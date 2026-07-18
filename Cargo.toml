@@ -7,5 +7,7 @@ rust-version = "1.80"
 [dependencies]
 anyhow = "1"
 pulldown-cmark = "0.13"
+serde = { version = "1", features = ["derive"] }
 softbuffer = "0.4"
+toml = "0.8"
 winit = "0.30"

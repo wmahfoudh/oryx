@@ -1,0 +1,65 @@
+# Oryx Light: desert daylight. Warm paper from the logo's cream, maroon-brown
+# ink, the same copper ramp with weight carried by darkness instead of glow.
+
+[surface]
+background = "#F7EFE3"
+foreground = "#3B2A20"
+
+[headings]
+h1 = "#963F0E"
+h2 = "#A85420"
+h3 = "#C87137"
+h4 = "#97673F"
+h5 = "#7E6248"
+h6 = "#6B5A4C"
+
+[text]
+body = "#3B2A20"
+bold = "#2A1D15"
+italic = "#7A4A33"
+strike = "#A08D7C"
+inline_code = "#8A4E17"
+inline_code_bg = "#EFE2CE"
+link = "#2E7D6E"
+math = "#6B4E8E"
+
+[blocks]
+code_bg = "#F1E7D6"
+code_border = "#DCCBB4"
+quote_bg = "#F2E8D9"
+quote_bar = "#C87137"
+table_border = "#DCCBB4"
+table_header_bg = "#EFE2CE"
+table_row_alt_bg = "#F2EADC"
+rule = "#CBB89F"
+frontmatter_bg = "#F2E8D9"
+frontmatter_fg = "#8A7A66"
+
+[syntax]
+keyword = "#A54E1B"
+string = "#5A7D3C"
+number = "#8A6A2F"
+function = "#8A4E17"
+type = "#2E7D6E"
+comment = "#99887A"
+operator = "#6B5A4C"
+variable = "#3B2A20"
+punctuation = "#7E6E5E"
+
+[alerts]
+note = "#2F6FA8"
+tip = "#4E7D33"
+important = "#6B4E8E"
+warning = "#A87616"
+caution = "#B04A38"
+
+[ui]
+sidebar_bg = "#EFE5D4"
+sidebar_fg = "#5C4A3A"
+sidebar_dir = "#A54E1B"
+scrollbar = "#D8C7AF"
+scrollbar_hover = "#C2AE93"
+selection_bg = "#EAD9BC"
+overlay_bg = "#F1E7D6"
+overlay_fg = "#3B2A20"
+overlay_highlight = "#EAD9BC"
