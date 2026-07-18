@@ -7,11 +7,15 @@ use oryx::doc::load;
 use oryx::doc::model::Document;
 use oryx::layout::{layout, metrics, DecoRect, LayoutDoc, ViewConfig};
 use oryx::paint;
+use oryx::paint::painter::Painter;
 use oryx::paint::scroll::{self, BandCache};
+use oryx::platform::config::{self, Config};
 use oryx::style::fonts::FontStore;
 use oryx::style::theme::{self, Theme};
+use oryx::ui::overlay::{Action, Overlay, OverlayResult};
 use oryx::ui::scrollbar;
 use oryx::ui::selection::{self, RunPos, Selection};
+use oryx::ui::theme_browser::ThemeBrowser;
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalPosition;
 use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
@@ -30,11 +34,21 @@ pub fn run(path: Option<PathBuf>, theme_name: Option<String>) -> anyhow::Result<
         .unwrap_or_else(|| PathBuf::from("."));
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Wait);
+    let config = config::load();
+    let cfg = ViewConfig {
+        body_family: config.body_family.clone(),
+        code_family: config.code_family.clone(),
+        body_size: config.body_size,
+        code_size: config.code_size,
+        ..ViewConfig::default()
+    };
+    let theme_choice = theme_name.as_deref().unwrap_or(&config.theme);
     let mut app = App {
         gfx: None,
         document,
-        theme: startup_theme(theme_name.as_deref()),
-        cfg: ViewConfig::default(),
+        theme: startup_theme(Some(theme_choice)),
+        cfg,
+        config,
         fonts: FontStore::new(),
         media: MediaCache::new(doc_dir),
         layout: None,
@@ -48,6 +62,7 @@ pub fn run(path: Option<PathBuf>, theme_name: Option<String>) -> anyhow::Result<
         sel_anchor: None,
         selection: None,
         clipboard: None,
+        overlay: None,
         pending_band_for: None,
     };
     event_loop.run_app(&mut app)?;
@@ -85,6 +100,7 @@ struct App {
     document: Document,
     theme: Theme,
     cfg: ViewConfig,
+    config: Config,
     fonts: FontStore,
     media: MediaCache,
     layout: Option<LayoutDoc>,
@@ -104,6 +120,9 @@ struct App {
     /// Created on first copy and kept alive so the content outlives the
     /// call on X11.
     clipboard: Option<arboard::Clipboard>,
+    /// The single active modal overlay; receives keys, clicks, and wheel
+    /// while open.
+    overlay: Option<Box<dyn Overlay>>,
     /// Deferred band rebuild, tagged with the window size it was scheduled
     /// at. Interactive frames (drag, live resize) paint the viewport
     /// directly; the expensive band builds one frame later, once stable.
@@ -234,6 +253,49 @@ impl App {
             self.selection = None;
             self.link_press();
         }
+    }
+
+    fn request_redraw(&self) {
+        if let Some(gfx) = self.gfx.as_ref() {
+            gfx.window.request_redraw();
+        }
+    }
+
+    /// Opens the theme browser, or closes it when already open.
+    fn toggle_theme_browser(&mut self) {
+        if self.overlay.is_some() {
+            self.overlay = None;
+        } else {
+            self.overlay = Some(Box::new(ThemeBrowser::new(
+                theme_dirs(),
+                &self.config.theme,
+            )));
+        }
+        self.request_redraw();
+    }
+
+    /// Applies what an overlay asked for after handling an event.
+    fn overlay_result(&mut self, result: OverlayResult) {
+        match result {
+            OverlayResult::Open => {}
+            OverlayResult::Close => self.overlay = None,
+            OverlayResult::Apply(Action::SetTheme(path)) => self.apply_theme(&path),
+        }
+        self.request_redraw();
+    }
+
+    /// Switches to a theme file, persists the choice, and restyles.
+    fn apply_theme(&mut self, path: &std::path::Path) {
+        let Some(theme) = theme::load_file(path) else {
+            return;
+        };
+        self.theme = theme;
+        if let Some(name) = path.file_stem().and_then(|s| s.to_str()) {
+            self.config.theme = name.to_string();
+            config::save(&self.config);
+        }
+        self.layout = None;
+        self.band = None;
     }
 
     /// Selects the whole document.
@@ -446,6 +508,11 @@ impl App {
             };
             scrollbar::draw(&mut buffer, size.width, size.height, thumb, color);
         }
+        if let Some(overlay) = self.overlay.as_mut() {
+            let mut painter = Painter::new(size.width, size.height, &mut self.fonts);
+            overlay.draw(&mut painter, &self.theme);
+            painter.composite(&mut buffer, size.width);
+        }
         buffer.present().expect("present failed");
         // A direct frame leaves the band stale: build it in a follow-up
         // frame so the visible one stayed cheap. Skipped during drags.
@@ -492,6 +559,15 @@ impl ApplicationHandler for App {
                     },
                 ..
             } => match logical_key {
+                Key::Character(c)
+                    if self.modifiers.control_key() && c.as_str().eq_ignore_ascii_case("t") =>
+                {
+                    self.toggle_theme_browser();
+                }
+                key if self.overlay.is_some() => {
+                    let result = self.overlay.as_mut().expect("overlay open").key(&key);
+                    self.overlay_result(result);
+                }
                 Key::Named(NamedKey::Escape) => event_loop.exit(),
                 Key::Named(named) => {
                     self.handle_key(&named);
@@ -503,15 +579,22 @@ impl ApplicationHandler for App {
                 },
                 _ => {}
             },
-            WindowEvent::MouseWheel { delta, .. } => match delta {
-                MouseScrollDelta::LineDelta(_, lines) => {
-                    self.scroll_by(-lines * 3.0 * self.line_step())
+            WindowEvent::MouseWheel { delta, .. } => {
+                let lines = match delta {
+                    MouseScrollDelta::LineDelta(_, lines) => -lines,
+                    MouseScrollDelta::PixelDelta(p) => -p.y as f32 / self.line_step(),
+                };
+                if let Some(overlay) = self.overlay.as_mut() {
+                    let result = overlay.scroll(lines);
+                    self.overlay_result(result);
+                } else {
+                    self.scroll_by(lines * 3.0 * self.line_step());
                 }
-                MouseScrollDelta::PixelDelta(p) => self.scroll_by(-p.y as f32),
-            },
+            }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = position;
-                if self.drag.is_some() {
+                if self.overlay.is_some() {
+                } else if self.drag.is_some() {
                     self.drag_to(position.y as f32);
                 } else if self.sel_anchor.is_some() {
                     self.extend_selection();
@@ -525,13 +608,20 @@ impl ApplicationHandler for App {
                 ..
             } => match state {
                 ElementState::Pressed => {
-                    self.scrollbar_press();
-                    if self.drag.is_none() {
-                        self.begin_selection();
+                    if let Some(overlay) = self.overlay.as_mut() {
+                        let (x, y) = (self.cursor.x as f32, self.cursor.y as f32);
+                        let result = overlay.click(x, y);
+                        self.overlay_result(result);
+                    } else {
+                        self.scrollbar_press();
+                        if self.drag.is_none() {
+                            self.begin_selection();
+                        }
                     }
                 }
                 ElementState::Released => {
-                    if self.drag.take().is_some() {
+                    if self.overlay.is_some() {
+                    } else if self.drag.take().is_some() {
                         if let Some(gfx) = self.gfx.as_ref() {
                             gfx.window.request_redraw();
                         }
