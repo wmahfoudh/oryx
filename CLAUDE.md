@@ -1,1 +1,0 @@
-@internal/CLAUDE.md
