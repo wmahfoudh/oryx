@@ -7,6 +7,9 @@ use crate::style::highlight::SyntaxRole;
 #[derive(Debug, Default, PartialEq)]
 pub struct Document {
     pub blocks: Vec<Block>,
+    /// The text the document was parsed from; block and span ranges index
+    /// into it. Markdown copy slices it directly.
+    pub source: String,
 }
 
 #[derive(Debug, PartialEq)]
@@ -15,6 +18,10 @@ pub struct Block {
     pub quote_depth: u8,
     /// Set when the enclosing quote is a GitHub alert.
     pub alert: Option<AlertKind>,
+    /// Byte range of the block's content in `Document::source`. Line-prefix
+    /// markers (`#`, `>`, list bullets) may sit before `start` on the same
+    /// line; empty when the block has no source form.
+    pub range: Range<usize>,
     pub kind: BlockKind,
 }
 
@@ -23,6 +30,7 @@ impl Block {
         Block {
             quote_depth: 0,
             alert: None,
+            range: 0..0,
             kind,
         }
     }
@@ -86,7 +94,7 @@ pub enum AlertKind {
     Caution,
 }
 
-#[derive(Debug, Default, PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub struct Span {
     pub text: String,
     pub bold: bool,
@@ -96,6 +104,25 @@ pub struct Span {
     pub math: bool,
     /// Link target: a URL, a `#anchor`, or `footnote:<label>`.
     pub link: Option<String>,
+    /// Byte range of the span's origin in `Document::source`. The slice may
+    /// differ from `text` when parsing transformed it (smart punctuation,
+    /// emoji, stripped HTML); empty for synthesized spans.
+    pub range: Range<usize>,
+}
+
+impl Default for Span {
+    fn default() -> Span {
+        Span {
+            text: String::new(),
+            bold: false,
+            italic: false,
+            strike: false,
+            code: false,
+            math: false,
+            link: None,
+            range: 0..0,
+        }
+    }
 }
 
 impl Span {

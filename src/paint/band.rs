@@ -5,16 +5,20 @@ use cosmic_text::{Attrs, Buffer, Color, Family, Metrics, Shaping, Style, Weight}
 use tiny_skia::{Pixmap, Rect, Transform};
 
 use crate::doc::images::MediaCache;
-use crate::layout::{metrics, LayoutDoc, TextRun};
+use crate::layout::{metrics, DecoRect, LayoutDoc, TextRun};
 use crate::style::fonts::FontStore;
 use crate::style::theme::Theme;
 
 /// Paints the document slice `[y_top, y_top + height)` at full width.
+/// `extra` rects (the selection highlight) paint above the document's own
+/// rects and below images and glyphs.
+#[allow(clippy::too_many_arguments)]
 pub fn band(
     layout: &LayoutDoc,
     theme: &Theme,
     fonts: &mut FontStore,
     media: &mut MediaCache,
+    extra: &[DecoRect],
     y_top: f32,
     width: u32,
     height: u32,
@@ -28,7 +32,7 @@ pub fn band(
         anti_alias: false,
         ..tiny_skia::Paint::default()
     };
-    for rect in &layout.rects {
+    for rect in layout.rects.iter().chain(extra) {
         if rect.y + rect.height < y_top || rect.y > band_bottom {
             continue;
         }

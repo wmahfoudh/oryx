@@ -1,4 +1,8 @@
-//! Maps pulldown-cmark events onto the document model.
+//! Maps pulldown-cmark events onto the document model. Every event carries
+//! its byte range in the source; spans and blocks keep those ranges so the
+//! selection can slice the original markdown back out.
+
+use std::ops::Range;
 
 use pulldown_cmark::{
     BlockQuoteKind, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd,
@@ -17,11 +21,12 @@ pub fn parse(source: &str) -> Document {
         | Options::ENABLE_YAML_STYLE_METADATA_BLOCKS
         | Options::ENABLE_GFM;
     let mut builder = Builder::default();
-    for event in Parser::new_ext(source, options) {
-        builder.event(event);
+    for (event, range) in Parser::new_ext(source, options).into_offset_iter() {
+        builder.event(event, range);
     }
     Document {
         blocks: builder.blocks,
+        source: source.to_string(),
     }
 }
 
@@ -50,6 +55,8 @@ struct Builder {
     italic: u32,
     strike: u32,
     link: Option<String>,
+    /// Source byte range of the event being processed, as (start, end).
+    current: (usize, usize),
 }
 
 #[derive(Default)]
@@ -60,7 +67,8 @@ struct TableAcc {
 }
 
 impl Builder {
-    fn event(&mut self, event: Event) {
+    fn event(&mut self, event: Event, range: Range<usize>) {
+        self.current = (range.start, range.end);
         match event {
             Event::Start(tag) => self.start(tag),
             Event::End(tag) => self.end(tag),
@@ -259,14 +267,19 @@ impl Builder {
         self.linkified(&replaced);
     }
 
-    /// Splits bare http(s) URLs out of plain text into linked spans.
+    /// Splits bare http(s) URLs out of plain text into linked spans. Span
+    /// ranges assume text offsets match source offsets; when a transform
+    /// broke that, consumers detect the mismatch and fall back.
     fn linkified(&mut self, text: &str) {
+        let base = self.current.0;
+        let mut pos = 0usize;
         let mut rest = text;
         while let Some(start) = rest.find("http://").or_else(|| rest.find("https://")) {
             let (before, from) = rest.split_at(start);
             if !before.is_empty() {
                 self.push(Span {
                     text: before.to_string(),
+                    range: base + pos..base + pos + before.len(),
                     ..self.style()
                 });
             }
@@ -278,8 +291,10 @@ impl Builder {
             self.push(Span {
                 text: url.to_string(),
                 link: Some(url.to_string()),
+                range: base + pos + start..base + pos + start + url.len(),
                 ..self.style()
             });
+            pos += start + url.len();
             rest = &from[url.len()..];
             if rest == after && rest.is_empty() {
                 break;
@@ -288,6 +303,7 @@ impl Builder {
         if !rest.is_empty() {
             self.push(Span {
                 text: rest.to_string(),
+                range: base + pos..base + pos + rest.len(),
                 ..self.style()
             });
         }
@@ -325,6 +341,7 @@ impl Builder {
             code: false,
             math: false,
             link: self.link.clone(),
+            range: self.current.0..self.current.1,
         }
     }
 
@@ -344,6 +361,11 @@ impl Builder {
                 && last.text != "\n";
             if same_style {
                 last.text.push_str(&span.text);
+                if last.range.is_empty() {
+                    last.range = span.range;
+                } else if !span.range.is_empty() {
+                    last.range.end = last.range.end.max(span.range.end);
+                }
                 return;
             }
         }
@@ -376,12 +398,49 @@ impl Builder {
         self.emit(BlockKind::Paragraph { spans });
     }
 
+    /// Source range of a block: the extent of its spans' ranges where it has
+    /// spans, otherwise the range of the event emitting it. Emission happens
+    /// on End events, whose pulldown range covers the whole element.
+    fn block_range(&self, kind: &BlockKind) -> Range<usize> {
+        match kind {
+            BlockKind::Heading { spans, .. }
+            | BlockKind::Paragraph { spans }
+            | BlockKind::ListItem { spans, .. }
+            | BlockKind::FootnoteDef { spans, .. } => extent(spans.iter()),
+            BlockKind::Table { header, rows } => extent(
+                header
+                    .iter()
+                    .flatten()
+                    .chain(rows.iter().flatten().flatten()),
+            ),
+            _ => self.current.0..self.current.1,
+        }
+    }
+
     fn emit(&mut self, kind: BlockKind) {
         self.blocks.push(Block {
             quote_depth: self.quote_depth,
             alert: self.alerts.iter().rev().find_map(|a| *a),
+            range: self.block_range(&kind),
             kind,
         });
+    }
+}
+
+/// Smallest range covering every nonempty span range.
+fn extent<'a>(spans: impl Iterator<Item = &'a Span>) -> Range<usize> {
+    let mut start = usize::MAX;
+    let mut end = 0;
+    for span in spans {
+        if !span.range.is_empty() {
+            start = start.min(span.range.start);
+            end = end.max(span.range.end);
+        }
+    }
+    if start == usize::MAX {
+        0..0
+    } else {
+        start..end
     }
 }
 
@@ -575,7 +634,8 @@ mod tests {
         let BlockKind::Paragraph { spans } = &d.blocks[0].kind else {
             panic!()
         };
-        assert_eq!(spans[0], Span::plain("plain "));
+        assert_eq!(spans[0].text, "plain ");
+        assert!(!spans[0].bold && !spans[0].italic && !spans[0].strike && !spans[0].code);
         assert!(spans[1].bold && spans[1].text == "bold");
         assert!(spans[3].italic && spans[3].text == "ital");
         assert!(spans[5].strike && spans[5].text == "gone");
@@ -768,6 +828,23 @@ mod tests {
             panic!()
         };
         assert!(spans[0].text.starts_with('\u{201C}'));
+    }
+
+    #[test]
+    fn ranges_index_the_source() {
+        let src = "# Title\n\npara **bold** end\n\n```rust\nlet x = 1;\n```\n\n> quoted";
+        let d = parse(src);
+        assert_eq!(d.source, src);
+        assert_eq!(&src[d.blocks[0].range.clone()], "Title");
+        let BlockKind::Paragraph { spans } = &d.blocks[1].kind else {
+            panic!()
+        };
+        assert_eq!(&src[spans[0].range.clone()], "para ");
+        assert_eq!(&src[spans[1].range.clone()], "bold");
+        let code = &src[d.blocks[2].range.clone()];
+        assert!(code.starts_with("```rust"), "code range was {code:?}");
+        assert!(code.trim_end().ends_with("```"), "code range was {code:?}");
+        assert_eq!(&src[d.blocks[3].range.clone()], "quoted");
     }
 
     #[test]

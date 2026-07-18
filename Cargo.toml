@@ -6,6 +6,7 @@ rust-version = "1.80"
 
 [dependencies]
 anyhow = "1"
+arboard = { version = "3", default-features = false, features = ["wayland-data-control"] }
 cosmic-text = "0.17.0"
 image = "0.25"
 open = "5"

@@ -44,12 +44,15 @@ fn code_document(token: &str, text: &str) -> Document {
         lines.pop();
     }
     let highlights = crate::style::highlight::spans(&lines, Some(token));
+    let mut block = Block::plain(BlockKind::CodeBlock {
+        language: Some(token.to_string()),
+        lines,
+        highlights,
+    });
+    block.range = 0..text.len();
     Document {
-        blocks: vec![Block::plain(BlockKind::CodeBlock {
-            language: Some(token.to_string()),
-            lines,
-            highlights,
-        })],
+        blocks: vec![block],
+        source: text.to_string(),
     }
 }
 
@@ -58,26 +61,41 @@ fn code_document(token: &str, text: &str) -> Document {
 fn plain_document(text: &str) -> Document {
     let mut blocks = Vec::new();
     let mut spans: Vec<Span> = Vec::new();
-    for line in text.lines() {
+    let mut offset = 0;
+    for raw in text.split('\n') {
+        let line = raw.strip_suffix('\r').unwrap_or(raw);
         if line.trim().is_empty() {
             flush_plain(&mut blocks, &mut spans);
         } else {
             if !spans.is_empty() {
                 spans.push(Span::plain("\n"));
             }
-            spans.push(Span::plain(line));
+            let mut span = Span::plain(line);
+            span.range = offset..offset + line.len();
+            spans.push(span);
         }
+        offset += raw.len() + 1;
     }
     flush_plain(&mut blocks, &mut spans);
-    Document { blocks }
+    Document {
+        blocks,
+        source: text.to_string(),
+    }
 }
 
 fn flush_plain(blocks: &mut Vec<Block>, spans: &mut Vec<Span>) {
-    if !spans.is_empty() {
-        blocks.push(Block::plain(BlockKind::Paragraph {
-            spans: std::mem::take(spans),
-        }));
+    if spans.is_empty() {
+        return;
     }
+    let spans = std::mem::take(spans);
+    let with_range: Vec<_> = spans.iter().filter(|s| !s.range.is_empty()).collect();
+    let range = match (with_range.first(), with_range.last()) {
+        (Some(first), Some(last)) => first.range.start..last.range.end,
+        _ => 0..0,
+    };
+    let mut block = Block::plain(BlockKind::Paragraph { spans });
+    block.range = range;
+    blocks.push(block);
 }
 
 /// Extension to highlight token, sorted by extension for binary search.

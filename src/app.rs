@@ -5,12 +5,13 @@ use std::sync::Arc;
 use oryx::doc::images::MediaCache;
 use oryx::doc::load;
 use oryx::doc::model::Document;
-use oryx::layout::{layout, metrics, LayoutDoc, ViewConfig};
+use oryx::layout::{layout, metrics, DecoRect, LayoutDoc, ViewConfig};
 use oryx::paint;
 use oryx::paint::scroll::{self, BandCache};
 use oryx::style::fonts::FontStore;
 use oryx::style::theme::{self, Theme};
 use oryx::ui::scrollbar;
+use oryx::ui::selection::{self, RunPos, Selection};
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalPosition;
 use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
@@ -44,6 +45,9 @@ pub fn run(path: Option<PathBuf>) -> anyhow::Result<()> {
         cursor: PhysicalPosition::new(0.0, 0.0),
         drag: None,
         hover_link: false,
+        sel_anchor: None,
+        selection: None,
+        clipboard: None,
         pending_band_for: None,
     };
     event_loop.run_app(&mut app)?;
@@ -84,6 +88,13 @@ struct App {
     drag: Option<f32>,
     /// Whether the cursor currently sits over a link, for the pointer icon.
     hover_link: bool,
+    /// Selection drag in progress: the caret grabbed at mouse down.
+    sel_anchor: Option<RunPos>,
+    /// Current selection, kept after the mouse releases.
+    selection: Option<Selection>,
+    /// Created on first copy and kept alive so the content outlives the
+    /// call on X11.
+    clipboard: Option<arboard::Clipboard>,
     /// Deferred band rebuild, tagged with the window size it was scheduled
     /// at. Interactive frames (drag, live resize) paint the viewport
     /// directly; the expensive band builds one frame later, once stable.
@@ -160,6 +171,105 @@ impl App {
         let target =
             scrollbar::scroll_for_thumb(cursor_y - grab, thumb_h, vh, self.doc_height(), vh);
         self.scroll_to(target);
+    }
+
+    /// Grabs a selection anchor at the cursor and clears any previous
+    /// selection.
+    fn begin_selection(&mut self) {
+        let x = self.cursor.x as f32;
+        let y = self.cursor.y as f32 + self.scroll_y;
+        let Some(lay) = self.layout.as_ref() else {
+            return;
+        };
+        self.sel_anchor = selection::pos_at(lay, &mut self.fonts, x, y);
+        if self.selection.take().is_some() {
+            self.band = None;
+            if let Some(gfx) = self.gfx.as_ref() {
+                gfx.window.request_redraw();
+            }
+        }
+    }
+
+    /// Extends the selection from the anchor to the cursor during a drag.
+    fn extend_selection(&mut self) {
+        let Some(start) = self.sel_anchor else {
+            return;
+        };
+        let x = self.cursor.x as f32;
+        let y = self.cursor.y as f32 + self.scroll_y;
+        let Some(lay) = self.layout.as_ref() else {
+            return;
+        };
+        let Some(end) = selection::pos_at(lay, &mut self.fonts, x, y) else {
+            return;
+        };
+        let sel = Selection { start, end };
+        if self.selection != Some(sel) {
+            self.selection = Some(sel);
+            self.band = None;
+            if let Some(gfx) = self.gfx.as_ref() {
+                gfx.window.request_redraw();
+            }
+        }
+    }
+
+    /// Ends a selection drag. A drag that never left its starting caret is
+    /// a click and follows the link under the cursor instead.
+    fn end_selection(&mut self) {
+        self.sel_anchor = None;
+        if self.selection.is_some_and(|s| !s.is_empty()) {
+            if let Some(gfx) = self.gfx.as_ref() {
+                gfx.window.request_redraw();
+            }
+        } else {
+            self.selection = None;
+            self.link_press();
+        }
+    }
+
+    /// Selects the whole document.
+    fn select_all(&mut self) {
+        let Some(lay) = self.layout.as_ref() else {
+            return;
+        };
+        let Some(sel) = selection::all(lay) else {
+            return;
+        };
+        if self.selection != Some(sel) {
+            self.selection = Some(sel);
+            self.band = None;
+            if let Some(gfx) = self.gfx.as_ref() {
+                gfx.window.request_redraw();
+            }
+        }
+    }
+
+    /// Puts the selection on the clipboard, as markdown or plain text.
+    fn copy_selection(&mut self, as_markdown: bool) {
+        let Some(sel) = self.selection else {
+            return;
+        };
+        let Some(lay) = self.layout.as_ref() else {
+            return;
+        };
+        let text = if as_markdown {
+            selection::markdown(&sel, lay, &self.document)
+        } else {
+            selection::plain_text(&sel, lay, &self.document)
+        };
+        if text.is_empty() {
+            return;
+        }
+        if self.clipboard.is_none() {
+            self.clipboard = arboard::Clipboard::new()
+                .map_err(|err| eprintln!("oryx: no clipboard: {err}"))
+                .ok();
+        }
+        if let Some(clipboard) = self.clipboard.as_mut() {
+            if let Err(err) = clipboard.set_text(text) {
+                eprintln!("oryx: clipboard copy failed: {err}");
+            }
+        }
     }
 
     /// Follow the link under the cursor: anchors scroll, http links open
@@ -249,9 +359,19 @@ impl App {
             self.layout_width = w;
             self.band = None;
             self.pending_band_for = None;
+            // Selection positions index the old layout's runs.
+            self.selection = None;
+            self.sel_anchor = None;
         }
         let lay = self.layout.as_ref().expect("layout exists");
         self.scroll_y = scroll::clamp(self.scroll_y, lay.height, size.height as f32);
+        let highlight: Vec<DecoRect> = match &self.selection {
+            Some(sel) => selection::rects(sel, lay, &mut self.fonts)
+                .into_iter()
+                .map(|(x, y, w, h)| DecoRect::fill(x, y, w, h, self.theme.ui.selection_bg))
+                .collect(),
+            None => Vec::new(),
+        };
 
         let band_usable = self.band.as_ref().is_some_and(|b| {
             b.width == size.width
@@ -259,15 +379,17 @@ impl App {
                 && !b.needs_repaint(self.scroll_y, size.height as f32)
         });
         let size_tag = (size.width, size.height);
+        let interactive = self.drag.is_some() || self.sel_anchor.is_some();
         let mut direct: Option<Vec<u32>> = None;
         if !band_usable {
-            let build_now = self.drag.is_none() && self.pending_band_for == Some(size_tag);
+            let build_now = !interactive && self.pending_band_for == Some(size_tag);
             if build_now {
                 self.band = Some(BandCache::repaint(
                     lay,
                     &self.theme,
                     &mut self.fonts,
                     &mut self.media,
+                    &highlight,
                     self.scroll_y,
                     size.width,
                     size.height,
@@ -279,11 +401,12 @@ impl App {
                     &self.theme,
                     &mut self.fonts,
                     &mut self.media,
+                    &highlight,
                     self.scroll_y,
                     size.width,
                     size.height,
                 ));
-                self.pending_band_for = self.drag.is_none().then_some(size_tag);
+                self.pending_band_for = (!interactive).then_some(size_tag);
             }
         }
         let view: &[u32] = match &direct {
@@ -364,6 +487,11 @@ impl ApplicationHandler for App {
                 Key::Named(named) => {
                     self.handle_key(&named);
                 }
+                Key::Character(c) if self.modifiers.control_key() => match c.as_str() {
+                    "c" | "C" => self.copy_selection(self.modifiers.shift_key()),
+                    "a" | "A" => self.select_all(),
+                    _ => {}
+                },
                 _ => {}
             },
             WindowEvent::MouseWheel { delta, .. } => match delta {
@@ -376,6 +504,8 @@ impl ApplicationHandler for App {
                 self.cursor = position;
                 if self.drag.is_some() {
                     self.drag_to(position.y as f32);
+                } else if self.sel_anchor.is_some() {
+                    self.extend_selection();
                 } else {
                     self.update_hover();
                 }
@@ -388,7 +518,7 @@ impl ApplicationHandler for App {
                 ElementState::Pressed => {
                     self.scrollbar_press();
                     if self.drag.is_none() {
-                        self.link_press();
+                        self.begin_selection();
                     }
                 }
                 ElementState::Released => {
@@ -396,6 +526,8 @@ impl ApplicationHandler for App {
                         if let Some(gfx) = self.gfx.as_ref() {
                             gfx.window.request_redraw();
                         }
+                    } else {
+                        self.end_selection();
                     }
                 }
             },
