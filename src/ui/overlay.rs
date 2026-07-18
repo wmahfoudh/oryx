@@ -20,6 +20,13 @@ pub enum Action {
     EditTheme(PathBuf),
     /// Restyle with an in-memory theme, without persisting anything.
     PreviewTheme(Box<Theme>),
+    /// Apply and persist font families and sizes.
+    SetView {
+        body_family: String,
+        code_family: String,
+        body_size: f32,
+        code_size: f32,
+    },
 }
 
 /// What the app should do after an overlay handled an event.

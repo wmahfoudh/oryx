@@ -15,6 +15,7 @@ use oryx::style::theme::{self, Theme};
 use oryx::ui::overlay::{Action, Overlay, OverlayResult};
 use oryx::ui::scrollbar;
 use oryx::ui::selection::{self, RunPos, Selection};
+use oryx::ui::settings::{self, Settings};
 use oryx::ui::theme_browser::ThemeBrowser;
 use oryx::ui::theme_editor::ThemeEditor;
 use winit::application::ApplicationHandler;
@@ -287,6 +288,43 @@ impl App {
         }
     }
 
+    /// Opens the settings dialog, or closes the active overlay.
+    fn toggle_settings(&mut self) {
+        if self.overlay.is_some() {
+            self.overlay_result(OverlayResult::Close);
+        } else {
+            self.overlay = Some(Box::new(Settings::new(
+                self.fonts.families(),
+                self.cfg.body_family.clone(),
+                self.cfg.code_family.clone(),
+                self.cfg.body_size,
+                self.cfg.code_size,
+            )));
+            self.request_redraw();
+        }
+    }
+
+    /// Session zoom around the current scroll position; never persisted.
+    fn set_zoom(&mut self, zoom: f32) {
+        if (zoom - self.cfg.zoom).abs() < f32::EPSILON {
+            return;
+        }
+        self.scroll_y *= zoom / self.cfg.zoom;
+        self.cfg.zoom = zoom;
+        self.layout = None;
+        self.band = None;
+        self.request_redraw();
+    }
+
+    fn zoom_key(&mut self, key: &str) {
+        match key {
+            "+" | "=" => self.set_zoom(settings::step_zoom(self.cfg.zoom, settings::ZOOM_STEP)),
+            "-" => self.set_zoom(settings::step_zoom(self.cfg.zoom, -settings::ZOOM_STEP)),
+            "0" => self.set_zoom(1.0),
+            _ => {}
+        }
+    }
+
     /// Applies what an overlay asked for after handling an event.
     fn overlay_result(&mut self, result: OverlayResult) {
         match result {
@@ -322,6 +360,24 @@ impl App {
             }
             OverlayResult::Apply(Action::PreviewTheme(theme)) => {
                 self.set_live_theme(*theme);
+            }
+            OverlayResult::Apply(Action::SetView {
+                body_family,
+                code_family,
+                body_size,
+                code_size,
+            }) => {
+                self.cfg.body_family = body_family.clone();
+                self.cfg.code_family = code_family.clone();
+                self.cfg.body_size = body_size;
+                self.cfg.code_size = code_size;
+                self.config.body_family = body_family;
+                self.config.code_family = code_family;
+                self.config.body_size = body_size;
+                self.config.code_size = code_size;
+                config::save(&self.config);
+                self.layout = None;
+                self.band = None;
             }
         }
         self.request_redraw();
@@ -622,6 +678,16 @@ impl ApplicationHandler for App {
                     if self.modifiers.control_key() && c.as_str().eq_ignore_ascii_case("t") =>
                 {
                     self.toggle_theme_browser();
+                }
+                Key::Character(c) if self.modifiers.control_key() && c.as_str() == "," => {
+                    self.toggle_settings();
+                }
+                Key::Character(c)
+                    if self.modifiers.control_key()
+                        && self.overlay.is_none()
+                        && matches!(c.as_str(), "+" | "=" | "-" | "0") =>
+                {
+                    self.zoom_key(c.as_str());
                 }
                 key if self.overlay.is_some() => {
                     let ctrl = self.modifiers.control_key();
