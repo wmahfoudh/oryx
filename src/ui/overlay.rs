@@ -13,6 +13,9 @@ use crate::style::theme::Theme;
 pub enum Action {
     /// Load the theme file, apply it, persist the choice.
     SetTheme(PathBuf),
+    /// A theme file was renamed; the persisted choice follows when it
+    /// pointed there.
+    RenamedTheme { from: String, to: String },
 }
 
 /// What the app should do after an overlay handled an event.

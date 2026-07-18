@@ -11,6 +11,8 @@ use crate::style::theme::Rgba;
 pub struct Painter<'a> {
     pixmap: Pixmap,
     fonts: &'a mut FontStore,
+    /// Bounds of everything painted, so composite touches only those rows.
+    dirty: Option<(f32, f32, f32, f32)>,
 }
 
 impl<'a> Painter<'a> {
@@ -18,6 +20,7 @@ impl<'a> Painter<'a> {
         Painter {
             pixmap: Pixmap::new(width.max(1), height.max(1)).expect("pixmap allocation"),
             fonts,
+            dirty: None,
         }
     }
 
@@ -29,10 +32,24 @@ impl<'a> Painter<'a> {
         self.pixmap.height() as f32
     }
 
+    fn mark(&mut self, x: f32, y: f32, w: f32, h: f32) {
+        let region = (x, y, x + w, y + h);
+        self.dirty = Some(match self.dirty {
+            None => region,
+            Some((x0, y0, x1, y1)) => (
+                x0.min(region.0),
+                y0.min(region.1),
+                x1.max(region.2),
+                y1.max(region.3),
+            ),
+        });
+    }
+
     pub fn fill(&mut self, x: f32, y: f32, w: f32, h: f32, radius: f32, color: Rgba) {
         let Some(path) = round_rect(x, y, w, h, radius) else {
             return;
         };
+        self.mark(x, y, w, h);
         let mut paint = tiny_skia::Paint::default();
         paint.set_color_rgba8(color.r, color.g, color.b, color.a);
         self.pixmap.fill_path(
@@ -49,6 +66,7 @@ impl<'a> Painter<'a> {
         let Some(path) = round_rect(x, y, w, h, radius) else {
             return;
         };
+        self.mark(x - line, y - line, w + 2.0 * line, h + 2.0 * line);
         let mut paint = tiny_skia::Paint::default();
         paint.set_color_rgba8(color.r, color.g, color.b, color.a);
         let stroke = tiny_skia::Stroke {
@@ -89,6 +107,7 @@ impl<'a> Painter<'a> {
                 advance = last.x + last.w;
             }
         }
+        self.mark(x, y, advance, size * 1.4);
         let data = self.pixmap.data_mut();
         buffer.draw(
             &mut self.fonts.font_system,
@@ -118,27 +137,37 @@ impl<'a> Painter<'a> {
         advance
     }
 
-    /// Blends every painted pixel onto an opaque 0RGB frame buffer.
+    /// Blends the painted region onto an opaque 0RGB frame buffer; only
+    /// rows inside the dirty bounds are touched.
     pub fn composite(&self, frame: &mut [u32], frame_width: u32) {
+        let Some((x0, y0, x1, y1)) = self.dirty else {
+            return;
+        };
         let data = self.pixmap.data();
         let width = self.pixmap.width() as usize;
-        for (i, px) in data.chunks_exact(4).enumerate() {
-            let a = px[3] as u32;
-            if a == 0 {
-                continue;
+        let height = self.pixmap.height() as usize;
+        let x0 = (x0.floor().max(0.0)) as usize;
+        let y0 = (y0.floor().max(0.0)) as usize;
+        let x1 = (x1.ceil().max(0.0) as usize).min(width);
+        let y1 = (y1.ceil().max(0.0) as usize).min(height);
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let i = (y * width + x) * 4;
+                let a = data[i + 3] as u32;
+                if a == 0 {
+                    continue;
+                }
+                let di = y * frame_width as usize + x;
+                let Some(dst) = frame.get_mut(di) else {
+                    continue;
+                };
+                let (dr, dg, db) = ((*dst >> 16) & 0xFF, (*dst >> 8) & 0xFF, *dst & 0xFF);
+                // Pixmap channels are premultiplied: source-over is add.
+                let r = data[i] as u32 + dr * (255 - a) / 255;
+                let g = data[i + 1] as u32 + dg * (255 - a) / 255;
+                let b = data[i + 2] as u32 + db * (255 - a) / 255;
+                *dst = (r.min(255) << 16) | (g.min(255) << 8) | b.min(255);
             }
-            let x = i % width;
-            let y = i / width;
-            let di = y * frame_width as usize + x;
-            let Some(dst) = frame.get_mut(di) else {
-                continue;
-            };
-            let (dr, dg, db) = ((*dst >> 16) & 0xFF, (*dst >> 8) & 0xFF, *dst & 0xFF);
-            // Pixmap channels are premultiplied: source-over is add.
-            let r = px[0] as u32 + dr * (255 - a) / 255;
-            let g = px[1] as u32 + dg * (255 - a) / 255;
-            let b = px[2] as u32 + db * (255 - a) / 255;
-            *dst = (r.min(255) << 16) | (g.min(255) << 8) | b.min(255);
         }
     }
 

@@ -280,6 +280,12 @@ impl App {
             OverlayResult::Open => {}
             OverlayResult::Close => self.overlay = None,
             OverlayResult::Apply(Action::SetTheme(path)) => self.apply_theme(&path),
+            OverlayResult::Apply(Action::RenamedTheme { from, to }) => {
+                if self.config.theme == from {
+                    self.config.theme = to;
+                    config::save(&self.config);
+                }
+            }
         }
         self.request_redraw();
     }
