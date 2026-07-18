@@ -10,6 +10,9 @@ pub const MARGIN_RATIO: f32 = 0.08;
 /// Top and bottom margin as a multiple of the body font size.
 pub const VERTICAL_MARGIN_EM: f32 = 2.0;
 
+/// Indent step for quote depth and list nesting, in pixels at zoom 1.
+pub const INDENT: f32 = 24.0;
+
 /// Heading size as a multiple of the body size.
 pub fn heading_scale(level: u8) -> f32 {
     match level {

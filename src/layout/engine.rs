@@ -6,7 +6,7 @@ use std::ops::Range;
 use cosmic_text::{Attrs, Buffer, Family, Metrics, Shaping, Style, Weight};
 
 use super::metrics;
-use crate::doc::model::{BlockKind, Document, Span};
+use crate::doc::model::{BlockKind, Document, Marker, Span};
 use crate::style::fonts::{FontStore, BODY_FAMILY, CODE_FAMILY};
 use crate::style::highlight::SyntaxRole;
 use crate::style::theme::{Rgba, Theme};
@@ -26,8 +26,8 @@ impl Default for ViewConfig {
         ViewConfig {
             body_family: BODY_FAMILY.to_string(),
             code_family: CODE_FAMILY.to_string(),
-            body_size: 16.0,
-            code_size: 14.0,
+            body_size: 22.0,
+            code_size: 20.0,
             zoom: 1.0,
         }
     }
@@ -87,30 +87,53 @@ pub fn layout(
     let mut cursor = 0.0_f32;
     let mut first = true;
 
+    let mut prev_quote_depth = 0u8;
+    let mut prev_is_list = false;
+
     for (block_index, block) in doc.blocks.iter().enumerate() {
         let heading = match &block.kind {
             BlockKind::Heading { level, .. } => Some(*level),
             _ => None,
         };
+        let is_list = matches!(block.kind, BlockKind::ListItem { .. });
         let base_size = match &block.kind {
-            BlockKind::Heading { spans, .. } | BlockKind::Paragraph { spans } => {
+            BlockKind::Heading { spans, .. }
+            | BlockKind::Paragraph { spans }
+            | BlockKind::ListItem { spans, .. } => {
                 if spans.is_empty() {
                     continue;
                 }
                 cfg.body_size * heading.map(metrics::heading_scale).unwrap_or(1.0) * cfg.zoom
             }
             BlockKind::CodeBlock { .. } => cfg.code_size * cfg.zoom,
+            BlockKind::Rule => cfg.body_size * cfg.zoom,
             _ => continue,
         };
+        let mut gap = 0.0;
         if first {
             cursor = vertical_margin;
             first = false;
+        } else if is_list && prev_is_list {
+            gap = 0.25 * base_size;
+            cursor += gap;
         } else {
-            cursor += metrics::space_above(heading, base_size);
+            gap = metrics::space_above(heading, base_size);
+            cursor += gap;
         }
         if let BlockKind::Heading { anchor, .. } = &block.kind {
             out.anchors.push((anchor.clone(), cursor));
         }
+
+        let quote_indent = block.quote_depth as f32 * metrics::INDENT * cfg.zoom;
+        let quote_pad = if block.quote_depth > 0 {
+            12.0 * cfg.zoom
+        } else {
+            0.0
+        };
+        let x_base = margin + quote_indent + quote_pad;
+        let avail = (content_width - quote_indent - 2.0 * quote_pad).max(40.0);
+        let rects_mark = out.rects.len();
+
         let height = match &block.kind {
             BlockKind::Heading { spans, .. } | BlockKind::Paragraph { spans } => {
                 let base = BlockStyle {
@@ -123,17 +146,26 @@ pub fn layout(
                     block_index,
                 };
                 shape_block(
-                    fonts,
-                    theme,
-                    cfg,
-                    spans,
-                    &base,
-                    margin,
-                    cursor,
-                    content_width,
-                    &mut out,
+                    fonts, theme, cfg, spans, &base, x_base, cursor, avail, &mut out,
                 )
             }
+            BlockKind::ListItem {
+                marker,
+                depth,
+                spans,
+            } => layout_list_item(
+                fonts,
+                theme,
+                cfg,
+                marker,
+                *depth,
+                spans,
+                block_index,
+                x_base,
+                cursor,
+                avail,
+                &mut out,
+            ),
             BlockKind::CodeBlock {
                 lines, highlights, ..
             } => layout_code(
@@ -143,14 +175,55 @@ pub fn layout(
                 lines,
                 highlights,
                 block_index,
-                margin,
+                x_base,
                 cursor,
-                content_width,
+                avail,
                 &mut out,
             ),
+            BlockKind::Rule => {
+                let thickness = (1.0 * cfg.zoom).max(1.0);
+                out.rects.push(DecoRect {
+                    x: x_base,
+                    y: cursor,
+                    width: avail,
+                    height: thickness,
+                    color: theme.blocks.rule,
+                });
+                thickness
+            }
             _ => 0.0,
         };
+
+        // Quote decoration wraps the block, extending over the gap when the
+        // previous block was quoted too, so consecutive quoted blocks read
+        // as one region. Inserted at rects_mark to paint under the block's
+        // own rects (pills, strikes, panels).
+        if block.quote_depth > 0 {
+            let continues = prev_quote_depth > 0;
+            let top = if continues { cursor - gap } else { cursor };
+            let panel_h = cursor + height - top;
+            let mut decoration = vec![DecoRect {
+                x: margin,
+                y: top,
+                width: content_width,
+                height: panel_h,
+                color: theme.blocks.quote_bg,
+            }];
+            for level in 0..block.quote_depth {
+                decoration.push(DecoRect {
+                    x: margin + level as f32 * metrics::INDENT * cfg.zoom,
+                    y: top,
+                    width: 3.0 * cfg.zoom,
+                    height: panel_h,
+                    color: theme.blocks.quote_bar,
+                });
+            }
+            out.rects.splice(rects_mark..rects_mark, decoration);
+        }
+
         cursor += height + metrics::space_below(base_size);
+        prev_quote_depth = block.quote_depth;
+        prev_is_list = is_list;
     }
 
     if !first {
@@ -386,6 +459,141 @@ fn shape_segment(
         }
     }
     height
+}
+
+/// Lays out one list item: marker (bullet, number, or checkbox) in the
+/// gutter, item text indented one step per nesting depth.
+#[allow(clippy::too_many_arguments)]
+fn layout_list_item(
+    fonts: &mut FontStore,
+    theme: &Theme,
+    cfg: &ViewConfig,
+    marker: &Marker,
+    depth: u8,
+    spans: &[Span],
+    block_index: usize,
+    x0: f32,
+    y0: f32,
+    avail: f32,
+    out: &mut LayoutDoc,
+) -> f32 {
+    let size = cfg.body_size * cfg.zoom;
+    let line_height = metrics::LINE_HEIGHT * size;
+    let indent = metrics::INDENT * cfg.zoom * (depth as f32 + 1.0);
+    let text_x = x0 + indent;
+    let text_w = (avail - indent).max(40.0);
+    let gutter = 10.0 * cfg.zoom;
+
+    match marker {
+        Marker::Bullet => {
+            let (runs, width) = shape_marker(fonts, cfg, "\u{2022}", size, theme.text.body);
+            place_marker(runs, text_x - width - gutter, y0, block_index, out);
+        }
+        Marker::Number(n) => {
+            let text = format!("{n}.");
+            let (runs, width) = shape_marker(fonts, cfg, &text, size, theme.text.body);
+            place_marker(runs, text_x - width - gutter, y0, block_index, out);
+        }
+        Marker::Task { checked } => {
+            let side = 0.8 * size;
+            let bx = text_x - side - gutter;
+            let by = y0 + (line_height - side) / 2.0;
+            if *checked {
+                out.rects.push(DecoRect {
+                    x: bx,
+                    y: by,
+                    width: side,
+                    height: side,
+                    color: theme.text.link,
+                });
+                let (runs, width) =
+                    shape_marker(fonts, cfg, "\u{2713}", 0.7 * size, theme.surface.background);
+                place_marker(runs, bx + (side - width) / 2.0, y0, block_index, out);
+            } else {
+                let t = (1.0 * cfg.zoom).max(1.0);
+                for (x, y, w, h) in [
+                    (bx, by, side, t),
+                    (bx, by + side - t, side, t),
+                    (bx, by, t, side),
+                    (bx + side - t, by, t, side),
+                ] {
+                    out.rects.push(DecoRect {
+                        x,
+                        y,
+                        width: w,
+                        height: h,
+                        color: theme.blocks.rule,
+                    });
+                }
+            }
+        }
+    }
+
+    let base = BlockStyle {
+        size,
+        color: theme.text.body,
+        bold: false,
+        block_index,
+    };
+    let height = shape_block(fonts, theme, cfg, spans, &base, text_x, y0, text_w, out);
+    height.max(line_height)
+}
+
+/// Shapes marker text at origin; the caller places it. Returns total width.
+fn shape_marker(
+    fonts: &mut FontStore,
+    cfg: &ViewConfig,
+    text: &str,
+    size: f32,
+    color: Rgba,
+) -> (Vec<TextRun>, f32) {
+    let line_height = metrics::LINE_HEIGHT * cfg.body_size * cfg.zoom;
+    let mut buffer = Buffer::new(&mut fonts.font_system, Metrics::new(size, line_height));
+    buffer.set_size(&mut fonts.font_system, None, None);
+    let attrs = Attrs::new().family(Family::Name(&cfg.body_family));
+    buffer.set_text(
+        &mut fonts.font_system,
+        text,
+        &attrs,
+        Shaping::Advanced,
+        None,
+    );
+    buffer.shape_until_scroll(&mut fonts.font_system, false);
+    let mut runs = Vec::new();
+    let mut width = 0.0f32;
+    for run in buffer.layout_runs() {
+        let Some(last) = run.glyphs.last() else {
+            continue;
+        };
+        width = width.max(last.x + last.w);
+        runs.push(TextRun {
+            text: text.to_string(),
+            x: 0.0,
+            y: run.line_top,
+            baseline: run.line_y,
+            width: last.x + last.w,
+            size,
+            family: cfg.body_family.clone(),
+            weight: Weight::NORMAL.0,
+            italic: false,
+            color,
+            link: None,
+            block: 0,
+            span: usize::MAX,
+        });
+    }
+    (runs, width)
+}
+
+/// Marker runs use span `usize::MAX`: synthetic, excluded from selection.
+fn place_marker(runs: Vec<TextRun>, x: f32, y: f32, block_index: usize, out: &mut LayoutDoc) {
+    for mut run in runs {
+        run.x += x;
+        run.y += y;
+        run.baseline += y;
+        run.block = block_index;
+        out.runs.push(run);
+    }
 }
 
 /// Lays out a fenced code block: a bordered panel of monospace lines,

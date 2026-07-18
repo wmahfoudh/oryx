@@ -41,6 +41,30 @@ def greet(name: str) -> str:
 A fence with no language renders plain, inside the same panel.
 ```
 
+## Quotes, Lists, Rules
+
+> A quoted paragraph gets its bar and a tinted panel.
+>
+> Consecutive quoted blocks read as one region.
+>
+> > Nesting adds a second bar and deeper indent.
+
+- An unordered item
+- Another, with **bold** and `code` inside
+  - A nested item one step deeper
+    - And a third level
+
+1. First ordered item
+2. Second
+3. Third, so the marker column is visibly right-aligned
+
+- [x] A checked task
+- [ ] An unchecked task
+
+---
+
+The line above is a horizontal rule spanning the content width.
+
 ### Heading Levels
 
 The copper ramp encodes hierarchy: the larger the heading, the warmer and
