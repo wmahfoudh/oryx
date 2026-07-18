@@ -1,6 +1,7 @@
 //! Scroll clamping and the band cache. Scrolling inside the band is a
 //! memcpy slice; the band repaints recentered only near its edges.
 
+use crate::doc::images::MediaCache;
 use crate::layout::LayoutDoc;
 use crate::style::fonts::FontStore;
 use crate::style::theme::Theme;
@@ -22,10 +23,12 @@ pub struct BandCache {
 impl BandCache {
     /// Paints a band recentered on `scroll_y`: five viewport heights,
     /// clamped so it never starts above the document top.
+    #[allow(clippy::too_many_arguments)]
     pub fn repaint(
         layout: &LayoutDoc,
         theme: &Theme,
         fonts: &mut FontStore,
+        media: &mut MediaCache,
         scroll_y: f32,
         width: u32,
         viewport_h: u32,
@@ -36,7 +39,7 @@ impl BandCache {
         let y_top = (scroll_y - (2 * viewport_h) as f32)
             .clamp(0.0, max_top)
             .floor();
-        let pixels = super::band(layout, theme, fonts, y_top, width, height);
+        let pixels = super::band(layout, theme, fonts, media, y_top, width, height);
         BandCache {
             pixels,
             y_top,

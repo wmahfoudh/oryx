@@ -1,3 +1,6 @@
+use std::path::PathBuf;
+
+use oryx::doc::images::MediaCache;
 use oryx::doc::markdown;
 use oryx::layout::{layout, LayoutDoc, TextRun, ViewConfig};
 use oryx::style::fonts::{FontStore, CODE_FAMILY};
@@ -13,7 +16,15 @@ fn cfg() -> ViewConfig {
 
 fn lay(source: &str, width: f32) -> LayoutDoc {
     let doc = markdown::parse(source);
-    layout(&doc, &Theme::default_dark(), &mut fonts(), &cfg(), width)
+    let mut media = MediaCache::new(PathBuf::from("."));
+    layout(
+        &doc,
+        &Theme::default_dark(),
+        &mut fonts(),
+        &mut media,
+        &cfg(),
+        width,
+    )
 }
 
 fn body_run(l: &LayoutDoc) -> &TextRun {
@@ -58,7 +69,15 @@ fn zoom_doubles_sizes_and_grows_height() {
     let doc = markdown::parse(source);
     let mut config = cfg();
     config.zoom = 2.0;
-    let zoomed = layout(&doc, &Theme::default_dark(), &mut fonts(), &config, 800.0);
+    let mut media = MediaCache::new(PathBuf::from("."));
+    let zoomed = layout(
+        &doc,
+        &Theme::default_dark(),
+        &mut fonts(),
+        &mut media,
+        &config,
+        800.0,
+    );
     assert_eq!(zoomed.runs[0].size, 88.0);
     assert!(zoomed.height > normal.height);
 }
@@ -308,6 +327,64 @@ fn dominant_column_grows_into_leftover() {
         outline.width > 672.0 * 0.8,
         "table with one wordy column should use most of the width: {}",
         outline.width
+    );
+}
+
+fn lay_with_images(source: &str, width: f32, dir: PathBuf) -> LayoutDoc {
+    let doc = markdown::parse(source);
+    let mut media = MediaCache::new(dir);
+    layout(
+        &doc,
+        &Theme::default_dark(),
+        &mut fonts(),
+        &mut media,
+        &cfg(),
+        width,
+    )
+}
+
+#[test]
+fn oversized_image_scales_to_content_width() {
+    let dir = std::env::temp_dir().join(format!("oryx-laytest-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let img = image::RgbaImage::from_pixel(2000, 1000, image::Rgba([10, 20, 30, 255]));
+    img.save(dir.join("wide.png")).unwrap();
+    let l = lay_with_images("![big](wide.png)", 800.0, dir);
+    let place = &l.images[0];
+    assert!((place.width - 672.0).abs() < 0.5, "fits content width");
+    assert!(
+        (place.height - 336.0).abs() < 0.5,
+        "aspect preserved: {}",
+        place.height
+    );
+}
+
+#[test]
+fn small_image_keeps_natural_size() {
+    let dir = std::env::temp_dir().join(format!("oryx-laytest2-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let img = image::RgbaImage::from_pixel(100, 50, image::Rgba([10, 20, 30, 255]));
+    img.save(dir.join("small.png")).unwrap();
+    let l = lay_with_images("![small](small.png)", 800.0, dir);
+    assert!((l.images[0].width - 100.0).abs() < 0.5, "no upscaling");
+}
+
+#[test]
+fn missing_image_becomes_placeholder() {
+    let dir = std::env::temp_dir().join("oryx-laytest-none");
+    std::fs::create_dir_all(&dir).unwrap();
+    let l = lay_with_images("![the alt text](gone.png)", 800.0, dir);
+    let t = Theme::default_dark();
+    assert!(l.images.is_empty());
+    assert!(
+        l.rects
+            .iter()
+            .any(|r| r.color == t.blocks.code_border && r.stroke > 0.0),
+        "placeholder outline"
+    );
+    assert!(
+        l.runs.iter().any(|r| r.text.contains("the alt text")),
+        "alt text shown"
     );
 }
 

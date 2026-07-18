@@ -6,6 +6,7 @@ use std::ops::Range;
 use cosmic_text::{Attrs, Buffer, Family, Metrics, Shaping, Style, Weight};
 
 use super::metrics;
+use crate::doc::images::MediaCache;
 use crate::doc::model::{BlockKind, Document, Marker, Span};
 use crate::style::fonts::{FontStore, BODY_FAMILY, CODE_FAMILY};
 use crate::style::highlight::SyntaxRole;
@@ -103,14 +104,27 @@ pub struct LayoutDoc {
     pub height: f32,
     pub runs: Vec<TextRun>,
     pub rects: Vec<DecoRect>,
+    /// Placed images, blitted by paint from the media cache.
+    pub images: Vec<ImagePlace>,
     /// Heading anchor slugs and their y positions.
     pub anchors: Vec<(String, f32)>,
+}
+
+/// One image scaled and positioned in the document.
+#[derive(Debug, Clone)]
+pub struct ImagePlace {
+    pub src: String,
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
 }
 
 pub fn layout(
     doc: &Document,
     theme: &Theme,
     fonts: &mut FontStore,
+    media: &mut MediaCache,
     cfg: &ViewConfig,
     viewport_width: f32,
 ) -> LayoutDoc {
@@ -140,7 +154,9 @@ pub fn layout(
                 cfg.body_size * heading.map(metrics::heading_scale).unwrap_or(1.0) * cfg.zoom
             }
             BlockKind::CodeBlock { .. } => cfg.code_size * cfg.zoom,
-            BlockKind::Rule | BlockKind::Table { .. } => cfg.body_size * cfg.zoom,
+            BlockKind::Rule | BlockKind::Table { .. } | BlockKind::Image { .. } => {
+                cfg.body_size * cfg.zoom
+            }
             _ => continue,
         };
         let mut gap = 0.0;
@@ -231,6 +247,19 @@ pub fn layout(
                 cfg,
                 header,
                 rows,
+                block_index,
+                x_base,
+                cursor,
+                avail,
+                &mut out,
+            ),
+            BlockKind::Image { path, alt } => layout_image(
+                fonts,
+                theme,
+                cfg,
+                media,
+                path,
+                alt,
                 block_index,
                 x_base,
                 cursor,
@@ -750,6 +779,77 @@ fn layout_table(
             .stroked(t),
     );
     y - y0
+}
+
+/// Places an image scaled down to fit the available width (never scaled
+/// up); an unloadable image becomes a bordered placeholder with alt text.
+#[allow(clippy::too_many_arguments)]
+fn layout_image(
+    fonts: &mut FontStore,
+    theme: &Theme,
+    cfg: &ViewConfig,
+    media: &mut MediaCache,
+    path: &str,
+    alt: &str,
+    block_index: usize,
+    x0: f32,
+    y0: f32,
+    avail: f32,
+    out: &mut LayoutDoc,
+) -> f32 {
+    if let Some((iw, ih)) = media.dimensions(path) {
+        let width = (iw as f32).min(avail);
+        let height = ih as f32 * width / iw as f32;
+        out.images.push(ImagePlace {
+            src: path.to_string(),
+            x: x0,
+            y: y0,
+            width,
+            height,
+        });
+        return height;
+    }
+    let pad = 12.0 * cfg.zoom;
+    let radius = metrics::CORNER_RADIUS * cfg.zoom;
+    let alt_span = [Span {
+        text: if alt.is_empty() {
+            path.to_string()
+        } else {
+            alt.to_string()
+        },
+        italic: true,
+        ..Span::default()
+    }];
+    let base = BlockStyle {
+        size: cfg.body_size * cfg.zoom,
+        color: theme.blocks.frontmatter_fg,
+        bold: false,
+        block_index,
+    };
+    let rects_mark = out.rects.len();
+    let text_h = shape_block(
+        fonts,
+        theme,
+        cfg,
+        &alt_span,
+        &base,
+        x0 + pad,
+        y0 + pad,
+        avail - 2.0 * pad,
+        out,
+    );
+    let box_h = text_h + 2.0 * pad;
+    out.rects.splice(
+        rects_mark..rects_mark,
+        [
+            DecoRect::fill(x0, y0, avail, box_h, theme.blocks.frontmatter_bg)
+                .rounded(radius, radius),
+            DecoRect::fill(x0, y0, avail, box_h, theme.blocks.code_border)
+                .rounded(radius, radius)
+                .stroked((1.0 * cfg.zoom).max(1.0)),
+        ],
+    );
+    box_h
 }
 
 /// Shapes marker text at origin; the caller places it. Returns total width.

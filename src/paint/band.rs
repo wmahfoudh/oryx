@@ -4,6 +4,7 @@
 use cosmic_text::{Attrs, Buffer, Color, Family, Metrics, Shaping, Style, Weight};
 use tiny_skia::{Pixmap, Rect, Transform};
 
+use crate::doc::images::MediaCache;
 use crate::layout::{metrics, LayoutDoc, TextRun};
 use crate::style::fonts::FontStore;
 use crate::style::theme::Theme;
@@ -13,6 +14,7 @@ pub fn band(
     layout: &LayoutDoc,
     theme: &Theme,
     fonts: &mut FontStore,
+    media: &mut MediaCache,
     y_top: f32,
     width: u32,
     height: u32,
@@ -64,6 +66,13 @@ pub fn band(
         }
     }
 
+    for image in &layout.images {
+        if image.y + image.height < y_top || image.y > band_bottom {
+            continue;
+        }
+        blit_image(&mut pixmap, media, image, y_top);
+    }
+
     for run in &layout.runs {
         let line_height = metrics::LINE_HEIGHT * run.size;
         if run.y + line_height < y_top || run.y > band_bottom {
@@ -77,6 +86,46 @@ pub fn band(
         .chunks_exact(4)
         .map(|px| ((px[0] as u32) << 16) | ((px[1] as u32) << 8) | px[2] as u32)
         .collect()
+}
+
+/// Blends a scaled image from the cache onto the pixmap.
+fn blit_image(
+    pixmap: &mut Pixmap,
+    media: &mut MediaCache,
+    image: &crate::layout::ImagePlace,
+    y_top: f32,
+) {
+    let tw = image.width.round().max(1.0) as u32;
+    let th = image.height.round().max(1.0) as u32;
+    let Some(rgba) = media.scaled(&image.src, tw, th) else {
+        return;
+    };
+    let pw = pixmap.width() as i32;
+    let ph = pixmap.height() as i32;
+    let (ox, oy) = (image.x as i32, (image.y - y_top) as i32);
+    let data = pixmap.data_mut();
+    for sy in 0..th as i32 {
+        let ty = oy + sy;
+        if ty < 0 || ty >= ph {
+            continue;
+        }
+        for sx in 0..tw as i32 {
+            let tx = ox + sx;
+            if tx < 0 || tx >= pw {
+                continue;
+            }
+            let si = ((sy * tw as i32 + sx) * 4) as usize;
+            let alpha = rgba[si + 3] as u32;
+            if alpha == 0 {
+                continue;
+            }
+            let di = ((ty * pw + tx) * 4) as usize;
+            data[di] = blend(rgba[si], data[di], alpha);
+            data[di + 1] = blend(rgba[si + 1], data[di + 1], alpha);
+            data[di + 2] = blend(rgba[si + 2], data[di + 2], alpha);
+            data[di + 3] = 255;
+        }
+    }
 }
 
 /// Builds a rectangle path with independent top and bottom corner radii.

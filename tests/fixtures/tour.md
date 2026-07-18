@@ -81,6 +81,20 @@ A table with short content stays compact instead of stretching:
 |a|1|
 |b|2|
 
+## Images
+
+The oryx mark, rendered inline at its natural size:
+
+![The oryx mark](oryx-test.png)
+
+Vector images rasterize at their intrinsic size, the logo as SVG:
+
+![The mark as SVG](../../assets/icon/oryx.svg)
+
+A broken path renders as a bordered placeholder with the alt text:
+
+![this image does not exist](missing-image.png)
+
 ### Heading Levels
 
 The copper ramp encodes hierarchy: the larger the heading, the warmer and

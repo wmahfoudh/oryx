@@ -2,6 +2,7 @@ use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use oryx::doc::images::MediaCache;
 use oryx::doc::load;
 use oryx::doc::model::Document;
 use oryx::layout::{layout, metrics, LayoutDoc, ViewConfig};
@@ -22,6 +23,10 @@ pub fn run(path: Option<PathBuf>) -> anyhow::Result<()> {
         Some(p) => load::open(p)?,
         None => Document::default(),
     };
+    let doc_dir = path
+        .as_ref()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .unwrap_or_else(|| PathBuf::from("."));
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Wait);
     let mut app = App {
@@ -30,6 +35,7 @@ pub fn run(path: Option<PathBuf>) -> anyhow::Result<()> {
         theme: startup_theme(),
         cfg: ViewConfig::default(),
         fonts: FontStore::new(),
+        media: MediaCache::new(doc_dir),
         layout: None,
         layout_width: 0.0,
         band: None,
@@ -66,6 +72,7 @@ struct App {
     theme: Theme,
     cfg: ViewConfig,
     fonts: FontStore,
+    media: MediaCache,
     layout: Option<LayoutDoc>,
     layout_width: f32,
     band: Option<BandCache>,
@@ -187,6 +194,7 @@ impl App {
                 &self.document,
                 &self.theme,
                 &mut self.fonts,
+                &mut self.media,
                 &self.cfg,
                 w,
             ));
@@ -211,6 +219,7 @@ impl App {
                     lay,
                     &self.theme,
                     &mut self.fonts,
+                    &mut self.media,
                     self.scroll_y,
                     size.width,
                     size.height,
@@ -221,6 +230,7 @@ impl App {
                     lay,
                     &self.theme,
                     &mut self.fonts,
+                    &mut self.media,
                     self.scroll_y,
                     size.width,
                     size.height,
