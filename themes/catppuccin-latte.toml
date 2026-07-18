@@ -1,0 +1,66 @@
+# Catppuccin Latte: adaptation of Catppuccin (catppuccin.com, MIT).
+# The light flavor: cool porcelain ground, the official rainbow heading
+# ramp in saturated daylight accents.
+
+[surface]
+background = "#EFF1F5"
+foreground = "#4C4F69"
+
+[headings]
+h1 = "#D20F39"
+h2 = "#FE640B"
+h3 = "#DF8E1D"
+h4 = "#40A02B"
+h5 = "#209FB5"
+h6 = "#7287FD"
+
+[text]
+body = "#4C4F69"
+bold = "#363A52"
+italic = "#5C5F77"
+strike = "#9CA0B0"
+inline_code = "#40A02B"
+inline_code_bg = "#E6E9EF"
+link = "#1E66F5"
+math = "#8839EF"
+
+[blocks]
+code_bg = "#E6E9EF"
+code_border = "#CCD0DA"
+quote_bg = "#E9ECF2"
+quote_bar = "#8839EF"
+table_border = "#CCD0DA"
+table_header_bg = "#E6E9EF"
+table_row_alt_bg = "#EAEDF2"
+rule = "#CCD0DA"
+frontmatter_bg = "#E6E9EF"
+frontmatter_fg = "#8C8FA1"
+
+[syntax]
+keyword = "#8839EF"
+string = "#40A02B"
+number = "#FE640B"
+function = "#1E66F5"
+type = "#DF8E1D"
+comment = "#8C8FA1"
+operator = "#04A5E5"
+variable = "#4C4F69"
+punctuation = "#7C7F93"
+
+[alerts]
+note = "#1E66F5"
+tip = "#40A02B"
+important = "#8839EF"
+warning = "#DF8E1D"
+caution = "#D20F39"
+
+[ui]
+sidebar_bg = "#E6E9EF"
+sidebar_fg = "#5C5F77"
+sidebar_dir = "#8839EF"
+scrollbar = "#CCD0DA"
+scrollbar_hover = "#BCC0CC"
+selection_bg = "#CCD0DA"
+overlay_bg = "#E6E9EF"
+overlay_fg = "#4C4F69"
+overlay_highlight = "#CCD0DA"

@@ -1,0 +1,65 @@
+# Flexoki Dark: adaptation of Flexoki by Steph Ango (stephango.com/flexoki, MIT).
+# Inky near-black warm paper negative, calm 400-series accents.
+
+[surface]
+background = "#100F0F"
+foreground = "#CECDC3"
+
+[headings]
+h1 = "#D14D41"
+h2 = "#DA702C"
+h3 = "#D0A215"
+h4 = "#879A39"
+h5 = "#4385BE"
+h6 = "#878580"
+
+[text]
+body = "#CECDC3"
+bold = "#E6E4D9"
+italic = "#B7B5AC"
+strike = "#6F6E69"
+inline_code = "#DA702C"
+inline_code_bg = "#1C1B1A"
+link = "#3AA99F"
+math = "#8B7EC8"
+
+[blocks]
+code_bg = "#1C1B1A"
+code_border = "#343331"
+quote_bg = "#161514"
+quote_bar = "#575653"
+table_border = "#343331"
+table_header_bg = "#1C1B1A"
+table_row_alt_bg = "#151413"
+rule = "#343331"
+frontmatter_bg = "#1C1B1A"
+frontmatter_fg = "#878580"
+
+[syntax]
+keyword = "#CE5D97"
+string = "#879A39"
+number = "#D0A215"
+function = "#4385BE"
+type = "#3AA99F"
+comment = "#6F6E69"
+operator = "#DA702C"
+variable = "#CECDC3"
+punctuation = "#878580"
+
+[alerts]
+note = "#4385BE"
+tip = "#879A39"
+important = "#8B7EC8"
+warning = "#D0A215"
+caution = "#D14D41"
+
+[ui]
+sidebar_bg = "#1C1B1A"
+sidebar_fg = "#B7B5AC"
+sidebar_dir = "#DA702C"
+scrollbar = "#343331"
+scrollbar_hover = "#403E3C"
+selection_bg = "#343331"
+overlay_bg = "#1C1B1A"
+overlay_fg = "#CECDC3"
+overlay_highlight = "#343331"

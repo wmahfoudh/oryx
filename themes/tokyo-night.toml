@@ -1,0 +1,65 @@
+# Tokyo Night: adaptation of Tokyo Night (github.com/enkia/tokyo-night-vscode-theme, MIT).
+# Deep city-night indigo, neon blue and purple leads, teal links.
+
+[surface]
+background = "#1A1B26"
+foreground = "#C0CAF5"
+
+[headings]
+h1 = "#7AA2F7"
+h2 = "#BB9AF7"
+h3 = "#7DCFFF"
+h4 = "#73DACA"
+h5 = "#E0AF68"
+h6 = "#565F89"
+
+[text]
+body = "#C0CAF5"
+bold = "#E2E7FC"
+italic = "#A9B1D6"
+strike = "#565F89"
+inline_code = "#7DCFFF"
+inline_code_bg = "#24283B"
+link = "#73DACA"
+math = "#9D7CD8"
+
+[blocks]
+code_bg = "#16161E"
+code_border = "#292E42"
+quote_bg = "#1F2335"
+quote_bar = "#7AA2F7"
+table_border = "#292E42"
+table_header_bg = "#24283B"
+table_row_alt_bg = "#1E202F"
+rule = "#292E42"
+frontmatter_bg = "#16161E"
+frontmatter_fg = "#565F89"
+
+[syntax]
+keyword = "#BB9AF7"
+string = "#9ECE6A"
+number = "#FF9E64"
+function = "#7AA2F7"
+type = "#2AC3DE"
+comment = "#565F89"
+operator = "#7DCFFF"
+variable = "#C0CAF5"
+punctuation = "#A9B1D6"
+
+[alerts]
+note = "#7AA2F7"
+tip = "#9ECE6A"
+important = "#BB9AF7"
+warning = "#E0AF68"
+caution = "#F7768E"
+
+[ui]
+sidebar_bg = "#16161E"
+sidebar_fg = "#A9B1D6"
+sidebar_dir = "#7AA2F7"
+scrollbar = "#292E42"
+scrollbar_hover = "#414868"
+selection_bg = "#33467C"
+overlay_bg = "#1F2335"
+overlay_fg = "#C0CAF5"
+overlay_highlight = "#292E42"

@@ -1,0 +1,65 @@
+# Everforest Light: adaptation of Everforest (github.com/sainnhe/everforest, MIT).
+# Sunlit clearing: warm parchment ground, sage text, forest accents.
+
+[surface]
+background = "#FDF6E3"
+foreground = "#5C6A72"
+
+[headings]
+h1 = "#F85552"
+h2 = "#F57D26"
+h3 = "#DFA000"
+h4 = "#8DA101"
+h5 = "#3A94C5"
+h6 = "#939F91"
+
+[text]
+body = "#5C6A72"
+bold = "#465258"
+italic = "#829181"
+strike = "#A6B0A0"
+inline_code = "#35A77C"
+inline_code_bg = "#F4F0D9"
+link = "#3A94C5"
+math = "#DF69BA"
+
+[blocks]
+code_bg = "#F4F0D9"
+code_border = "#E6E2CC"
+quote_bg = "#F7F2DD"
+quote_bar = "#8DA101"
+table_border = "#E6E2CC"
+table_header_bg = "#EFEBD4"
+table_row_alt_bg = "#F7F2DD"
+rule = "#E6E2CC"
+frontmatter_bg = "#F4F0D9"
+frontmatter_fg = "#939F91"
+
+[syntax]
+keyword = "#F85552"
+string = "#8DA101"
+number = "#DF69BA"
+function = "#35A77C"
+type = "#DFA000"
+comment = "#939F91"
+operator = "#F57D26"
+variable = "#5C6A72"
+punctuation = "#829181"
+
+[alerts]
+note = "#3A94C5"
+tip = "#8DA101"
+important = "#DF69BA"
+warning = "#DFA000"
+caution = "#F85552"
+
+[ui]
+sidebar_bg = "#EFEBD4"
+sidebar_fg = "#5C6A72"
+sidebar_dir = "#8DA101"
+scrollbar = "#E0DCC7"
+scrollbar_hover = "#BDC3AF"
+selection_bg = "#E6E2CC"
+overlay_bg = "#F4F0D9"
+overlay_fg = "#5C6A72"
+overlay_highlight = "#E6E2CC"

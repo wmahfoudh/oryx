@@ -1,0 +1,66 @@
+# Oryx Night: original. Desert night sky: deep blue-black ground,
+# moonlit silver text, moon-gold h1, starlight cyan links, a rare
+# dune-fire orange in code keywords.
+
+[surface]
+background = "#10141F"
+foreground = "#C9D1E3"
+
+[headings]
+h1 = "#E0B45C"
+h2 = "#A8BEE0"
+h3 = "#7FA6C9"
+h4 = "#6F9E8F"
+h5 = "#8E9BB5"
+h6 = "#66718A"
+
+[text]
+body = "#C9D1E3"
+bold = "#E8EDF7"
+italic = "#A8B2C9"
+strike = "#66718A"
+inline_code = "#E0B45C"
+inline_code_bg = "#1A2030"
+link = "#6FB3C9"
+math = "#A18BD4"
+
+[blocks]
+code_bg = "#141926"
+code_border = "#232B40"
+quote_bg = "#131826"
+quote_bar = "#3A4560"
+table_border = "#232B40"
+table_header_bg = "#1A2030"
+table_row_alt_bg = "#131826"
+rule = "#232B40"
+frontmatter_bg = "#141926"
+frontmatter_fg = "#66718A"
+
+[syntax]
+keyword = "#D97742"
+string = "#8FAF7E"
+number = "#E0B45C"
+function = "#6FB3C9"
+type = "#A18BD4"
+comment = "#66718A"
+operator = "#A8B2C9"
+variable = "#C9D1E3"
+punctuation = "#8E9BB5"
+
+[alerts]
+note = "#6FB3C9"
+tip = "#8FAF7E"
+important = "#A18BD4"
+warning = "#E0B45C"
+caution = "#D95F51"
+
+[ui]
+sidebar_bg = "#0C0F18"
+sidebar_fg = "#A8B2C9"
+sidebar_dir = "#E0B45C"
+scrollbar = "#232B40"
+scrollbar_hover = "#333D58"
+selection_bg = "#26324D"
+overlay_bg = "#1A2030"
+overlay_fg = "#C9D1E3"
+overlay_highlight = "#26324D"

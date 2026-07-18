@@ -1,0 +1,65 @@
+# Nord: adaptation of the Nord palette (nordtheme.com, MIT).
+# Arctic polar-night ground, frost blues lead, aurora colors as accents.
+
+[surface]
+background = "#2E3440"
+foreground = "#D8DEE9"
+
+[headings]
+h1 = "#88C0D0"
+h2 = "#81A1C1"
+h3 = "#8FBCBB"
+h4 = "#5E81AC"
+h5 = "#B48EAD"
+h6 = "#4C566A"
+
+[text]
+body = "#D8DEE9"
+bold = "#ECEFF4"
+italic = "#E5E9F0"
+strike = "#4C566A"
+inline_code = "#D08770"
+inline_code_bg = "#3B4252"
+link = "#88C0D0"
+math = "#B48EAD"
+
+[blocks]
+code_bg = "#3B4252"
+code_border = "#434C5E"
+quote_bg = "#353C4A"
+quote_bar = "#81A1C1"
+table_border = "#434C5E"
+table_header_bg = "#3B4252"
+table_row_alt_bg = "#333947"
+rule = "#434C5E"
+frontmatter_bg = "#3B4252"
+frontmatter_fg = "#616E88"
+
+[syntax]
+keyword = "#81A1C1"
+string = "#A3BE8C"
+number = "#B48EAD"
+function = "#88C0D0"
+type = "#8FBCBB"
+comment = "#616E88"
+operator = "#81A1C1"
+variable = "#D8DEE9"
+punctuation = "#ECEFF4"
+
+[alerts]
+note = "#88C0D0"
+tip = "#A3BE8C"
+important = "#B48EAD"
+warning = "#EBCB8B"
+caution = "#BF616A"
+
+[ui]
+sidebar_bg = "#292E39"
+sidebar_fg = "#D8DEE9"
+sidebar_dir = "#88C0D0"
+scrollbar = "#434C5E"
+scrollbar_hover = "#4C566A"
+selection_bg = "#434C5E"
+overlay_bg = "#3B4252"
+overlay_fg = "#ECEFF4"
+overlay_highlight = "#434C5E"

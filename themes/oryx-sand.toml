@@ -1,0 +1,66 @@
+# Oryx Sand: original. Daylight sibling of oryx-light: sun-warmed sand
+# ground, desert hues for headings (sienna, ochre, olive), an oasis-teal
+# accent for links.
+
+[surface]
+background = "#F5EADA"
+foreground = "#4A4036"
+
+[headings]
+h1 = "#B4472E"
+h2 = "#B97F24"
+h3 = "#7D7B2E"
+h4 = "#2E7D74"
+h5 = "#8A6A4F"
+h6 = "#9A8D7C"
+
+[text]
+body = "#4A4036"
+bold = "#322A22"
+italic = "#6B5B49"
+strike = "#A99A87"
+inline_code = "#A0522D"
+inline_code_bg = "#EDE0CB"
+link = "#2E7D74"
+math = "#7B5EA7"
+
+[blocks]
+code_bg = "#EFE3CE"
+code_border = "#DCCCB0"
+quote_bg = "#F0E4D0"
+quote_bar = "#B97F24"
+table_border = "#DCCCB0"
+table_header_bg = "#EDE0CB"
+table_row_alt_bg = "#F0E5D2"
+rule = "#DCCCB0"
+frontmatter_bg = "#EFE3CE"
+frontmatter_fg = "#9A8D7C"
+
+[syntax]
+keyword = "#B4472E"
+string = "#6E7F2F"
+number = "#B97F24"
+function = "#2E7D74"
+type = "#8A6A4F"
+comment = "#9A8D7C"
+operator = "#A0522D"
+variable = "#4A4036"
+punctuation = "#857767"
+
+[alerts]
+note = "#3E7CA6"
+tip = "#6E7F2F"
+important = "#7B5EA7"
+warning = "#B97F24"
+caution = "#B4472E"
+
+[ui]
+sidebar_bg = "#EFE3CE"
+sidebar_fg = "#5C5041"
+sidebar_dir = "#B4472E"
+scrollbar = "#DCCCB0"
+scrollbar_hover = "#C9B592"
+selection_bg = "#E7D7B8"
+overlay_bg = "#EFE3CE"
+overlay_fg = "#4A4036"
+overlay_highlight = "#E7D7B8"

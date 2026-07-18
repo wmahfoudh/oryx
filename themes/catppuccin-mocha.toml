@@ -1,0 +1,66 @@
+# Catppuccin Mocha: adaptation of Catppuccin (catppuccin.com, MIT).
+# Soothing dark pastels on a deep indigo base, the official rainbow
+# heading ramp from red down to lavender.
+
+[surface]
+background = "#1E1E2E"
+foreground = "#CDD6F4"
+
+[headings]
+h1 = "#F38BA8"
+h2 = "#FAB387"
+h3 = "#F9E2AF"
+h4 = "#A6E3A1"
+h5 = "#74C7EC"
+h6 = "#B4BEFE"
+
+[text]
+body = "#CDD6F4"
+bold = "#F5E0DC"
+italic = "#B4BEFE"
+strike = "#6C7086"
+inline_code = "#A6E3A1"
+inline_code_bg = "#313244"
+link = "#89B4FA"
+math = "#CBA6F7"
+
+[blocks]
+code_bg = "#181825"
+code_border = "#313244"
+quote_bg = "#252539"
+quote_bar = "#CBA6F7"
+table_border = "#45475A"
+table_header_bg = "#313244"
+table_row_alt_bg = "#232336"
+rule = "#45475A"
+frontmatter_bg = "#181825"
+frontmatter_fg = "#6C7086"
+
+[syntax]
+keyword = "#CBA6F7"
+string = "#A6E3A1"
+number = "#FAB387"
+function = "#89B4FA"
+type = "#F9E2AF"
+comment = "#6C7086"
+operator = "#89DCEB"
+variable = "#CDD6F4"
+punctuation = "#9399B2"
+
+[alerts]
+note = "#89B4FA"
+tip = "#A6E3A1"
+important = "#CBA6F7"
+warning = "#F9E2AF"
+caution = "#F38BA8"
+
+[ui]
+sidebar_bg = "#181825"
+sidebar_fg = "#BAC2DE"
+sidebar_dir = "#CBA6F7"
+scrollbar = "#45475A"
+scrollbar_hover = "#585B70"
+selection_bg = "#45475A"
+overlay_bg = "#313244"
+overlay_fg = "#CDD6F4"
+overlay_highlight = "#45475A"

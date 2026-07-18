@@ -1,0 +1,65 @@
+# Rosé Pine: adaptation of Rosé Pine (rosepinetheme.com, MIT).
+# Muted twilight purples with rose, gold, and foam accents.
+
+[surface]
+background = "#191724"
+foreground = "#E0DEF4"
+
+[headings]
+h1 = "#EB6F92"
+h2 = "#F6C177"
+h3 = "#EBBCBA"
+h4 = "#9CCFD8"
+h5 = "#C4A7E7"
+h6 = "#908CAA"
+
+[text]
+body = "#E0DEF4"
+bold = "#EFEDFB"
+italic = "#908CAA"
+strike = "#6E6A86"
+inline_code = "#EBBCBA"
+inline_code_bg = "#26233A"
+link = "#9CCFD8"
+math = "#C4A7E7"
+
+[blocks]
+code_bg = "#1F1D2E"
+code_border = "#26233A"
+quote_bg = "#1F1D2E"
+quote_bar = "#C4A7E7"
+table_border = "#403D52"
+table_header_bg = "#26233A"
+table_row_alt_bg = "#1F1D2E"
+rule = "#403D52"
+frontmatter_bg = "#1F1D2E"
+frontmatter_fg = "#6E6A86"
+
+[syntax]
+keyword = "#31748F"
+string = "#F6C177"
+number = "#EBBCBA"
+function = "#EB6F92"
+type = "#9CCFD8"
+comment = "#6E6A86"
+operator = "#908CAA"
+variable = "#E0DEF4"
+punctuation = "#908CAA"
+
+[alerts]
+note = "#9CCFD8"
+tip = "#31748F"
+important = "#C4A7E7"
+warning = "#F6C177"
+caution = "#EB6F92"
+
+[ui]
+sidebar_bg = "#1F1D2E"
+sidebar_fg = "#908CAA"
+sidebar_dir = "#C4A7E7"
+scrollbar = "#403D52"
+scrollbar_hover = "#524F67"
+selection_bg = "#403D52"
+overlay_bg = "#26233A"
+overlay_fg = "#E0DEF4"
+overlay_highlight = "#403D52"

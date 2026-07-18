@@ -1,0 +1,66 @@
+# Meadow: original. Fresh dew-green light with wildflower accents:
+# grass and spring greens lead the headings, campion pink and
+# cornflower blue as the blossoms.
+
+[surface]
+background = "#F4F7EE"
+foreground = "#35402E"
+
+[headings]
+h1 = "#3E7C46"
+h2 = "#77982F"
+h3 = "#B0486E"
+h4 = "#6068B0"
+h5 = "#8A6A2F"
+h6 = "#8C9483"
+
+[text]
+body = "#35402E"
+bold = "#232B1E"
+italic = "#4E5C42"
+strike = "#A3AC98"
+inline_code = "#3E7C46"
+inline_code_bg = "#E7EDDC"
+link = "#6068B0"
+math = "#8A5BA6"
+
+[blocks]
+code_bg = "#EBF0E1"
+code_border = "#D3DCC4"
+quote_bg = "#EDF2E3"
+quote_bar = "#77982F"
+table_border = "#D3DCC4"
+table_header_bg = "#E7EDDC"
+table_row_alt_bg = "#EFF3E7"
+rule = "#D3DCC4"
+frontmatter_bg = "#EBF0E1"
+frontmatter_fg = "#8C9483"
+
+[syntax]
+keyword = "#3E7C46"
+string = "#8A6A2F"
+number = "#B0486E"
+function = "#6068B0"
+type = "#77982F"
+comment = "#8C9483"
+operator = "#4E5C42"
+variable = "#35402E"
+punctuation = "#7C8471"
+
+[alerts]
+note = "#6068B0"
+tip = "#3E7C46"
+important = "#8A5BA6"
+warning = "#B08A2F"
+caution = "#B04A3A"
+
+[ui]
+sidebar_bg = "#EBF0E1"
+sidebar_fg = "#4E5C42"
+sidebar_dir = "#3E7C46"
+scrollbar = "#D3DCC4"
+scrollbar_hover = "#BBC6A9"
+selection_bg = "#DCE5CB"
+overlay_bg = "#EBF0E1"
+overlay_fg = "#35402E"
+overlay_highlight = "#DCE5CB"

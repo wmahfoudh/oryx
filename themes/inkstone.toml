@@ -1,0 +1,66 @@
+# Inkstone: original. Near-monochrome high-contrast reading theme:
+# black ink on warm white paper, a single vermilion seal-red reserved
+# for links, rules, and code keywords.
+
+[surface]
+background = "#FBFAF7"
+foreground = "#26241F"
+
+[headings]
+h1 = "#141310"
+h2 = "#26241F"
+h3 = "#3B382F"
+h4 = "#504C41"
+h5 = "#6B6659"
+h6 = "#868070"
+
+[text]
+body = "#26241F"
+bold = "#000000"
+italic = "#504C41"
+strike = "#A39D8D"
+inline_code = "#26241F"
+inline_code_bg = "#EFEDE6"
+link = "#C3392B"
+math = "#504C41"
+
+[blocks]
+code_bg = "#F3F1EA"
+code_border = "#DEDACD"
+quote_bg = "#F5F3EC"
+quote_bar = "#26241F"
+table_border = "#DEDACD"
+table_header_bg = "#EFEDE6"
+table_row_alt_bg = "#F5F3EC"
+rule = "#C3392B"
+frontmatter_bg = "#F3F1EA"
+frontmatter_fg = "#868070"
+
+[syntax]
+keyword = "#C3392B"
+string = "#504C41"
+number = "#6B6659"
+function = "#141310"
+type = "#3B382F"
+comment = "#A39D8D"
+operator = "#6B6659"
+variable = "#26241F"
+punctuation = "#A39D8D"
+
+[alerts]
+note = "#3E5C76"
+tip = "#4F6B4A"
+important = "#6C5877"
+warning = "#9C7A2E"
+caution = "#C3392B"
+
+[ui]
+sidebar_bg = "#F3F1EA"
+sidebar_fg = "#3B382F"
+sidebar_dir = "#C3392B"
+scrollbar = "#DEDACD"
+scrollbar_hover = "#C9C4B2"
+selection_bg = "#EAE6D8"
+overlay_bg = "#F3F1EA"
+overlay_fg = "#26241F"
+overlay_highlight = "#EAE6D8"

@@ -4,18 +4,31 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
+    let mut path: Option<PathBuf> = None;
+    let mut theme: Option<String> = None;
     let mut args = std::env::args_os().skip(1);
-    match args.next() {
-        Some(arg) if arg == "--version" => {
+    while let Some(arg) = args.next() {
+        if arg == "--version" {
             println!("oryx {}", env!("CARGO_PKG_VERSION"));
-            ExitCode::SUCCESS
+            return ExitCode::SUCCESS;
         }
-        path => match app::run(path.map(PathBuf::from)) {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(error) => {
-                eprintln!("oryx: {error}");
-                ExitCode::FAILURE
+        if arg == "--theme" {
+            match args.next().and_then(|name| name.into_string().ok()) {
+                Some(name) => theme = Some(name),
+                None => {
+                    eprintln!("oryx: --theme takes a theme name");
+                    return ExitCode::FAILURE;
+                }
             }
-        },
+            continue;
+        }
+        path = Some(PathBuf::from(arg));
+    }
+    match app::run(path, theme) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("oryx: {error}");
+            ExitCode::FAILURE
+        }
     }
 }

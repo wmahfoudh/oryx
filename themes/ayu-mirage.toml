@@ -1,0 +1,65 @@
+# Ayu Mirage: adaptation of Ayu (github.com/ayu-theme, MIT).
+# Muted blue-slate ground with ayu's vivid warm accent set.
+
+[surface]
+background = "#1F2430"
+foreground = "#CCCAC2"
+
+[headings]
+h1 = "#F28779"
+h2 = "#FFAD66"
+h3 = "#FFD173"
+h4 = "#D5FF80"
+h5 = "#73D0FF"
+h6 = "#707A8C"
+
+[text]
+body = "#CCCAC2"
+bold = "#ECEAE1"
+italic = "#FFDFB3"
+strike = "#707A8C"
+inline_code = "#95E6CB"
+inline_code_bg = "#1C212B"
+link = "#5CCFE6"
+math = "#DFBFFF"
+
+[blocks]
+code_bg = "#191E2A"
+code_border = "#2A3140"
+quote_bg = "#1C212B"
+quote_bar = "#707A8C"
+table_border = "#2A3140"
+table_header_bg = "#232936"
+table_row_alt_bg = "#1C212B"
+rule = "#2A3140"
+frontmatter_bg = "#191E2A"
+frontmatter_fg = "#707A8C"
+
+[syntax]
+keyword = "#FFAD66"
+string = "#D5FF80"
+number = "#DFBFFF"
+function = "#FFD173"
+type = "#73D0FF"
+comment = "#6C7986"
+operator = "#F29E74"
+variable = "#CCCAC2"
+punctuation = "#8A9199"
+
+[alerts]
+note = "#73D0FF"
+tip = "#D5FF80"
+important = "#DFBFFF"
+warning = "#FFD173"
+caution = "#F28779"
+
+[ui]
+sidebar_bg = "#191E2A"
+sidebar_fg = "#8A9199"
+sidebar_dir = "#FFAD66"
+scrollbar = "#2A3140"
+scrollbar_hover = "#3A4450"
+selection_bg = "#34455A"
+overlay_bg = "#232936"
+overlay_fg = "#CCCAC2"
+overlay_highlight = "#34455A"

@@ -252,6 +252,13 @@ macro_rules! raw_group {
         struct $Raw {
             $( $(#[serde(rename = $name)])? $field: Option<Rgba>, )*
         }
+        impl $Raw {
+            fn missing(&self, group: &str, out: &mut Vec<String>) {
+                $( if self.$field.is_none() {
+                    out.push(format!("{group}.{}", stringify!($field)));
+                } )*
+            }
+        }
     };
 }
 
@@ -388,6 +395,30 @@ pub fn load_file(path: &Path) -> Option<Theme> {
             None
         }
     }
+}
+
+/// Role keys a theme file leaves to fallback, empty when the file is
+/// complete. None when the file does not read or parse.
+pub fn missing_keys(path: &Path) -> Option<Vec<String>> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let raw = toml::from_str::<Raw>(&text).ok()?;
+    let mut out = Vec::new();
+    raw.surface.missing("surface", &mut out);
+    raw.headings.missing("headings", &mut out);
+    raw.text.missing("text", &mut out);
+    raw.blocks.missing("blocks", &mut out);
+    raw.syntax.missing("syntax", &mut out);
+    raw.alerts.missing("alerts", &mut out);
+    raw.ui.missing("ui", &mut out);
+    Some(out)
+}
+
+/// Loads a theme by name from the first directory that has its file.
+pub fn find(dirs: &[PathBuf], name: &str) -> Option<Theme> {
+    dirs.iter()
+        .map(|dir| dir.join(format!("{name}.toml")))
+        .find(|path| path.is_file())
+        .and_then(|path| load_file(&path))
 }
 
 pub fn scan(dir: &Path) -> Vec<ThemeEntry> {
@@ -556,5 +587,41 @@ selection_bg = "#33445566"
         }
         let entries = scan(&themes);
         assert!(entries.iter().any(|e| e.name == "oryx-dark"));
+    }
+
+    #[test]
+    fn missing_keys_lists_unset_roles() {
+        let path = temp_theme("gaps", "[surface]\nbackground = \"#000000\"\n");
+        let missing = missing_keys(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert!(missing.contains(&"surface.foreground".to_string()));
+        assert!(missing.contains(&"syntax.type_".to_string()));
+        assert!(!missing.contains(&"surface.background".to_string()));
+    }
+
+    #[test]
+    fn shipped_collection_is_complete() {
+        let themes = Path::new(env!("CARGO_MANIFEST_DIR")).join("themes");
+        let entries = scan(&themes);
+        assert!(
+            entries.len() >= 30,
+            "expected the full collection, found {}",
+            entries.len()
+        );
+        for entry in entries {
+            let missing = missing_keys(&entry.path)
+                .unwrap_or_else(|| panic!("{} does not parse", entry.name));
+            assert!(missing.is_empty(), "{}: missing {missing:?}", entry.name);
+        }
+    }
+
+    #[test]
+    fn find_resolves_theme_by_name() {
+        let path = temp_theme("findme", "[surface]\nbackground = \"#123456\"\n");
+        let dir = path.parent().unwrap().to_path_buf();
+        let theme = find(std::slice::from_ref(&dir), "findme").unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(theme.surface.background, hex("#123456"));
+        assert!(find(&[dir], "absent").is_none());
     }
 }

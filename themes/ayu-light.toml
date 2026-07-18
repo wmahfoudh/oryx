@@ -1,0 +1,65 @@
+# Ayu Light: adaptation of Ayu (github.com/ayu-theme, MIT).
+# Bright neutral gray-white with ayu's crisp citrus accents.
+
+[surface]
+background = "#FAFAFA"
+foreground = "#5C6166"
+
+[headings]
+h1 = "#F07171"
+h2 = "#FA8D3E"
+h3 = "#F2AE49"
+h4 = "#86B300"
+h5 = "#399EE6"
+h6 = "#8A9199"
+
+[text]
+body = "#5C6166"
+bold = "#33383D"
+italic = "#787B80"
+strike = "#ABB0B6"
+inline_code = "#86B300"
+inline_code_bg = "#F3F4F5"
+link = "#399EE6"
+math = "#A37ACC"
+
+[blocks]
+code_bg = "#F3F4F5"
+code_border = "#E1E3E6"
+quote_bg = "#F5F6F7"
+quote_bar = "#ABB0B6"
+table_border = "#E1E3E6"
+table_header_bg = "#F3F4F5"
+table_row_alt_bg = "#F5F6F7"
+rule = "#E1E3E6"
+frontmatter_bg = "#F3F4F5"
+frontmatter_fg = "#8A9199"
+
+[syntax]
+keyword = "#FA8D3E"
+string = "#86B300"
+number = "#A37ACC"
+function = "#F2AE49"
+type = "#55B4D4"
+comment = "#787B80"
+operator = "#ED9366"
+variable = "#5C6166"
+punctuation = "#8A9199"
+
+[alerts]
+note = "#399EE6"
+tip = "#86B300"
+important = "#A37ACC"
+warning = "#F2AE49"
+caution = "#F07171"
+
+[ui]
+sidebar_bg = "#F3F4F5"
+sidebar_fg = "#5C6166"
+sidebar_dir = "#FA8D3E"
+scrollbar = "#D9DBDE"
+scrollbar_hover = "#C2C5C9"
+selection_bg = "#D5E5F4"
+overlay_bg = "#F3F4F5"
+overlay_fg = "#5C6166"
+overlay_highlight = "#D5E5F4"

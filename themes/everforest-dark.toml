@@ -1,0 +1,65 @@
+# Everforest Dark: adaptation of Everforest (github.com/sainnhe/everforest, MIT).
+# Green-tinted comfortable dark, soft warm foreground, forest accents.
+
+[surface]
+background = "#2D353B"
+foreground = "#D3C6AA"
+
+[headings]
+h1 = "#E67E80"
+h2 = "#E69875"
+h3 = "#DBBC7F"
+h4 = "#A7C080"
+h5 = "#7FBBB3"
+h6 = "#859289"
+
+[text]
+body = "#D3C6AA"
+bold = "#E6DCBF"
+italic = "#9DA9A0"
+strike = "#7A8478"
+inline_code = "#83C092"
+inline_code_bg = "#343F44"
+link = "#7FBBB3"
+math = "#D699B6"
+
+[blocks]
+code_bg = "#232A2E"
+code_border = "#3D484D"
+quote_bg = "#333C42"
+quote_bar = "#A7C080"
+table_border = "#475258"
+table_header_bg = "#3D484D"
+table_row_alt_bg = "#293136"
+rule = "#475258"
+frontmatter_bg = "#232A2E"
+frontmatter_fg = "#859289"
+
+[syntax]
+keyword = "#E67E80"
+string = "#A7C080"
+number = "#D699B6"
+function = "#83C092"
+type = "#DBBC7F"
+comment = "#859289"
+operator = "#E69875"
+variable = "#D3C6AA"
+punctuation = "#9DA9A0"
+
+[alerts]
+note = "#7FBBB3"
+tip = "#A7C080"
+important = "#D699B6"
+warning = "#DBBC7F"
+caution = "#E67E80"
+
+[ui]
+sidebar_bg = "#232A2E"
+sidebar_fg = "#9DA9A0"
+sidebar_dir = "#A7C080"
+scrollbar = "#475258"
+scrollbar_hover = "#56635F"
+selection_bg = "#475258"
+overlay_bg = "#343F44"
+overlay_fg = "#D3C6AA"
+overlay_highlight = "#475258"

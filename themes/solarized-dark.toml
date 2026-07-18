@@ -1,0 +1,65 @@
+# Solarized Dark: adaptation of Solarized (ethanschoonover.com/solarized, MIT).
+# The classic low-contrast teal-black with the fixed accent wheel.
+
+[surface]
+background = "#002B36"
+foreground = "#839496"
+
+[headings]
+h1 = "#CB4B16"
+h2 = "#B58900"
+h3 = "#859900"
+h4 = "#2AA198"
+h5 = "#268BD2"
+h6 = "#586E75"
+
+[text]
+body = "#839496"
+bold = "#EEE8D5"
+italic = "#93A1A1"
+strike = "#586E75"
+inline_code = "#CB4B16"
+inline_code_bg = "#073642"
+link = "#268BD2"
+math = "#6C71C4"
+
+[blocks]
+code_bg = "#073642"
+code_border = "#0E4B5A"
+quote_bg = "#04313D"
+quote_bar = "#586E75"
+table_border = "#0E4B5A"
+table_header_bg = "#073642"
+table_row_alt_bg = "#01323E"
+rule = "#0E4B5A"
+frontmatter_bg = "#073642"
+frontmatter_fg = "#586E75"
+
+[syntax]
+keyword = "#859900"
+string = "#2AA198"
+number = "#D33682"
+function = "#268BD2"
+type = "#B58900"
+comment = "#586E75"
+operator = "#859900"
+variable = "#839496"
+punctuation = "#657B83"
+
+[alerts]
+note = "#268BD2"
+tip = "#859900"
+important = "#6C71C4"
+warning = "#B58900"
+caution = "#DC322F"
+
+[ui]
+sidebar_bg = "#00252E"
+sidebar_fg = "#839496"
+sidebar_dir = "#268BD2"
+scrollbar = "#073642"
+scrollbar_hover = "#586E75"
+selection_bg = "#073642"
+overlay_bg = "#073642"
+overlay_fg = "#93A1A1"
+overlay_highlight = "#094959"

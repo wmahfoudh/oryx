@@ -1,0 +1,65 @@
+# Gruvbox Light: adaptation of gruvbox (github.com/morhetz/gruvbox, MIT).
+# Cream paper with the faded ink accent set, warm and retro.
+
+[surface]
+background = "#FBF1C7"
+foreground = "#3C3836"
+
+[headings]
+h1 = "#AF3A03"
+h2 = "#B57614"
+h3 = "#79740E"
+h4 = "#427B58"
+h5 = "#076678"
+h6 = "#928374"
+
+[text]
+body = "#3C3836"
+bold = "#282828"
+italic = "#504945"
+strike = "#928374"
+inline_code = "#AF3A03"
+inline_code_bg = "#EBDBB2"
+link = "#076678"
+math = "#8F3F71"
+
+[blocks]
+code_bg = "#F2E5BC"
+code_border = "#D5C4A1"
+quote_bg = "#F5EBC1"
+quote_bar = "#928374"
+table_border = "#D5C4A1"
+table_header_bg = "#EBDBB2"
+table_row_alt_bg = "#F5EBC1"
+rule = "#D5C4A1"
+frontmatter_bg = "#F2E5BC"
+frontmatter_fg = "#928374"
+
+[syntax]
+keyword = "#9D0006"
+string = "#79740E"
+number = "#8F3F71"
+function = "#B57614"
+type = "#427B58"
+comment = "#928374"
+operator = "#AF3A03"
+variable = "#3C3836"
+punctuation = "#7C6F64"
+
+[alerts]
+note = "#076678"
+tip = "#79740E"
+important = "#8F3F71"
+warning = "#B57614"
+caution = "#9D0006"
+
+[ui]
+sidebar_bg = "#F2E5BC"
+sidebar_fg = "#504945"
+sidebar_dir = "#AF3A03"
+scrollbar = "#D5C4A1"
+scrollbar_hover = "#BDAE93"
+selection_bg = "#D5C4A1"
+overlay_bg = "#F2E5BC"
+overlay_fg = "#3C3836"
+overlay_highlight = "#D5C4A1"

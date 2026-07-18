@@ -1,0 +1,66 @@
+# Night Owl: adaptation of Night Owl by Sarah Drasner
+# (github.com/sdras/night-owl-vscode-theme, MIT).
+# Deep ocean-night blue tuned for low light, purple and blue leads.
+
+[surface]
+background = "#011627"
+foreground = "#D6DEEB"
+
+[headings]
+h1 = "#C792EA"
+h2 = "#82AAFF"
+h3 = "#7FDBCA"
+h4 = "#ADDB67"
+h5 = "#FFCB8B"
+h6 = "#5F7E97"
+
+[text]
+body = "#D6DEEB"
+bold = "#FFFFFF"
+italic = "#C5E4FD"
+strike = "#637777"
+inline_code = "#7FDBCA"
+inline_code_bg = "#0B2942"
+link = "#82AAFF"
+math = "#C792EA"
+
+[blocks]
+code_bg = "#0B2942"
+code_border = "#1D3B53"
+quote_bg = "#0E2A3E"
+quote_bar = "#5F7E97"
+table_border = "#1D3B53"
+table_header_bg = "#0B2942"
+table_row_alt_bg = "#04192E"
+rule = "#1D3B53"
+frontmatter_bg = "#0B2942"
+frontmatter_fg = "#637777"
+
+[syntax]
+keyword = "#C792EA"
+string = "#ECC48D"
+number = "#F78C6C"
+function = "#82AAFF"
+type = "#FFCB8B"
+comment = "#637777"
+operator = "#7FDBCA"
+variable = "#D6DEEB"
+punctuation = "#8BADC1"
+
+[alerts]
+note = "#82AAFF"
+tip = "#ADDB67"
+important = "#C792EA"
+warning = "#FFCB8B"
+caution = "#EF5350"
+
+[ui]
+sidebar_bg = "#010F1A"
+sidebar_fg = "#89A4BB"
+sidebar_dir = "#82AAFF"
+scrollbar = "#1D3B53"
+scrollbar_hover = "#2C5372"
+selection_bg = "#1D3B53"
+overlay_bg = "#0B2942"
+overlay_fg = "#D6DEEB"
+overlay_highlight = "#1D3B53"

@@ -1,0 +1,66 @@
+# Ember: original. Warm charcoal with a fire-gradient heading ramp,
+# from flame red-orange down to cooled ash, and a dying-ember blue
+# for links as the cold counterpoint.
+
+[surface]
+background = "#1B1817"
+foreground = "#E3DCD4"
+
+[headings]
+h1 = "#F25C3A"
+h2 = "#E8823C"
+h3 = "#D9A144"
+h4 = "#C2B156"
+h5 = "#A89078"
+h6 = "#7D746B"
+
+[text]
+body = "#E3DCD4"
+bold = "#F5F0E9"
+italic = "#D4C0AC"
+strike = "#7D746B"
+inline_code = "#E8A06A"
+inline_code_bg = "#292423"
+link = "#7FA8B8"
+math = "#AD8FC4"
+
+[blocks]
+code_bg = "#211D1C"
+code_border = "#362F2D"
+quote_bg = "#201C1B"
+quote_bar = "#F25C3A"
+table_border = "#362F2D"
+table_header_bg = "#292423"
+table_row_alt_bg = "#1F1B1A"
+rule = "#362F2D"
+frontmatter_bg = "#211D1C"
+frontmatter_fg = "#8A7F76"
+
+[syntax]
+keyword = "#F25C3A"
+string = "#C2B156"
+number = "#D9A144"
+function = "#E8823C"
+type = "#7FA8B8"
+comment = "#8A7F76"
+operator = "#D4C0AC"
+variable = "#E3DCD4"
+punctuation = "#A89684"
+
+[alerts]
+note = "#7FA8B8"
+tip = "#9BA65C"
+important = "#AD8FC4"
+warning = "#D9A144"
+caution = "#F25C3A"
+
+[ui]
+sidebar_bg = "#161313"
+sidebar_fg = "#C9BFB4"
+sidebar_dir = "#F25C3A"
+scrollbar = "#362F2D"
+scrollbar_hover = "#4A403D"
+selection_bg = "#3E3128"
+overlay_bg = "#292423"
+overlay_fg = "#E3DCD4"
+overlay_highlight = "#3E3128"

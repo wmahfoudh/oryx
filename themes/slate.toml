@@ -1,0 +1,66 @@
+# Slate: original. Disciplined cool dark: blue-gray monochrome with a
+# steel-blue heading ramp and a single teal accent for links. The quiet
+# professional counterpart to the warm oryx-dark.
+
+[surface]
+background = "#1F2429"
+foreground = "#CBD3DA"
+
+[headings]
+h1 = "#62A8D0"
+h2 = "#8EA8C0"
+h3 = "#9FB0BF"
+h4 = "#8494A4"
+h5 = "#74828F"
+h6 = "#5E6B78"
+
+[text]
+body = "#CBD3DA"
+bold = "#E8EDF2"
+italic = "#A9B4BF"
+strike = "#5E6B78"
+inline_code = "#85C2DC"
+inline_code_bg = "#2A3138"
+link = "#4FB0BE"
+math = "#9D93C8"
+
+[blocks]
+code_bg = "#24292F"
+code_border = "#333B44"
+quote_bg = "#232930"
+quote_bar = "#4A5866"
+table_border = "#333B44"
+table_header_bg = "#2A3138"
+table_row_alt_bg = "#22272D"
+rule = "#333B44"
+frontmatter_bg = "#24292F"
+frontmatter_fg = "#74828F"
+
+[syntax]
+keyword = "#62A8D0"
+string = "#85B893"
+number = "#C79A6B"
+function = "#85C2DC"
+type = "#9D93C8"
+comment = "#66737F"
+operator = "#A9B4BF"
+variable = "#CBD3DA"
+punctuation = "#8494A4"
+
+[alerts]
+note = "#62A8D0"
+tip = "#85B893"
+important = "#9D93C8"
+warning = "#C79A6B"
+caution = "#C97064"
+
+[ui]
+sidebar_bg = "#1A1F24"
+sidebar_fg = "#A9B4BF"
+sidebar_dir = "#62A8D0"
+scrollbar = "#333B44"
+scrollbar_hover = "#46505A"
+selection_bg = "#31414E"
+overlay_bg = "#2A3138"
+overlay_fg = "#CBD3DA"
+overlay_highlight = "#31414E"

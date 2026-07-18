@@ -19,7 +19,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{CursorIcon, Window, WindowId};
 
-pub fn run(path: Option<PathBuf>) -> anyhow::Result<()> {
+pub fn run(path: Option<PathBuf>, theme_name: Option<String>) -> anyhow::Result<()> {
     let document = match &path {
         Some(p) => load::open(p)?,
         None => Document::default(),
@@ -33,7 +33,7 @@ pub fn run(path: Option<PathBuf>) -> anyhow::Result<()> {
     let mut app = App {
         gfx: None,
         document,
-        theme: startup_theme(),
+        theme: startup_theme(theme_name.as_deref()),
         cfg: ViewConfig::default(),
         fonts: FontStore::new(),
         media: MediaCache::new(doc_dir),
@@ -54,21 +54,30 @@ pub fn run(path: Option<PathBuf>) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Initial theme until config persistence lands: oryx-light from the themes
-/// directory next to the binary or in the working directory, dark fallback.
-fn startup_theme() -> Theme {
-    let mut candidates: Vec<PathBuf> = Vec::new();
+/// Theme directories in lookup order: next to the binary, then the
+/// working directory.
+fn theme_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            candidates.push(dir.join("themes/oryx-light.toml"));
+            dirs.push(dir.join("themes"));
         }
     }
-    candidates.push(PathBuf::from("themes/oryx-light.toml"));
-    candidates
-        .iter()
-        .filter(|p| p.exists())
-        .find_map(|p| theme::load_file(p))
-        .unwrap_or_else(Theme::default_dark)
+    dirs.push(PathBuf::from("themes"));
+    dirs
+}
+
+/// Startup theme: the `--theme` override when given, otherwise oryx-light
+/// until config persistence lands, dark fallback either way.
+fn startup_theme(name: Option<&str>) -> Theme {
+    let dirs = theme_dirs();
+    if let Some(name) = name {
+        match theme::find(&dirs, name) {
+            Some(theme) => return theme,
+            None => eprintln!("oryx: theme {name:?} not found, using the default"),
+        }
+    }
+    theme::find(&dirs, "oryx-light").unwrap_or_else(Theme::default_dark)
 }
 
 struct App {

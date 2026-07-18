@@ -1,0 +1,65 @@
+# Solarized Light: adaptation of Solarized (ethanschoonover.com/solarized, MIT).
+# Warm paper base3 ground with the same fixed accent wheel as the dark half.
+
+[surface]
+background = "#FDF6E3"
+foreground = "#657B83"
+
+[headings]
+h1 = "#CB4B16"
+h2 = "#B58900"
+h3 = "#859900"
+h4 = "#2AA198"
+h5 = "#268BD2"
+h6 = "#93A1A1"
+
+[text]
+body = "#657B83"
+bold = "#073642"
+italic = "#586E75"
+strike = "#93A1A1"
+inline_code = "#CB4B16"
+inline_code_bg = "#EEE8D5"
+link = "#268BD2"
+math = "#6C71C4"
+
+[blocks]
+code_bg = "#EEE8D5"
+code_border = "#DCD4BE"
+quote_bg = "#F5EEDC"
+quote_bar = "#93A1A1"
+table_border = "#DCD4BE"
+table_header_bg = "#EEE8D5"
+table_row_alt_bg = "#F7F0DE"
+rule = "#DCD4BE"
+frontmatter_bg = "#EEE8D5"
+frontmatter_fg = "#93A1A1"
+
+[syntax]
+keyword = "#859900"
+string = "#2AA198"
+number = "#D33682"
+function = "#268BD2"
+type = "#B58900"
+comment = "#93A1A1"
+operator = "#859900"
+variable = "#657B83"
+punctuation = "#839496"
+
+[alerts]
+note = "#268BD2"
+tip = "#859900"
+important = "#6C71C4"
+warning = "#B58900"
+caution = "#DC322F"
+
+[ui]
+sidebar_bg = "#EEE8D5"
+sidebar_fg = "#657B83"
+sidebar_dir = "#268BD2"
+scrollbar = "#D5CDB6"
+scrollbar_hover = "#C0B9A2"
+selection_bg = "#E4DCC3"
+overlay_bg = "#EEE8D5"
+overlay_fg = "#586E75"
+overlay_highlight = "#E4DCC3"

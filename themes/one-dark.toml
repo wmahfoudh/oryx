@@ -1,0 +1,65 @@
+# One Dark: adaptation of Atom One Dark (github.com/atom/atom, MIT).
+# Balanced gray-blue dark with the familiar six-hue accent set.
+
+[surface]
+background = "#282C34"
+foreground = "#ABB2BF"
+
+[headings]
+h1 = "#E06C75"
+h2 = "#D19A66"
+h3 = "#E5C07B"
+h4 = "#98C379"
+h5 = "#61AFEF"
+h6 = "#5C6370"
+
+[text]
+body = "#ABB2BF"
+bold = "#D7DAE0"
+italic = "#C8CCD4"
+strike = "#5C6370"
+inline_code = "#98C379"
+inline_code_bg = "#31353F"
+link = "#61AFEF"
+math = "#C678DD"
+
+[blocks]
+code_bg = "#21252B"
+code_border = "#3B4048"
+quote_bg = "#2C313A"
+quote_bar = "#5C6370"
+table_border = "#3B4048"
+table_header_bg = "#31353F"
+table_row_alt_bg = "#2C313A"
+rule = "#3B4048"
+frontmatter_bg = "#21252B"
+frontmatter_fg = "#5C6370"
+
+[syntax]
+keyword = "#C678DD"
+string = "#98C379"
+number = "#D19A66"
+function = "#61AFEF"
+type = "#E5C07B"
+comment = "#5C6370"
+operator = "#56B6C2"
+variable = "#E06C75"
+punctuation = "#ABB2BF"
+
+[alerts]
+note = "#61AFEF"
+tip = "#98C379"
+important = "#C678DD"
+warning = "#E5C07B"
+caution = "#E06C75"
+
+[ui]
+sidebar_bg = "#21252B"
+sidebar_fg = "#9DA5B4"
+sidebar_dir = "#61AFEF"
+scrollbar = "#3E4451"
+scrollbar_hover = "#4B5263"
+selection_bg = "#3E4451"
+overlay_bg = "#31353F"
+overlay_fg = "#ABB2BF"
+overlay_highlight = "#3E4451"

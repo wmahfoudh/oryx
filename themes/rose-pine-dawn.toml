@@ -1,0 +1,65 @@
+# Rosé Pine Dawn: adaptation of Rosé Pine (rosepinetheme.com, MIT).
+# The light variant: rosewater paper, dusty rose and gold accents.
+
+[surface]
+background = "#FAF4ED"
+foreground = "#575279"
+
+[headings]
+h1 = "#B4637A"
+h2 = "#EA9D34"
+h3 = "#D7827E"
+h4 = "#56949F"
+h5 = "#907AA9"
+h6 = "#797593"
+
+[text]
+body = "#575279"
+bold = "#464261"
+italic = "#797593"
+strike = "#9893A5"
+inline_code = "#D7827E"
+inline_code_bg = "#F2E9E1"
+link = "#286983"
+math = "#907AA9"
+
+[blocks]
+code_bg = "#F4EDE8"
+code_border = "#DFDAD9"
+quote_bg = "#F6EFE7"
+quote_bar = "#907AA9"
+table_border = "#DFDAD9"
+table_header_bg = "#F2E9E1"
+table_row_alt_bg = "#F6EFE7"
+rule = "#DFDAD9"
+frontmatter_bg = "#F4EDE8"
+frontmatter_fg = "#9893A5"
+
+[syntax]
+keyword = "#286983"
+string = "#EA9D34"
+number = "#D7827E"
+function = "#B4637A"
+type = "#56949F"
+comment = "#9893A5"
+operator = "#797593"
+variable = "#575279"
+punctuation = "#797593"
+
+[alerts]
+note = "#56949F"
+tip = "#286983"
+important = "#907AA9"
+warning = "#EA9D34"
+caution = "#B4637A"
+
+[ui]
+sidebar_bg = "#F2E9E1"
+sidebar_fg = "#797593"
+sidebar_dir = "#907AA9"
+scrollbar = "#DFDAD9"
+scrollbar_hover = "#CECACD"
+selection_bg = "#DFDAD9"
+overlay_bg = "#F2E9E1"
+overlay_fg = "#575279"
+overlay_highlight = "#DFDAD9"

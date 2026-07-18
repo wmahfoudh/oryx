@@ -1,0 +1,66 @@
+# Dracula: adaptation of the Dracula theme palette (draculatheme.com, MIT).
+# Cold dark blue-gray ground; pink and purple lead, cyan links, the classic
+# yellow strings and green functions in code.
+
+[surface]
+background = "#282A36"
+foreground = "#F8F8F2"
+
+[headings]
+h1 = "#FF79C6"
+h2 = "#BD93F9"
+h3 = "#8BE9FD"
+h4 = "#50FA7B"
+h5 = "#FFB86C"
+h6 = "#6272A4"
+
+[text]
+body = "#F8F8F2"
+bold = "#FFB86C"
+italic = "#F1FA8C"
+strike = "#6272A4"
+inline_code = "#50FA7B"
+inline_code_bg = "#343746"
+link = "#8BE9FD"
+math = "#BD93F9"
+
+[blocks]
+code_bg = "#21222C"
+code_border = "#44475A"
+quote_bg = "#2E3040"
+quote_bar = "#BD93F9"
+table_border = "#44475A"
+table_header_bg = "#343746"
+table_row_alt_bg = "#2C2E3A"
+rule = "#44475A"
+frontmatter_bg = "#21222C"
+frontmatter_fg = "#6272A4"
+
+[syntax]
+keyword = "#FF79C6"
+string = "#F1FA8C"
+number = "#BD93F9"
+function = "#50FA7B"
+type = "#8BE9FD"
+comment = "#6272A4"
+operator = "#FF79C6"
+variable = "#F8F8F2"
+punctuation = "#F8F8F2"
+
+[alerts]
+note = "#8BE9FD"
+tip = "#50FA7B"
+important = "#BD93F9"
+warning = "#FFB86C"
+caution = "#FF5555"
+
+[ui]
+sidebar_bg = "#21222C"
+sidebar_fg = "#F8F8F2"
+sidebar_dir = "#BD93F9"
+scrollbar = "#44475A"
+scrollbar_hover = "#6272A4"
+selection_bg = "#44475A"
+overlay_bg = "#343746"
+overlay_fg = "#F8F8F2"
+overlay_highlight = "#44475A"

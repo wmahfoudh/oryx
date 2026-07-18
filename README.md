@@ -8,24 +8,27 @@ Oryx renders on the CPU through a purpose-built layout engine, so it starts in m
 
 ## Status
 
-Oryx is under active development. Rendering is in place for headings, text styles, syntax highlighted code, blockquotes, lists and task lists, tables, horizontal rules, and images including SVG. Interaction currently covers mouse and keyboard scrolling. Theme switching, font settings, selection and copy, a folder sidebar, and file association are planned and specified.
+Oryx is under active development. Rendering is in place for headings, text styles, syntax highlighted code, blockquotes, lists and task lists, tables, horizontal rules, images including SVG, and clickable links. Interaction covers scrolling, link navigation, and text selection with plain or markdown copy. An in-app theme browser, font settings, a folder sidebar, and file association are planned and specified.
 
 ## Usage
 
 ```
-oryx <file>
+oryx [--theme <name>] <file>
 ```
 
-Opens markdown (`.md`, `.markdown`), source code files with syntax highlighting, or any text file.
+Opens markdown (`.md`, `.markdown`), source code files with syntax highlighting, or any text file. `--theme` selects a theme from the `themes/` folder by file name, for example `--theme nord`.
 
 | Key | Action |
 |---|---|
 | `Arrow Up` / `Arrow Down` | Scroll by line |
 | `Page Up` / `Page Down`, `Space` / `Shift+Space` | Scroll by page |
 | `Home` / `End` | Jump to top or bottom |
+| `Ctrl+A` | Select the whole document |
+| `Ctrl+C` | Copy the selection as plain text |
+| `Ctrl+Shift+C` | Copy the selection as markdown |
 | `Escape` | Quit |
 
-The scrollbar on the right edge can be dragged; the mouse wheel scrolls.
+The scrollbar on the right edge can be dragged; the mouse wheel scrolls. Clicking a link opens it in the browser; anchor links jump inside the document. Dragging over text selects it.
 
 ## Rendering
 
@@ -38,7 +41,27 @@ The scrollbar on the right edge can be dragged; the mouse wheel scrolls.
 
 ## Themes
 
-Two themes ship today: Oryx Light, warm paper with red, gold, and olive heading hues, and Oryx Dark, the same identity on warm dark ground. A theme is a single TOML file with 49 color roles covering every element independently; missing keys fall back to built-in defaults, and a malformed file is skipped, never fatal. Custom themes go in the `themes/` folder next to the binary.
+Thirty themes ship with Oryx. A theme is a single TOML file with 49 color roles covering every element independently; missing keys fall back to built-in defaults, and a malformed file is skipped, never fatal. Custom themes go in the `themes/` folder next to the binary.
+
+Eight are original designs: `oryx-light` and `oryx-dark` (the default warm identity), `oryx-sand` and `oryx-night` (desert day and night), `inkstone` (near-monochrome ink with a vermilion accent), `ember` (charcoal with a fire-gradient), `meadow` (dew-green with wildflower accents), and `slate` (disciplined cool gray).
+
+The rest adapt permissively licensed editor palettes, all MIT, with thanks to their authors:
+
+- Dracula ([draculatheme.com](https://draculatheme.com))
+- Nord ([nordtheme.com](https://www.nordtheme.com))
+- Gruvbox dark and light ([morhetz/gruvbox](https://github.com/morhetz/gruvbox))
+- Catppuccin Mocha and Latte ([catppuccin.com](https://catppuccin.com))
+- Tokyo Night ([enkia/tokyo-night-vscode-theme](https://github.com/enkia/tokyo-night-vscode-theme))
+- Solarized dark and light by Ethan Schoonover ([ethanschoonover.com/solarized](https://ethanschoonover.com/solarized))
+- One Dark ([atom](https://github.com/atom/atom))
+- Everforest dark and light ([sainnhe/everforest](https://github.com/sainnhe/everforest))
+- Rosé Pine and Rosé Pine Dawn ([rosepinetheme.com](https://rosepinetheme.com))
+- Kanagawa ([rebelot/kanagawa.nvim](https://github.com/rebelot/kanagawa.nvim))
+- Ayu Mirage and Light ([ayu-theme](https://github.com/ayu-theme/ayu-colors))
+- Night Owl by Sarah Drasner ([sdras/night-owl-vscode-theme](https://github.com/sdras/night-owl-vscode-theme))
+- Horizon ([jolaleye/horizon-theme-vscode](https://github.com/jolaleye/horizon-theme-vscode))
+- Flexoki dark and light by Steph Ango ([stephango.com/flexoki](https://stephango.com/flexoki))
+- GitHub Light ([primer/primitives](https://github.com/primer/primitives))
 
 ## Building
 

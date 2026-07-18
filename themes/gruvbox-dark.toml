@@ -1,0 +1,65 @@
+# Gruvbox Dark: adaptation of gruvbox (github.com/morhetz/gruvbox, MIT).
+# Retro warm dark with bright pastel accents, orange-to-blue heading ramp.
+
+[surface]
+background = "#282828"
+foreground = "#EBDBB2"
+
+[headings]
+h1 = "#FE8019"
+h2 = "#FABD2F"
+h3 = "#B8BB26"
+h4 = "#8EC07C"
+h5 = "#83A598"
+h6 = "#928374"
+
+[text]
+body = "#EBDBB2"
+bold = "#FBF1C7"
+italic = "#D5C4A1"
+strike = "#928374"
+inline_code = "#FE8019"
+inline_code_bg = "#3C3836"
+link = "#83A598"
+math = "#D3869B"
+
+[blocks]
+code_bg = "#1D2021"
+code_border = "#3C3836"
+quote_bg = "#32302F"
+quote_bar = "#928374"
+table_border = "#504945"
+table_header_bg = "#3C3836"
+table_row_alt_bg = "#2D2B2A"
+rule = "#504945"
+frontmatter_bg = "#1D2021"
+frontmatter_fg = "#928374"
+
+[syntax]
+keyword = "#FB4934"
+string = "#B8BB26"
+number = "#D3869B"
+function = "#FABD2F"
+type = "#8EC07C"
+comment = "#928374"
+operator = "#FE8019"
+variable = "#EBDBB2"
+punctuation = "#A89984"
+
+[alerts]
+note = "#83A598"
+tip = "#B8BB26"
+important = "#D3869B"
+warning = "#FABD2F"
+caution = "#FB4934"
+
+[ui]
+sidebar_bg = "#1D2021"
+sidebar_fg = "#D5C4A1"
+sidebar_dir = "#FE8019"
+scrollbar = "#504945"
+scrollbar_hover = "#665C54"
+selection_bg = "#504945"
+overlay_bg = "#3C3836"
+overlay_fg = "#EBDBB2"
+overlay_highlight = "#504945"

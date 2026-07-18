@@ -1,0 +1,66 @@
+# Kanagawa: adaptation of kanagawa.nvim (github.com/rebelot/kanagawa.nvim, MIT).
+# Ink-wash dark inspired by Hokusai's Great Wave: sumi ink ground,
+# fuji-white text, wave blue selection.
+
+[surface]
+background = "#1F1F28"
+foreground = "#DCD7BA"
+
+[headings]
+h1 = "#E46876"
+h2 = "#FFA066"
+h3 = "#E6C384"
+h4 = "#98BB6C"
+h5 = "#7E9CD8"
+h6 = "#727169"
+
+[text]
+body = "#DCD7BA"
+bold = "#EDE8CE"
+italic = "#C8C093"
+strike = "#727169"
+inline_code = "#FFA066"
+inline_code_bg = "#2A2A37"
+link = "#7FB4CA"
+math = "#957FB8"
+
+[blocks]
+code_bg = "#16161D"
+code_border = "#2A2A37"
+quote_bg = "#1A1A22"
+quote_bar = "#54546D"
+table_border = "#363646"
+table_header_bg = "#2A2A37"
+table_row_alt_bg = "#1A1A22"
+rule = "#363646"
+frontmatter_bg = "#16161D"
+frontmatter_fg = "#727169"
+
+[syntax]
+keyword = "#957FB8"
+string = "#98BB6C"
+number = "#D27E99"
+function = "#7E9CD8"
+type = "#7AA89F"
+comment = "#727169"
+operator = "#C0A36E"
+variable = "#DCD7BA"
+punctuation = "#9CABCA"
+
+[alerts]
+note = "#7E9CD8"
+tip = "#98BB6C"
+important = "#957FB8"
+warning = "#FF9E3B"
+caution = "#FF5D62"
+
+[ui]
+sidebar_bg = "#16161D"
+sidebar_fg = "#C8C093"
+sidebar_dir = "#7E9CD8"
+scrollbar = "#363646"
+scrollbar_hover = "#54546D"
+selection_bg = "#2D4F67"
+overlay_bg = "#2A2A37"
+overlay_fg = "#DCD7BA"
+overlay_highlight = "#363646"
