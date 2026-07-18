@@ -3,13 +3,15 @@
 //! DejaVu Sans and Courier Prime ship inside the binary; system fonts are
 //! loaded only as glyph fallback and as choices in the settings dialog.
 
-use cosmic_text::FontSystem;
+use cosmic_text::{FontSystem, SwashCache};
 
 pub const BODY_FAMILY: &str = "DejaVu Sans";
 pub const CODE_FAMILY: &str = "Courier Prime";
 
 pub struct FontStore {
     pub font_system: FontSystem,
+    /// Glyph raster cache shared by every paint pass.
+    pub swash: SwashCache,
 }
 
 static EMBEDDED: &[&[u8]] = &[
@@ -29,7 +31,10 @@ impl FontStore {
         for bytes in EMBEDDED {
             font_system.db_mut().load_font_data(bytes.to_vec());
         }
-        FontStore { font_system }
+        FontStore {
+            font_system,
+            swash: SwashCache::new(),
+        }
     }
 
     /// Every selectable family: the bundled two first, then system families,

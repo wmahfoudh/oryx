@@ -5,7 +5,10 @@
 pub const LINE_HEIGHT: f32 = 1.5;
 
 /// Each side margin as a fraction of viewport width.
-pub const MARGIN_RATIO: f32 = 0.10;
+pub const MARGIN_RATIO: f32 = 0.08;
+
+/// Top and bottom margin as a multiple of the body font size.
+pub const VERTICAL_MARGIN_EM: f32 = 2.0;
 
 /// Heading size as a multiple of the body size.
 pub fn heading_scale(level: u8) -> f32 {

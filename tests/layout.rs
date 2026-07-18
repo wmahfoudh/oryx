@@ -35,9 +35,9 @@ fn wrapping_respects_margins() {
     let l = lay(&"word ".repeat(200), 500.0);
     assert!(l.runs.len() > 1, "expected wrapped lines");
     for r in &l.runs {
-        assert!(r.x >= 50.0 - 0.5, "run starts left of margin: {}", r.x);
+        assert!(r.x >= 40.0 - 0.5, "run starts left of margin: {}", r.x);
         assert!(
-            r.x + r.width <= 450.0 + 0.5,
+            r.x + r.width <= 460.0 + 0.5,
             "run exceeds right margin: {}",
             r.x + r.width
         );

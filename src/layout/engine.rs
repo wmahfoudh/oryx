@@ -78,6 +78,7 @@ pub fn layout(
     viewport_width: f32,
 ) -> LayoutDoc {
     let margin = metrics::MARGIN_RATIO * viewport_width;
+    let vertical_margin = metrics::VERTICAL_MARGIN_EM * cfg.body_size * cfg.zoom;
     let content_width = (viewport_width - 2.0 * margin).max(50.0);
     let mut out = LayoutDoc::default();
     let mut cursor = 0.0_f32;
@@ -95,7 +96,7 @@ pub fn layout(
         let scale = heading.map(metrics::heading_scale).unwrap_or(1.0);
         let base_size = cfg.body_size * scale * cfg.zoom;
         if first {
-            cursor = margin;
+            cursor = vertical_margin;
             first = false;
         } else {
             cursor += metrics::space_above(heading, base_size);
@@ -127,7 +128,7 @@ pub fn layout(
     }
 
     if !first {
-        out.height = cursor + margin;
+        out.height = cursor + vertical_margin;
     }
     out
 }
