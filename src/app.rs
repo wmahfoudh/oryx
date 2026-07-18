@@ -5,6 +5,7 @@ use std::sync::Arc;
 use oryx::doc::load;
 use oryx::doc::model::Document;
 use oryx::layout::{layout, metrics, LayoutDoc, ViewConfig};
+use oryx::paint;
 use oryx::paint::scroll::{self, BandCache};
 use oryx::style::fonts::FontStore;
 use oryx::style::theme::{self, Theme};
@@ -36,6 +37,7 @@ pub fn run(path: Option<PathBuf>) -> anyhow::Result<()> {
         modifiers: ModifiersState::empty(),
         cursor: PhysicalPosition::new(0.0, 0.0),
         drag: None,
+        pending_band_for: None,
     };
     event_loop.run_app(&mut app)?;
     Ok(())
@@ -72,6 +74,10 @@ struct App {
     cursor: PhysicalPosition<f64>,
     /// Scrollbar drag: cursor offset from the thumb top when grabbed.
     drag: Option<f32>,
+    /// Deferred band rebuild, tagged with the window size it was scheduled
+    /// at. Interactive frames (drag, live resize) paint the viewport
+    /// directly; the expensive band builds one frame later, once stable.
+    pending_band_for: Option<(u32, u32)>,
 }
 
 struct Gfx {
@@ -186,30 +192,50 @@ impl App {
             ));
             self.layout_width = w;
             self.band = None;
+            self.pending_band_for = None;
         }
         let lay = self.layout.as_ref().expect("layout exists");
         self.scroll_y = scroll::clamp(self.scroll_y, lay.height, size.height as f32);
 
-        let band_stale = match &self.band {
-            None => true,
-            Some(b) => {
-                b.width != size.width
-                    || b.height != size.height * 5
-                    || b.needs_repaint(self.scroll_y, size.height as f32)
+        let band_usable = self.band.as_ref().is_some_and(|b| {
+            b.width == size.width
+                && b.height == size.height * 5
+                && !b.needs_repaint(self.scroll_y, size.height as f32)
+        });
+        let size_tag = (size.width, size.height);
+        let mut direct: Option<Vec<u32>> = None;
+        if !band_usable {
+            let build_now = self.drag.is_none() && self.pending_band_for == Some(size_tag);
+            if build_now {
+                self.band = Some(BandCache::repaint(
+                    lay,
+                    &self.theme,
+                    &mut self.fonts,
+                    self.scroll_y,
+                    size.width,
+                    size.height,
+                ));
+                self.pending_band_for = None;
+            } else {
+                direct = Some(paint::band(
+                    lay,
+                    &self.theme,
+                    &mut self.fonts,
+                    self.scroll_y,
+                    size.width,
+                    size.height,
+                ));
+                self.pending_band_for = self.drag.is_none().then_some(size_tag);
             }
-        };
-        if band_stale {
-            self.band = Some(BandCache::repaint(
-                lay,
-                &self.theme,
-                &mut self.fonts,
-                self.scroll_y,
-                size.width,
-                size.height,
-            ));
         }
-        let band = self.band.as_ref().expect("band exists");
-        let view = band.view(self.scroll_y, size.height);
+        let view: &[u32] = match &direct {
+            Some(pixels) => pixels,
+            None => self
+                .band
+                .as_ref()
+                .expect("band exists")
+                .view(self.scroll_y, size.height),
+        };
 
         gfx.surface
             .resize(width, height)
@@ -231,6 +257,11 @@ impl App {
             scrollbar::draw(&mut buffer, size.width, size.height, thumb, color);
         }
         buffer.present().expect("present failed");
+        // A direct frame leaves the band stale: build it in a follow-up
+        // frame so the visible one stayed cheap. Skipped during drags.
+        if direct.is_some() && self.pending_band_for.is_some() {
+            gfx.window.request_redraw();
+        }
     }
 }
 
