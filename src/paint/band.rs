@@ -30,14 +30,37 @@ pub fn band(
         if rect.y + rect.height < y_top || rect.y > band_bottom {
             continue;
         }
-        if let Some(r) = Rect::from_xywh(
-            rect.x,
-            rect.y - y_top,
-            rect.width.max(0.5),
-            rect.height.max(0.5),
-        ) {
-            paint.set_color_rgba8(rect.color.r, rect.color.g, rect.color.b, rect.color.a);
-            pixmap.fill_rect(r, &paint, Transform::identity(), None);
+        paint.set_color_rgba8(rect.color.r, rect.color.g, rect.color.b, rect.color.a);
+        let rounded = rect.radius_top > 0.0 || rect.radius_bottom > 0.0;
+        paint.anti_alias = rounded;
+        if !rounded && rect.stroke == 0.0 {
+            if let Some(r) = Rect::from_xywh(
+                rect.x,
+                rect.y - y_top,
+                rect.width.max(0.5),
+                rect.height.max(0.5),
+            ) {
+                pixmap.fill_rect(r, &paint, Transform::identity(), None);
+            }
+            continue;
+        }
+        let Some(path) = rect_path(rect, y_top) else {
+            continue;
+        };
+        if rect.stroke > 0.0 {
+            let stroke = tiny_skia::Stroke {
+                width: rect.stroke,
+                ..tiny_skia::Stroke::default()
+            };
+            pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+        } else {
+            pixmap.fill_path(
+                &path,
+                &paint,
+                tiny_skia::FillRule::Winding,
+                Transform::identity(),
+                None,
+            );
         }
     }
 
@@ -54,6 +77,28 @@ pub fn band(
         .chunks_exact(4)
         .map(|px| ((px[0] as u32) << 16) | ((px[1] as u32) << 8) | px[2] as u32)
         .collect()
+}
+
+/// Builds a rectangle path with independent top and bottom corner radii.
+fn rect_path(rect: &crate::layout::DecoRect, y_top: f32) -> Option<tiny_skia::Path> {
+    let (x, y, w, h) = (rect.x, rect.y - y_top, rect.width, rect.height);
+    if w <= 0.0 || h <= 0.0 {
+        return None;
+    }
+    let rt = rect.radius_top.min(w / 2.0).min(h / 2.0);
+    let rb = rect.radius_bottom.min(w / 2.0).min(h / 2.0);
+    let mut pb = tiny_skia::PathBuilder::new();
+    pb.move_to(x + rt, y);
+    pb.line_to(x + w - rt, y);
+    pb.quad_to(x + w, y, x + w, y + rt);
+    pb.line_to(x + w, y + h - rb);
+    pb.quad_to(x + w, y + h, x + w - rb, y + h);
+    pb.line_to(x + rb, y + h);
+    pb.quad_to(x, y + h, x, y + h - rb);
+    pb.line_to(x, y + rt);
+    pb.quad_to(x, y, x + rt, y);
+    pb.close();
+    pb.finish()
 }
 
 /// Re-shapes one run single-line and blends its glyphs onto the pixmap.

@@ -65,6 +65,22 @@ A fence with no language renders plain, inside the same panel.
 
 The line above is a horizontal rule spanning the content width.
 
+## Tables
+
+|Feature|Status|Notes|
+|---|---|---|
+|Headings|done|six independent hues|
+|Code|done|syntect, pure Rust|
+|Tables|new|header row, alternating stripes, and cells that wrap when one of them carries a longer sentence like this one|
+|`inline code`|works|styles apply inside cells with **bold** too|
+
+A table with short content stays compact instead of stretching:
+
+|Key|Value|
+|---|---|
+|a|1|
+|b|2|
+
 ### Heading Levels
 
 The copper ramp encodes hierarchy: the larger the heading, the warmer and

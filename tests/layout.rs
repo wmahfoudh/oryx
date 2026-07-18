@@ -178,8 +178,10 @@ fn task_items_draw_checkboxes() {
         "checked box fill"
     );
     assert!(
-        l.rects.iter().filter(|r| r.color == t.blocks.rule).count() >= 4,
-        "unchecked box border"
+        l.rects
+            .iter()
+            .any(|r| r.color == t.blocks.rule && r.stroke > 0.0),
+        "unchecked box outline"
     );
 }
 
@@ -210,6 +212,103 @@ fn rule_spans_content_width() {
         .find(|r| r.color == t.blocks.rule)
         .expect("rule rect");
     assert!((rule.width - 672.0).abs() < 1.0);
+}
+
+#[test]
+fn table_columns_header_and_stripes() {
+    let l = lay("|alpha|beta|gamma|\n|-|-|-|\n|a|b|c|\n|d|e|f|", 800.0);
+    let t = Theme::default_dark();
+    let alpha = l.runs.iter().find(|r| r.text == "alpha").unwrap();
+    let beta = l.runs.iter().find(|r| r.text == "beta").unwrap();
+    let gamma = l.runs.iter().find(|r| r.text == "gamma").unwrap();
+    assert!(alpha.x < beta.x && beta.x < gamma.x, "columns increase");
+    assert_eq!(alpha.weight, 700, "header bold");
+    assert!(l.rects.iter().any(|r| r.color == t.blocks.table_header_bg));
+    assert!(l.rects.iter().any(|r| r.color == t.blocks.table_row_alt_bg));
+    assert!(
+        l.rects
+            .iter()
+            .filter(|r| r.color == t.blocks.table_border)
+            .count()
+            >= 5,
+        "grid lines"
+    );
+    let outline = l
+        .rects
+        .iter()
+        .find(|r| r.color == t.blocks.table_border && r.stroke > 0.0)
+        .expect("rounded outline");
+    assert!(outline.radius_top > 0.0 && outline.radius_bottom > 0.0);
+    let header_bg = l
+        .rects
+        .iter()
+        .find(|r| r.color == t.blocks.table_header_bg)
+        .unwrap();
+    assert!(header_bg.radius_top > 0.0, "header stripe rounds on top");
+    let a = l.runs.iter().find(|r| r.text == "a").unwrap();
+    assert!(a.y > alpha.y, "body row below header");
+    assert!((a.x - alpha.x).abs() < 1.0, "same column aligns");
+}
+
+#[test]
+fn table_cells_wrap_within_capped_columns() {
+    let l = lay(
+        "|short|this long cell has quite a lot of text and must wrap|\n|-|-|\n|x|y|",
+        500.0,
+    );
+    for r in &l.runs {
+        assert!(
+            r.x + r.width <= 460.5,
+            "run exceeds table bounds: {} {}",
+            r.text,
+            r.x + r.width
+        );
+    }
+    let header_rows: std::collections::BTreeSet<i64> = l
+        .runs
+        .iter()
+        .filter(|r| r.weight == 700)
+        .map(|r| r.y as i64)
+        .collect();
+    assert!(
+        header_rows.len() >= 2,
+        "long header cell should wrap onto multiple lines: {header_rows:?}"
+    );
+    let header_cells = l.runs.iter().filter(|r| r.weight == 700).count();
+    assert!(header_cells >= 2, "both header cells present");
+}
+
+#[test]
+fn compact_table_stays_narrow() {
+    let l = lay("|a|b|\n|-|-|\n|1|2|", 800.0);
+    let t = Theme::default_dark();
+    let outline = l
+        .rects
+        .iter()
+        .find(|r| r.color == t.blocks.table_border && r.stroke > 0.0)
+        .unwrap();
+    assert!(
+        outline.width < 250.0,
+        "tiny table should not stretch: {}",
+        outline.width
+    );
+}
+
+#[test]
+fn dominant_column_grows_into_leftover() {
+    let long = "one dominant column with a long descriptive sentence that wants space";
+    let l = lay(&format!("|id|note|\n|-|-|\n|1|{long}|"), 800.0);
+    let t = Theme::default_dark();
+    let outline = l
+        .rects
+        .iter()
+        .find(|r| r.color == t.blocks.table_border && r.stroke > 0.0)
+        .unwrap();
+    assert!(
+        outline.width > 672.0 * 0.8,
+        "table with one wordy column should use most of the width: {}",
+        outline.width
+    );
 }
 
 #[test]
