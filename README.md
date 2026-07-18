@@ -8,7 +8,7 @@ Oryx renders on the CPU through a purpose-built layout engine, so it starts in m
 
 ## Status
 
-Oryx is under active development. Rendering is in place for headings, text styles, syntax highlighted code, blockquotes, lists and task lists, tables, horizontal rules, images including SVG, and clickable links. Interaction covers scrolling, link navigation, and text selection with plain or markdown copy. An in-app theme browser, font settings, a folder sidebar, and file association are planned and specified.
+Oryx is under active development. Rendering is in place for headings, text styles, syntax highlighted code, blockquotes, lists and task lists, tables, horizontal rules, images including SVG, and clickable links. Interaction covers scrolling, link navigation, text selection with plain or markdown copy, a theme browser and theme editor, font and size settings, and zoom. A shortcuts help overlay, a folder sidebar, remote images, and file association are planned and specified.
 
 ## Usage
 
@@ -26,9 +26,14 @@ Opens markdown (`.md`, `.markdown`), source code files with syntax highlighting,
 | `Ctrl+A` | Select the whole document |
 | `Ctrl+C` | Copy the selection as plain text |
 | `Ctrl+Shift+C` | Copy the selection as markdown |
-| `Escape` | Quit |
+| `Ctrl+T` | Theme browser |
+| `Ctrl+,` | Settings: fonts and sizes |
+| `Ctrl+Plus` / `Ctrl+Minus` / `Ctrl+0` | Zoom in, out, reset |
+| `Escape` | Close the open panel, otherwise quit |
 
 The scrollbar on the right edge can be dragged; the mouse wheel scrolls. Clicking a link opens it in the browser; anchor links jump inside the document. Dragging over text selects it.
+
+The theme browser lists every theme with preview swatches; clicking or Enter applies one, and each row carries edit, duplicate, and delete actions, with double-click renaming. The editor covers all 49 color roles with a color picker and hex entry, restyling the document live; editing a shipped theme works on a copy. Settings choose the body and code fonts from the system list, previewed in their own faces, and step both sizes. Theme, fonts, and sizes persist across launches; zoom is per session.
 
 ## Rendering
 
@@ -41,7 +46,7 @@ The scrollbar on the right edge can be dragged; the mouse wheel scrolls. Clickin
 
 ## Themes
 
-Thirty themes ship with Oryx. A theme is a single TOML file with 49 color roles covering every element independently; missing keys fall back to built-in defaults, and a malformed file is skipped, never fatal. Custom themes go in the `themes/` folder next to the binary.
+Thirty themes ship with Oryx. A theme is a single TOML file with 49 color roles covering every element independently; missing keys fall back to built-in defaults, and a malformed file is skipped, never fatal. Custom themes go in the `themes/` folder next to the binary, and the built-in browser and editor manage them without leaving the app.
 
 Eight are original designs: `oryx-light` and `oryx-dark` (the default warm identity), `oryx-sand` and `oryx-night` (desert day and night), `inkstone` (near-monochrome ink with a vermilion accent), `ember` (charcoal with a fire-gradient), `meadow` (dew-green with wildflower accents), and `slate` (disciplined cool gray).
 
