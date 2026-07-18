@@ -16,6 +16,7 @@ use oryx::ui::overlay::{Action, Overlay, OverlayResult};
 use oryx::ui::scrollbar;
 use oryx::ui::selection::{self, RunPos, Selection};
 use oryx::ui::theme_browser::ThemeBrowser;
+use oryx::ui::theme_editor::ThemeEditor;
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalPosition;
 use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
@@ -63,6 +64,9 @@ pub fn run(path: Option<PathBuf>, theme_name: Option<String>) -> anyhow::Result<
         selection: None,
         clipboard: None,
         overlay: None,
+        overlay_mouse: false,
+        pre_edit: None,
+        overlay_canvas: None,
         pending_band_for: None,
     };
     event_loop.run_app(&mut app)?;
@@ -123,6 +127,12 @@ struct App {
     /// The single active modal overlay; receives keys, clicks, and wheel
     /// while open.
     overlay: Option<Box<dyn Overlay>>,
+    /// Left button held while an overlay is open, for drag routing.
+    overlay_mouse: bool,
+    /// Theme to restore when the editor closes without saving.
+    pre_edit: Option<Theme>,
+    /// Reused overlay canvas and the region the last frame painted.
+    overlay_canvas: Option<OverlayCanvas>,
     /// Deferred band rebuild, tagged with the window size it was scheduled
     /// at. Interactive frames (drag, live resize) paint the viewport
     /// directly; the expensive band builds one frame later, once stable.
@@ -133,6 +143,9 @@ struct Gfx {
     window: Arc<Window>,
     surface: softbuffer::Surface<Arc<Window>, Arc<Window>>,
 }
+
+/// Reused overlay pixmap plus the region the last frame painted.
+type OverlayCanvas = (tiny_skia::Pixmap, Option<(f32, f32, f32, f32)>);
 
 impl App {
     fn line_step(&self) -> f32 {
@@ -261,30 +274,54 @@ impl App {
         }
     }
 
-    /// Opens the theme browser, or closes it when already open.
+    /// Opens the theme browser, or closes the active overlay.
     fn toggle_theme_browser(&mut self) {
         if self.overlay.is_some() {
-            self.overlay = None;
+            self.overlay_result(OverlayResult::Close);
         } else {
             self.overlay = Some(Box::new(ThemeBrowser::new(
                 theme_dirs(),
                 &self.config.theme,
             )));
+            self.request_redraw();
         }
-        self.request_redraw();
     }
 
     /// Applies what an overlay asked for after handling an event.
     fn overlay_result(&mut self, result: OverlayResult) {
         match result {
             OverlayResult::Open => {}
-            OverlayResult::Close => self.overlay = None,
-            OverlayResult::Apply(Action::SetTheme(path)) => self.apply_theme(&path),
+            OverlayResult::Close => {
+                self.overlay = None;
+                // An editor closed without saving: back to the last
+                // applied state.
+                if let Some(previous) = self.pre_edit.take() {
+                    self.set_live_theme(previous);
+                }
+            }
+            OverlayResult::Apply(Action::SetTheme(path)) => {
+                self.apply_theme(&path);
+                // A save from the editor moves its revert point forward.
+                if self.pre_edit.is_some() {
+                    self.pre_edit = Some(self.theme.clone());
+                }
+            }
             OverlayResult::Apply(Action::RenamedTheme { from, to }) => {
                 if self.config.theme == from {
                     self.config.theme = to;
                     config::save(&self.config);
                 }
+            }
+            OverlayResult::Apply(Action::EditTheme(path)) => {
+                if let Some(editor) = ThemeEditor::new(&path) {
+                    self.pre_edit = Some(self.theme.clone());
+                    let preview = editor.current();
+                    self.overlay = Some(Box::new(editor));
+                    self.set_live_theme(preview);
+                }
+            }
+            OverlayResult::Apply(Action::PreviewTheme(theme)) => {
+                self.set_live_theme(*theme);
             }
         }
         self.request_redraw();
@@ -295,11 +332,16 @@ impl App {
         let Some(theme) = theme::load_file(path) else {
             return;
         };
-        self.theme = theme;
         if let Some(name) = path.file_stem().and_then(|s| s.to_str()) {
             self.config.theme = name.to_string();
             config::save(&self.config);
         }
+        self.set_live_theme(theme);
+    }
+
+    /// Restyles with an in-memory theme, persisting nothing.
+    fn set_live_theme(&mut self, theme: Theme) {
+        self.theme = theme;
         self.layout = None;
         self.band = None;
     }
@@ -456,7 +498,7 @@ impl App {
                 && !b.needs_repaint(self.scroll_y, size.height as f32)
         });
         let size_tag = (size.width, size.height);
-        let interactive = self.drag.is_some() || self.sel_anchor.is_some();
+        let interactive = self.drag.is_some() || self.sel_anchor.is_some() || self.overlay_mouse;
         let mut direct: Option<Vec<u32>> = None;
         if !band_usable {
             let build_now = !interactive && self.pending_band_for == Some(size_tag);
@@ -515,9 +557,20 @@ impl App {
             scrollbar::draw(&mut buffer, size.width, size.height, thumb, color);
         }
         if let Some(overlay) = self.overlay.as_mut() {
-            let mut painter = Painter::new(size.width, size.height, &mut self.fonts);
-            overlay.draw(&mut painter, &self.theme);
-            painter.composite(&mut buffer, size.width);
+            let fits = self
+                .overlay_canvas
+                .as_ref()
+                .is_some_and(|(p, _)| p.width() == size.width && p.height() == size.height);
+            if !fits {
+                self.overlay_canvas =
+                    tiny_skia::Pixmap::new(size.width, size.height).map(|pixmap| (pixmap, None));
+            }
+            if let Some((canvas, stale)) = self.overlay_canvas.as_mut() {
+                let mut painter = Painter::new(canvas, &mut self.fonts, stale.take());
+                overlay.draw(&mut painter, &self.theme);
+                painter.composite(&mut buffer, size.width);
+                *stale = painter.dirty();
+            }
         }
         buffer.present().expect("present failed");
         // A direct frame leaves the band stale: build it in a follow-up
@@ -571,7 +624,8 @@ impl ApplicationHandler for App {
                     self.toggle_theme_browser();
                 }
                 key if self.overlay.is_some() => {
-                    let result = self.overlay.as_mut().expect("overlay open").key(&key);
+                    let ctrl = self.modifiers.control_key();
+                    let result = self.overlay.as_mut().expect("overlay open").key(&key, ctrl);
                     self.overlay_result(result);
                 }
                 Key::Named(NamedKey::Escape) => event_loop.exit(),
@@ -600,6 +654,11 @@ impl ApplicationHandler for App {
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = position;
                 if self.overlay.is_some() {
+                    if self.overlay_mouse {
+                        let (x, y) = (position.x as f32, position.y as f32);
+                        let result = self.overlay.as_mut().expect("overlay open").drag(x, y);
+                        self.overlay_result(result);
+                    }
                 } else if self.drag.is_some() {
                     self.drag_to(position.y as f32);
                 } else if self.sel_anchor.is_some() {
@@ -615,6 +674,7 @@ impl ApplicationHandler for App {
             } => match state {
                 ElementState::Pressed => {
                     if let Some(overlay) = self.overlay.as_mut() {
+                        self.overlay_mouse = true;
                         let (x, y) = (self.cursor.x as f32, self.cursor.y as f32);
                         let result = overlay.click(x, y);
                         self.overlay_result(result);
@@ -626,7 +686,9 @@ impl ApplicationHandler for App {
                     }
                 }
                 ElementState::Released => {
-                    if self.overlay.is_some() {
+                    self.overlay_mouse = false;
+                    if let Some(overlay) = self.overlay.as_mut() {
+                        overlay.release();
                     } else if self.drag.take().is_some() {
                         if let Some(gfx) = self.gfx.as_ref() {
                             gfx.window.request_redraw();

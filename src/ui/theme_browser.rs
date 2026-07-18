@@ -36,6 +36,7 @@ struct Geometry {
     name_x: f32,
     delete_x: f32,
     duplicate_x: f32,
+    edit_x: f32,
 }
 
 enum Commit {
@@ -242,6 +243,7 @@ impl Overlay for ThemeBrowser {
             name_x: px + PAD + 2.0 * SWATCH + 16.0,
             delete_x: px + panel_w - PAD - ICON_BOX,
             duplicate_x: px + panel_w - PAD - 2.0 * ICON_BOX - 6.0,
+            edit_x: px + panel_w - PAD - 3.0 * ICON_BOX - 12.0,
         };
         self.scroll = self.scroll.clamp(0.0, self.max_scroll());
 
@@ -305,7 +307,7 @@ impl Overlay for ThemeBrowser {
 
             match &self.renaming {
                 Some((rename_index, buffer)) if *rename_index == index => {
-                    let field_w = self.geometry.duplicate_x - self.geometry.name_x - 10.0;
+                    let field_w = self.geometry.edit_x - self.geometry.name_x - 10.0;
                     let valid = row
                         .path
                         .parent()
@@ -365,8 +367,27 @@ impl Overlay for ThemeBrowser {
                 }
             }
 
-            // Duplicate icon: two offset squares, front one masking the back.
+            // Pencil icon: diagonal shaft with a nib dot.
             let icon_y = ry + (ROW_H - 4.0 - 13.0) / 2.0;
+            let pen_x = self.geometry.edit_x + 4.0;
+            painter.line(
+                pen_x + 3.0,
+                icon_y + 10.0,
+                pen_x + 10.0,
+                icon_y + 3.0,
+                2.2,
+                theme.ui.overlay_fg,
+            );
+            painter.fill(
+                pen_x + 0.5,
+                icon_y + 11.0,
+                2.5,
+                2.5,
+                1.0,
+                theme.ui.overlay_fg,
+            );
+
+            // Duplicate icon: two offset squares, front one masking the back.
             let dup_x = self.geometry.duplicate_x + 4.0;
             painter.stroke(dup_x + 4.0, icon_y, 9.0, 9.0, 2.0, 1.2, theme.ui.overlay_fg);
             painter.fill(dup_x, icon_y + 4.0, 9.0, 9.0, 2.0, row_bg);
@@ -422,7 +443,7 @@ impl Overlay for ThemeBrowser {
         );
     }
 
-    fn key(&mut self, key: &Key) -> OverlayResult {
+    fn key(&mut self, key: &Key, _ctrl: bool) -> OverlayResult {
         if self.renaming.is_some() {
             return self.rename_key(key);
         }
@@ -477,6 +498,9 @@ impl Overlay for ThemeBrowser {
         if x >= self.geometry.duplicate_x {
             self.duplicate(index);
             return OverlayResult::Open;
+        }
+        if x >= self.geometry.edit_x {
+            return OverlayResult::Apply(Action::EditTheme(self.rows[index].path.clone()));
         }
         // Double click on the name starts an inline rename.
         let now = Instant::now();

@@ -120,7 +120,7 @@ impl<'de> Deserialize<'de> for Rgba {
 }
 
 /// Accepts #RGB, #RRGGBB, and #RRGGBBAA.
-fn parse_hex(s: &str) -> Option<Rgba> {
+pub fn parse_hex(s: &str) -> Option<Rgba> {
     let hex = s.strip_prefix('#')?;
     let v = u32::from_str_radix(hex, 16).ok()?;
     Some(match hex.len() {
@@ -380,6 +380,146 @@ fn resolve(raw: Raw) -> Theme {
     }
 }
 
+macro_rules! role_table {
+    ($(($group:ident, $key:ident, $name:literal)),* $(,)?) => {
+        /// Every color role as (group, key) in file order; drives `save`
+        /// and the theme editor.
+        pub const ROLES: &[(&str, &str)] = &[$((stringify!($group), $name)),*];
+
+        pub fn role(theme: &Theme, index: usize) -> Rgba {
+            let mut i = 0usize;
+            $( if index == i { return theme.$group.$key; } i += 1; )*
+            let _ = i;
+            panic!("role index {index} out of range")
+        }
+
+        pub fn role_mut(theme: &mut Theme, index: usize) -> &mut Rgba {
+            let mut i = 0usize;
+            $( if index == i { return &mut theme.$group.$key; } i += 1; )*
+            let _ = i;
+            panic!("role index {index} out of range")
+        }
+    };
+}
+
+role_table!(
+    (surface, background, "background"),
+    (surface, foreground, "foreground"),
+    (headings, h1, "h1"),
+    (headings, h2, "h2"),
+    (headings, h3, "h3"),
+    (headings, h4, "h4"),
+    (headings, h5, "h5"),
+    (headings, h6, "h6"),
+    (text, body, "body"),
+    (text, bold, "bold"),
+    (text, italic, "italic"),
+    (text, strike, "strike"),
+    (text, inline_code, "inline_code"),
+    (text, inline_code_bg, "inline_code_bg"),
+    (text, link, "link"),
+    (text, math, "math"),
+    (blocks, code_bg, "code_bg"),
+    (blocks, code_border, "code_border"),
+    (blocks, quote_bg, "quote_bg"),
+    (blocks, quote_bar, "quote_bar"),
+    (blocks, table_border, "table_border"),
+    (blocks, table_header_bg, "table_header_bg"),
+    (blocks, table_row_alt_bg, "table_row_alt_bg"),
+    (blocks, rule, "rule"),
+    (blocks, frontmatter_bg, "frontmatter_bg"),
+    (blocks, frontmatter_fg, "frontmatter_fg"),
+    (syntax, keyword, "keyword"),
+    (syntax, string, "string"),
+    (syntax, number, "number"),
+    (syntax, function, "function"),
+    (syntax, type_, "type"),
+    (syntax, comment, "comment"),
+    (syntax, operator, "operator"),
+    (syntax, variable, "variable"),
+    (syntax, punctuation, "punctuation"),
+    (alerts, note, "note"),
+    (alerts, tip, "tip"),
+    (alerts, important, "important"),
+    (alerts, warning, "warning"),
+    (alerts, caution, "caution"),
+    (ui, sidebar_bg, "sidebar_bg"),
+    (ui, sidebar_fg, "sidebar_fg"),
+    (ui, sidebar_dir, "sidebar_dir"),
+    (ui, scrollbar, "scrollbar"),
+    (ui, scrollbar_hover, "scrollbar_hover"),
+    (ui, selection_bg, "selection_bg"),
+    (ui, overlay_bg, "overlay_bg"),
+    (ui, overlay_fg, "overlay_fg"),
+    (ui, overlay_highlight, "overlay_highlight"),
+);
+
+/// `#RRGGBB`, or `#RRGGBBAA` when the color is translucent.
+pub fn hex_string(c: Rgba) -> String {
+    if c.a == 255 {
+        format!("#{:02X}{:02X}{:02X}", c.r, c.g, c.b)
+    } else {
+        format!("#{:02X}{:02X}{:02X}{:02X}", c.r, c.g, c.b, c.a)
+    }
+}
+
+/// Writes a theme file with every role explicit, groups in schema order,
+/// one key per line.
+pub fn save(path: &Path, theme: &Theme) -> std::io::Result<()> {
+    let mut out = String::new();
+    let mut group = "";
+    for (index, (g, key)) in ROLES.iter().enumerate() {
+        if *g != group {
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(&format!("[{g}]\n"));
+            group = g;
+        }
+        out.push_str(&format!("{key} = \"{}\"\n", hex_string(role(theme, index))));
+    }
+    std::fs::write(path, out)
+}
+
+/// The shipped collection, which the editor never overwrites.
+const BUNDLED: &[&str] = &[
+    "ayu-light",
+    "ayu-mirage",
+    "catppuccin-latte",
+    "catppuccin-mocha",
+    "dracula",
+    "ember",
+    "everforest-dark",
+    "everforest-light",
+    "flexoki-dark",
+    "flexoki-light",
+    "github-light",
+    "gruvbox-dark",
+    "gruvbox-light",
+    "horizon",
+    "inkstone",
+    "kanagawa",
+    "meadow",
+    "night-owl",
+    "nord",
+    "one-dark",
+    "oryx-dark",
+    "oryx-light",
+    "oryx-night",
+    "oryx-sand",
+    "rose-pine",
+    "rose-pine-dawn",
+    "slate",
+    "solarized-dark",
+    "solarized-light",
+    "tokyo-night",
+];
+
+/// Whether a theme name belongs to the shipped collection.
+pub fn is_bundled(name: &str) -> bool {
+    BUNDLED.contains(&name)
+}
+
 pub fn load_file(path: &Path) -> Option<Theme> {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
@@ -587,6 +727,51 @@ selection_bg = "#33445566"
         }
         let entries = scan(&themes);
         assert!(entries.iter().any(|e| e.name == "oryx-dark"));
+    }
+
+    #[test]
+    fn save_round_trips_through_load() {
+        let dir = std::env::temp_dir().join(format!("oryx-save-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("saved.toml");
+        let mut theme = Theme::default_dark();
+        theme.ui.selection_bg = Rgba {
+            r: 1,
+            g: 2,
+            b: 3,
+            a: 128,
+        };
+        save(&path, &theme).unwrap();
+        let loaded = load_file(&path).unwrap();
+        let complete = missing_keys(&path).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(loaded, theme);
+        assert!(complete.is_empty(), "saved file left gaps: {complete:?}");
+    }
+
+    #[test]
+    fn parse_hex_rejects_garbage() {
+        assert!(parse_hex("").is_none());
+        assert!(parse_hex("zz").is_none());
+        assert!(parse_hex("#12345").is_none());
+        assert!(parse_hex("#GGHHII").is_none());
+        assert_eq!(
+            parse_hex("#A1B2C3"),
+            Some(Rgba {
+                r: 0xA1,
+                g: 0xB2,
+                b: 0xC3,
+                a: 255
+            })
+        );
+    }
+
+    #[test]
+    fn bundled_names_are_known() {
+        assert!(is_bundled("dracula"));
+        assert!(is_bundled("oryx-light"));
+        assert!(!is_bundled("my-own-theme"));
+        assert!(!is_bundled("dracula-copy"));
     }
 
     #[test]

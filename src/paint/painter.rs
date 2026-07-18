@@ -9,19 +9,43 @@ use crate::style::fonts::FontStore;
 use crate::style::theme::Rgba;
 
 pub struct Painter<'a> {
-    pixmap: Pixmap,
+    pixmap: &'a mut Pixmap,
     fonts: &'a mut FontStore,
     /// Bounds of everything painted, so composite touches only those rows.
     dirty: Option<(f32, f32, f32, f32)>,
 }
 
 impl<'a> Painter<'a> {
-    pub fn new(width: u32, height: u32, fonts: &'a mut FontStore) -> Painter<'a> {
+    /// Wraps a reused canvas; `stale` is the region the previous frame
+    /// painted, wiped back to transparent before drawing starts.
+    pub fn new(
+        pixmap: &'a mut Pixmap,
+        fonts: &'a mut FontStore,
+        stale: Option<(f32, f32, f32, f32)>,
+    ) -> Painter<'a> {
+        if let Some((x0, y0, x1, y1)) = stale {
+            let width = pixmap.width() as usize;
+            let height = pixmap.height() as usize;
+            let x0 = (x0.floor().max(0.0) as usize).min(width);
+            let y0 = (y0.floor().max(0.0) as usize).min(height);
+            let x1 = (x1.ceil().max(0.0) as usize).min(width);
+            let y1 = (y1.ceil().max(0.0) as usize).min(height);
+            let data = pixmap.data_mut();
+            for y in y0..y1 {
+                let row = (y * width + x0) * 4..(y * width + x1) * 4;
+                data[row].fill(0);
+            }
+        }
         Painter {
-            pixmap: Pixmap::new(width.max(1), height.max(1)).expect("pixmap allocation"),
+            pixmap,
             fonts,
             dirty: None,
         }
+    }
+
+    /// The painted bounds of this frame, to pass back as `stale` next time.
+    pub fn dirty(&self) -> Option<(f32, f32, f32, f32)> {
+        self.dirty
     }
 
     pub fn width(&self) -> f32 {
@@ -75,6 +99,62 @@ impl<'a> Painter<'a> {
         };
         self.pixmap
             .stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+    }
+
+    pub fn line(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, width: f32, color: Rgba) {
+        let mut pb = PathBuilder::new();
+        pb.move_to(x0, y0);
+        pb.line_to(x1, y1);
+        let Some(path) = pb.finish() else {
+            return;
+        };
+        self.mark(
+            x0.min(x1) - width,
+            y0.min(y1) - width,
+            (x1 - x0).abs() + 2.0 * width,
+            (y1 - y0).abs() + 2.0 * width,
+        );
+        let mut paint = tiny_skia::Paint {
+            anti_alias: true,
+            ..tiny_skia::Paint::default()
+        };
+        paint.set_color_rgba8(color.r, color.g, color.b, color.a);
+        let stroke = tiny_skia::Stroke {
+            width,
+            line_cap: tiny_skia::LineCap::Round,
+            ..tiny_skia::Stroke::default()
+        };
+        self.pixmap
+            .stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+    }
+
+    /// Fills a rectangle from a per-pixel callback over coordinates
+    /// normalized to [0, 1]; the result is opaque.
+    pub fn shade(&mut self, x: f32, y: f32, w: f32, h: f32, f: impl Fn(f32, f32) -> Rgba) {
+        if w <= 0.0 || h <= 0.0 {
+            return;
+        }
+        self.mark(x, y, w, h);
+        let width = self.pixmap.width() as i32;
+        let height = self.pixmap.height() as i32;
+        let data = self.pixmap.data_mut();
+        for py in 0..h as i32 {
+            for px in 0..w as i32 {
+                let tx = x as i32 + px;
+                let ty = y as i32 + py;
+                if tx < 0 || ty < 0 || tx >= width || ty >= height {
+                    continue;
+                }
+                let u = px as f32 / (w - 1.0).max(1.0);
+                let v = py as f32 / (h - 1.0).max(1.0);
+                let c = f(u, v);
+                let i = ((ty * width + tx) * 4) as usize;
+                data[i] = c.r;
+                data[i + 1] = c.g;
+                data[i + 2] = c.b;
+                data[i + 3] = 255;
+            }
+        }
     }
 
     pub fn measure(&mut self, text: &str, family: &str, size: f32, weight: u16) -> f32 {
