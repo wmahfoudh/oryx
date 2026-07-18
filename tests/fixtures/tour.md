@@ -95,6 +95,16 @@ A broken path renders as a bordered placeholder with the alt text:
 
 ![this image does not exist](missing-image.png)
 
+## Links
+
+External links open in the system browser: the
+[Oryx repository](https://codeberg.org/wmahfoudh/oryx) lives on Codeberg.
+Bare autolinks work too: https://example.com.
+
+Anchor links jump inside the document: back to [Text Styles](#text-styles),
+or down to [Heading Levels](#heading-levels). The cursor turns into a
+pointer over any link.
+
 ### Heading Levels
 
 The copper ramp encodes hierarchy: the larger the heading, the warmer and

@@ -399,3 +399,27 @@ fn strike_emits_line_rect() {
         .expect("no strike rect");
     assert!((rect.width - run.width).abs() < 1.0);
 }
+
+#[test]
+fn link_at_returns_target_inside_run() {
+    let l = lay("intro [click here](https://a.tld) outro", 800.0);
+    let link = l.runs.iter().find(|r| r.link.is_some()).unwrap();
+    let hit = l.link_at(link.x + link.width / 2.0, link.y + link.size / 2.0);
+    assert_eq!(hit, Some("https://a.tld"));
+}
+
+#[test]
+fn link_at_returns_none_outside_links() {
+    let l = lay("intro [click here](https://a.tld) outro", 800.0);
+    let plain = l.runs.iter().find(|r| r.link.is_none()).unwrap();
+    assert_eq!(l.link_at(plain.x + 1.0, plain.y + 1.0), None);
+    assert_eq!(l.link_at(-10.0, -10.0), None);
+}
+
+#[test]
+fn anchor_target_resolves_to_heading_y() {
+    let l = lay("# One\n\n[jump](#two-more)\n\n## Two More\n\ntext", 800.0);
+    let heading_y = l.anchors.iter().find(|(s, _)| s == "two-more").unwrap().1;
+    assert_eq!(l.anchor_y("#two-more"), Some(heading_y));
+    assert_eq!(l.anchor_y("#absent"), None);
+}

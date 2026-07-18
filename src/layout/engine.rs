@@ -110,6 +110,30 @@ pub struct LayoutDoc {
     pub anchors: Vec<(String, f32)>,
 }
 
+impl LayoutDoc {
+    /// Link target under a point in document coordinates, if any.
+    /// The hit box of a run spans its full line height.
+    pub fn link_at(&self, x: f32, y: f32) -> Option<&str> {
+        self.runs.iter().find_map(|r| {
+            let target = r.link.as_deref()?;
+            let inside = x >= r.x
+                && x <= r.x + r.width
+                && y >= r.y
+                && y <= r.y + metrics::LINE_HEIGHT * r.size;
+            inside.then_some(target)
+        })
+    }
+
+    /// Y position of the heading matching a `#anchor` link target.
+    pub fn anchor_y(&self, target: &str) -> Option<f32> {
+        let slug = target.strip_prefix('#')?;
+        self.anchors
+            .iter()
+            .find(|(s, _)| s == slug)
+            .map(|(_, y)| *y)
+    }
+}
+
 /// One image scaled and positioned in the document.
 #[derive(Debug, Clone)]
 pub struct ImagePlace {

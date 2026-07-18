@@ -16,7 +16,7 @@ use winit::dpi::PhysicalPosition;
 use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
-use winit::window::{Window, WindowId};
+use winit::window::{CursorIcon, Window, WindowId};
 
 pub fn run(path: Option<PathBuf>) -> anyhow::Result<()> {
     let document = match &path {
@@ -43,6 +43,7 @@ pub fn run(path: Option<PathBuf>) -> anyhow::Result<()> {
         modifiers: ModifiersState::empty(),
         cursor: PhysicalPosition::new(0.0, 0.0),
         drag: None,
+        hover_link: false,
         pending_band_for: None,
     };
     event_loop.run_app(&mut app)?;
@@ -81,6 +82,8 @@ struct App {
     cursor: PhysicalPosition<f64>,
     /// Scrollbar drag: cursor offset from the thumb top when grabbed.
     drag: Option<f32>,
+    /// Whether the cursor currently sits over a link, for the pointer icon.
+    hover_link: bool,
     /// Deferred band rebuild, tagged with the window size it was scheduled
     /// at. Interactive frames (drag, live resize) paint the viewport
     /// directly; the expensive band builds one frame later, once stable.
@@ -112,6 +115,9 @@ impl App {
         let clamped = scroll::clamp(y, self.doc_height(), self.viewport_h());
         if clamped != self.scroll_y {
             self.scroll_y = clamped;
+            if self.drag.is_none() {
+                self.update_hover();
+            }
             if let Some(gfx) = self.gfx.as_ref() {
                 gfx.window.request_redraw();
             }
@@ -154,6 +160,48 @@ impl App {
         let target =
             scrollbar::scroll_for_thumb(cursor_y - grab, thumb_h, vh, self.doc_height(), vh);
         self.scroll_to(target);
+    }
+
+    /// Follow the link under the cursor: anchors scroll, http links open
+    /// in the system browser.
+    fn link_press(&mut self) {
+        let Some(lay) = self.layout.as_ref() else {
+            return;
+        };
+        let x = self.cursor.x as f32;
+        let y = self.cursor.y as f32 + self.scroll_y;
+        let Some(target) = lay.link_at(x, y).map(str::to_owned) else {
+            return;
+        };
+        if let Some(anchor) = lay.anchor_y(&target) {
+            self.scroll_to(anchor);
+        } else if target.starts_with("http://") || target.starts_with("https://") {
+            if let Err(err) = open::that_detached(&target) {
+                eprintln!("oryx: cannot open {target}: {err}");
+            }
+        }
+    }
+
+    /// Track whether a link sits under the cursor and swap the pointer icon
+    /// on transitions.
+    fn update_hover(&mut self) {
+        let x = self.cursor.x as f32;
+        let y = self.cursor.y as f32 + self.scroll_y;
+        let hovering = self
+            .layout
+            .as_ref()
+            .is_some_and(|l| l.link_at(x, y).is_some());
+        if hovering != self.hover_link {
+            self.hover_link = hovering;
+            if let Some(gfx) = self.gfx.as_ref() {
+                let icon = if hovering {
+                    CursorIcon::Pointer
+                } else {
+                    CursorIcon::Default
+                };
+                gfx.window.set_cursor(icon);
+            }
+        }
     }
 
     fn scrollbar_press(&mut self) {
@@ -328,6 +376,8 @@ impl ApplicationHandler for App {
                 self.cursor = position;
                 if self.drag.is_some() {
                     self.drag_to(position.y as f32);
+                } else {
+                    self.update_hover();
                 }
             }
             WindowEvent::MouseInput {
@@ -335,7 +385,12 @@ impl ApplicationHandler for App {
                 button: MouseButton::Left,
                 ..
             } => match state {
-                ElementState::Pressed => self.scrollbar_press(),
+                ElementState::Pressed => {
+                    self.scrollbar_press();
+                    if self.drag.is_none() {
+                        self.link_press();
+                    }
+                }
                 ElementState::Released => {
                     if self.drag.take().is_some() {
                         if let Some(gfx) = self.gfx.as_ref() {
