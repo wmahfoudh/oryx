@@ -17,6 +17,30 @@ on each side hold their ratio. Consecutive lines inside one paragraph sit
 flush at exactly one and a half times the font size, while paragraphs are
 separated by space scaled to their weight.
 
+## Code
+
+Inline code like `let x = 1` sits in a pill on the shared baseline.
+
+```rust
+// Comments are muted; keywords, strings, and numbers each take a hue.
+fn fibonacci(n: u64) -> u64 {
+    match n {
+        0 | 1 => n,
+        _ => fibonacci(n - 1) + fibonacci(n - 2),
+    }
+}
+```
+
+```python
+def greet(name: str) -> str:
+    """Docstrings count as strings."""
+    return f"Hello, {name}!"
+```
+
+```
+A fence with no language renders plain, inside the same panel.
+```
+
 ### Heading Levels
 
 The copper ramp encodes hierarchy: the larger the heading, the warmer and

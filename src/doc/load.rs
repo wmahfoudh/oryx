@@ -43,10 +43,12 @@ fn code_document(token: &str, text: &str) -> Document {
     while lines.last().is_some_and(|l| l.is_empty()) {
         lines.pop();
     }
+    let highlights = crate::style::highlight::spans(&lines, Some(token));
     Document {
         blocks: vec![Block::plain(BlockKind::CodeBlock {
             language: Some(token.to_string()),
             lines,
+            highlights,
         })],
     }
 }
@@ -176,11 +178,17 @@ mod tests {
         let path = temp_file("t.py", "def f():\n    return 1\n");
         let d = open(&path).unwrap();
         std::fs::remove_file(&path).unwrap();
-        let BlockKind::CodeBlock { language, lines } = &d.blocks[0].kind else {
+        let BlockKind::CodeBlock {
+            language,
+            lines,
+            highlights,
+        } = &d.blocks[0].kind
+        else {
             panic!("expected code block, got {:?}", d.blocks)
         };
         assert_eq!(language.as_deref(), Some("python"));
         assert_eq!(lines, &["def f():", "    return 1"]);
+        assert_eq!(highlights.len(), 2);
     }
 
     #[test]

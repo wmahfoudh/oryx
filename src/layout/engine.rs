@@ -1,11 +1,14 @@
 //! The layout engine: document model in, positioned runs and rects out.
 //! Pure with respect to the window: no pixels, fully testable with numbers.
 
+use std::ops::Range;
+
 use cosmic_text::{Attrs, Buffer, Family, Metrics, Shaping, Style, Weight};
 
 use super::metrics;
 use crate::doc::model::{BlockKind, Document, Span};
 use crate::style::fonts::{FontStore, BODY_FAMILY, CODE_FAMILY};
+use crate::style::highlight::SyntaxRole;
 use crate::style::theme::{Rgba, Theme};
 
 #[derive(Debug, Clone)]
@@ -85,16 +88,20 @@ pub fn layout(
     let mut first = true;
 
     for (block_index, block) in doc.blocks.iter().enumerate() {
-        let (spans, heading) = match &block.kind {
-            BlockKind::Heading { level, spans, .. } => (spans, Some(*level)),
-            BlockKind::Paragraph { spans } => (spans, None),
+        let heading = match &block.kind {
+            BlockKind::Heading { level, .. } => Some(*level),
+            _ => None,
+        };
+        let base_size = match &block.kind {
+            BlockKind::Heading { spans, .. } | BlockKind::Paragraph { spans } => {
+                if spans.is_empty() {
+                    continue;
+                }
+                cfg.body_size * heading.map(metrics::heading_scale).unwrap_or(1.0) * cfg.zoom
+            }
+            BlockKind::CodeBlock { .. } => cfg.code_size * cfg.zoom,
             _ => continue,
         };
-        if spans.is_empty() {
-            continue;
-        }
-        let scale = heading.map(metrics::heading_scale).unwrap_or(1.0);
-        let base_size = cfg.body_size * scale * cfg.zoom;
         if first {
             cursor = vertical_margin;
             first = false;
@@ -104,26 +111,45 @@ pub fn layout(
         if let BlockKind::Heading { anchor, .. } = &block.kind {
             out.anchors.push((anchor.clone(), cursor));
         }
-        let base = BlockStyle {
-            size: base_size,
-            color: match heading {
-                Some(level) => heading_color(theme, level),
-                None => theme.text.body,
-            },
-            bold: heading.is_some(),
-            block_index,
+        let height = match &block.kind {
+            BlockKind::Heading { spans, .. } | BlockKind::Paragraph { spans } => {
+                let base = BlockStyle {
+                    size: base_size,
+                    color: match heading {
+                        Some(level) => heading_color(theme, level),
+                        None => theme.text.body,
+                    },
+                    bold: heading.is_some(),
+                    block_index,
+                };
+                shape_block(
+                    fonts,
+                    theme,
+                    cfg,
+                    spans,
+                    &base,
+                    margin,
+                    cursor,
+                    content_width,
+                    &mut out,
+                )
+            }
+            BlockKind::CodeBlock {
+                lines, highlights, ..
+            } => layout_code(
+                fonts,
+                theme,
+                cfg,
+                lines,
+                highlights,
+                block_index,
+                margin,
+                cursor,
+                content_width,
+                &mut out,
+            ),
+            _ => 0.0,
         };
-        let height = shape_block(
-            fonts,
-            theme,
-            cfg,
-            spans,
-            &base,
-            margin,
-            cursor,
-            content_width,
-            &mut out,
-        );
         cursor += height + metrics::space_below(base_size);
     }
 
@@ -160,6 +186,8 @@ struct SpanStyle {
     strike: bool,
     color: Rgba,
     link: Option<String>,
+    /// Background pill color for inline code.
+    pill: Option<Rgba>,
 }
 
 fn span_style(theme: &Theme, cfg: &ViewConfig, base: &BlockStyle, span: &Span) -> SpanStyle {
@@ -201,6 +229,7 @@ fn span_style(theme: &Theme, cfg: &ViewConfig, base: &BlockStyle, span: &Span) -
         strike: span.strike,
         color,
         link: span.link.clone(),
+        pill: code.then_some(theme.text.inline_code_bg),
     }
 }
 
@@ -320,6 +349,15 @@ fn shape_segment(
             let width = last.x + last.w - first.x;
             let y = y0 + run.line_top;
             let baseline = y0 + run.line_y;
+            if let Some(pill) = st.pill {
+                out.rects.push(DecoRect {
+                    x: x - 3.0,
+                    y: y + 0.1 * line_height,
+                    width: width + 6.0,
+                    height: 0.8 * line_height,
+                    color: pill,
+                });
+            }
             out.runs.push(TextRun {
                 text: line_text[start_byte..end_byte].to_string(),
                 x,
@@ -348,6 +386,162 @@ fn shape_segment(
         }
     }
     height
+}
+
+/// Lays out a fenced code block: a bordered panel of monospace lines,
+/// one row per source line, no wrapping, colors from highlight roles.
+#[allow(clippy::too_many_arguments)]
+fn layout_code(
+    fonts: &mut FontStore,
+    theme: &Theme,
+    cfg: &ViewConfig,
+    lines: &[String],
+    highlights: &[Vec<(Range<usize>, SyntaxRole)>],
+    block_index: usize,
+    x0: f32,
+    y0: f32,
+    content_width: f32,
+    out: &mut LayoutDoc,
+) -> f32 {
+    let size = cfg.code_size * cfg.zoom;
+    let line_height = metrics::LINE_HEIGHT * size;
+    let pad = 12.0 * cfg.zoom;
+    let height = lines.len() as f32 * line_height + 2.0 * pad;
+    let blocks = &theme.blocks;
+    out.rects.push(DecoRect {
+        x: x0,
+        y: y0,
+        width: content_width,
+        height,
+        color: blocks.code_bg,
+    });
+    for (x, y, w, h) in [
+        (x0, y0, content_width, 1.0),
+        (x0, y0 + height - 1.0, content_width, 1.0),
+        (x0, y0, 1.0, height),
+        (x0 + content_width - 1.0, y0, 1.0, height),
+    ] {
+        out.rects.push(DecoRect {
+            x,
+            y,
+            width: w,
+            height: h,
+            color: blocks.code_border,
+        });
+    }
+    let empty: Vec<(Range<usize>, SyntaxRole)> = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        if line.is_empty() {
+            continue;
+        }
+        let segments = highlights.get(i).unwrap_or(&empty);
+        shape_code_line(
+            fonts,
+            theme,
+            cfg,
+            line,
+            segments,
+            block_index,
+            x0 + pad,
+            y0 + pad + i as f32 * line_height,
+            size,
+            line_height,
+            out,
+        );
+    }
+    height
+}
+
+#[allow(clippy::too_many_arguments)]
+fn shape_code_line(
+    fonts: &mut FontStore,
+    theme: &Theme,
+    cfg: &ViewConfig,
+    line: &str,
+    segments: &[(Range<usize>, SyntaxRole)],
+    block_index: usize,
+    x0: f32,
+    y0: f32,
+    size: f32,
+    line_height: f32,
+    out: &mut LayoutDoc,
+) {
+    let whole_line = [(0..line.len(), SyntaxRole::Plain)];
+    let segments: &[(Range<usize>, SyntaxRole)] = if segments.is_empty() {
+        &whole_line
+    } else {
+        segments
+    };
+    let mut buffer = Buffer::new(&mut fonts.font_system, Metrics::new(size, line_height));
+    buffer.set_size(&mut fonts.font_system, None, None);
+    let rich: Vec<(&str, Attrs)> = segments
+        .iter()
+        .enumerate()
+        .map(|(index, (range, _))| {
+            let attrs = Attrs::new()
+                .family(Family::Name(&cfg.code_family))
+                .metadata(index);
+            (&line[range.clone()], attrs)
+        })
+        .collect();
+    let default_attrs = Attrs::new().family(Family::Name(&cfg.code_family));
+    buffer.set_rich_text(
+        &mut fonts.font_system,
+        rich,
+        &default_attrs,
+        Shaping::Advanced,
+        None,
+    );
+    buffer.shape_until_scroll(&mut fonts.font_system, false);
+    for run in buffer.layout_runs() {
+        let line_text = buffer.lines[run.line_i].text();
+        let glyphs = trim_trailing_spaces(run.glyphs, line_text);
+        let mut g = 0;
+        while g < glyphs.len() {
+            let segment_index = glyphs[g].metadata;
+            let mut end = g + 1;
+            while end < glyphs.len() && glyphs[end].metadata == segment_index {
+                end += 1;
+            }
+            let first = &glyphs[g];
+            let last = &glyphs[end - 1];
+            let start_byte = glyphs[g..end].iter().map(|gl| gl.start).min().unwrap();
+            let end_byte = glyphs[g..end].iter().map(|gl| gl.end).max().unwrap();
+            let role = segments[segment_index].1;
+            out.runs.push(TextRun {
+                text: line_text[start_byte..end_byte].to_string(),
+                x: x0 + first.x,
+                y: y0 + run.line_top,
+                baseline: y0 + run.line_y,
+                width: last.x + last.w - first.x,
+                size,
+                family: cfg.code_family.clone(),
+                weight: Weight::NORMAL.0,
+                italic: false,
+                color: role_color(theme, role),
+                link: None,
+                block: block_index,
+                span: segment_index,
+            });
+            g = end;
+        }
+    }
+}
+
+fn role_color(theme: &Theme, role: SyntaxRole) -> Rgba {
+    let s = &theme.syntax;
+    match role {
+        SyntaxRole::Keyword => s.keyword,
+        SyntaxRole::String => s.string,
+        SyntaxRole::Number => s.number,
+        SyntaxRole::Function => s.function,
+        SyntaxRole::Type => s.type_,
+        SyntaxRole::Comment => s.comment,
+        SyntaxRole::Operator => s.operator,
+        SyntaxRole::Variable => s.variable,
+        SyntaxRole::Punctuation => s.punctuation,
+        SyntaxRole::Plain => theme.surface.foreground,
+    }
 }
 
 /// Drops line-trailing whitespace glyphs so run widths match visible text.

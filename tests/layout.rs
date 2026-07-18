@@ -116,6 +116,36 @@ fn link_color_and_target() {
 }
 
 #[test]
+fn code_block_panel_and_highlighting() {
+    let l = lay("```rust\nfn main() {\n    let s = \"hi\";\n}\n```", 800.0);
+    let t = Theme::default_dark();
+    assert!(l.rects.iter().any(|r| r.color == t.blocks.code_bg));
+    assert!(l.rects.iter().any(|r| r.color == t.blocks.code_border));
+    let kw = l
+        .runs
+        .iter()
+        .find(|r| r.color == t.syntax.keyword)
+        .expect("keyword-colored run");
+    assert_eq!(kw.family, CODE_FAMILY);
+    assert!(l.runs.iter().any(|r| r.color == t.syntax.string));
+    let rows: std::collections::BTreeSet<i64> = l.runs.iter().map(|r| r.y as i64).collect();
+    assert!(rows.len() >= 3, "one row per source line, got {rows:?}");
+}
+
+#[test]
+fn inline_code_gets_pill() {
+    let l = lay("with `mono` inside", 800.0);
+    let t = Theme::default_dark();
+    let run = l.runs.iter().find(|r| r.family == CODE_FAMILY).unwrap();
+    let pill = l
+        .rects
+        .iter()
+        .find(|r| r.color == t.text.inline_code_bg)
+        .expect("pill rect");
+    assert!(pill.x <= run.x && pill.x + pill.width >= run.x + run.width);
+}
+
+#[test]
 fn strike_emits_line_rect() {
     let l = lay("~~gone~~", 800.0);
     let run = &l.runs[0];

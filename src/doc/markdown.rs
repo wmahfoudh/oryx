@@ -5,6 +5,7 @@ use pulldown_cmark::{
 };
 
 use crate::doc::model::{AlertKind, Block, BlockKind, Document, Marker, Span};
+use crate::style::highlight;
 
 pub fn parse(source: &str) -> Document {
     let options = Options::ENABLE_TABLES
@@ -172,7 +173,12 @@ impl Builder {
                     while lines.last().is_some_and(|l| l.is_empty()) {
                         lines.pop();
                     }
-                    self.emit(BlockKind::CodeBlock { language, lines });
+                    let highlights = highlight::spans(&lines, language.as_deref());
+                    self.emit(BlockKind::CodeBlock {
+                        language,
+                        lines,
+                        highlights,
+                    });
                 }
             }
             TagEnd::List(_) => {
@@ -592,11 +598,17 @@ mod tests {
     #[test]
     fn fenced_code_language_and_lines() {
         let d = parse("```rust\nfn main() {}\nlet x = 1;\n```");
-        let BlockKind::CodeBlock { language, lines } = &d.blocks[0].kind else {
+        let BlockKind::CodeBlock {
+            language,
+            lines,
+            highlights,
+        } = &d.blocks[0].kind
+        else {
             panic!()
         };
         assert_eq!(language.as_deref(), Some("rust"));
         assert_eq!(lines, &["fn main() {}", "let x = 1;"]);
+        assert_eq!(highlights.len(), lines.len());
     }
 
     #[test]

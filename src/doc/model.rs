@@ -1,5 +1,9 @@
 //! Document model: the visual-free representation every later stage consumes.
 
+use std::ops::Range;
+
+use crate::style::highlight::SyntaxRole;
+
 #[derive(Debug, Default, PartialEq)]
 pub struct Document {
     pub blocks: Vec<Block>,
@@ -37,6 +41,8 @@ pub enum BlockKind {
     CodeBlock {
         language: Option<String>,
         lines: Vec<String>,
+        /// One vector of styled ranges per line, computed at load.
+        highlights: Vec<Vec<(Range<usize>, SyntaxRole)>>,
     },
     ListItem {
         marker: Marker,
