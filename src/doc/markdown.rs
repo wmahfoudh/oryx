@@ -8,7 +8,9 @@ use pulldown_cmark::{
     BlockQuoteKind, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd,
 };
 
-use crate::doc::model::{AlertKind, Block, BlockKind, Document, Marker, Span};
+use crate::doc::model::{
+    AlertKind, Block, BlockKind, Document, Marker, Span, SpanImage, SpanScript,
+};
 use crate::style::highlight;
 
 pub fn parse(source: &str) -> Document {
@@ -51,6 +53,14 @@ struct Builder {
     in_metadata: bool,
     metadata: Vec<(String, String)>,
     html_block: bool,
+    /// Unterminated tag carried between HTML events; pulldown delivers
+    /// block HTML line by line, and attributes may wrap.
+    html_tail: String,
+    /// One entry per open `<p>`/`<div>`, true when it centers its content.
+    html_center: Vec<bool>,
+    html_code: u32,
+    html_sub: u32,
+    html_sup: u32,
     bold: u32,
     italic: u32,
     strike: u32,
@@ -226,9 +236,17 @@ impl Builder {
             TagEnd::Strikethrough => self.strike = self.strike.saturating_sub(1),
             TagEnd::Link => self.link = None,
             TagEnd::Image => {
+                // Images join the text flow as spans; a paragraph holding
+                // nothing else collapses back to a block image at flush.
                 if let Some((path, alt)) = self.image.take() {
-                    self.flush_spans();
-                    self.emit(BlockKind::Image { path, alt });
+                    let mut span = self.style();
+                    span.text = alt;
+                    span.image = Some(SpanImage {
+                        src: path,
+                        width: None,
+                        height: None,
+                    });
+                    self.spans.push(span);
                 }
             }
             TagEnd::FootnoteDefinition => self.footnote = None,
@@ -239,6 +257,7 @@ impl Builder {
             }
             TagEnd::HtmlBlock => {
                 self.html_block = false;
+                self.html_tail.clear();
                 self.flush_spans();
             }
             _ => {}
@@ -309,26 +328,107 @@ impl Builder {
         }
     }
 
+    /// The GitHub README subset of embedded HTML: centered p and div,
+    /// sized images, links wrapping images, br, and inline styling tags.
+    /// Everything else is stripped with its inner text kept.
     fn html(&mut self, html: &str) {
-        // Policy: tags are stripped and inner text kept, <br> becomes a break.
-        let mut rest = html;
+        let combined = if self.html_tail.is_empty() {
+            html.to_string()
+        } else {
+            std::mem::take(&mut self.html_tail) + " " + html
+        };
+        let mut rest = combined.as_str();
         while let Some(open) = rest.find('<') {
             let (before, tag_on) = rest.split_at(open);
-            if !before.is_empty() {
-                self.text(before);
+            // A `<` not starting a tag is ordinary text.
+            let tag_like = tag_on[1..]
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic() || c == '/');
+            if !tag_like {
+                self.html_text(before);
+                self.html_text("<");
+                rest = &tag_on[1..];
+                continue;
             }
+            self.html_text(before);
             let Some(close) = tag_on.find('>') else {
+                // The tag continues in the next event; keep it whole.
+                self.html_tail = tag_on.to_string();
                 return;
             };
-            let tag = &tag_on[..close + 1];
-            let name = tag.trim_start_matches(['<', '/']).to_ascii_lowercase();
-            if name.starts_with("br") {
-                self.push(Span::plain("\n"));
-            }
+            self.html_tag(&tag_on[1..close]);
             rest = &tag_on[close + 1..];
         }
-        if !rest.is_empty() {
-            self.text(rest);
+        self.html_text(rest);
+    }
+
+    /// Text between tags; HTML collapses whitespace runs, newlines included.
+    fn html_text(&mut self, text: &str) {
+        if text.trim().is_empty() {
+            if !text.is_empty() && !self.spans.is_empty() {
+                self.text(" ");
+            }
+            return;
+        }
+        let mut collapsed = String::with_capacity(text.len());
+        if text.starts_with(char::is_whitespace) {
+            collapsed.push(' ');
+        }
+        collapsed.push_str(&text.split_whitespace().collect::<Vec<_>>().join(" "));
+        if text.ends_with(char::is_whitespace) {
+            collapsed.push(' ');
+        }
+        self.text(&collapsed);
+    }
+
+    fn html_tag(&mut self, tag: &str) {
+        let inner = tag.trim().trim_end_matches('/').trim();
+        let closing = inner.starts_with('/');
+        let inner = inner.trim_start_matches('/');
+        let name_end = inner
+            .find(|c: char| c.is_whitespace())
+            .unwrap_or(inner.len());
+        let name = inner[..name_end].to_ascii_lowercase();
+        let attrs = &inner[name_end..];
+        match (name.as_str(), closing) {
+            ("br", _) => self.push(Span::plain("\n")),
+            ("p" | "div", false) => {
+                self.flush_spans();
+                let centered =
+                    html_attr(attrs, "align").is_some_and(|a| a.eq_ignore_ascii_case("center"));
+                self.html_center.push(centered);
+            }
+            ("p" | "div", true) => {
+                self.flush_spans();
+                self.html_center.pop();
+            }
+            ("a", false) => self.link = html_attr(attrs, "href"),
+            ("a", true) => self.link = None,
+            ("img", false) => {
+                let Some(src) = html_attr(attrs, "src") else {
+                    return;
+                };
+                let mut span = self.style();
+                span.text = html_attr(attrs, "alt").unwrap_or_default();
+                span.image = Some(SpanImage {
+                    src,
+                    width: html_attr(attrs, "width").and_then(|v| v.parse().ok()),
+                    height: html_attr(attrs, "height").and_then(|v| v.parse().ok()),
+                });
+                self.spans.push(span);
+            }
+            ("b" | "strong", false) => self.bold += 1,
+            ("b" | "strong", true) => self.bold = self.bold.saturating_sub(1),
+            ("i" | "em", false) => self.italic += 1,
+            ("i" | "em", true) => self.italic = self.italic.saturating_sub(1),
+            ("code" | "kbd", false) => self.html_code += 1,
+            ("code" | "kbd", true) => self.html_code = self.html_code.saturating_sub(1),
+            ("sub", false) => self.html_sub += 1,
+            ("sub", true) => self.html_sub = self.html_sub.saturating_sub(1),
+            ("sup", false) => self.html_sup += 1,
+            ("sup", true) => self.html_sup = self.html_sup.saturating_sub(1),
+            _ => {}
         }
     }
 
@@ -338,9 +438,17 @@ impl Builder {
             bold: self.bold > 0,
             italic: self.italic > 0,
             strike: self.strike > 0,
-            code: false,
+            code: self.html_code > 0,
             math: false,
+            script: if self.html_sub > 0 {
+                SpanScript::Sub
+            } else if self.html_sup > 0 {
+                SpanScript::Sup
+            } else {
+                SpanScript::None
+            },
             link: self.link.clone(),
+            image: None,
             range: self.current.0..self.current.1,
         }
     }
@@ -356,7 +464,10 @@ impl Builder {
                 && last.strike == span.strike
                 && last.code == span.code
                 && last.math == span.math
+                && last.script == span.script
                 && last.link == span.link
+                && last.image.is_none()
+                && span.image.is_none()
                 && span.text != "\n"
                 && last.text != "\n";
             if same_style {
@@ -380,6 +491,27 @@ impl Builder {
         if let Some(label) = self.footnote.clone() {
             self.emit(BlockKind::FootnoteDef { label, spans });
             return;
+        }
+        // A paragraph that is one plain image and whitespace stays a block
+        // image; links, size attributes, or centering keep it inline.
+        if self.lists.is_empty() && self.html_center.is_empty() {
+            let solo = spans
+                .iter()
+                .filter(|s| s.image.is_none())
+                .all(|s| s.text.trim().is_empty());
+            let images: Vec<&Span> = spans.iter().filter(|s| s.image.is_some()).collect();
+            if solo && images.len() == 1 {
+                let span = images[0];
+                let image = span.image.as_ref().expect("image span");
+                if span.link.is_none() && image.width.is_none() && image.height.is_none() {
+                    let kind = BlockKind::Image {
+                        path: image.src.clone(),
+                        alt: span.text.clone(),
+                    };
+                    self.emit(kind);
+                    return;
+                }
+            }
         }
         if !self.lists.is_empty() {
             let depth = (self.lists.len() - 1) as u8;
@@ -422,9 +554,40 @@ impl Builder {
             quote_depth: self.quote_depth,
             alert: self.alerts.iter().rev().find_map(|a| *a),
             range: self.block_range(&kind),
+            centered: self.html_center.iter().any(|&c| c),
             kind,
         });
     }
+}
+
+/// One attribute's value from a tag's attribute text: `name="v"`, `name='v'`,
+/// or unquoted `name=v`.
+fn html_attr(attrs: &str, name: &str) -> Option<String> {
+    let lower = attrs.to_ascii_lowercase();
+    let mut from = 0;
+    while let Some(at) = lower[from..].find(name) {
+        let start = from + at;
+        let before_ok = start == 0
+            || lower[..start]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_whitespace());
+        let after = &attrs[start + name.len()..];
+        let after_trim = after.trim_start();
+        if before_ok && after_trim.starts_with('=') {
+            let value = after_trim[1..].trim_start();
+            return Some(match value.chars().next() {
+                Some(q @ ('"' | '\'')) => value[1..].split(q).next().unwrap_or("").to_string(),
+                _ => value
+                    .split(|c: char| c.is_whitespace() || c == '>')
+                    .next()
+                    .unwrap_or("")
+                    .to_string(),
+            });
+        }
+        from = start + name.len();
+    }
+    None
 }
 
 /// Smallest range covering every nonempty span range.
@@ -800,6 +963,89 @@ mod tests {
         let text: String = spans.iter().map(|s| s.text.as_str()).collect();
         assert!(text.contains('\u{1F389}'), "tada missing in {text:?}");
         assert!(text.contains('\u{1F680}'), "rocket missing in {text:?}");
+    }
+
+    #[test]
+    fn centered_html_block_with_linked_sized_images() {
+        let d = parse(
+            "<p align=\"center\">\n<a href=\"https://x.tld\"><img src=\"https://img.tld/a.svg\" height=\"20\"></a>\n<img src=\"b.png\" width=\"64\" height=\"32\">\n</p>",
+        );
+        let b = &d.blocks[0];
+        assert!(b.centered, "block centered");
+        let BlockKind::Paragraph { spans } = &b.kind else {
+            panic!("expected paragraph, got {:?}", b.kind)
+        };
+        let images: Vec<&Span> = spans.iter().filter(|s| s.image.is_some()).collect();
+        assert_eq!(images.len(), 2);
+        let first = images[0].image.as_ref().unwrap();
+        assert_eq!(first.src, "https://img.tld/a.svg");
+        assert_eq!(first.height, Some(20));
+        assert_eq!(images[0].link.as_deref(), Some("https://x.tld"));
+        let second = images[1].image.as_ref().unwrap();
+        assert_eq!((second.width, second.height), (Some(64), Some(32)));
+        assert!(images[1].link.is_none());
+    }
+
+    #[test]
+    fn html_tags_split_across_lines_reassemble() {
+        let d = parse(
+            "<p align=\"center\">\n<img src=\"logo.svg\"\n    height=\"130\">\n<a href=\"https://x.tld\">\n<img src=\"b.svg\"\n alt=\"B\"></a>\n</p>",
+        );
+        let BlockKind::Paragraph { spans } = &d.blocks[0].kind else {
+            panic!("{:?}", d.blocks[0].kind)
+        };
+        let images: Vec<&Span> = spans.iter().filter(|s| s.image.is_some()).collect();
+        assert_eq!(images.len(), 2, "both split images parsed");
+        assert_eq!(images[0].image.as_ref().unwrap().height, Some(130));
+        assert_eq!(images[1].link.as_deref(), Some("https://x.tld"));
+        assert!(
+            !spans.iter().any(|s| s.text.contains("height")),
+            "no leaked attribute text"
+        );
+    }
+
+    #[test]
+    fn inline_html_styles_and_scripts() {
+        let d = parse("a <b>bold</b> H<sub>2</sub>O x<sup>9</sup> <kbd>Ctrl</kbd>");
+        let BlockKind::Paragraph { spans } = &d.blocks[0].kind else {
+            panic!()
+        };
+        assert!(spans.iter().any(|s| s.bold && s.text == "bold"));
+        assert!(spans
+            .iter()
+            .any(|s| s.script == SpanScript::Sub && s.text == "2"));
+        assert!(spans
+            .iter()
+            .any(|s| s.script == SpanScript::Sup && s.text == "9"));
+        assert!(spans.iter().any(|s| s.code && s.text == "Ctrl"));
+    }
+
+    #[test]
+    fn markdown_image_beside_text_stays_inline() {
+        let d = parse("- coverage: ![badge](https://img.tld/c.svg)");
+        let BlockKind::ListItem { spans, .. } = &d.blocks[0].kind else {
+            panic!("{:?}", d.blocks[0].kind)
+        };
+        let img = spans
+            .iter()
+            .find(|s| s.image.is_some())
+            .expect("inline image span");
+        assert_eq!(img.image.as_ref().unwrap().src, "https://img.tld/c.svg");
+        assert_eq!(img.text, "badge");
+    }
+
+    #[test]
+    fn bare_and_linked_image_paragraphs() {
+        let bare = parse("![alt text](pic.png)");
+        assert!(matches!(&bare.blocks[0].kind, BlockKind::Image { .. }));
+        // A linked badge alone in a paragraph stays inline so it is
+        // clickable.
+        let linked = parse("[![b](https://img.tld/b.svg)](https://x.tld)");
+        let BlockKind::Paragraph { spans } = &linked.blocks[0].kind else {
+            panic!("{:?}", linked.blocks[0].kind)
+        };
+        assert_eq!(spans[0].link.as_deref(), Some("https://x.tld"));
+        assert!(spans[0].image.is_some());
     }
 
     #[test]

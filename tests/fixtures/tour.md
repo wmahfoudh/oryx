@@ -135,6 +135,16 @@ An unreachable remote source keeps the alt placeholder:
 
 ![unreachable badge](https://nonexistent.invalid/badge.svg)
 
+## Embedded HTML
+
+<p align="center">
+<a href="https://codeberg.org/wmahfoudh/oryx"><img src="https://img.shields.io/badge/oryx-fast-brightgreen" height="20"></a>
+<img src="https://img.shields.io/badge/html-subset-blue" height="20">
+</p>
+
+Inline styling: <b>bold</b>, <i>italic</i>, H<sub>2</sub>O, x<sup>2</sup>,
+and <kbd>Ctrl</kbd>+<kbd>T</kbd>. A break<br>via the br tag.
+
 ## Footnotes and Math
 
 Footnote references[^1] render superscript in the link color and click-jump

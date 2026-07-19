@@ -22,6 +22,8 @@ pub struct Block {
     /// markers (`#`, `>`, list bullets) may sit before `start` on the same
     /// line; empty when the block has no source form.
     pub range: Range<usize>,
+    /// Set inside `<p align="center">` or `<div align="center">`.
+    pub centered: bool,
     pub kind: BlockKind,
 }
 
@@ -31,6 +33,7 @@ impl Block {
             quote_depth: 0,
             alert: None,
             range: 0..0,
+            centered: false,
             kind,
         }
     }
@@ -94,6 +97,24 @@ pub enum AlertKind {
     Caution,
 }
 
+/// Inline image carried by a span; the span text is the alt fallback.
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct SpanImage {
+    pub src: String,
+    /// Pixel size from HTML attributes; None uses the natural size.
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+}
+
+/// Vertical script position of a span.
+#[derive(Debug, PartialEq, Eq, Clone, Copy, Default)]
+pub enum SpanScript {
+    #[default]
+    None,
+    Sub,
+    Sup,
+}
+
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct Span {
     pub text: String,
@@ -102,8 +123,11 @@ pub struct Span {
     pub strike: bool,
     pub code: bool,
     pub math: bool,
+    pub script: SpanScript,
     /// Link target: a URL, a `#anchor`, or `footnote:<label>`.
     pub link: Option<String>,
+    /// Set when the span is an inline image flowing with the text.
+    pub image: Option<SpanImage>,
     /// Byte range of the span's origin in `Document::source`. The slice may
     /// differ from `text` when parsing transformed it (smart punctuation,
     /// emoji, stripped HTML); empty for synthesized spans.
@@ -119,7 +143,9 @@ impl Default for Span {
             strike: false,
             code: false,
             math: false,
+            script: SpanScript::None,
             link: None,
+            image: None,
             range: 0..0,
         }
     }

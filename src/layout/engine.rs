@@ -7,7 +7,7 @@ use cosmic_text::{Attrs, Buffer, Family, Metrics, Shaping, Style, Weight};
 
 use super::metrics;
 use crate::doc::images::MediaCache;
-use crate::doc::model::{AlertKind, BlockKind, Document, Marker, Span};
+use crate::doc::model::{AlertKind, BlockKind, Document, Marker, Span, SpanImage, SpanScript};
 use crate::style::fonts::{FontStore, BODY_FAMILY, CODE_FAMILY};
 use crate::style::highlight::SyntaxRole;
 use crate::style::theme::{Rgba, Theme};
@@ -114,13 +114,20 @@ impl LayoutDoc {
     /// Link target under a point in document coordinates, if any.
     /// The hit box of a run spans its full line height.
     pub fn link_at(&self, x: f32, y: f32) -> Option<&str> {
-        self.runs.iter().find_map(|r| {
+        let run_hit = self.runs.iter().find_map(|r| {
             let target = r.link.as_deref()?;
             let inside = x >= r.x
                 && x <= r.x + r.width
                 && y >= r.y
                 && y <= r.y + metrics::LINE_HEIGHT * r.size;
             inside.then_some(target)
+        });
+        run_hit.or_else(|| {
+            self.images.iter().find_map(|i| {
+                let target = i.link.as_deref()?;
+                let inside = x >= i.x && x <= i.x + i.width && y >= i.y && y <= i.y + i.height;
+                inside.then_some(target)
+            })
         })
     }
 
@@ -142,6 +149,8 @@ pub struct ImagePlace {
     pub y: f32,
     pub width: f32,
     pub height: f32,
+    /// Click target when the image is wrapped in a link.
+    pub link: Option<String>,
 }
 
 pub fn layout(
@@ -233,6 +242,8 @@ pub fn layout(
         let x_base = margin + quote_indent + quote_pad;
         let avail = (content_width - quote_indent - 2.0 * quote_pad).max(40.0);
         let rects_mark = out.rects.len();
+        let runs_mark = out.runs.len();
+        let images_mark = out.images.len();
 
         // The first block of an alert region gets the bold title line; the
         // quote panel later extends up to cover it.
@@ -265,8 +276,8 @@ pub fn layout(
                     bold: heading.is_some(),
                     block_index,
                 };
-                shape_block(
-                    fonts, theme, cfg, spans, &base, x_base, cursor, avail, &mut out,
+                flow_or_shape(
+                    fonts, theme, cfg, media, spans, &base, x_base, cursor, avail, &mut out,
                 )
             }
             BlockKind::ListItem {
@@ -277,6 +288,7 @@ pub fn layout(
                 fonts,
                 theme,
                 cfg,
+                media,
                 marker,
                 *depth,
                 spans,
@@ -375,6 +387,10 @@ pub fn layout(
                 )
             }
         };
+
+        if block.centered {
+            center_lines(&mut out, runs_mark, rects_mark, images_mark, x_base, avail);
+        }
 
         // Quote decoration wraps the block, extending over the gap when the
         // previous block continues the same region (quote or alert), so
@@ -493,6 +509,17 @@ fn span_style(theme: &Theme, cfg: &ViewConfig, base: &BlockStyle, span: &Span) -
     if footnote {
         size *= 0.7;
         rise = 0.3 * base.size;
+    }
+    match span.script {
+        SpanScript::Sup => {
+            size *= 0.7;
+            rise = 0.3 * base.size;
+        }
+        SpanScript::Sub => {
+            size *= 0.7;
+            rise = -0.12 * base.size;
+        }
+        SpanScript::None => {}
     }
     SpanStyle {
         family: if code || span.math {
@@ -708,6 +735,7 @@ fn layout_list_item(
     fonts: &mut FontStore,
     theme: &Theme,
     cfg: &ViewConfig,
+    media: &mut MediaCache,
     marker: &Marker,
     depth: u8,
     spans: &[Span],
@@ -764,7 +792,9 @@ fn layout_list_item(
         bold: false,
         block_index,
     };
-    let height = shape_block(fonts, theme, cfg, spans, &base, text_x, y0, text_w, out);
+    let height = flow_or_shape(
+        fonts, theme, cfg, media, spans, &base, text_x, y0, text_w, out,
+    );
     height.max(line_height)
 }
 
@@ -967,6 +997,7 @@ fn layout_image(
             y: y0,
             width,
             height,
+            link: None,
         });
         return height;
     }
@@ -1358,6 +1389,261 @@ fn layout_footnote_def(
         out,
     );
     text_h.max(metrics::LINE_HEIGHT * base_size)
+}
+
+/// Chooses between plain shaping and mixed text-and-image flow.
+#[allow(clippy::too_many_arguments)]
+fn flow_or_shape(
+    fonts: &mut FontStore,
+    theme: &Theme,
+    cfg: &ViewConfig,
+    media: &mut MediaCache,
+    spans: &[Span],
+    base: &BlockStyle,
+    x0: f32,
+    y0: f32,
+    avail: f32,
+    out: &mut LayoutDoc,
+) -> f32 {
+    if spans.iter().any(|s| s.image.is_some()) {
+        layout_flow(fonts, theme, cfg, media, spans, base, x0, y0, avail, out)
+    } else {
+        shape_block(fonts, theme, cfg, spans, base, x0, y0, avail, out)
+    }
+}
+
+/// One line images may join: its top, height, pen x, and whether it is an
+/// image row rather than a text line.
+struct FlowLine {
+    top: f32,
+    height: f32,
+    end_x: f32,
+    row: bool,
+}
+
+/// Text with inline images. Text shapes normally; an image joins the last
+/// text line when it fits there, otherwise images collect into rows that
+/// wrap at the content width. Text after an image starts a new line.
+#[allow(clippy::too_many_arguments)]
+fn layout_flow(
+    fonts: &mut FontStore,
+    theme: &Theme,
+    cfg: &ViewConfig,
+    media: &mut MediaCache,
+    spans: &[Span],
+    base: &BlockStyle,
+    x0: f32,
+    y0: f32,
+    avail: f32,
+    out: &mut LayoutDoc,
+) -> f32 {
+    let line_height = metrics::LINE_HEIGHT * base.size;
+    let gap = 8.0 * cfg.zoom;
+    let mut y = y0;
+    let mut line: Option<FlowLine> = None;
+
+    let mut i = 0;
+    while i < spans.len() {
+        if spans[i].image.is_none() {
+            // The text chunk up to the next image, masked into a full-length
+            // span list so run span indices keep mapping to the model.
+            let start = i;
+            while i < spans.len() && spans[i].image.is_none() {
+                i += 1;
+            }
+            if spans[start..i].iter().all(|s| s.text.trim().is_empty()) {
+                continue;
+            }
+            if let Some(l) = line.take() {
+                if l.row {
+                    y = l.top + l.height + 0.25 * base.size;
+                }
+            }
+            let masked: Vec<Span> = spans
+                .iter()
+                .enumerate()
+                .map(|(si, s)| {
+                    let mut c = s.clone();
+                    if si < start || si >= i || s.image.is_some() {
+                        c.text = String::new();
+                        c.image = None;
+                    }
+                    c
+                })
+                .collect();
+            let runs_mark = out.runs.len();
+            let h = shape_block(fonts, theme, cfg, &masked, base, x0, y, avail, out);
+            let last_top = out.runs[runs_mark..].iter().map(|r| r.y).fold(y, f32::max);
+            let end_x = out.runs[runs_mark..]
+                .iter()
+                .filter(|r| (r.y - last_top).abs() < 1.0)
+                .map(|r| r.x + r.width)
+                .fold(x0, f32::max);
+            y += h;
+            line = Some(FlowLine {
+                top: last_top,
+                height: line_height,
+                end_x,
+                row: false,
+            });
+        } else {
+            let span = &spans[i];
+            let image = span.image.as_ref().expect("image span");
+            let (w, h, loaded) = image_size(media, image, cfg, avail);
+            let joins = line
+                .as_ref()
+                .is_some_and(|l| l.end_x + gap + w <= x0 + avail && (l.row || h <= l.height + 2.0));
+            if joins {
+                let l = line.as_mut().expect("open line");
+                let iy = if l.row {
+                    l.top
+                } else {
+                    l.top + 0.85 * l.height - h
+                };
+                place_image(out, theme, span, image, l.end_x + gap, iy, w, h, loaded);
+                l.end_x += gap + w;
+                if l.row && h > l.height {
+                    l.height = h;
+                }
+            } else {
+                if let Some(l) = line.take() {
+                    if l.row {
+                        y = l.top + l.height + 0.25 * base.size;
+                    }
+                }
+                place_image(out, theme, span, image, x0, y, w, h, loaded);
+                line = Some(FlowLine {
+                    top: y,
+                    height: h,
+                    end_x: x0 + w,
+                    row: true,
+                });
+            }
+            i += 1;
+        }
+    }
+    if let Some(l) = line {
+        if l.row {
+            y = l.top + l.height;
+        }
+    }
+    (y - y0).max(line_height)
+}
+
+/// Display size of an inline image: attribute pixels win, the natural size
+/// fills in the rest, everything capped to the content width. The flag is
+/// false when no pixels are available yet.
+fn image_size(
+    media: &mut MediaCache,
+    image: &SpanImage,
+    cfg: &ViewConfig,
+    avail: f32,
+) -> (f32, f32, bool) {
+    let natural = media.dimensions(&image.src);
+    let aw = image.width.map(|v| v as f32 * cfg.zoom);
+    let ah = image.height.map(|v| v as f32 * cfg.zoom);
+    let (mut w, mut h) = match (aw, ah, natural) {
+        (Some(w), Some(h), _) => (w, h),
+        (Some(w), None, Some((nw, nh))) => (w, w * nh as f32 / nw as f32),
+        (None, Some(h), Some((nw, nh))) => (h * nw as f32 / nh as f32, h),
+        (None, None, Some((nw, nh))) => (nw as f32, nh as f32),
+        (Some(w), None, None) => (w, w * 0.5),
+        (None, Some(h), None) => (h * 2.0, h),
+        (None, None, None) => (120.0_f32.min(avail), metrics::LINE_HEIGHT * cfg.body_size),
+    };
+    if w > avail {
+        h *= avail / w;
+        w = avail;
+    }
+    (w, h, natural.is_some())
+}
+
+/// Places one inline image; without pixels yet a bordered placeholder box
+/// holds its spot until the fetch lands.
+#[allow(clippy::too_many_arguments)]
+fn place_image(
+    out: &mut LayoutDoc,
+    theme: &Theme,
+    span: &Span,
+    image: &SpanImage,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    loaded: bool,
+) {
+    out.images.push(ImagePlace {
+        src: image.src.clone(),
+        x,
+        y,
+        width: w,
+        height: h,
+        link: span.link.clone(),
+    });
+    if !loaded {
+        out.rects
+            .push(DecoRect::fill(x, y, w, h, theme.blocks.code_border).stroked(1.0));
+    }
+}
+
+/// Shifts every element of a centered block so each visual line sits in the
+/// middle of the content width. Lines are clustered by vertical overlap.
+fn center_lines(
+    out: &mut LayoutDoc,
+    runs_mark: usize,
+    rects_mark: usize,
+    images_mark: usize,
+    x0: f32,
+    avail: f32,
+) {
+    // (top, bottom, kind, index) per element; kinds: 0 runs, 1 rects, 2 images.
+    let mut items: Vec<(f32, f32, u8, usize)> = Vec::new();
+    for (i, r) in out.runs.iter().enumerate().skip(runs_mark) {
+        items.push((r.y, r.y + metrics::LINE_HEIGHT * r.size, 0, i));
+    }
+    for (i, r) in out.rects.iter().enumerate().skip(rects_mark) {
+        items.push((r.y, r.y + r.height, 1, i));
+    }
+    for (i, im) in out.images.iter().enumerate().skip(images_mark) {
+        items.push((im.y, im.y + im.height, 2, i));
+    }
+    items.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut start = 0;
+    while start < items.len() {
+        let mut end = start + 1;
+        let mut bottom = items[start].1;
+        while end < items.len() && items[end].0 < bottom {
+            bottom = bottom.max(items[end].1);
+            end += 1;
+        }
+        let group = &items[start..end];
+        let span_x = |item: &(f32, f32, u8, usize)| -> (f32, f32) {
+            match item.2 {
+                0 => (out.runs[item.3].x, out.runs[item.3].width),
+                1 => (out.rects[item.3].x, out.rects[item.3].width),
+                _ => (out.images[item.3].x, out.images[item.3].width),
+            }
+        };
+        let min_x = group.iter().map(|it| span_x(it).0).fold(f32::MAX, f32::min);
+        let max_x = group
+            .iter()
+            .map(|it| {
+                let (x, w) = span_x(it);
+                x + w
+            })
+            .fold(0.0, f32::max);
+        let dx = x0 + (avail - (max_x - min_x)) / 2.0 - min_x;
+        if dx > 0.5 {
+            for item in group {
+                match item.2 {
+                    0 => out.runs[item.3].x += dx,
+                    1 => out.rects[item.3].x += dx,
+                    _ => out.images[item.3].x += dx,
+                }
+            }
+        }
+        start = end;
+    }
 }
 
 /// Shapes marker text at origin; the caller places it. Returns total width.

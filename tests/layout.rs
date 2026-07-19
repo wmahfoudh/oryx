@@ -446,6 +446,49 @@ fn consecutive_quoted_blocks_tile_without_gap() {
 }
 
 #[test]
+fn badge_row_centers_and_shares_a_line() {
+    let l = lay(
+        "<p align=\"center\"><img src=\"a.png\" width=\"40\" height=\"20\"> <img src=\"b.png\" width=\"40\" height=\"20\"></p>",
+        800.0,
+    );
+    assert_eq!(l.images.len(), 2, "two inline images placed");
+    assert_eq!(l.images[0].y, l.images[1].y, "badges share a row");
+    let left = l.images[0].x;
+    let right = l.images[1].x + l.images[1].width;
+    let mid = (left + right) / 2.0;
+    assert!((mid - 400.0).abs() < 20.0, "row centered, mid {mid}");
+}
+
+#[test]
+fn inline_badge_joins_the_text_line() {
+    let l = lay(
+        "coverage: <img src=\"c.png\" width=\"40\" height=\"20\">",
+        800.0,
+    );
+    let text = l.runs.iter().find(|r| r.text.contains("coverage")).unwrap();
+    let img = &l.images[0];
+    assert!(img.x >= text.x + text.width - 1.0, "badge after the text");
+    assert!(
+        img.y >= text.y - 1.0 && img.y + img.height <= text.y + 34.0,
+        "badge inside the text line box"
+    );
+}
+
+#[test]
+fn linked_inline_image_is_clickable() {
+    let l = lay(
+        "<p align=\"center\"><a href=\"https://z.tld\"><img src=\"d.png\" width=\"40\" height=\"20\"></a></p>",
+        800.0,
+    );
+    let img = &l.images[0];
+    assert_eq!(
+        l.link_at(img.x + 5.0, img.y + 5.0),
+        Some("https://z.tld"),
+        "image hit box carries the link"
+    );
+}
+
+#[test]
 fn footnote_reference_superscript_and_definitions_last() {
     let t = Theme::default_dark();
     // The definition sits mid-document; layout must still render it last.

@@ -9,12 +9,14 @@ use crate::style::fonts::{BODY_FAMILY, CODE_FAMILY};
 use crate::style::theme::{Rgba, Theme};
 use crate::ui::overlay::{Overlay, OverlayResult};
 
-const ROW_H: f32 = 28.0;
+const ROW_H: f32 = 34.0;
 const PAD: f32 = 14.0;
-const HEADER_H: f32 = 44.0;
-const FOOTER_H: f32 = 30.0;
-const COLUMN_GAP: f32 = 28.0;
+const HEADER_H: f32 = 46.0;
+const FOOTER_H: f32 = 32.0;
+const COLUMN_GAP: f32 = 40.0;
 const RADIUS: f32 = 8.0;
+const KEYS_SIZE: f32 = 16.0;
+const ACTION_SIZE: f32 = 15.0;
 
 #[derive(Default, Clone, Copy)]
 struct Geometry {
@@ -43,11 +45,11 @@ impl Overlay for Help {
         let rows = keymap::SHORTCUTS;
         let keys_w = rows
             .iter()
-            .map(|s| painter.measure(&keymap::display(s.keys), CODE_FAMILY, 13.0, 600))
+            .map(|s| painter.measure(&keymap::display(s.keys), CODE_FAMILY, KEYS_SIZE, 400))
             .fold(0.0, f32::max);
         let action_w = rows
             .iter()
-            .map(|s| painter.measure(s.action, BODY_FAMILY, 14.0, 400))
+            .map(|s| painter.measure(s.action, BODY_FAMILY, ACTION_SIZE, 400))
             .fold(0.0, f32::max);
         let panel_w = (PAD + keys_w + COLUMN_GAP + action_w + PAD).min(w - 40.0);
         let panel_h = HEADER_H + PAD + rows.len() as f32 * ROW_H + PAD + FOOTER_H;
@@ -93,27 +95,48 @@ impl Overlay for Help {
             let ry = rows_top + index as f32 * ROW_H;
             painter.text(
                 px + PAD,
-                ry + 4.0,
+                ry + 6.0,
                 &keymap::display(row.keys),
                 CODE_FAMILY,
-                13.0,
-                600,
+                KEYS_SIZE,
+                400,
                 ui.overlay_fg,
             );
             painter.text(
                 action_x,
-                ry + 4.0,
+                ry + 6.0,
                 row.action,
                 BODY_FAMILY,
-                14.0,
+                ACTION_SIZE,
                 400,
                 ui.overlay_fg,
             );
+            if index + 1 < rows.len() {
+                painter.line(
+                    px + PAD,
+                    ry + ROW_H - 1.0,
+                    px + panel_w - PAD,
+                    ry + ROW_H - 1.0,
+                    1.0,
+                    theme.blocks.table_border,
+                );
+            }
         }
         painter.text(
             px + PAD,
-            py + panel_h - FOOTER_H + 6.0,
+            py + panel_h - FOOTER_H + 7.0,
             "esc: close",
+            BODY_FAMILY,
+            12.0,
+            400,
+            theme.blocks.frontmatter_fg,
+        );
+        let version = concat!("v", env!("CARGO_PKG_VERSION"));
+        let version_w = painter.measure(version, BODY_FAMILY, 12.0, 400);
+        painter.text(
+            px + panel_w - PAD - version_w,
+            py + panel_h - FOOTER_H + 7.0,
+            version,
             BODY_FAMILY,
             12.0,
             400,
