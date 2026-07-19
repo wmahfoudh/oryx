@@ -102,14 +102,17 @@ pub fn run(path: Option<PathBuf>, theme_name: Option<String>) -> anyhow::Result<
     Ok(())
 }
 
-/// Theme directories in lookup order: next to the binary, then the
-/// working directory.
+/// Theme directories in lookup order: next to the binary, the XDG data
+/// directory an installation fills, then the working directory.
 fn theme_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             dirs.push(dir.join("themes"));
         }
+    }
+    if let Some(base) = directories::BaseDirs::new() {
+        dirs.push(base.data_dir().join("oryx/themes"));
     }
     dirs.push(PathBuf::from("themes"));
     dirs
@@ -1007,6 +1010,15 @@ impl ApplicationHandler for App {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn theme_dirs_include_the_xdg_data_dir() {
+        let dirs = super::theme_dirs();
+        assert!(
+            dirs.iter().any(|d| d.ends_with("oryx/themes")),
+            "installed themes must resolve from the data dir, got {dirs:?}"
+        );
+    }
+
     #[test]
     fn icon_pipeline_produces_rgba_and_ico() {
         assert_eq!(super::ICON_64.len(), 64 * 64 * 4);

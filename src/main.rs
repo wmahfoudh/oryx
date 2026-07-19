@@ -12,6 +12,15 @@ fn main() -> ExitCode {
             println!("oryx {}", env!("CARGO_PKG_VERSION"));
             return ExitCode::SUCCESS;
         }
+        if arg == "--register" {
+            return match oryx::platform::register::register() {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => {
+                    eprintln!("oryx: register failed: {error}");
+                    ExitCode::FAILURE
+                }
+            };
+        }
         if arg == "--theme" {
             match args.next().and_then(|name| name.into_string().ok()) {
                 Some(name) => theme = Some(name),
