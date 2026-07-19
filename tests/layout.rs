@@ -423,3 +423,78 @@ fn anchor_target_resolves_to_heading_y() {
     assert_eq!(l.anchor_y("#two-more"), Some(heading_y));
     assert_eq!(l.anchor_y("#absent"), None);
 }
+
+#[test]
+fn consecutive_quoted_blocks_tile_without_gap() {
+    let t = Theme::default_dark();
+    for source in ["> one\n>\n> two", "> [!CAUTION]\n> one\n>\n> two"] {
+        let l = lay(source, 800.0);
+        let mut panels: Vec<_> = l
+            .rects
+            .iter()
+            .filter(|r| r.color == t.blocks.quote_bg)
+            .collect();
+        panels.sort_by(|a, b| a.y.total_cmp(&b.y));
+        assert_eq!(panels.len(), 2, "{source}: expected two quote panels");
+        assert!(
+            panels[0].y + panels[0].height >= panels[1].y - 0.01,
+            "{source}: gap between panels: first ends {}, second starts {}",
+            panels[0].y + panels[0].height,
+            panels[1].y
+        );
+    }
+}
+
+#[test]
+fn alert_titles_bold_and_colored_per_kind() {
+    let theme = Theme::default_dark();
+    for (tag, title_text, color) in [
+        ("NOTE", "Note", theme.alerts.note),
+        ("TIP", "Tip", theme.alerts.tip),
+        ("IMPORTANT", "Important", theme.alerts.important),
+        ("WARNING", "Warning", theme.alerts.warning),
+        ("CAUTION", "Caution", theme.alerts.caution),
+    ] {
+        let l = lay(&format!("> [!{tag}]\n> Body here."), 800.0);
+        let title = l
+            .runs
+            .iter()
+            .find(|r| r.text == title_text)
+            .unwrap_or_else(|| panic!("{tag}: no title run"));
+        assert_eq!(title.weight, 700, "{tag}");
+        assert_eq!(title.color, color, "{tag}");
+        let body = l
+            .runs
+            .iter()
+            .find(|r| r.text.contains("Body here"))
+            .unwrap();
+        assert!(title.y < body.y, "{tag}: title above the body");
+        assert!(
+            l.rects
+                .iter()
+                .any(|r| r.color == color && r.width <= 4.0 && r.height > 0.0),
+            "{tag}: no bar in the alert color"
+        );
+    }
+}
+
+#[test]
+fn frontmatter_panel_precedes_all_blocks() {
+    let theme = Theme::default_dark();
+    let l = lay("---\ntitle: Oryx\ntags: docs\n---\n\n# Head\n\nBody", 800.0);
+    let panel = l
+        .rects
+        .iter()
+        .find(|r| r.color == theme.blocks.frontmatter_bg)
+        .expect("no frontmatter panel");
+    let meta = l
+        .runs
+        .iter()
+        .find(|r| r.text.contains("title: Oryx"))
+        .expect("no metadata line");
+    assert_eq!(meta.color, theme.blocks.frontmatter_fg);
+    let heading = l.runs.iter().find(|r| r.text == "Head").unwrap();
+    assert!(panel.y < heading.y);
+    assert!(panel.y + panel.height <= heading.y);
+    assert!(meta.y < heading.y);
+}

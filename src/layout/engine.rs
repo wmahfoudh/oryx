@@ -7,7 +7,7 @@ use cosmic_text::{Attrs, Buffer, Family, Metrics, Shaping, Style, Weight};
 
 use super::metrics;
 use crate::doc::images::MediaCache;
-use crate::doc::model::{BlockKind, Document, Marker, Span};
+use crate::doc::model::{AlertKind, BlockKind, Document, Marker, Span};
 use crate::style::fonts::{FontStore, BODY_FAMILY, CODE_FAMILY};
 use crate::style::highlight::SyntaxRole;
 use crate::style::theme::{Rgba, Theme};
@@ -160,7 +160,9 @@ pub fn layout(
     let mut first = true;
 
     let mut prev_quote_depth = 0u8;
+    let mut prev_alert: Option<AlertKind> = None;
     let mut prev_is_list = false;
+    let mut prev_space_below = 0.0_f32;
 
     for (block_index, block) in doc.blocks.iter().enumerate() {
         let heading = match &block.kind {
@@ -178,9 +180,10 @@ pub fn layout(
                 cfg.body_size * heading.map(metrics::heading_scale).unwrap_or(1.0) * cfg.zoom
             }
             BlockKind::CodeBlock { .. } => cfg.code_size * cfg.zoom,
-            BlockKind::Rule | BlockKind::Table { .. } | BlockKind::Image { .. } => {
-                cfg.body_size * cfg.zoom
-            }
+            BlockKind::Rule
+            | BlockKind::Table { .. }
+            | BlockKind::Image { .. }
+            | BlockKind::Frontmatter { .. } => cfg.body_size * cfg.zoom,
             _ => continue,
         };
         let mut gap = 0.0;
@@ -207,6 +210,26 @@ pub fn layout(
         let x_base = margin + quote_indent + quote_pad;
         let avail = (content_width - quote_indent - 2.0 * quote_pad).max(40.0);
         let rects_mark = out.rects.len();
+
+        // The first block of an alert region gets the bold title line; the
+        // quote panel later extends up to cover it.
+        let alert_start =
+            block.alert.is_some() && (prev_quote_depth == 0 || prev_alert != block.alert);
+        let region_top = cursor;
+        if alert_start {
+            let kind = block.alert.expect("alert start has a kind");
+            let title = [Span::plain(alert_title(kind))];
+            let base = BlockStyle {
+                size: cfg.body_size * cfg.zoom,
+                color: alert_color(theme, kind),
+                bold: true,
+                block_index,
+            };
+            let title_h = shape_block(
+                fonts, theme, cfg, &title, &base, x_base, cursor, avail, &mut out,
+            );
+            cursor += title_h + 0.25 * base_size;
+        }
 
         let height = match &block.kind {
             BlockKind::Heading { spans, .. } | BlockKind::Paragraph { spans } => {
@@ -290,16 +313,33 @@ pub fn layout(
                 avail,
                 &mut out,
             ),
+            BlockKind::Frontmatter { entries } => layout_frontmatter(
+                fonts,
+                theme,
+                cfg,
+                entries,
+                block_index,
+                x_base,
+                cursor,
+                avail,
+                &mut out,
+            ),
             _ => 0.0,
         };
 
         // Quote decoration wraps the block, extending over the gap when the
-        // previous block was quoted too, so consecutive quoted blocks read
-        // as one region. Inserted at rects_mark to paint under the block's
-        // own rects (pills, strikes, panels).
+        // previous block continues the same region (quote or alert), so
+        // consecutive quoted blocks read as one. Inserted at rects_mark to
+        // paint under the block's own rects (pills, strikes, panels).
         if block.quote_depth > 0 {
-            let continues = prev_quote_depth > 0;
-            let top = if continues { cursor - gap } else { cursor };
+            let continues = prev_quote_depth > 0 && prev_alert == block.alert;
+            // The previous block's trailing space belongs to the region
+            // too, or the panels leave a seam between them.
+            let top = if continues {
+                cursor - gap - prev_space_below
+            } else {
+                region_top
+            };
             let panel_h = cursor + height - top;
             let mut decoration = vec![DecoRect::fill(
                 margin,
@@ -309,12 +349,16 @@ pub fn layout(
                 theme.blocks.quote_bg,
             )];
             for level in 0..block.quote_depth {
+                let bar = match block.alert {
+                    Some(kind) if level == 0 => alert_color(theme, kind),
+                    _ => theme.blocks.quote_bar,
+                };
                 decoration.push(DecoRect::fill(
                     margin + level as f32 * metrics::INDENT * cfg.zoom,
                     top,
                     3.0 * cfg.zoom,
                     panel_h,
-                    theme.blocks.quote_bar,
+                    bar,
                 ));
             }
             out.rects.splice(rects_mark..rects_mark, decoration);
@@ -322,7 +366,9 @@ pub fn layout(
 
         cursor += height + metrics::space_below(base_size);
         prev_quote_depth = block.quote_depth;
+        prev_alert = block.alert;
         prev_is_list = is_list;
+        prev_space_below = metrics::space_below(base_size);
     }
 
     if !first {
@@ -856,6 +902,80 @@ fn layout_image(
         theme,
         cfg,
         &alt_span,
+        &base,
+        x0 + pad,
+        y0 + pad,
+        avail - 2.0 * pad,
+        out,
+    );
+    let box_h = text_h + 2.0 * pad;
+    out.rects.splice(
+        rects_mark..rects_mark,
+        [
+            DecoRect::fill(x0, y0, avail, box_h, theme.blocks.frontmatter_bg)
+                .rounded(radius, radius),
+            DecoRect::fill(x0, y0, avail, box_h, theme.blocks.code_border)
+                .rounded(radius, radius)
+                .stroked((1.0 * cfg.zoom).max(1.0)),
+        ],
+    );
+    box_h
+}
+
+fn alert_title(kind: AlertKind) -> &'static str {
+    match kind {
+        AlertKind::Note => "Note",
+        AlertKind::Tip => "Tip",
+        AlertKind::Important => "Important",
+        AlertKind::Warning => "Warning",
+        AlertKind::Caution => "Caution",
+    }
+}
+
+fn alert_color(theme: &Theme, kind: AlertKind) -> Rgba {
+    match kind {
+        AlertKind::Note => theme.alerts.note,
+        AlertKind::Tip => theme.alerts.tip,
+        AlertKind::Important => theme.alerts.important,
+        AlertKind::Warning => theme.alerts.warning,
+        AlertKind::Caution => theme.alerts.caution,
+    }
+}
+
+/// Frontmatter panel: dim key-value lines on `frontmatter_bg`.
+#[allow(clippy::too_many_arguments)]
+fn layout_frontmatter(
+    fonts: &mut FontStore,
+    theme: &Theme,
+    cfg: &ViewConfig,
+    entries: &[(String, String)],
+    block_index: usize,
+    x0: f32,
+    y0: f32,
+    avail: f32,
+    out: &mut LayoutDoc,
+) -> f32 {
+    let pad = 12.0 * cfg.zoom;
+    let radius = metrics::CORNER_RADIUS * cfg.zoom;
+    let mut spans = Vec::new();
+    for (index, (key, value)) in entries.iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::plain("\n"));
+        }
+        spans.push(Span::plain(format!("{key}: {value}")));
+    }
+    let base = BlockStyle {
+        size: 0.85 * cfg.body_size * cfg.zoom,
+        color: theme.blocks.frontmatter_fg,
+        bold: false,
+        block_index,
+    };
+    let rects_mark = out.rects.len();
+    let text_h = shape_block(
+        fonts,
+        theme,
+        cfg,
+        &spans,
         &base,
         x0 + pad,
         y0 + pad,

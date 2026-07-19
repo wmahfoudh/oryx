@@ -1,7 +1,14 @@
+---
+title: Oryx Feature Tour
+status: living document
+updated: continuously
+---
+
 # Oryx Feature Tour
 
 This document exercises every rendering feature as it lands. Open it after
-each task and the newest section shows what just became visible.
+each task and the newest section shows what just became visible. Emoji
+shortcodes render through font fallback: :tada: :rocket: :sparkles:
 
 ## Text Styles
 
@@ -64,6 +71,25 @@ A fence with no language renders plain, inside the same panel.
 ---
 
 The line above is a horizontal rule spanning the content width.
+
+## Alerts
+
+> [!NOTE]
+> Useful information a reader should notice even when skimming.
+
+> [!TIP]
+> A helpful suggestion for doing something better.
+
+> [!IMPORTANT]
+> Key information required to achieve a goal.
+
+> [!WARNING]
+> Urgent attention needed to avoid problems.
+
+> [!CAUTION]
+> Consequences ahead; this one spans two blocks.
+>
+> The panel and colored bar cover both paragraphs as one region.
 
 ## Tables
 
