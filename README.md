@@ -1,56 +1,111 @@
 # Oryx
 
-<img src="assets/icon/oryx.svg" width="96" alt="Oryx logo">
+A blazing fast, beautiful, minimalistic markdown viewer.
 
-A fast markdown viewer. Instant startup, smooth scrolling, beautiful typography. No webview, no Electron, no GPU required.
+![License](https://img.shields.io/badge/license-GPL--3.0-orange)
+![Platforms](https://img.shields.io/badge/platforms-Linux%20%7C%20Windows-blue)
+![Built in](https://img.shields.io/badge/built%20in-Rust-black)
 
-Oryx renders on the CPU through a purpose-built layout engine, so it starts in milliseconds and scrolls at a constant cost on documents of any length.
+Oryx started as a personal need: reading a markdown file should not require opening an editor, a browser tab, or an Electron app. Most tools either edit with a preview attached or embed a web engine to draw text. Oryx instead renders markdown natively, in a single small binary that draws everything itself on the CPU, with the typography and theming a reader deserves and nothing else on screen.
 
-## Status
+There are no menus. Press F1 for the complete shortcut list, Escape to close a panel or quit. Those two keys are all you need to know in advance.
 
-Oryx is under active development. Rendering is in place for headings, text styles, syntax highlighted code, blockquotes, lists and task lists, tables, horizontal rules, images including SVG, and clickable links. Interaction covers scrolling, link navigation, text selection with plain or markdown copy, a theme browser and theme editor, font and size settings, and zoom. A shortcuts help overlay, a folder sidebar, remote images, and file association are planned and specified.
+![Oryx rendering a markdown document](screenshots/hero.png)
+
+## Contents
+
+- [Features](#features)
+- [Installation](#installation)
+- [Usage](#usage)
+- [Themes](#themes)
+- [Design](#design)
+- [What Oryx does not do](#what-oryx-does-not-do)
+- [Fonts](#fonts)
+- [Contributing](#contributing)
+- [How Oryx was built](#how-oryx-was-built)
+- [License](#license)
+
+## Features
+
+**Rendering.** Headings, bold, italic, strikethrough, inline code, links, autolinks, and smart punctuation. Syntax highlighted code blocks in thirty languages, with long lines wrapped inside the panel instead of spilling out of it. Tables with striped rows, blockquotes with nesting, GitHub alerts (note, tip, important, warning, caution) with colored bars and titles, task lists, horizontal rules, YAML frontmatter as a metadata panel, and emoji shortcodes like `:tada:`.
+
+**Images and badges.** Local raster and SVG images, plus remote images fetched in the background and cached on disk, so a document full of shields.io badges renders instantly on the second open, even offline.
+
+**GitHub READMEs.** The embedded HTML subset real READMEs use: centered blocks, sized images, clickable badge rows, line breaks, and inline styling tags including sub and sup. A typical project README renders the way its author intended.
+
+![A README-style badge header rendered by Oryx](screenshots/github.png)
+
+**Footnotes and math.** Footnote references render superscript and click-jump to their definitions, collected at the end under a rule. Math literals render styled, with TeX commands like `\sum` and `\alpha` shown as real symbols and simple scripts raised and lowered.
+
+**Code files too.** Oryx opens source files directly (`oryx main.rs`) as a single highlighted document, plus plain text. The folder sidebar makes it a quick reader for any project directory.
+
+![The sidebar and a highlighted code file](screenshots/code.png)
+
+**Interface.** A folder sidebar with keyboard navigation, a native open dialog, text selection with copy as plain text or as the original markdown, session zoom, reload from disk for files being edited in parallel, and a shortcuts help screen. Every panel is keyboard driven and mouse friendly.
+
+## Installation
+
+### From a release
+
+Download the archive for your platform from the [releases page](https://codeberg.org/wmahfoudh/oryx/releases), extract it, and run the installer inside:
+
+```
+tar -xzf oryx-*-linux-x86_64.tar.gz && cd oryx && ./install.sh
+```
+
+On Windows, extract the zip and run `install.ps1` in PowerShell. The installer copies the binary and themes, and registers the file association so markdown files open with Oryx from your file manager. `./install.sh --uninstall` removes everything.
+
+### From source
+
+Requires Rust 1.80 or later.
+
+```
+git clone https://codeberg.org/wmahfoudh/oryx.git
+cd oryx
+make install
+```
+
+`make install` builds the release binary, installs it to `~/.local/bin`, copies the themes to `~/.local/share/oryx/themes`, and registers the file association. Plain `cargo build --release` works too; the binary looks for `themes/` next to itself, in the XDG data directory, and in the working directory.
 
 ## Usage
 
 ```
-oryx [--theme <name>] <file>
+oryx README.md          open a file
+oryx src/main.rs        code files render highlighted
+oryx --theme nord file  pick a theme for this session
+oryx --register         install the file association and icons
+oryx --version          print the version
 ```
 
-Opens markdown (`.md`, `.markdown`), source code files with syntax highlighting, or any text file. `--theme` selects a theme from the `themes/` folder by file name, for example `--theme nord`.
-
-| Key | Action |
+| Shortcut | Action |
 |---|---|
-| `Arrow Up` / `Arrow Down` | Scroll by line |
-| `Page Up` / `Page Down`, `Space` / `Shift+Space` | Scroll by page |
-| `Home` / `End` | Jump to top or bottom |
-| `Ctrl+A` | Select the whole document |
-| `Ctrl+C` | Copy the selection as plain text |
-| `Ctrl+Shift+C` | Copy the selection as markdown |
-| `Ctrl+T` | Theme browser |
-| `Ctrl+,` | Settings: fonts and sizes |
-| `Ctrl+Plus` / `Ctrl+Minus` / `Ctrl+0` | Zoom in, out, reset |
-| `Escape` | Close the open panel, otherwise quit |
+| Ctrl+O | Open file |
+| Ctrl+, | Settings |
+| Ctrl+T | Theme browser |
+| Ctrl+B | Folder sidebar |
+| F1 | Shortcuts help |
+| F5 / Ctrl+R | Reload from disk |
+| Ctrl+Plus / Ctrl+Minus | Zoom in / out |
+| Ctrl+0 | Reset zoom |
+| Ctrl+A | Select all |
+| Ctrl+C | Copy selection as text |
+| Ctrl+Shift+C | Copy selection as markdown |
+| Up / Down | Scroll by line |
+| Page Up / Page Down, Space / Shift+Space | Scroll by page |
+| Home / End | Jump to top / bottom |
+| Escape | Close overlay or sidebar, quit |
 
-The scrollbar on the right edge can be dragged; the mouse wheel scrolls. Clicking a link opens it in the browser; anchor links jump inside the document. Dragging over text selects it.
-
-The theme browser lists every theme with preview swatches; clicking or Enter applies one, and each row carries edit, duplicate, and delete actions, with double-click renaming. The editor covers all 49 color roles with a color picker and hex entry, restyling the document live; editing a shipped theme works on a copy. Settings choose the body and code fonts from the system list, previewed in their own faces, and step both sizes. Theme, fonts, and sizes persist across launches; zoom is per session.
-
-## Rendering
-
-- Headings carry six independent theme colors, one per level.
-- Bold, italic, and strikethrough each have their own color, not only a style.
-- Code blocks are syntax highlighted panels; inline code sits in a pill.
-- Tables size their columns to content: compact tables stay compact, wordy columns use the available width and wrap inside it.
-- Images render inline, scaled down to the content width, never scaled up. SVG rasterizes at its intrinsic size. Broken paths show a bordered placeholder with the alt text.
-- GitHub alerts, footnotes, math, emoji shortcodes, and YAML frontmatter are parsed and render progressively as features land.
+Ctrl is Cmd on macOS. Copy as markdown reproduces the original source of the selection, styles intact.
 
 ## Themes
 
-Thirty themes ship with Oryx. A theme is a single TOML file with 49 color roles covering every element independently; missing keys fall back to built-in defaults, and a malformed file is skipped, never fatal. Custom themes go in the `themes/` folder next to the binary, and the built-in browser and editor manage them without leaving the app.
+Thirty themes ship with Oryx. A theme is one TOML file with 49 color roles covering every element independently; a missing key falls back to a default and a malformed file is skipped, never fatal. The built-in browser (Ctrl+T) previews and applies them live, and the built-in editor changes any role with a color picker while the document restyles behind it. Editing a bundled theme automatically edits a copy, so the shipped files stay pristine.
 
-Eight are original designs: `oryx-light` and `oryx-dark` (the default warm identity), `oryx-sand` and `oryx-night` (desert day and night), `inkstone` (near-monochrome ink with a vermilion accent), `ember` (charcoal with a fire-gradient), `meadow` (dew-green with wildflower accents), and `slate` (disciplined cool gray).
+![The theme browser](screenshots/themes.png)
 
-The rest adapt permissively licensed editor palettes, all MIT, with thanks to their authors:
+![The theme editor](screenshots/editor.png)
+
+Eight themes are original designs: `oryx-light` and `oryx-dark` (the default warm identity), `oryx-sand` and `oryx-night`, `inkstone`, `ember`, `meadow`, and `slate`. The rest adapt permissively licensed editor palettes, all MIT, with thanks to their authors:
 
 - Dracula ([draculatheme.com](https://draculatheme.com))
 - Nord ([nordtheme.com](https://www.nordtheme.com))
@@ -68,16 +123,32 @@ The rest adapt permissively licensed editor palettes, all MIT, with thanks to th
 - Flexoki dark and light by Steph Ango ([stephango.com/flexoki](https://stephango.com/flexoki))
 - GitHub Light ([primer/primitives](https://github.com/primer/primitives))
 
-## Building
+## Design
 
-Requires Rust 1.80 or later.
+Oryx is a four stage pipeline: load, layout, paint, present. The whole document is parsed and laid out once at open, painting happens in bands around the viewport, and scrolling inside a band is a memory copy, so the frame cost of scrolling does not depend on document length. The event loop only wakes for input; idle CPU is zero.
 
-```
-cargo build --release
-```
+Everything is drawn by the layout engine itself, which makes the rendering fully testable as numbers: positions, wrapping, spacing, and colors are asserted in over 160 tests. Every color on screen comes from the active theme file. The dependencies are pure Rust throughout, which is what keeps the binary small, the startup instant, and the build simple on all three platforms.
 
-The binary expects the `themes/` folder alongside it (or in the working directory during development). `make check` runs the full verification: formatting, clippy for Linux, Windows, and macOS targets, build, and tests.
+A typical document opens in well under 150 milliseconds cold, including engine warm-up. Startup, relayout, and paint timings are validated by a performance test in the repository.
+
+## What Oryx does not do
+
+Oryx is a viewer for everyday documents, and stays honest about its edges. It does not edit files. It renders math as styled literals with real symbols, not full typesetting. Very large files (megabytes of dense code blocks) open in seconds rather than instantly, because syntax highlighting is done up front. Find in document is not there yet, and the embedded HTML support is a deliberate subset: no HTML tables, no collapsible sections. macOS compiles but is untested and has no packaged build. Some of these are on the list for future versions; none of them are promises.
 
 ## Fonts
 
-DejaVu Sans and Courier Prime are embedded in the binary. DejaVu is distributed under the DejaVu Fonts License; Courier Prime under the SIL Open Font License.
+DejaVu Sans and Courier Prime are embedded in the binary. DejaVu is distributed under the DejaVu Fonts License; Courier Prime under the SIL Open Font License. The settings dialog can switch to any installed system family.
+
+## Contributing
+
+Bug reports and theme contributions are welcome on the [issue tracker](https://codeberg.org/wmahfoudh/oryx/issues). Pull requests are read with interest, without promises. `make check` is the gate: formatting, clippy for the Linux, Windows, and macOS targets, build, and the full test suite.
+
+## How Oryx was built
+
+Oryx was built in collaboration with Claude. This section states that plainly rather than hiding it.
+
+The division of work: I owned the specification, the technology and architecture decisions, feature scope, visual verification of every change, and every commit. Claude wrote the implementation and its tests under that direction, following a written spec, a technical design, and a task-by-task plan, test-driven throughout, with formatting, lints for three platforms, and the full test suite gating every task.
+
+## License
+
+Oryx is free software, released under the [GNU General Public License v3.0](LICENSE).

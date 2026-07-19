@@ -102,6 +102,14 @@ pub fn run(path: Option<PathBuf>, theme_name: Option<String>) -> anyhow::Result<
     Ok(())
 }
 
+/// Window title: the open file's name, path stripped.
+fn window_title(path: Option<&Path>) -> String {
+    match path.and_then(|p| p.file_name()).and_then(|n| n.to_str()) {
+        Some(name) => format!("{name} \u{00B7} oryx"),
+        None => "oryx".to_string(),
+    }
+}
+
 /// Theme directories in lookup order: next to the binary, the XDG data
 /// directory an installation fills, then the working directory.
 fn theme_dirs() -> Vec<PathBuf> {
@@ -428,6 +436,9 @@ impl App {
                 *side = Sidebar::new(&dir);
             }
             side.set_current(&path);
+        }
+        if let Some(gfx) = self.gfx.as_ref() {
+            gfx.window.set_title(&window_title(Some(&path)));
         }
         self.request_redraw();
     }
@@ -850,7 +861,7 @@ impl ApplicationHandler for App {
         // desktop entry matching the app_id instead.
         let icon = winit::window::Icon::from_rgba(ICON_64.to_vec(), 64, 64).ok();
         let attributes = Window::default_attributes()
-            .with_title("oryx")
+            .with_title(window_title(self.path.as_deref()))
             .with_window_icon(icon);
         // Wayland compositors resolve the window icon from a desktop entry
         // matching this app_id; the same call sets WM_CLASS on X11.
@@ -1010,6 +1021,16 @@ impl ApplicationHandler for App {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn window_title_carries_the_file_name() {
+        use std::path::Path;
+        assert_eq!(
+            super::window_title(Some(Path::new("/docs/notes/README.md"))),
+            "README.md · oryx"
+        );
+        assert_eq!(super::window_title(None), "oryx");
+    }
+
     #[test]
     fn theme_dirs_include_the_xdg_data_dir() {
         let dirs = super::theme_dirs();
