@@ -31,6 +31,7 @@ struct Row {
 #[derive(Default, Clone, Copy)]
 struct Geometry {
     panel: (f32, f32, f32, f32),
+    center: (f32, f32),
     list_top: f32,
     list_h: f32,
     name_x: f32,
@@ -55,6 +56,9 @@ pub struct ThemeBrowser {
     /// Inline rename in progress: row index and the edited name.
     renaming: Option<(usize, String)>,
     last_name_click: Option<(usize, Instant)>,
+    moving: bool,
+    grab: (f32, f32),
+    offset: (f32, f32),
     geometry: Geometry,
 }
 
@@ -68,6 +72,9 @@ impl ThemeBrowser {
             pending_delete: None,
             renaming: None,
             last_name_click: None,
+            moving: false,
+            grab: (0.0, 0.0),
+            offset: (0.0, 0.0),
             geometry: Geometry::default(),
         };
         browser.rescan();
@@ -230,14 +237,16 @@ impl Overlay for ThemeBrowser {
         let max_h = (h * 0.8).max(ROW_H + HEADER_H + 2.0 * PAD);
         let want_h = HEADER_H + PAD + self.rows.len() as f32 * ROW_H + PAD;
         let panel_h = want_h.min(max_h);
-        let px = ((w - panel_w) / 2.0).floor();
-        let py = ((h - panel_h) / 2.0).floor();
+        let center = (((w - panel_w) / 2.0).floor(), ((h - panel_h) / 2.0).floor());
+        let px = (center.0 + self.offset.0).clamp(60.0 - panel_w, w - 60.0);
+        let py = (center.1 + self.offset.1).clamp(-8.0, h - HEADER_H);
         let list_top = py + HEADER_H + PAD;
         let list_h = panel_h - HEADER_H - 2.0 * PAD;
         let list_bottom = list_top + list_h;
 
         self.geometry = Geometry {
             panel: (px, py, panel_w, panel_h),
+            center,
             list_top,
             list_h,
             name_x: px + PAD + 2.0 * SWATCH + 16.0,
@@ -480,6 +489,11 @@ impl Overlay for ThemeBrowser {
         if x < px || x > px + pw || y < py || y > py + ph {
             return OverlayResult::Close;
         }
+        if y < py + HEADER_H {
+            self.moving = true;
+            self.grab = (x - px, y - py);
+            return OverlayResult::Open;
+        }
         if y < self.geometry.list_top || y > self.geometry.list_top + self.geometry.list_h {
             return OverlayResult::Open;
         }
@@ -517,6 +531,20 @@ impl Overlay for ThemeBrowser {
             return OverlayResult::Apply(Action::SetTheme(row.path.clone()));
         }
         OverlayResult::Open
+    }
+
+    fn drag(&mut self, x: f32, y: f32) -> OverlayResult {
+        if self.moving {
+            self.offset = (
+                x - self.grab.0 - self.geometry.center.0,
+                y - self.grab.1 - self.geometry.center.1,
+            );
+        }
+        OverlayResult::Open
+    }
+
+    fn release(&mut self) {
+        self.moving = false;
     }
 
     fn scroll(&mut self, lines: f32) -> OverlayResult {

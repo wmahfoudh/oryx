@@ -5,6 +5,7 @@ use std::sync::Arc;
 use oryx::doc::images::MediaCache;
 use oryx::doc::load;
 use oryx::doc::model::Document;
+use oryx::input::keymap::{self, Command};
 use oryx::layout::{layout, metrics, DecoRect, LayoutDoc, ViewConfig};
 use oryx::paint;
 use oryx::paint::painter::Painter;
@@ -12,6 +13,7 @@ use oryx::paint::scroll::{self, BandCache};
 use oryx::platform::config::{self, Config};
 use oryx::style::fonts::FontStore;
 use oryx::style::theme::{self, Theme};
+use oryx::ui::help::Help;
 use oryx::ui::overlay::{Action, Overlay, OverlayResult};
 use oryx::ui::scrollbar;
 use oryx::ui::selection::{self, RunPos, Selection};
@@ -22,7 +24,7 @@ use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalPosition;
 use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::keyboard::{Key, ModifiersState, NamedKey};
+use winit::keyboard::ModifiersState;
 use winit::window::{CursorIcon, Window, WindowId};
 
 pub fn run(path: Option<PathBuf>, theme_name: Option<String>) -> anyhow::Result<()> {
@@ -185,19 +187,30 @@ impl App {
         (self.viewport_h() - self.line_step()).max(self.line_step())
     }
 
-    fn handle_key(&mut self, key: &NamedKey) -> bool {
-        match key {
-            NamedKey::ArrowDown => self.scroll_by(self.line_step()),
-            NamedKey::ArrowUp => self.scroll_by(-self.line_step()),
-            NamedKey::PageDown => self.scroll_by(self.page_step()),
-            NamedKey::PageUp => self.scroll_by(-self.page_step()),
-            NamedKey::Space if self.modifiers.shift_key() => self.scroll_by(-self.page_step()),
-            NamedKey::Space => self.scroll_by(self.page_step()),
-            NamedKey::Home => self.scroll_to(0.0),
-            NamedKey::End => self.scroll_to(self.doc_height()),
-            _ => return false,
+    /// Executes a shortcut resolved by the keymap.
+    fn run_command(&mut self, cmd: Command, event_loop: &ActiveEventLoop) {
+        match cmd {
+            Command::Help => self.toggle_help(),
+            Command::Settings => self.toggle_settings(),
+            Command::ThemeBrowser => self.toggle_theme_browser(),
+            Command::ZoomIn => {
+                self.set_zoom(settings::step_zoom(self.cfg.zoom, settings::ZOOM_STEP));
+            }
+            Command::ZoomOut => {
+                self.set_zoom(settings::step_zoom(self.cfg.zoom, -settings::ZOOM_STEP));
+            }
+            Command::ZoomReset => self.set_zoom(1.0),
+            Command::SelectAll => self.select_all(),
+            Command::CopyText => self.copy_selection(false),
+            Command::CopyMarkdown => self.copy_selection(true),
+            Command::LineUp => self.scroll_by(-self.line_step()),
+            Command::LineDown => self.scroll_by(self.line_step()),
+            Command::PageUp => self.scroll_by(-self.page_step()),
+            Command::PageDown => self.scroll_by(self.page_step()),
+            Command::Top => self.scroll_to(0.0),
+            Command::Bottom => self.scroll_to(self.doc_height()),
+            Command::Quit => event_loop.exit(),
         }
-        true
     }
 
     fn thumb(&self) -> Option<(f32, f32)> {
@@ -304,6 +317,16 @@ impl App {
         }
     }
 
+    /// Opens the shortcuts help, or closes the active overlay.
+    fn toggle_help(&mut self) {
+        if self.overlay.is_some() {
+            self.overlay_result(OverlayResult::Close);
+        } else {
+            self.overlay = Some(Box::new(Help::new()));
+            self.request_redraw();
+        }
+    }
+
     /// Session zoom around the current scroll position; never persisted.
     fn set_zoom(&mut self, zoom: f32) {
         if (zoom - self.cfg.zoom).abs() < f32::EPSILON {
@@ -314,15 +337,6 @@ impl App {
         self.layout = None;
         self.band = None;
         self.request_redraw();
-    }
-
-    fn zoom_key(&mut self, key: &str) {
-        match key {
-            "+" | "=" => self.set_zoom(settings::step_zoom(self.cfg.zoom, settings::ZOOM_STEP)),
-            "-" => self.set_zoom(settings::step_zoom(self.cfg.zoom, -settings::ZOOM_STEP)),
-            "0" => self.set_zoom(1.0),
-            _ => {}
-        }
     }
 
     /// Applies what an overlay asked for after handling an event.
@@ -673,38 +687,24 @@ impl ApplicationHandler for App {
                         ..
                     },
                 ..
-            } => match logical_key {
-                Key::Character(c)
-                    if self.modifiers.control_key() && c.as_str().eq_ignore_ascii_case("t") =>
-                {
-                    self.toggle_theme_browser();
+            } => {
+                let ctrl = self.modifiers.control_key();
+                let shift = self.modifiers.shift_key();
+                // The overlay toggles stay global so their chord closes the
+                // overlay it opened; everything else feeds an open overlay.
+                match keymap::command(&logical_key, ctrl, shift) {
+                    Some(cmd @ (Command::ThemeBrowser | Command::Settings | Command::Help)) => {
+                        self.run_command(cmd, event_loop);
+                    }
+                    _ if self.overlay.is_some() => {
+                        let overlay = self.overlay.as_mut().expect("overlay open");
+                        let result = overlay.key(&logical_key, ctrl);
+                        self.overlay_result(result);
+                    }
+                    Some(cmd) => self.run_command(cmd, event_loop),
+                    None => {}
                 }
-                Key::Character(c) if self.modifiers.control_key() && c.as_str() == "," => {
-                    self.toggle_settings();
-                }
-                Key::Character(c)
-                    if self.modifiers.control_key()
-                        && self.overlay.is_none()
-                        && matches!(c.as_str(), "+" | "=" | "-" | "0") =>
-                {
-                    self.zoom_key(c.as_str());
-                }
-                key if self.overlay.is_some() => {
-                    let ctrl = self.modifiers.control_key();
-                    let result = self.overlay.as_mut().expect("overlay open").key(&key, ctrl);
-                    self.overlay_result(result);
-                }
-                Key::Named(NamedKey::Escape) => event_loop.exit(),
-                Key::Named(named) => {
-                    self.handle_key(&named);
-                }
-                Key::Character(c) if self.modifiers.control_key() => match c.as_str() {
-                    "c" | "C" => self.copy_selection(self.modifiers.shift_key()),
-                    "a" | "A" => self.select_all(),
-                    _ => {}
-                },
-                _ => {}
-            },
+            }
             WindowEvent::MouseWheel { delta, .. } => {
                 let lines = match delta {
                     MouseScrollDelta::LineDelta(_, lines) => -lines,

@@ -1,3 +1,4 @@
+pub mod help;
 pub mod overlay;
 pub mod scrollbar;
 pub mod selection;
