@@ -121,6 +121,20 @@ A broken path renders as a bordered placeholder with the alt text:
 
 ![this image does not exist](missing-image.png)
 
+Remote images fetch in the background and cache on disk; badges are SVG:
+
+![build badge](https://img.shields.io/badge/build-passing-brightgreen)
+![version badge](https://img.shields.io/badge/version-0.3.0-blue)
+![license badge](https://img.shields.io/badge/license-GPL--3.0-orange)
+
+A remote raster image arrives the same way, replacing its placeholder:
+
+![remote logo](https://codeberg.org/assets/img/logo.png)
+
+An unreachable remote source keeps the alt placeholder:
+
+![unreachable badge](https://nonexistent.invalid/badge.svg)
+
 ## Links
 
 External links open in the system browser: the

@@ -5,8 +5,11 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use image::RgbaImage;
+
+use crate::doc::fetch;
 
 pub fn load(doc_dir: &Path, src: &str) -> Option<RgbaImage> {
     if src.starts_with("http://") || src.starts_with("https://") {
@@ -49,22 +52,137 @@ fn load_svg(bytes: &[u8]) -> Option<RgbaImage> {
     Some(img)
 }
 
+/// Wakes the event loop when a background fetch lands.
+pub type Waker = Arc<dyn Fn() + Send + Sync>;
+
+/// Decodes fetched bytes: SVG when the head looks like XML, raster
+/// otherwise.
+pub fn decode(bytes: &[u8]) -> Option<RgbaImage> {
+    let head = &bytes[..bytes.len().min(512)];
+    let looks_svg = std::str::from_utf8(head).is_ok_and(|t| {
+        t.trim_start_matches('\u{feff}')
+            .trim_start()
+            .starts_with('<')
+    });
+    if looks_svg {
+        load_svg(bytes)
+    } else {
+        image::load_from_memory(bytes)
+            .ok()
+            .map(|dynamic| dynamic.to_rgba8())
+    }
+}
+
+/// A remote source that has no pixels yet.
+enum RemoteState {
+    Pending,
+    Failed,
+}
+
+/// Fetch results queued by background threads until the main thread
+/// folds them in.
+type Arrivals = Arc<Mutex<Vec<(String, Option<RgbaImage>)>>>;
+
 pub struct MediaCache {
     doc_dir: PathBuf,
+    cache_dir: Option<PathBuf>,
     originals: HashMap<String, Option<RgbaImage>>,
     scaled: HashMap<(String, u32, u32), Vec<u8>>,
+    remote: HashMap<String, RemoteState>,
+    arrivals: Arrivals,
+    waker: Option<Waker>,
 }
 
 impl MediaCache {
     pub fn new(doc_dir: PathBuf) -> MediaCache {
+        Self::with_cache_dir(doc_dir, fetch::cache_dir())
+    }
+
+    /// The disk cache location is injectable so tests never touch the
+    /// user's real cache.
+    pub fn with_cache_dir(doc_dir: PathBuf, cache_dir: Option<PathBuf>) -> MediaCache {
         MediaCache {
             doc_dir,
+            cache_dir,
             originals: HashMap::new(),
             scaled: HashMap::new(),
+            remote: HashMap::new(),
+            arrivals: Arc::new(Mutex::new(Vec::new())),
+            waker: None,
         }
     }
 
+    pub fn set_waker(&mut self, waker: Waker) {
+        self.waker = Some(waker);
+    }
+
+    /// Folds arrived fetches into the cache; true when anything landed.
+    pub fn drain_remote(&mut self) -> bool {
+        let arrived: Vec<_> = {
+            let mut arrivals = self.arrivals.lock().expect("arrivals lock");
+            arrivals.drain(..).collect()
+        };
+        let changed = !arrived.is_empty();
+        for (url, image) in arrived {
+            match image {
+                Some(image) => {
+                    self.originals.insert(url.clone(), Some(image));
+                    self.remote.remove(&url);
+                }
+                None => {
+                    self.remote.insert(url, RemoteState::Failed);
+                }
+            }
+        }
+        changed
+    }
+
+    fn is_remote(src: &str) -> bool {
+        src.starts_with("http://") || src.starts_with("https://")
+    }
+
+    /// Remote lookup: memory, then the disk cache, then a background
+    /// fetch. Always returns at once; missing pixels mean a placeholder.
+    fn remote_original(&mut self, src: &str) -> Option<&RgbaImage> {
+        if !self.originals.contains_key(src) && !self.remote.contains_key(src) {
+            match self.cached_bytes(src) {
+                Some(bytes) => {
+                    self.originals.insert(src.to_string(), decode(&bytes));
+                }
+                None => self.spawn_fetch(src),
+            }
+        }
+        self.originals.get(src).and_then(|o| o.as_ref())
+    }
+
+    fn cached_bytes(&self, src: &str) -> Option<Vec<u8>> {
+        std::fs::read(self.cache_dir.as_ref()?.join(fetch::key(src))).ok()
+    }
+
+    fn spawn_fetch(&mut self, src: &str) {
+        self.remote.insert(src.to_string(), RemoteState::Pending);
+        let url = src.to_string();
+        let cache_dir = self.cache_dir.clone();
+        let arrivals = Arc::clone(&self.arrivals);
+        let waker = self.waker.clone();
+        std::thread::spawn(move || {
+            let bytes = fetch::fetch(&url);
+            if let (Some(dir), Some(bytes)) = (&cache_dir, &bytes) {
+                let _ = std::fs::create_dir_all(dir);
+                let _ = std::fs::write(dir.join(fetch::key(&url)), bytes);
+            }
+            let image = bytes.as_deref().and_then(decode);
+            arrivals.lock().expect("arrivals lock").push((url, image));
+            if let Some(wake) = waker {
+                wake();
+            }
+        });
+    }
+
     fn original(&mut self, src: &str) -> Option<&RgbaImage> {
+        if Self::is_remote(src) {
+            return self.remote_original(src);
+        }
         if !self.originals.contains_key(src) {
             let loaded = load(&self.doc_dir, src);
             self.originals.insert(src.to_string(), loaded);
@@ -131,6 +249,45 @@ mod tests {
         let dir = temp_dir();
         assert!(load(&dir, "nope.png").is_none());
         assert!(load(&dir, "https://example.com/x.png").is_none());
+    }
+
+    fn png_bytes(w: u32, h: u32) -> Vec<u8> {
+        let img = RgbaImage::from_pixel(w, h, image::Rgba([10, 20, 30, 255]));
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+        bytes.into_inner()
+    }
+
+    #[test]
+    fn decode_sniffs_svg_and_raster() {
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20">
+            <rect width="40" height="20" fill="#112233"/></svg>"##;
+        assert_eq!(decode(svg.as_bytes()).unwrap().dimensions(), (40, 20));
+        assert_eq!(decode(&png_bytes(8, 4)).unwrap().dimensions(), (8, 4));
+        assert!(decode(b"not an image at all").is_none());
+    }
+
+    #[test]
+    fn cached_remote_loads_without_network() {
+        let cache = temp_dir().join("cache-hit");
+        std::fs::create_dir_all(&cache).unwrap();
+        let url = "https://img.example/badge.png";
+        std::fs::write(cache.join(crate::doc::fetch::key(url)), png_bytes(8, 4)).unwrap();
+        let mut media = MediaCache::with_cache_dir(temp_dir(), Some(cache.clone()));
+        assert_eq!(media.dimensions(url), Some((8, 4)));
+        std::fs::remove_dir_all(&cache).unwrap();
+    }
+
+    #[test]
+    fn pending_remote_yields_placeholder_without_blocking() {
+        let cache = temp_dir().join("cache-miss");
+        let mut media = MediaCache::with_cache_dir(temp_dir(), Some(cache.clone()));
+        // Nothing listens on this port; the fetch fails in the background
+        // while the placeholder answer returns at once.
+        let url = "https://127.0.0.1:1/x.png";
+        assert_eq!(media.dimensions(url), None);
+        assert_eq!(media.dimensions(url), None);
+        let _ = std::fs::remove_dir_all(&cache);
     }
 
     #[test]

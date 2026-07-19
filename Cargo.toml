@@ -19,6 +19,7 @@ softbuffer = "0.4"
 syntect = { version = "5.3.0", default-features = false, features = ["default-fancy"] }
 tiny-skia = "0.11"
 toml = "0.8"
+ureq = { version = "3.2.1", default-features = false, features = ["native-tls", "gzip"] }
 winit = "0.30"
 
 [dev-dependencies]

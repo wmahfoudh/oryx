@@ -2,7 +2,7 @@ use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use oryx::doc::images::MediaCache;
+use oryx::doc::images::{MediaCache, Waker};
 use oryx::doc::load;
 use oryx::doc::model::Document;
 use oryx::input::keymap::{self, Command};
@@ -40,8 +40,16 @@ pub fn run(path: Option<PathBuf>, theme_name: Option<String>) -> anyhow::Result<
         .as_ref()
         .and_then(|p| p.parent().map(|d| d.to_path_buf()))
         .unwrap_or_else(|| PathBuf::from("."));
-    let event_loop = EventLoop::new()?;
+    let event_loop = EventLoop::with_user_event().build()?;
     event_loop.set_control_flow(ControlFlow::Wait);
+    let proxy = event_loop.create_proxy();
+    // Background fetches wake the loop so arrived pixels trigger a
+    // relayout without polling.
+    let waker: Waker = Arc::new(move || {
+        let _ = proxy.send_event(());
+    });
+    let mut media = MediaCache::new(doc_dir.clone());
+    media.set_waker(waker.clone());
     let mut config = config::load();
     if path.is_some() {
         let dir_text = doc_dir.display().to_string();
@@ -66,7 +74,8 @@ pub fn run(path: Option<PathBuf>, theme_name: Option<String>) -> anyhow::Result<
         cfg,
         config,
         fonts: FontStore::new(),
-        media: MediaCache::new(doc_dir),
+        media,
+        waker,
         layout: None,
         layout_width: 0.0,
         band: None,
@@ -126,6 +135,8 @@ struct App {
     config: Config,
     fonts: FontStore,
     media: MediaCache,
+    /// Handed to every media cache so fetch threads can wake the loop.
+    waker: Waker,
     layout: Option<LayoutDoc>,
     layout_width: f32,
     band: Option<BandCache>,
@@ -399,6 +410,7 @@ impl App {
             }
         }
         self.media = MediaCache::new(dir.clone());
+        self.media.set_waker(self.waker.clone());
         self.scroll_y = 0.0;
         self.selection = None;
         self.sel_anchor = None;
@@ -803,6 +815,15 @@ impl App {
 }
 
 impl ApplicationHandler for App {
+    /// A background fetch landed: fold it in and relayout.
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, _event: ()) {
+        if self.media.drain_remote() {
+            self.layout = None;
+            self.band = None;
+            self.request_redraw();
+        }
+    }
+
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.gfx.is_some() {
             return;
