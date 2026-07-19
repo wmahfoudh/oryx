@@ -6,11 +6,9 @@ A blazing fast, beautiful, minimalistic markdown viewer.
 ![Platforms](https://img.shields.io/badge/platforms-Linux%20%7C%20Windows-blue)
 ![Built in](https://img.shields.io/badge/built%20in-Rust-black)
 
-Oryx started as a personal need: reading a markdown file should not require opening an editor, a browser tab, or an Electron app. Most tools either edit with a preview attached or embed a web engine to draw text. Oryx instead renders markdown natively, in a single small binary that draws everything itself on the CPU, with the typography and theming a reader deserves and nothing else on screen.
+Oryx started as a personal need: reading a markdown file should not require opening an editor, a browser tab, or an Electron app. Most tools either edit with a preview attached or embed a web engine to draw text. I produce a lot of mardown that I have to review, I rarely edit them, but rather take notes. Oryx addresses this very specific need: Speed and convenience! It renders markdown natively, in a single small binary that draws everything itself on the CPU, with the typography and theming a reader deserves and nothing else on screen.
 
-There are no menus. Press F1 for the complete shortcut list, Escape to close a panel or quit. Those two keys are all you need to know in advance.
-
-![Oryx rendering a markdown document](screenshots/hero.png)
+> There are no menus. **Press F1** for the complete shortcut list, Escape to close a panel or quit. Those two keys are all you need to know in advance.
 
 ## Contents
 
@@ -145,9 +143,7 @@ Bug reports and theme contributions are welcome on the [issue tracker](https://c
 
 ## How Oryx was built
 
-Oryx was built in collaboration with Claude. This section states that plainly rather than hiding it.
-
-The division of work: I owned the specification, the technology and architecture decisions, feature scope, visual verification of every change, and every commit. Claude wrote the implementation and its tests under that direction, following a written spec, a technical design, and a task-by-task plan, test-driven throughout, with formatting, lints for three platforms, and the full test suite gating every task.
+Oryx was built with the help of Claude. I did the specs, the technology and architecture decisions, feature scope, code verification, visual verification of every change and commit. Claude wrote the implementation and its tests under that direction, following a written spec, a technical design, and a task-by-task plan, test-driven throughout, with formatting, lints for three platforms, and the full test suite gating every task.
 
 ## License
 
