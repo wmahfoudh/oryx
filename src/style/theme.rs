@@ -101,6 +101,11 @@ pub struct Ui {
     pub overlay_bg: Rgba,
     pub overlay_fg: Rgba,
     pub overlay_highlight: Rgba,
+    /// Backgrounds behind find matches; translucent so they tint body
+    /// text, code, and table surfaces alike. The current match reads
+    /// stronger than the rest.
+    pub search_match_bg: Rgba,
+    pub search_current_bg: Rgba,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -151,6 +156,10 @@ pub fn parse_hex(s: &str) -> Option<Rgba> {
 
 const fn c(r: u8, g: u8, b: u8) -> Rgba {
     Rgba { r, g, b, a: 255 }
+}
+
+const fn ca(r: u8, g: u8, b: u8, a: u8) -> Rgba {
+    Rgba { r, g, b, a }
 }
 
 impl Theme {
@@ -221,6 +230,8 @@ impl Theme {
                 overlay_bg: c(0x2C, 0x25, 0x1B),
                 overlay_fg: c(0xE8, 0xDF, 0xC8),
                 overlay_highlight: c(0x4A, 0x40, 0x28),
+                search_match_bg: ca(0xD4, 0xA7, 0x3C, 0x4D),
+                search_current_bg: ca(0xE0, 0x68, 0x45, 0x80),
             },
         }
     }
@@ -324,6 +335,8 @@ raw_group!(RawUi {
     overlay_bg,
     overlay_fg,
     overlay_highlight,
+    search_match_bg,
+    search_current_bg,
 });
 
 macro_rules! merge {
@@ -374,7 +387,8 @@ fn resolve(raw: Raw) -> Theme {
             type MergeTarget = Ui;
             merge!(raw.ui, d.ui, {
                 sidebar_bg, sidebar_fg, sidebar_dir, scrollbar, scrollbar_hover,
-                selection_bg, overlay_bg, overlay_fg, overlay_highlight
+                selection_bg, overlay_bg, overlay_fg, overlay_highlight,
+                search_match_bg, search_current_bg
             })
         },
     }
@@ -452,6 +466,8 @@ role_table!(
     (ui, overlay_bg, "overlay_bg"),
     (ui, overlay_fg, "overlay_fg"),
     (ui, overlay_highlight, "overlay_highlight"),
+    (ui, search_match_bg, "search_match_bg"),
+    (ui, search_current_bg, "search_current_bg"),
 );
 
 /// `#RRGGBB`, or `#RRGGBBAA` when the color is translucent.

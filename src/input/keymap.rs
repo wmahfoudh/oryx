@@ -19,6 +19,9 @@ pub enum Command {
     SelectAll,
     CopyText,
     CopyMarkdown,
+    Find,
+    FindNext,
+    FindPrev,
     LineUp,
     LineDown,
     PageUp,
@@ -30,7 +33,7 @@ pub enum Command {
 
 impl Command {
     /// Every variant; the coverage test checks each one against the table.
-    pub const ALL: [Command; 19] = [
+    pub const ALL: [Command; 22] = [
         Command::OpenFile,
         Command::Reload,
         Command::Sidebar,
@@ -43,6 +46,9 @@ impl Command {
         Command::SelectAll,
         Command::CopyText,
         Command::CopyMarkdown,
+        Command::Find,
+        Command::FindNext,
+        Command::FindPrev,
         Command::LineUp,
         Command::LineDown,
         Command::PageUp,
@@ -135,6 +141,19 @@ pub const SHORTCUTS: &[Shortcut] = &[
         keys: "Ctrl+Shift+C",
         action: "Copy selection as markdown",
         bindings: &[(Binding::CtrlShift("c"), Command::CopyMarkdown)],
+    },
+    Shortcut {
+        keys: "Ctrl+F",
+        action: "Find in document",
+        bindings: &[(Binding::Ctrl("f"), Command::Find)],
+    },
+    Shortcut {
+        keys: "F3 / Shift+F3",
+        action: "Next / previous match",
+        bindings: &[
+            (Binding::ShiftNamed(NamedKey::F3), Command::FindPrev),
+            (Binding::Named(NamedKey::F3), Command::FindNext),
+        ],
     },
     Shortcut {
         keys: "Up / Down",
@@ -285,6 +304,19 @@ mod tests {
         let space = Key::Named(NamedKey::Space);
         assert_eq!(command(&space, false, false), Some(Command::PageDown));
         assert_eq!(command(&space, false, true), Some(Command::PageUp));
+    }
+
+    #[test]
+    fn find_chords_resolve() {
+        assert_eq!(command(&chr("f"), true, false), Some(Command::Find));
+        assert_eq!(
+            command(&Key::Named(NamedKey::F3), false, false),
+            Some(Command::FindNext)
+        );
+        assert_eq!(
+            command(&Key::Named(NamedKey::F3), false, true),
+            Some(Command::FindPrev)
+        );
     }
 
     #[test]

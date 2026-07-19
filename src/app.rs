@@ -16,6 +16,7 @@ use oryx::style::theme::{self, Theme};
 use oryx::ui::help::Help;
 use oryx::ui::overlay::{Action, Overlay, OverlayResult};
 use oryx::ui::scrollbar;
+use oryx::ui::search::{self, SearchState};
 use oryx::ui::selection::{self, RunPos, Selection};
 use oryx::ui::settings::{self, Settings};
 use oryx::ui::sidebar::{self, Sidebar};
@@ -96,6 +97,9 @@ pub fn run(path: Option<PathBuf>, theme_name: Option<String>) -> anyhow::Result<
         overlay_canvas: None,
         sidebar: None,
         sidebar_canvas: None,
+        search: None,
+        search_canvas: None,
+        last_query: String::new(),
         pending_band_for: None,
     };
     event_loop.run_app(&mut app)?;
@@ -181,6 +185,12 @@ struct App {
     sidebar: Option<Sidebar>,
     /// Reused sidebar canvas, mirroring the overlay canvas mechanics.
     sidebar_canvas: Option<OverlayCanvas>,
+    /// Find session while the search bar is open.
+    search: Option<SearchState>,
+    /// Reused search bar canvas, mirroring the overlay canvas mechanics.
+    search_canvas: Option<OverlayCanvas>,
+    /// Query of the last closed search, restored when the bar reopens.
+    last_query: String,
     /// Deferred band rebuild, tagged with the window size it was scheduled
     /// at. Interactive frames (drag, live resize) paint the viewport
     /// directly; the expensive band builds one frame later, once stable.
@@ -251,6 +261,9 @@ impl App {
             Command::SelectAll => self.select_all(),
             Command::CopyText => self.copy_selection(false),
             Command::CopyMarkdown => self.copy_selection(true),
+            Command::Find => self.open_search(),
+            Command::FindNext => self.step_search(true),
+            Command::FindPrev => self.step_search(false),
             Command::LineUp => self.scroll_by(-self.line_step()),
             Command::LineDown => self.scroll_by(self.line_step()),
             Command::PageUp => self.scroll_by(-self.page_step()),
@@ -266,6 +279,176 @@ impl App {
                     event_loop.exit();
                 }
             }
+        }
+    }
+
+    /// Opens the search bar with the last query standing selected, so
+    /// typing replaces it; Ctrl+F on an open bar reselects the same way.
+    fn open_search(&mut self) {
+        if let Some(state) = self.search.as_mut() {
+            state.selected = !state.query.is_empty();
+            self.request_redraw();
+            return;
+        }
+        let query = self.last_query.clone();
+        self.search = Some(SearchState {
+            selected: !query.is_empty(),
+            query,
+            matches: Vec::new(),
+            rects: Vec::new(),
+            current: 0,
+            stale: true,
+        });
+        self.band = None;
+        self.request_redraw();
+    }
+
+    fn close_search(&mut self) {
+        if let Some(state) = self.search.take() {
+            self.last_query = state.query;
+            self.band = None;
+            self.request_redraw();
+        }
+    }
+
+    /// Moves to the neighboring match; with the bar closed, reopens it.
+    fn step_search(&mut self, forward: bool) {
+        let Some(state) = self.search.as_mut() else {
+            self.open_search();
+            return;
+        };
+        state.selected = false;
+        if state.matches.is_empty() {
+            return;
+        }
+        state.current = search::step(state.current, state.matches.len(), forward);
+        self.band = None;
+        self.scroll_match_into_view();
+        self.request_redraw();
+    }
+
+    /// Keys the open search bar consumes: query edits, Enter stepping,
+    /// Escape closing. Everything else falls through to the document, so
+    /// scrolling and shortcuts stay live under the bar.
+    fn search_key(&mut self, key: &Key, ctrl: bool, shift: bool) -> bool {
+        if self.search.is_none() {
+            return false;
+        }
+        match key {
+            Key::Named(NamedKey::Escape) => {
+                self.close_search();
+                true
+            }
+            Key::Named(NamedKey::Enter) => {
+                self.step_search(!shift);
+                true
+            }
+            Key::Named(NamedKey::Backspace) => {
+                let state = self.search.as_mut().expect("search open");
+                let edited = if state.selected {
+                    state.selected = false;
+                    state.query.clear();
+                    true
+                } else {
+                    state.query.pop().is_some()
+                };
+                if edited {
+                    state.stale = true;
+                    self.band = None;
+                    self.request_redraw();
+                }
+                true
+            }
+            Key::Named(NamedKey::Space) => {
+                self.push_query(" ");
+                true
+            }
+            Key::Character(s) if ctrl && s.eq_ignore_ascii_case("v") => {
+                if self.clipboard.is_none() {
+                    self.clipboard = arboard::Clipboard::new()
+                        .map_err(|err| eprintln!("oryx: no clipboard: {err}"))
+                        .ok();
+                }
+                let text = self.clipboard.as_mut().and_then(|c| c.get_text().ok());
+                if let Some(text) = text {
+                    self.push_query(&text);
+                }
+                true
+            }
+            Key::Character(s) if !ctrl => {
+                self.push_query(s);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Appends to the query, dropping control characters a paste may
+    /// carry; a tab or newline could otherwise cross line boundaries. A
+    /// selected query is replaced, not extended.
+    fn push_query(&mut self, text: &str) {
+        let Some(state) = self.search.as_mut() else {
+            return;
+        };
+        let clean: String = text.chars().filter(|c| !c.is_control()).collect();
+        if clean.is_empty() {
+            return;
+        }
+        if state.selected {
+            state.selected = false;
+            state.query.clear();
+        }
+        state.query.push_str(&clean);
+        state.stale = true;
+        self.band = None;
+        self.request_redraw();
+    }
+
+    /// Recomputes stale matches against the current layout, then keeps
+    /// the reading position: the current match becomes the first at or
+    /// below the viewport top. Runs inside redraw once layout exists, so
+    /// query edits and relayouts from zoom, resize, or reload all land
+    /// here.
+    fn sync_search(&mut self) {
+        if !self.search.as_ref().is_some_and(|s| s.stale) {
+            return;
+        }
+        let Some(lay) = self.layout.as_ref() else {
+            return;
+        };
+        let scroll = self.scroll_y;
+        let state = self.search.as_mut().expect("search open");
+        state.matches = search::matches(lay, &state.query);
+        state.stale = false;
+        state.current = state
+            .matches
+            .iter()
+            .position(|m| lay.runs[m.start.run].y >= scroll)
+            .unwrap_or(0);
+        let mut rects = Vec::new();
+        for (index, m) in state.matches.iter().enumerate() {
+            for rect in selection::rects(m, lay, &mut self.fonts) {
+                rects.push((index, rect));
+            }
+        }
+        state.rects = rects;
+        self.scroll_match_into_view();
+    }
+
+    /// Centers the current match vertically when it sits off screen.
+    fn scroll_match_into_view(&mut self) {
+        let (Some(lay), Some(state)) = (self.layout.as_ref(), self.search.as_ref()) else {
+            return;
+        };
+        let Some(m) = state.matches.get(state.current) else {
+            return;
+        };
+        let run = &lay.runs[m.start.run];
+        let line_h = metrics::LINE_HEIGHT * run.size;
+        let top = run.y;
+        let vh = self.viewport_h();
+        if top < self.scroll_y || top + line_h > self.scroll_y + vh {
+            self.scroll_to(top - (vh - line_h) / 2.0);
         }
     }
 
@@ -686,10 +869,9 @@ impl App {
 
     fn redraw(&mut self) {
         let inset = self.inset() as u32;
-        let Some(gfx) = self.gfx.as_mut() else {
+        let Some(size) = self.gfx.as_ref().map(|g| g.window.inner_size()) else {
             return;
         };
-        let size = gfx.window.inner_size();
         let (Some(width), Some(height)) =
             (NonZeroU32::new(size.width), NonZeroU32::new(size.height))
         else {
@@ -709,19 +891,34 @@ impl App {
             self.layout_width = avail;
             self.band = None;
             self.pending_band_for = None;
-            // Selection positions index the old layout's runs.
+            // Selection positions index the old layout's runs, and so do
+            // search matches.
             self.selection = None;
             self.sel_anchor = None;
+            if let Some(state) = self.search.as_mut() {
+                state.stale = true;
+            }
         }
+        self.sync_search();
         let lay = self.layout.as_ref().expect("layout exists");
         self.scroll_y = scroll::clamp(self.scroll_y, lay.height, size.height as f32);
-        let highlight: Vec<DecoRect> = match &self.selection {
+        let mut highlight: Vec<DecoRect> = match &self.selection {
             Some(sel) => selection::rects(sel, lay, &mut self.fonts)
                 .into_iter()
                 .map(|(x, y, w, h)| DecoRect::fill(x, y, w, h, self.theme.ui.selection_bg))
                 .collect(),
             None => Vec::new(),
         };
+        if let Some(state) = self.search.as_ref() {
+            for &(index, (x, y, w, h)) in &state.rects {
+                let color = if index == state.current {
+                    self.theme.ui.search_current_bg
+                } else {
+                    self.theme.ui.search_match_bg
+                };
+                highlight.push(DecoRect::fill(x, y, w, h, color));
+            }
+        }
 
         let band_usable = self.band.as_ref().is_some_and(|b| {
             b.width == avail_px
@@ -729,7 +926,13 @@ impl App {
                 && !b.needs_repaint(self.scroll_y, size.height as f32)
         });
         let size_tag = (size.width, size.height);
-        let interactive = self.drag.is_some() || self.sel_anchor.is_some() || self.overlay_mouse;
+        // An open search counts as interactive: every keystroke edits the
+        // highlights, so frames paint direct and the expensive band
+        // rebuild waits until the bar closes.
+        let interactive = self.drag.is_some()
+            || self.sel_anchor.is_some()
+            || self.overlay_mouse
+            || self.search.is_some();
         let mut direct: Option<Vec<u32>> = None;
         if !band_usable {
             let build_now = !interactive && self.pending_band_for == Some(size_tag);
@@ -768,6 +971,9 @@ impl App {
                 .view(self.scroll_y, size.height),
         };
 
+        let Some(gfx) = self.gfx.as_mut() else {
+            return;
+        };
         gfx.surface
             .resize(width, height)
             .expect("surface resize failed");
@@ -814,6 +1020,22 @@ impl App {
             if let Some((canvas, stale)) = self.sidebar_canvas.as_mut() {
                 let mut painter = Painter::new(canvas, &mut self.fonts, stale.take());
                 side.draw(&mut painter, &self.theme);
+                painter.composite(&mut buffer, size.width);
+                *stale = painter.dirty();
+            }
+        }
+        if let Some(state) = self.search.as_ref() {
+            let fits = self
+                .search_canvas
+                .as_ref()
+                .is_some_and(|(p, _)| p.width() == size.width && p.height() == size.height);
+            if !fits {
+                self.search_canvas =
+                    tiny_skia::Pixmap::new(size.width, size.height).map(|pixmap| (pixmap, None));
+            }
+            if let Some((canvas, stale)) = self.search_canvas.as_mut() {
+                let mut painter = Painter::new(canvas, &mut self.fonts, stale.take());
+                search::draw_bar(&mut painter, &self.theme, state, size.width as f32);
                 painter.composite(&mut buffer, size.width);
                 *stale = painter.dirty();
             }
@@ -934,6 +1156,7 @@ impl ApplicationHandler for App {
                         let result = overlay.key(&logical_key, ctrl);
                         self.overlay_result(result);
                     }
+                    _ if self.search_key(&logical_key, ctrl, shift) => {}
                     Some(Command::LineUp) if self.sidebar.is_some() => {
                         if let Some(side) = self.sidebar.as_mut() {
                             side.move_selection(-1);

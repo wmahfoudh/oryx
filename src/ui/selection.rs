@@ -11,8 +11,8 @@ use crate::layout::{metrics, LayoutDoc, TextRun};
 use crate::style::fonts::FontStore;
 
 /// Marker runs (bullets, numbers, checkmarks) carry this span sentinel and
-/// take no part in selection.
-const MARKER_SPAN: usize = usize::MAX;
+/// take no part in selection or search.
+pub(crate) const MARKER_SPAN: usize = usize::MAX;
 
 /// A caret position: index into `LayoutDoc::runs` plus a character offset
 /// within that run's text, from 0 to the run's character count inclusive.
