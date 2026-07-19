@@ -19,6 +19,44 @@ pub struct Config {
     /// Folder of the last opened file; the open dialog starts here when
     /// no file is open. Empty means never set.
     pub last_dir: String,
+    /// Window geometry from the last clean exit; None until the first
+    /// one. Must stay the last field so its table serializes after the
+    /// plain values.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window: Option<WindowState>,
+}
+
+/// Saved window geometry in physical pixels. The position is absent on
+/// Wayland, where the compositor owns placement. While the window is
+/// maximized the fields keep the floating geometry underneath, so
+/// unmaximizing after a restart lands where the user left it.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct WindowState {
+    pub width: u32,
+    pub height: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub x: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub y: Option<i32>,
+    pub maximized: bool,
+}
+
+impl WindowState {
+    /// The saved position, kept only while the window rectangle still
+    /// overlaps one of the monitor rectangles (x, y, width, height), so a
+    /// window last seen on an unplugged monitor falls back to the
+    /// platform's own placement.
+    pub fn position_on(&self, monitors: &[(i32, i32, u32, u32)]) -> Option<(i32, i32)> {
+        let (x, y) = (self.x?, self.y?);
+        let visible = monitors.iter().any(|&(mx, my, mw, mh)| {
+            x < mx + mw as i32
+                && x + self.width as i32 > mx
+                && y < my + mh as i32
+                && y + self.height as i32 > my
+        });
+        visible.then_some((x, y))
+    }
 }
 
 impl Default for Config {
@@ -30,6 +68,7 @@ impl Default for Config {
             body_size: 22.0,
             code_size: 20.0,
             last_dir: String::new(),
+            window: None,
         }
     }
 }
@@ -84,11 +123,99 @@ mod tests {
             body_size: 18.0,
             code_size: 16.0,
             last_dir: "/home/user/notes".to_string(),
+            window: None,
         };
         save_to(&path, &config);
         let loaded = load_from(&path);
         std::fs::remove_file(&path).unwrap();
         assert_eq!(loaded, config);
+    }
+
+    #[test]
+    fn window_state_round_trips() {
+        let path = temp_path("window.toml");
+        let config = Config {
+            window: Some(WindowState {
+                width: 1280,
+                height: 800,
+                x: Some(64),
+                y: Some(-32),
+                maximized: true,
+            }),
+            ..Config::default()
+        };
+        save_to(&path, &config);
+        let loaded = load_from(&path);
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(loaded, config);
+    }
+
+    #[test]
+    fn window_state_without_position_round_trips() {
+        let path = temp_path("window-nopos.toml");
+        let config = Config {
+            window: Some(WindowState {
+                width: 1024,
+                height: 768,
+                x: None,
+                y: None,
+                maximized: false,
+            }),
+            ..Config::default()
+        };
+        save_to(&path, &config);
+        let loaded = load_from(&path);
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(loaded, config);
+    }
+
+    #[test]
+    fn absent_window_table_gives_none() {
+        let path = temp_path("no-window.toml");
+        std::fs::write(&path, "theme = \"nord\"\n").unwrap();
+        let loaded = load_from(&path);
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(loaded.window, None);
+    }
+
+    fn saved(x: i32, y: i32) -> WindowState {
+        WindowState {
+            width: 800,
+            height: 600,
+            x: Some(x),
+            y: Some(y),
+            maximized: false,
+        }
+    }
+
+    #[test]
+    fn position_kept_when_window_touches_a_monitor() {
+        let monitors = [(0, 0, 1920, 1080), (1920, 0, 1920, 1080)];
+        assert_eq!(saved(100, 100).position_on(&monitors), Some((100, 100)));
+        assert_eq!(saved(2000, 200).position_on(&monitors), Some((2000, 200)));
+        // Partly off the left edge still counts as visible.
+        assert_eq!(saved(-400, 100).position_on(&monitors), Some((-400, 100)));
+    }
+
+    #[test]
+    fn position_dropped_when_window_is_off_screen() {
+        let monitors = [(0, 0, 1920, 1080)];
+        // Fully right of, below, and left of the only monitor.
+        assert_eq!(saved(2000, 100).position_on(&monitors), None);
+        assert_eq!(saved(100, 1200).position_on(&monitors), None);
+        assert_eq!(saved(-900, 100).position_on(&monitors), None);
+    }
+
+    #[test]
+    fn position_absent_without_saved_coordinates() {
+        let state = WindowState {
+            width: 800,
+            height: 600,
+            x: None,
+            y: None,
+            maximized: false,
+        };
+        assert_eq!(state.position_on(&[(0, 0, 1920, 1080)]), None);
     }
 
     #[test]

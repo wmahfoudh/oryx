@@ -10,7 +10,7 @@ use oryx::layout::{layout, metrics, DecoRect, LayoutDoc, ViewConfig};
 use oryx::paint;
 use oryx::paint::painter::Painter;
 use oryx::paint::scroll::{self, BandCache};
-use oryx::platform::config::{self, Config};
+use oryx::platform::config::{self, Config, WindowState};
 use oryx::style::fonts::FontStore;
 use oryx::style::theme::{self, Theme};
 use oryx::ui::help::Help;
@@ -22,7 +22,7 @@ use oryx::ui::sidebar::{self, Sidebar};
 use oryx::ui::theme_browser::ThemeBrowser;
 use oryx::ui::theme_editor::ThemeEditor;
 use winit::application::ApplicationHandler;
-use winit::dpi::PhysicalPosition;
+use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
@@ -860,9 +860,30 @@ impl ApplicationHandler for App {
         // X11 and Windows take the icon here; Wayland resolves it from the
         // desktop entry matching the app_id instead.
         let icon = winit::window::Icon::from_rgba(ICON_64.to_vec(), 64, 64).ok();
-        let attributes = Window::default_attributes()
+        let mut attributes = Window::default_attributes()
             .with_title(window_title(self.path.as_deref()))
             .with_window_icon(icon);
+        // Reopen as last closed: size, position when it still lands on a
+        // monitor, and the maximized state on top so unmaximizing falls
+        // back to the floating geometry. Wayland ignores the position.
+        if let Some(win) = self.config.window.filter(|w| w.width > 0 && w.height > 0) {
+            attributes = attributes.with_inner_size(PhysicalSize::new(win.width, win.height));
+            let monitors: Vec<(i32, i32, u32, u32)> = event_loop
+                .available_monitors()
+                .map(|m| {
+                    (
+                        m.position().x,
+                        m.position().y,
+                        m.size().width,
+                        m.size().height,
+                    )
+                })
+                .collect();
+            if let Some((x, y)) = win.position_on(&monitors) {
+                attributes = attributes.with_position(PhysicalPosition::new(x, y));
+            }
+            attributes = attributes.with_maximized(win.maximized);
+        }
         // Wayland compositors resolve the window icon from a desktop entry
         // matching this app_id; the same call sets WM_CLASS on X11.
         #[cfg(target_os = "linux")]
@@ -1008,14 +1029,52 @@ impl ApplicationHandler for App {
                     }
                 }
             },
-            WindowEvent::Resized(_) => {
+            WindowEvent::Resized(size) => {
                 if let Some(gfx) = self.gfx.as_ref() {
+                    // Track only the floating geometry; a maximized or
+                    // restored-maximized window must not overwrite it.
+                    if !gfx.window.is_maximized() {
+                        let win = self.config.window.get_or_insert_with(WindowState::default);
+                        win.width = size.width;
+                        win.height = size.height;
+                    }
                     gfx.window.request_redraw();
+                }
+            }
+            WindowEvent::Moved(position) => {
+                if let Some(gfx) = self.gfx.as_ref() {
+                    if !gfx.window.is_maximized() {
+                        let win = self.config.window.get_or_insert_with(WindowState::default);
+                        win.x = Some(position.x);
+                        win.y = Some(position.y);
+                    }
                 }
             }
             WindowEvent::RedrawRequested => self.redraw(),
             _ => {}
         }
+    }
+
+    /// Both exit paths, the close button and the quit key, land here.
+    /// One save stamps the maximized flag; when floating, a direct query
+    /// beats the tracked values for the final geometry. Wayland reports
+    /// no position, so x and y keep their earlier state there.
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        let Some(gfx) = self.gfx.as_ref() else { return };
+        let maximized = gfx.window.is_maximized();
+        let mut win = self.config.window.unwrap_or_default();
+        if !maximized {
+            let size = gfx.window.inner_size();
+            win.width = size.width;
+            win.height = size.height;
+            if let Ok(pos) = gfx.window.outer_position() {
+                win.x = Some(pos.x);
+                win.y = Some(pos.y);
+            }
+        }
+        win.maximized = maximized;
+        self.config.window = Some(win);
+        config::save(&self.config);
     }
 }
 
