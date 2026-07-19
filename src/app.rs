@@ -28,6 +28,9 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{CursorIcon, Window, WindowId};
 
+/// The window icon raster produced by the build script.
+const ICON_64: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/icon_64.rgba"));
+
 pub fn run(path: Option<PathBuf>, theme_name: Option<String>) -> anyhow::Result<()> {
     let document = match &path {
         Some(p) => load::open(p)?,
@@ -840,7 +843,12 @@ impl ApplicationHandler for App {
         if self.gfx.is_some() {
             return;
         }
-        let attributes = Window::default_attributes().with_title("oryx");
+        // X11 and Windows take the icon here; Wayland resolves it from the
+        // desktop entry matching the app_id instead.
+        let icon = winit::window::Icon::from_rgba(ICON_64.to_vec(), 64, 64).ok();
+        let attributes = Window::default_attributes()
+            .with_title("oryx")
+            .with_window_icon(icon);
         // Wayland compositors resolve the window icon from a desktop entry
         // matching this app_id; the same call sets WM_CLASS on X11.
         #[cfg(target_os = "linux")]
@@ -994,5 +1002,15 @@ impl ApplicationHandler for App {
             WindowEvent::RedrawRequested => self.redraw(),
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn icon_pipeline_produces_rgba_and_ico() {
+        assert_eq!(super::ICON_64.len(), 64 * 64 * 4);
+        let ico: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/oryx.ico"));
+        assert_eq!(&ico[..4], &[0, 0, 1, 0], "ICO header magic");
     }
 }
