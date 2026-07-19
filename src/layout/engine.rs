@@ -334,9 +334,11 @@ pub fn layout(
         if block.quote_depth > 0 {
             let continues = prev_quote_depth > 0 && prev_alert == block.alert;
             // The previous block's trailing space belongs to the region
-            // too, or the panels leave a seam between them.
+            // too, plus one pixel of overlap into its panel: rasterization
+            // rounds abutting edges independently and a shared fractional
+            // edge can otherwise leave an uncovered row.
             let top = if continues {
-                cursor - gap - prev_space_below
+                cursor - gap - prev_space_below - 1.0
             } else {
                 region_top
             };

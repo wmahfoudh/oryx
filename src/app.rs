@@ -222,6 +222,7 @@ impl App {
     fn run_command(&mut self, cmd: Command, event_loop: &ActiveEventLoop) {
         match cmd {
             Command::OpenFile => self.open_dialog(),
+            Command::Reload => self.reload(),
             Command::Sidebar => self.toggle_sidebar(),
             Command::Help => self.toggle_help(),
             Command::Settings => self.toggle_settings(),
@@ -423,6 +424,17 @@ impl App {
             side.set_current(&path);
         }
         self.request_redraw();
+    }
+
+    /// Re-reads the open file from disk, keeping the scroll position, for
+    /// documents being edited in parallel.
+    fn reload(&mut self) {
+        let Some(path) = self.path.clone() else {
+            return;
+        };
+        let scroll = self.scroll_y;
+        self.open_file(&path, false);
+        self.scroll_y = scroll;
     }
 
     /// Native open dialog filtered to the recognized extensions.

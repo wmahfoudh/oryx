@@ -8,6 +8,7 @@ use winit::keyboard::{Key, NamedKey};
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Command {
     OpenFile,
+    Reload,
     Sidebar,
     Help,
     Settings,
@@ -29,8 +30,9 @@ pub enum Command {
 
 impl Command {
     /// Every variant; the coverage test checks each one against the table.
-    pub const ALL: [Command; 18] = [
+    pub const ALL: [Command; 19] = [
         Command::OpenFile,
+        Command::Reload,
         Command::Sidebar,
         Command::Help,
         Command::Settings,
@@ -96,6 +98,14 @@ pub const SHORTCUTS: &[Shortcut] = &[
         keys: "F1",
         action: "Shortcuts help",
         bindings: &[(Binding::Named(NamedKey::F1), Command::Help)],
+    },
+    Shortcut {
+        keys: "F5 / Ctrl+R",
+        action: "Reload from disk",
+        bindings: &[
+            (Binding::Named(NamedKey::F5), Command::Reload),
+            (Binding::Ctrl("r"), Command::Reload),
+        ],
     },
     Shortcut {
         keys: "Ctrl+Plus / Ctrl+Minus",
@@ -275,6 +285,16 @@ mod tests {
         let space = Key::Named(NamedKey::Space);
         assert_eq!(command(&space, false, false), Some(Command::PageDown));
         assert_eq!(command(&space, false, true), Some(Command::PageUp));
+    }
+
+    #[test]
+    fn reload_matches_f5_and_ctrl_r() {
+        assert_eq!(
+            command(&Key::Named(NamedKey::F5), false, false),
+            Some(Command::Reload)
+        );
+        assert_eq!(command(&chr("r"), true, false), Some(Command::Reload));
+        assert_eq!(command(&chr("r"), false, false), None);
     }
 
     #[test]

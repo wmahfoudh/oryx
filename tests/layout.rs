@@ -446,6 +446,40 @@ fn consecutive_quoted_blocks_tile_without_gap() {
 }
 
 #[test]
+fn quote_region_paints_without_seam() {
+    let t = Theme::default_dark();
+    // Fractional zooms move the panel junction across sub-pixel positions;
+    // independent edge rounding used to leave an uncovered row at some of
+    // them, so the whole sweep must paint solid.
+    for zoom in [1.0, 1.03, 1.07, 1.13, 1.17, 1.23, 1.29] {
+        let doc = markdown::parse("# Head\n\ntext\n\n> [!CAUTION]\n> one\n>\n> two paragraphs");
+        let mut config = cfg();
+        config.zoom = zoom;
+        let mut media = MediaCache::new(PathBuf::from("."));
+        let l = layout(&doc, &t, &mut fonts(), &mut media, &config, 800.0);
+        let panels: Vec<_> = l
+            .rects
+            .iter()
+            .filter(|r| r.color == t.blocks.quote_bg)
+            .collect();
+        assert_eq!(panels.len(), 2, "zoom {zoom}");
+        let top = panels.iter().map(|r| r.y).fold(f32::MAX, f32::min);
+        let bottom = panels.iter().map(|r| r.y + r.height).fold(0.0, f32::max);
+        let pixels = oryx::paint::band(&l, &t, &mut fonts(), &mut media, &[], 0.0, 800, 900);
+        let bg = t.surface.background;
+        let bgpx = ((bg.r as u32) << 16) | ((bg.g as u32) << 8) | bg.b as u32;
+        let x = (0.08 * 800.0) as usize + 30;
+        for row in (top.ceil() as usize + 1)..(bottom.floor() as usize - 1) {
+            assert_ne!(
+                pixels[row * 800 + x],
+                bgpx,
+                "background shows through at zoom {zoom}, row {row}"
+            );
+        }
+    }
+}
+
+#[test]
 fn alert_titles_bold_and_colored_per_kind() {
     let theme = Theme::default_dark();
     for (tag, title_text, color) in [
