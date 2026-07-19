@@ -156,6 +156,37 @@ fn code_block_panel_and_highlighting() {
 }
 
 #[test]
+fn code_lines_wrap_inside_the_panel() {
+    let src = "```rust\n// this comment is long enough that it must wrap into more than one visual line at a narrow width\nlet x = 1;\n```";
+    let l = lay(src, 420.0);
+    let t = Theme::default_dark();
+    let panel = l
+        .rects
+        .iter()
+        .find(|r| r.color == t.blocks.code_bg)
+        .unwrap();
+    let right = panel.x + panel.width;
+    for r in l.runs.iter().filter(|r| r.family == CODE_FAMILY) {
+        assert!(
+            r.x + r.width <= right + 0.5,
+            "run overflows the panel: {:?}",
+            r.text
+        );
+    }
+    let rows: std::collections::BTreeSet<i64> = l.runs.iter().map(|r| r.y as i64).collect();
+    assert!(rows.len() >= 3, "expected wrapped rows, got {rows:?}");
+    let bottom = l
+        .runs
+        .iter()
+        .map(|r| r.y + 1.5 * r.size)
+        .fold(0.0, f32::max);
+    assert!(
+        panel.y + panel.height >= bottom - 0.5,
+        "panel covers the wrapped lines"
+    );
+}
+
+#[test]
 fn inline_code_gets_pill() {
     let l = lay("with `mono` inside", 800.0);
     let t = Theme::default_dark();

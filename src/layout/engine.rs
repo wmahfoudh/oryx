@@ -1721,24 +1721,19 @@ fn layout_code(
     let size = cfg.code_size * cfg.zoom;
     let line_height = metrics::LINE_HEIGHT * size;
     let pad = 12.0 * cfg.zoom;
-    let height = lines.len() as f32 * line_height + 2.0 * pad;
-    let blocks = &theme.blocks;
-    let radius = metrics::CORNER_RADIUS * cfg.zoom;
-    out.rects.push(
-        DecoRect::fill(x0, y0, content_width, height, blocks.code_bg).rounded(radius, radius),
-    );
-    out.rects.push(
-        DecoRect::fill(x0, y0, content_width, height, blocks.code_border)
-            .rounded(radius, radius)
-            .stroked((1.0 * cfg.zoom).max(1.0)),
-    );
+    // Long lines wrap inside the panel instead of overflowing it, so the
+    // panel height follows the shaped lines.
+    let wrap_width = (content_width - 2.0 * pad).max(40.0);
+    let rects_mark = out.rects.len();
     let empty: Vec<(Range<usize>, SyntaxRole)> = Vec::new();
+    let mut y = y0 + pad;
     for (i, line) in lines.iter().enumerate() {
         if line.is_empty() {
+            y += line_height;
             continue;
         }
         let segments = highlights.get(i).unwrap_or(&empty);
-        shape_code_line(
+        y += shape_code_line(
             fonts,
             theme,
             cfg,
@@ -1746,12 +1741,25 @@ fn layout_code(
             segments,
             block_index,
             x0 + pad,
-            y0 + pad + i as f32 * line_height,
+            y,
             size,
             line_height,
+            wrap_width,
             out,
         );
     }
+    let height = y - y0 + pad;
+    let blocks = &theme.blocks;
+    let radius = metrics::CORNER_RADIUS * cfg.zoom;
+    out.rects.splice(
+        rects_mark..rects_mark,
+        [
+            DecoRect::fill(x0, y0, content_width, height, blocks.code_bg).rounded(radius, radius),
+            DecoRect::fill(x0, y0, content_width, height, blocks.code_border)
+                .rounded(radius, radius)
+                .stroked((1.0 * cfg.zoom).max(1.0)),
+        ],
+    );
     height
 }
 
@@ -1767,8 +1775,9 @@ fn shape_code_line(
     y0: f32,
     size: f32,
     line_height: f32,
+    wrap_width: f32,
     out: &mut LayoutDoc,
-) {
+) -> f32 {
     let whole_line = [(0..line.len(), SyntaxRole::Plain)];
     let segments: &[(Range<usize>, SyntaxRole)] = if segments.is_empty() {
         &whole_line
@@ -1776,7 +1785,7 @@ fn shape_code_line(
         segments
     };
     let mut buffer = Buffer::new(&mut fonts.font_system, Metrics::new(size, line_height));
-    buffer.set_size(&mut fonts.font_system, None, None);
+    buffer.set_size(&mut fonts.font_system, Some(wrap_width), None);
     let rich: Vec<(&str, Attrs)> = segments
         .iter()
         .enumerate()
@@ -1796,7 +1805,9 @@ fn shape_code_line(
         None,
     );
     buffer.shape_until_scroll(&mut fonts.font_system, false);
+    let mut height = 0.0_f32;
     for run in buffer.layout_runs() {
+        height = height.max(run.line_top + line_height);
         let line_text = buffer.lines[run.line_i].text();
         let glyphs = trim_trailing_spaces(run.glyphs, line_text);
         let mut g = 0;
@@ -1829,6 +1840,7 @@ fn shape_code_line(
             g = end;
         }
     }
+    height.max(line_height)
 }
 
 fn role_color(theme: &Theme, role: SyntaxRole) -> Rgba {
