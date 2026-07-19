@@ -446,6 +446,80 @@ fn consecutive_quoted_blocks_tile_without_gap() {
 }
 
 #[test]
+fn footnote_reference_superscript_and_definitions_last() {
+    let t = Theme::default_dark();
+    // The definition sits mid-document; layout must still render it last.
+    let l = lay("body text[^n]\n\n[^n]: the note itself\n\nmore", 800.0);
+    let reference = l
+        .runs
+        .iter()
+        .find(|r| r.link.as_deref() == Some("footnote:n"))
+        .expect("reference run");
+    assert!(
+        (reference.size - 22.0 * 0.7).abs() < 0.5,
+        "superscript size"
+    );
+    assert_eq!(reference.color, t.text.link);
+    let body = l.runs.iter().find(|r| r.text.contains("body")).unwrap();
+    assert!(
+        reference.baseline < body.baseline - 2.0,
+        "reference baseline raised"
+    );
+    let note = l
+        .runs
+        .iter()
+        .find(|r| r.text.contains("the note itself"))
+        .expect("definition text");
+    let more = l.runs.iter().find(|r| r.text == "more").unwrap();
+    assert!(note.y > more.y, "definitions collect at the end");
+    let anchor = l.anchor_y("footnote:n").expect("footnote anchor");
+    assert!((anchor - note.y).abs() < 60.0);
+    assert!(
+        l.rects
+            .iter()
+            .any(|r| r.color == t.blocks.rule && r.y > more.y && r.y < note.y),
+        "rule above the definitions"
+    );
+}
+
+#[test]
+fn math_spans_style_and_scripts() {
+    let t = Theme::default_dark();
+    let l = lay("energy $E=mc^2$ inline", 800.0);
+    let m = l
+        .runs
+        .iter()
+        .find(|r| r.text.contains("E=mc"))
+        .expect("math run");
+    assert_eq!(m.color, t.text.math);
+    assert_eq!(m.family, CODE_FAMILY);
+    assert!(m.italic);
+    let sup = l
+        .runs
+        .iter()
+        .find(|r| r.text == "2" && r.size < m.size)
+        .expect("superscript run");
+    assert!(sup.baseline < m.baseline - 1.0, "superscript raised");
+    assert_eq!(sup.color, t.text.math);
+}
+
+#[test]
+fn math_block_centers_in_panel() {
+    let t = Theme::default_dark();
+    let l = lay("$$E=mc^2$$", 800.0);
+    let panel = l
+        .rects
+        .iter()
+        .find(|r| r.color == t.blocks.code_bg)
+        .expect("math panel");
+    let min_x = l.runs.iter().map(|r| r.x).fold(f32::MAX, f32::min);
+    let max_x = l.runs.iter().map(|r| r.x + r.width).fold(0.0, f32::max);
+    let mid = (min_x + max_x) / 2.0;
+    assert!((mid - 400.0).abs() < 30.0, "centered, mid={mid}");
+    assert!(panel.width > max_x - min_x, "panel wraps the formula");
+}
+
+#[test]
 fn quote_region_paints_without_seam() {
     let t = Theme::default_dark();
     // Fractional zooms move the panel junction across sub-pixel positions;

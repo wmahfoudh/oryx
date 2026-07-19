@@ -135,6 +135,21 @@ An unreachable remote source keeps the alt placeholder:
 
 ![unreachable badge](https://nonexistent.invalid/badge.svg)
 
+## Footnotes and Math
+
+Footnote references[^1] render superscript in the link color and click-jump
+to their definition; here is a second one[^note] with a word label. The
+definitions collect at the end of the document under a rule, wherever they
+were written.
+
+Inline math renders as a styled literal with simple scripts: $E=mc^2$,
+$a_i + b^{10}$, and $x_{max}$. Block math centers in a panel:
+
+$$\sum_{i=1}^{n} i = n(n+1)/2$$
+
+[^1]: The first footnote definition, written mid-document.
+[^note]: The second definition, with the label rendered as its marker.
+
 ## Links
 
 External links open in the system browser: the

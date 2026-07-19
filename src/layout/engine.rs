@@ -124,9 +124,9 @@ impl LayoutDoc {
         })
     }
 
-    /// Y position of the heading matching a `#anchor` link target.
+    /// Y position of a `#anchor` link target or a `footnote:` reference.
     pub fn anchor_y(&self, target: &str) -> Option<f32> {
-        let slug = target.strip_prefix('#')?;
+        let slug = target.strip_prefix('#').unwrap_or(target);
         self.anchors
             .iter()
             .find(|(s, _)| s == slug)
@@ -164,7 +164,29 @@ pub fn layout(
     let mut prev_is_list = false;
     let mut prev_space_below = 0.0_f32;
 
-    for (block_index, block) in doc.blocks.iter().enumerate() {
+    // Footnote definitions collect at the document end under a rule,
+    // wherever the source declared them. Model indices stay untouched so
+    // selection and copy keep their mapping.
+    let (body_order, note_order): (Vec<usize>, Vec<usize>) = (0..doc.blocks.len())
+        .partition(|&i| !matches!(doc.blocks[i].kind, BlockKind::FootnoteDef { .. }));
+    let notes_start = body_order.len();
+    let has_notes = !note_order.is_empty();
+    let order: Vec<usize> = body_order.into_iter().chain(note_order).collect();
+
+    for (position, &block_index) in order.iter().enumerate() {
+        let block = &doc.blocks[block_index];
+        if has_notes && position == notes_start && !first {
+            let size = cfg.body_size * cfg.zoom;
+            cursor += metrics::space_above(None, size);
+            out.rects.push(DecoRect::fill(
+                margin,
+                cursor,
+                content_width,
+                (1.0 * cfg.zoom).max(1.0),
+                theme.blocks.rule,
+            ));
+            cursor += (1.0 * cfg.zoom).max(1.0);
+        }
         let heading = match &block.kind {
             BlockKind::Heading { level, .. } => Some(*level),
             _ => None,
@@ -183,8 +205,9 @@ pub fn layout(
             BlockKind::Rule
             | BlockKind::Table { .. }
             | BlockKind::Image { .. }
+            | BlockKind::MathBlock { .. }
             | BlockKind::Frontmatter { .. } => cfg.body_size * cfg.zoom,
-            _ => continue,
+            BlockKind::FootnoteDef { .. } => 0.85 * cfg.body_size * cfg.zoom,
         };
         let mut gap = 0.0;
         if first {
@@ -324,7 +347,33 @@ pub fn layout(
                 avail,
                 &mut out,
             ),
-            _ => 0.0,
+            BlockKind::MathBlock { tex } => layout_math_block(
+                fonts,
+                theme,
+                cfg,
+                tex,
+                block_index,
+                x_base,
+                cursor,
+                avail,
+                &mut out,
+            ),
+            BlockKind::FootnoteDef { label, spans } => {
+                out.anchors.push((format!("footnote:{label}"), cursor));
+                layout_footnote_def(
+                    fonts,
+                    theme,
+                    cfg,
+                    label,
+                    spans,
+                    base_size,
+                    block_index,
+                    x_base,
+                    cursor,
+                    avail,
+                    &mut out,
+                )
+            }
         };
 
         // Quote decoration wraps the block, extending over the gap when the
@@ -408,10 +457,16 @@ struct SpanStyle {
     link: Option<String>,
     /// Background pill color for inline code.
     pill: Option<Rgba>,
+    /// Baseline shift: positive raises (superscripts), negative lowers.
+    rise: f32,
 }
 
 fn span_style(theme: &Theme, cfg: &ViewConfig, base: &BlockStyle, span: &Span) -> SpanStyle {
     let code = span.code;
+    let footnote = span
+        .link
+        .as_deref()
+        .is_some_and(|l| l.starts_with("footnote:"));
     let color = if span.link.is_some() {
         theme.text.link
     } else if span.math {
@@ -429,27 +484,34 @@ fn span_style(theme: &Theme, cfg: &ViewConfig, base: &BlockStyle, span: &Span) -
     } else {
         base.color
     };
+    let mut size = if code || span.math {
+        cfg.code_size * cfg.zoom * (base.size / (cfg.body_size * cfg.zoom))
+    } else {
+        base.size
+    };
+    let mut rise = 0.0;
+    if footnote {
+        size *= 0.7;
+        rise = 0.3 * base.size;
+    }
     SpanStyle {
         family: if code || span.math {
             cfg.code_family.clone()
         } else {
             cfg.body_family.clone()
         },
-        size: if code || span.math {
-            cfg.code_size * cfg.zoom * (base.size / (cfg.body_size * cfg.zoom))
-        } else {
-            base.size
-        },
+        size,
         weight: if base.bold || span.bold {
             Weight::BOLD
         } else {
             Weight::NORMAL
         },
-        italic: span.italic,
+        italic: span.italic || span.math,
         strike: span.strike,
         color,
         link: span.link.clone(),
         pill: code.then_some(theme.text.inline_code_bg),
+        rise,
     }
 }
 
@@ -468,23 +530,49 @@ fn shape_block(
     out: &mut LayoutDoc,
 ) -> f32 {
     let line_height = metrics::LINE_HEIGHT * base.size;
-    let styles: Vec<SpanStyle> = spans
-        .iter()
-        .map(|s| span_style(theme, cfg, base, s))
-        .collect();
+    // Math literals expand into script segments at this point only; the
+    // model keeps the raw TeX. Each expanded piece remembers its model
+    // span so selection and copy still map to the source.
+    let mut shaped: Vec<Span> = Vec::new();
+    let mut origins: Vec<usize> = Vec::new();
+    let mut styles: Vec<SpanStyle> = Vec::new();
+    for (si, span) in spans.iter().enumerate() {
+        if span.math && span.text != "\n" {
+            for (text, script) in math_scripts(&tex_symbols(&span.text)) {
+                let mut piece = span.clone();
+                piece.text = text;
+                let mut style = span_style(theme, cfg, base, &piece);
+                if script != Script::Normal {
+                    style.rise = match script {
+                        Script::Sup => 0.3 * style.size,
+                        _ => -0.12 * style.size,
+                    };
+                    style.size *= 0.7;
+                }
+                shaped.push(piece);
+                origins.push(si);
+                styles.push(style);
+            }
+        } else {
+            styles.push(span_style(theme, cfg, base, span));
+            shaped.push(span.clone());
+            origins.push(si);
+        }
+    }
 
     let mut height = 0.0_f32;
     let mut segment: Vec<usize> = Vec::new();
     let mut i = 0;
-    while i <= spans.len() {
-        let is_break = i == spans.len() || spans[i].text == "\n";
+    while i <= shaped.len() {
+        let is_break = i == shaped.len() || shaped[i].text == "\n";
         if is_break {
             if !segment.is_empty() {
                 height += shape_segment(
                     fonts,
                     cfg,
-                    spans,
+                    &shaped,
                     &styles,
+                    &origins,
                     &segment,
                     base,
                     x0,
@@ -494,7 +582,7 @@ fn shape_block(
                     out,
                 );
                 segment.clear();
-            } else if i < spans.len() {
+            } else if i < shaped.len() {
                 height += line_height;
             }
         } else {
@@ -511,6 +599,7 @@ fn shape_segment(
     cfg: &ViewConfig,
     spans: &[Span],
     styles: &[SpanStyle],
+    origins: &[usize],
     segment: &[usize],
     base: &BlockStyle,
     x0: f32,
@@ -567,8 +656,8 @@ fn shape_segment(
             let st = &styles[span_index];
             let x = x0 + first.x;
             let width = last.x + last.w - first.x;
-            let y = y0 + run.line_top;
-            let baseline = y0 + run.line_y;
+            let y = y0 + run.line_top - st.rise;
+            let baseline = y0 + run.line_y - st.rise;
             if let Some(pill) = st.pill {
                 let radius = metrics::PILL_RADIUS * cfg.zoom;
                 out.rects.push(
@@ -595,7 +684,7 @@ fn shape_segment(
                 color: st.color,
                 link: st.link.clone(),
                 block: base.block_index,
-                span: span_index,
+                span: origins[span_index],
             });
             if st.strike {
                 out.rects.push(DecoRect::fill(
@@ -924,6 +1013,166 @@ fn layout_image(
     box_h
 }
 
+/// Vertical role of one piece of a math literal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Script {
+    Normal,
+    Sup,
+    Sub,
+}
+
+/// TeX command to Unicode symbol, sorted by name for binary search.
+static TEX_SYMBOLS: &[(&str, &str)] = &[
+    ("Delta", "\u{0394}"),
+    ("Gamma", "\u{0393}"),
+    ("Lambda", "\u{039B}"),
+    ("Leftarrow", "\u{21D0}"),
+    ("Omega", "\u{03A9}"),
+    ("Phi", "\u{03A6}"),
+    ("Pi", "\u{03A0}"),
+    ("Psi", "\u{03A8}"),
+    ("Rightarrow", "\u{21D2}"),
+    ("Sigma", "\u{03A3}"),
+    ("Theta", "\u{0398}"),
+    ("Xi", "\u{039E}"),
+    ("alpha", "\u{03B1}"),
+    ("approx", "\u{2248}"),
+    ("beta", "\u{03B2}"),
+    ("cap", "\u{2229}"),
+    ("cdot", "\u{22C5}"),
+    ("cdots", "\u{22EF}"),
+    ("chi", "\u{03C7}"),
+    ("circ", "\u{2218}"),
+    ("cup", "\u{222A}"),
+    ("delta", "\u{03B4}"),
+    ("div", "\u{00F7}"),
+    ("emptyset", "\u{2205}"),
+    ("epsilon", "\u{03B5}"),
+    ("equiv", "\u{2261}"),
+    ("eta", "\u{03B7}"),
+    ("exists", "\u{2203}"),
+    ("forall", "\u{2200}"),
+    ("gamma", "\u{03B3}"),
+    ("geq", "\u{2265}"),
+    ("in", "\u{2208}"),
+    ("infty", "\u{221E}"),
+    ("int", "\u{222B}"),
+    ("iota", "\u{03B9}"),
+    ("kappa", "\u{03BA}"),
+    ("lambda", "\u{03BB}"),
+    ("langle", "\u{27E8}"),
+    ("ldots", "\u{2026}"),
+    ("leftarrow", "\u{2190}"),
+    ("leftrightarrow", "\u{2194}"),
+    ("leq", "\u{2264}"),
+    ("mp", "\u{2213}"),
+    ("mu", "\u{03BC}"),
+    ("nabla", "\u{2207}"),
+    ("neg", "\u{00AC}"),
+    ("neq", "\u{2260}"),
+    ("notin", "\u{2209}"),
+    ("nu", "\u{03BD}"),
+    ("oint", "\u{222E}"),
+    ("omega", "\u{03C9}"),
+    ("oplus", "\u{2295}"),
+    ("otimes", "\u{2297}"),
+    ("partial", "\u{2202}"),
+    ("phi", "\u{03C6}"),
+    ("pi", "\u{03C0}"),
+    ("pm", "\u{00B1}"),
+    ("prod", "\u{220F}"),
+    ("propto", "\u{221D}"),
+    ("psi", "\u{03C8}"),
+    ("rangle", "\u{27E9}"),
+    ("rho", "\u{03C1}"),
+    ("rightarrow", "\u{2192}"),
+    ("sigma", "\u{03C3}"),
+    ("sim", "\u{223C}"),
+    ("sqrt", "\u{221A}"),
+    ("subset", "\u{2282}"),
+    ("subseteq", "\u{2286}"),
+    ("sum", "\u{2211}"),
+    ("supset", "\u{2283}"),
+    ("supseteq", "\u{2287}"),
+    ("tau", "\u{03C4}"),
+    ("theta", "\u{03B8}"),
+    ("times", "\u{00D7}"),
+    ("to", "\u{2192}"),
+    ("upsilon", "\u{03C5}"),
+    ("vee", "\u{2228}"),
+    ("wedge", "\u{2227}"),
+    ("xi", "\u{03BE}"),
+    ("zeta", "\u{03B6}"),
+];
+
+/// Replaces common TeX commands with their Unicode symbols; unknown
+/// commands stay literal.
+fn tex_symbols(tex: &str) -> String {
+    let chars: Vec<char> = tex.chars().collect();
+    let mut out = String::with_capacity(tex.len());
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '\\' {
+            let mut end = i + 1;
+            while end < chars.len() && chars[end].is_ascii_alphabetic() {
+                end += 1;
+            }
+            if end > i + 1 {
+                let name: String = chars[i + 1..end].iter().collect();
+                if let Ok(hit) = TEX_SYMBOLS.binary_search_by_key(&name.as_str(), |(n, _)| n) {
+                    out.push_str(TEX_SYMBOLS[hit].1);
+                    i = end;
+                    continue;
+                }
+            }
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out
+}
+
+/// Splits a TeX literal into script segments: `^` and `_` bind the next
+/// character or braced group, as in TeX. Anything unmatched stays literal.
+fn math_scripts(tex: &str) -> Vec<(String, Script)> {
+    fn flush(normal: &mut String, out: &mut Vec<(String, Script)>) {
+        if !normal.is_empty() {
+            out.push((std::mem::take(normal), Script::Normal));
+        }
+    }
+    let chars: Vec<char> = tex.chars().collect();
+    let mut out = Vec::new();
+    let mut normal = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '^' || c == '_' {
+            let script = if c == '^' { Script::Sup } else { Script::Sub };
+            match chars.get(i + 1) {
+                Some('{') => {
+                    if let Some(close) = chars[i + 2..].iter().position(|&ch| ch == '}') {
+                        flush(&mut normal, &mut out);
+                        out.push((chars[i + 2..i + 2 + close].iter().collect(), script));
+                        i += close + 3;
+                        continue;
+                    }
+                }
+                Some(&arg) => {
+                    flush(&mut normal, &mut out);
+                    out.push((arg.to_string(), script));
+                    i += 2;
+                    continue;
+                }
+                None => {}
+            }
+        }
+        normal.push(c);
+        i += 1;
+    }
+    flush(&mut normal, &mut out);
+    out
+}
+
 fn alert_title(kind: AlertKind) -> &'static str {
     match kind {
         AlertKind::Note => "Note",
@@ -996,6 +1245,119 @@ fn layout_frontmatter(
         ],
     );
     box_h
+}
+
+/// Block math: the literal centered in a flush panel on the code
+/// background, scripts rendered like inline math.
+#[allow(clippy::too_many_arguments)]
+fn layout_math_block(
+    fonts: &mut FontStore,
+    theme: &Theme,
+    cfg: &ViewConfig,
+    tex: &str,
+    block_index: usize,
+    x0: f32,
+    y0: f32,
+    avail: f32,
+    out: &mut LayoutDoc,
+) -> f32 {
+    let pad = 12.0 * cfg.zoom;
+    let radius = metrics::CORNER_RADIUS * cfg.zoom;
+    let span = Span {
+        text: tex.trim().to_string(),
+        math: true,
+        ..Span::default()
+    };
+    let base = BlockStyle {
+        size: cfg.body_size * cfg.zoom,
+        color: theme.text.math,
+        bold: false,
+        block_index,
+    };
+    let runs_mark = out.runs.len();
+    let rects_mark = out.rects.len();
+    let text_h = shape_block(
+        fonts,
+        theme,
+        cfg,
+        &[span],
+        &base,
+        x0 + pad,
+        y0 + pad,
+        avail - 2.0 * pad,
+        out,
+    );
+    let min_x = out.runs[runs_mark..]
+        .iter()
+        .map(|r| r.x)
+        .fold(f32::MAX, f32::min);
+    let max_x = out.runs[runs_mark..]
+        .iter()
+        .map(|r| r.x + r.width)
+        .fold(0.0, f32::max);
+    if max_x > min_x {
+        let dx = (x0 + avail / 2.0) - (min_x + max_x) / 2.0;
+        for run in &mut out.runs[runs_mark..] {
+            run.x += dx;
+        }
+    }
+    let box_h = text_h + 2.0 * pad;
+    out.rects.splice(
+        rects_mark..rects_mark,
+        [DecoRect::fill(x0, y0, avail, box_h, theme.blocks.code_bg).rounded(radius, radius)],
+    );
+    box_h
+}
+
+/// One footnote definition: the label as a small raised marker in link
+/// color, the note text indented beside it.
+#[allow(clippy::too_many_arguments)]
+fn layout_footnote_def(
+    fonts: &mut FontStore,
+    theme: &Theme,
+    cfg: &ViewConfig,
+    label: &str,
+    spans: &[Span],
+    base_size: f32,
+    block_index: usize,
+    x0: f32,
+    y0: f32,
+    avail: f32,
+    out: &mut LayoutDoc,
+) -> f32 {
+    let marker = [Span::plain(format!("{label}."))];
+    let marker_base = BlockStyle {
+        size: 0.7 * base_size,
+        color: theme.text.link,
+        bold: true,
+        block_index,
+    };
+    let runs_mark = out.runs.len();
+    shape_block(fonts, theme, cfg, &marker, &marker_base, x0, y0, avail, out);
+    let marker_w = out.runs[runs_mark..]
+        .iter()
+        .map(|r| r.x + r.width)
+        .fold(x0, f32::max)
+        - x0;
+    let indent = (marker_w + 8.0 * cfg.zoom).max(metrics::INDENT * cfg.zoom);
+    let base = BlockStyle {
+        size: base_size,
+        color: theme.text.body,
+        bold: false,
+        block_index,
+    };
+    let text_h = shape_block(
+        fonts,
+        theme,
+        cfg,
+        spans,
+        &base,
+        x0 + indent,
+        y0,
+        (avail - indent).max(40.0),
+        out,
+    );
+    text_h.max(metrics::LINE_HEIGHT * base_size)
 }
 
 /// Shapes marker text at origin; the caller places it. Returns total width.
@@ -1214,4 +1576,61 @@ fn trim_trailing_spaces<'a>(
         }
     }
     &glyphs[..end]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn seg(text: &str, script: Script) -> (String, Script) {
+        (text.to_string(), script)
+    }
+
+    #[test]
+    fn math_scripts_split_sup_and_sub() {
+        assert_eq!(
+            math_scripts("x^2"),
+            [seg("x", Script::Normal), seg("2", Script::Sup)]
+        );
+        assert_eq!(
+            math_scripts("a_i"),
+            [seg("a", Script::Normal), seg("i", Script::Sub)]
+        );
+        assert_eq!(
+            math_scripts("x^{10}+y"),
+            [
+                seg("x", Script::Normal),
+                seg("10", Script::Sup),
+                seg("+y", Script::Normal)
+            ]
+        );
+        assert_eq!(
+            math_scripts("E=mc^2"),
+            [seg("E=mc", Script::Normal), seg("2", Script::Sup)]
+        );
+    }
+
+    #[test]
+    fn tex_symbols_replace_known_commands() {
+        assert_eq!(tex_symbols(r"\sum_{i=1}^{n}"), "\u{2211}_{i=1}^{n}");
+        assert_eq!(tex_symbols(r"\alpha + \beta"), "\u{03B1} + \u{03B2}");
+        assert_eq!(tex_symbols(r"\pi r^2"), "\u{03C0} r^2");
+        assert_eq!(tex_symbols(r"x \to \infty"), "x \u{2192} \u{221E}");
+        assert_eq!(tex_symbols(r"a \leq b \neq c"), "a \u{2264} b \u{2260} c");
+    }
+
+    #[test]
+    fn tex_symbols_keep_unknown_commands_literal() {
+        assert_eq!(tex_symbols(r"\foo{x}"), r"\foo{x}");
+        assert_eq!(tex_symbols("no commands"), "no commands");
+        assert_eq!(tex_symbols(r"trailing \"), r"trailing \");
+    }
+
+    #[test]
+    fn math_scripts_keep_unmatched_literal() {
+        assert_eq!(math_scripts("plain"), [seg("plain", Script::Normal)]);
+        assert_eq!(math_scripts("a^"), [seg("a^", Script::Normal)]);
+        assert_eq!(math_scripts("a^{open"), [seg("a^{open", Script::Normal)]);
+        assert_eq!(math_scripts(""), Vec::<(String, Script)>::new());
+    }
 }
