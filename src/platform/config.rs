@@ -16,6 +16,9 @@ pub struct Config {
     pub code_family: String,
     pub body_size: f32,
     pub code_size: f32,
+    /// Folder of the last opened file; the open dialog starts here when
+    /// no file is open. Empty means never set.
+    pub last_dir: String,
 }
 
 impl Default for Config {
@@ -26,6 +29,7 @@ impl Default for Config {
             code_family: CODE_FAMILY.to_string(),
             body_size: 22.0,
             code_size: 20.0,
+            last_dir: String::new(),
         }
     }
 }
@@ -79,6 +83,7 @@ mod tests {
             code_family: "Test Mono".to_string(),
             body_size: 18.0,
             code_size: 16.0,
+            last_dir: "/home/user/notes".to_string(),
         };
         save_to(&path, &config);
         let loaded = load_from(&path);
@@ -110,5 +115,6 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
         assert_eq!(loaded.theme, "nord");
         assert_eq!(loaded.body_size, 22.0);
+        assert_eq!(loaded.last_dir, "");
     }
 }

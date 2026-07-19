@@ -37,6 +37,19 @@ pub fn open(path: &Path) -> anyhow::Result<Document> {
     })
 }
 
+/// A short notice (an open error) rendered as a plain document.
+pub fn message(text: &str) -> Document {
+    plain_document(text)
+}
+
+/// Every extension Oryx renders intentionally, for dialog filters.
+pub fn recognized_extensions() -> Vec<&'static str> {
+    ["md", "markdown", "txt"]
+        .into_iter()
+        .chain(CODE_EXTENSIONS.iter().map(|(ext, _)| *ext))
+        .collect()
+}
+
 /// The whole file as a single highlighted code block.
 fn code_document(token: &str, text: &str) -> Document {
     let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
@@ -234,5 +247,23 @@ mod tests {
     #[test]
     fn missing_file_is_an_error() {
         assert!(open(Path::new("/nonexistent/oryx-missing.md")).is_err());
+    }
+
+    #[test]
+    fn message_becomes_a_plain_document() {
+        let d = message("cannot open /x: denied");
+        assert_eq!(d.blocks.len(), 1);
+        let BlockKind::Paragraph { spans } = &d.blocks[0].kind else {
+            panic!("expected a paragraph")
+        };
+        assert_eq!(spans[0].text, "cannot open /x: denied");
+    }
+
+    #[test]
+    fn recognized_extensions_cover_the_renderable_set() {
+        let exts = recognized_extensions();
+        for e in ["md", "markdown", "txt", "rs", "py", "toml", "yaml"] {
+            assert!(exts.contains(&e), "{e} missing");
+        }
     }
 }

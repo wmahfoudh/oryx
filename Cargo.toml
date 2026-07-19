@@ -13,6 +13,7 @@ image = "0.25"
 open = "5"
 pulldown-cmark = "0.13"
 resvg = "0.45.1"
+rfd = "0.17.2"
 serde = { version = "1", features = ["derive"] }
 softbuffer = "0.4"
 syntect = { version = "5.3.0", default-features = false, features = ["default-fancy"] }

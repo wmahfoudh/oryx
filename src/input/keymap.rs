@@ -7,6 +7,8 @@ use winit::keyboard::{Key, NamedKey};
 /// Application command a shortcut resolves to.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Command {
+    OpenFile,
+    Sidebar,
     Help,
     Settings,
     ThemeBrowser,
@@ -27,7 +29,9 @@ pub enum Command {
 
 impl Command {
     /// Every variant; the coverage test checks each one against the table.
-    pub const ALL: [Command; 16] = [
+    pub const ALL: [Command; 18] = [
+        Command::OpenFile,
+        Command::Sidebar,
         Command::Help,
         Command::Settings,
         Command::ThemeBrowser,
@@ -69,9 +73,9 @@ pub struct Shortcut {
 
 pub const SHORTCUTS: &[Shortcut] = &[
     Shortcut {
-        keys: "F1",
-        action: "Shortcuts help",
-        bindings: &[(Binding::Named(NamedKey::F1), Command::Help)],
+        keys: "Ctrl+O",
+        action: "Open file",
+        bindings: &[(Binding::Ctrl("o"), Command::OpenFile)],
     },
     Shortcut {
         keys: "Ctrl+,",
@@ -82,6 +86,16 @@ pub const SHORTCUTS: &[Shortcut] = &[
         keys: "Ctrl+T",
         action: "Theme browser",
         bindings: &[(Binding::Ctrl("t"), Command::ThemeBrowser)],
+    },
+    Shortcut {
+        keys: "Ctrl+B",
+        action: "Folder sidebar",
+        bindings: &[(Binding::Ctrl("b"), Command::Sidebar)],
+    },
+    Shortcut {
+        keys: "F1",
+        action: "Shortcuts help",
+        bindings: &[(Binding::Named(NamedKey::F1), Command::Help)],
     },
     Shortcut {
         keys: "Ctrl+Plus / Ctrl+Minus",
@@ -140,7 +154,7 @@ pub const SHORTCUTS: &[Shortcut] = &[
     },
     Shortcut {
         keys: "Escape",
-        action: "Close overlay / quit",
+        action: "Close overlay or sidebar / quit",
         bindings: &[(Binding::Named(NamedKey::Escape), Command::Quit)],
     },
 ];
@@ -234,6 +248,8 @@ mod tests {
 
     #[test]
     fn ctrl_chords_resolve() {
+        assert_eq!(command(&chr("o"), true, false), Some(Command::OpenFile));
+        assert_eq!(command(&chr("b"), true, false), Some(Command::Sidebar));
         assert_eq!(command(&chr("t"), true, false), Some(Command::ThemeBrowser));
         assert_eq!(command(&chr("T"), true, true), Some(Command::ThemeBrowser));
         assert_eq!(command(&chr(","), true, false), Some(Command::Settings));
