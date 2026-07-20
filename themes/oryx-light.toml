@@ -1,13 +1,10 @@
-# Oryx Light: butter cream paper, headings distinguished by hue
-# (red, gold, olive, sienna), tan code panels, teal for links and accents.
-
 [surface]
 background = "#FBF1CE"
 foreground = "#3F3B33"
 
 [headings]
-h1 = "#C13B2E"
-h2 = "#B08828"
+h1 = "#CC2923"
+h2 = "#D5983D"
 h3 = "#7F8B26"
 h4 = "#A8622F"
 h5 = "#6B5F4B"
@@ -50,7 +47,7 @@ punctuation = "#7A7264"
 note = "#2F6FA8"
 tip = "#4E7D33"
 important = "#6B4E8E"
-warning = "#B08828"
+warning = "#D59827"
 caution = "#C13B2E"
 
 [ui]
