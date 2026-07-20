@@ -45,13 +45,13 @@ Oryx started as a personal need: reading a markdown file should not require open
 
 ## Themes
 
-Thirty themes ship with Oryx. A theme is one TOML file with 51 color roles covering every element independently; a missing key falls back to a default and a malformed file is skipped, never fatal. The built-in browser (Ctrl+T) previews and applies them live, and the built-in editor changes any role with a color picker while the document restyles behind it. Editing a bundled theme automatically edits a copy, so the shipped files stay pristine.
+Thirty-one themes ship with Oryx. A theme is one TOML file with 51 color roles covering every element independently; a missing key falls back to a default and a malformed file is skipped, never fatal. The built-in browser (Ctrl+T) previews and applies them live, and the built-in editor changes any role with a color picker while the document restyles behind it. Editing a bundled theme automatically edits a copy, so the shipped files stay pristine.
 
 ![The theme browser](screenshots/themes.png)
 
 ![The theme editor](screenshots/editor.png)
 
-Eight themes are original designs: `oryx-light` and `oryx-dark` (the default warm identity), `oryx-sand` and `oryx-night`, `inkstone`, `ember`, `meadow`, and `slate`. The rest adapt permissively licensed editor palettes, all MIT, with thanks to their authors:
+Nine themes are original designs: `oryx-light` (the default) and its dark twin `oryx-dark`, `oryx-sand` and `oryx-night`, `inkstone`, `ember`, `meadow`, `slate`, and `be-vendible`. The rest adapt permissively licensed editor palettes, all MIT, with thanks to their authors:
 
 - Dracula ([draculatheme.com](https://draculatheme.com))
 - Nord ([nordtheme.com](https://www.nordtheme.com))

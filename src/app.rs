@@ -130,8 +130,8 @@ fn theme_dirs() -> Vec<PathBuf> {
     dirs
 }
 
-/// Startup theme: the `--theme` override when given, otherwise oryx-light
-/// until config persistence lands, dark fallback either way.
+/// Resolves the launch theme by name, falling back to the oryx-light file,
+/// then to the compiled default when no theme file is found.
 fn startup_theme(name: Option<&str>) -> Theme {
     let dirs = theme_dirs();
     if let Some(name) = name {
