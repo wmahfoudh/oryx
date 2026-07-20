@@ -501,6 +501,7 @@ pub fn save(path: &Path, theme: &Theme) -> std::io::Result<()> {
 const BUNDLED: &[&str] = &[
     "ayu-light",
     "ayu-mirage",
+    "be-vendible",
     "catppuccin-latte",
     "catppuccin-mocha",
     "dracula",
@@ -784,6 +785,7 @@ selection_bg = "#33445566"
 
     #[test]
     fn bundled_names_are_known() {
+        assert!(is_bundled("be-vendible"));
         assert!(is_bundled("dracula"));
         assert!(is_bundled("oryx-light"));
         assert!(!is_bundled("my-own-theme"));
