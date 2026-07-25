@@ -1,8 +1,14 @@
 //! File loading and type detection by extension.
 
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use crate::doc::model::{Block, BlockKind, Document, Span};
+use crate::style::highlight::{self, Arrival, PendingBlock};
+
+/// Sync highlighting budget at open; whatever remains goes to the
+/// background worker.
+pub const OPEN_BUDGET: Duration = Duration::from_millis(40);
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum FileKind {
@@ -26,15 +32,75 @@ pub fn detect(path: &Path) -> FileKind {
     }
 }
 
-pub fn open(path: &Path) -> anyhow::Result<Document> {
+/// An opened document and the code blocks whose highlighting did not
+/// finish inside the deadline.
+pub struct Opened {
+    pub document: Document,
+    pub pending: Vec<PendingBlock>,
+}
+
+pub fn open(path: &Path, deadline: Option<Instant>) -> anyhow::Result<Opened> {
     let bytes =
         std::fs::read(path).map_err(|e| anyhow::anyhow!("cannot open {}: {e}", path.display()))?;
     let text = String::from_utf8_lossy(&bytes);
-    Ok(match detect(path) {
+    let mut document = match detect(path) {
         FileKind::Markdown => super::markdown::parse(&text),
         FileKind::Code(token) => code_document(token, &text),
         FileKind::Plain => plain_document(&text),
-    })
+    };
+    let pending = apply_budget(&mut document, deadline);
+    Ok(Opened { document, pending })
+}
+
+/// Highlights code blocks in document order until the deadline, leaving
+/// each block's computed prefix in place; returns the unfinished blocks.
+fn apply_budget(doc: &mut Document, deadline: Option<Instant>) -> Vec<PendingBlock> {
+    let mut pending = Vec::new();
+    for (index, block) in doc.blocks.iter_mut().enumerate() {
+        let BlockKind::CodeBlock {
+            language,
+            lines,
+            highlights,
+        } = &mut block.kind
+        else {
+            continue;
+        };
+        *highlights = highlight::spans_until(lines, language.as_deref(), deadline);
+        if highlights.len() < lines.len() {
+            pending.push(PendingBlock {
+                block: index,
+                language: language.clone(),
+                lines: lines.clone(),
+            });
+        }
+    }
+    pending
+}
+
+/// Copies one arrived chunk into its block's highlight prefix, growing
+/// the prefix when the chunk extends it. Out-of-range chunks and
+/// non-code blocks are ignored; arrivals are trusted only as far as the
+/// current document reaches.
+pub fn fold(doc: &mut Document, arrival: &Arrival) {
+    let Some(block) = doc.blocks.get_mut(arrival.block) else {
+        return;
+    };
+    let BlockKind::CodeBlock {
+        lines, highlights, ..
+    } = &mut block.kind
+    else {
+        return;
+    };
+    let end = (arrival.start_line + arrival.spans.len()).min(lines.len());
+    if highlights.len() < end {
+        highlights.resize(end, Vec::new());
+    }
+    for (offset, spans) in arrival.spans.iter().enumerate() {
+        let line = arrival.start_line + offset;
+        if line < end {
+            highlights[line] = spans.clone();
+        }
+    }
 }
 
 /// A short notice (an open error) rendered as a plain document.
@@ -50,17 +116,16 @@ pub fn recognized_extensions() -> Vec<&'static str> {
         .collect()
 }
 
-/// The whole file as a single highlighted code block.
+/// The whole file as a single code block; the budget pass highlights it.
 fn code_document(token: &str, text: &str) -> Document {
     let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
     while lines.last().is_some_and(|l| l.is_empty()) {
         lines.pop();
     }
-    let highlights = crate::style::highlight::spans(&lines, Some(token));
     let mut block = Block::plain(BlockKind::CodeBlock {
         language: Some(token.to_string()),
         lines,
-        highlights,
+        highlights: Vec::new(),
     });
     block.range = 0..text.len();
     Document {
@@ -207,7 +272,7 @@ mod tests {
     #[test]
     fn code_file_becomes_one_code_block() {
         let path = temp_file("t.py", "def f():\n    return 1\n");
-        let d = open(&path).unwrap();
+        let d = open(&path, None).unwrap().document;
         std::fs::remove_file(&path).unwrap();
         let BlockKind::CodeBlock {
             language,
@@ -223,9 +288,88 @@ mod tests {
     }
 
     #[test]
+    fn past_deadline_leaves_code_pending() {
+        let path = temp_file(
+            "t2.md",
+            "# T\n\n```rust\nfn a() {}\n```\n\ntext\n\n```python\nx = 1\n```\n",
+        );
+        let opened = open(&path, Some(Instant::now())).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(opened.pending.len(), 2);
+        assert_eq!(opened.pending[0].language.as_deref(), Some("rust"));
+        assert_eq!(opened.pending[1].language.as_deref(), Some("python"));
+        for p in &opened.pending {
+            let BlockKind::CodeBlock {
+                lines, highlights, ..
+            } = &opened.document.blocks[p.block].kind
+            else {
+                panic!("pending index does not point at a code block")
+            };
+            assert_eq!(&p.lines, lines);
+            assert!(highlights.is_empty());
+        }
+    }
+
+    #[test]
+    fn no_deadline_matches_eager_highlighting() {
+        let path = temp_file("t3.rs", "fn main() {\n    let x = 1;\n}\n");
+        let opened = open(&path, None).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert!(opened.pending.is_empty());
+        let BlockKind::CodeBlock {
+            lines, highlights, ..
+        } = &opened.document.blocks[0].kind
+        else {
+            panic!("expected code block")
+        };
+        assert_eq!(highlights, &highlight::spans(lines, Some("rust")));
+        assert!(highlights
+            .iter()
+            .flatten()
+            .any(|(_, role)| *role != crate::style::highlight::SyntaxRole::Plain));
+    }
+
+    #[test]
+    fn fold_grows_and_overwrites_the_prefix() {
+        let path = temp_file("t4.rs", "fn a() {}\nfn b() {}\nfn c() {}\nfn d() {}\n");
+        let mut opened = open(&path, Some(Instant::now())).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        let eager = {
+            let BlockKind::CodeBlock { lines, .. } = &opened.document.blocks[0].kind else {
+                panic!("expected code block")
+            };
+            highlight::spans(lines, Some("rust"))
+        };
+        fold(
+            &mut opened.document,
+            &Arrival {
+                block: 0,
+                start_line: 0,
+                spans: eager[0..2].to_vec(),
+            },
+        );
+        let BlockKind::CodeBlock { highlights, .. } = &opened.document.blocks[0].kind else {
+            panic!()
+        };
+        assert_eq!(highlights.len(), 2);
+        fold(
+            &mut opened.document,
+            &Arrival {
+                block: 0,
+                start_line: 2,
+                spans: eager[2..4].to_vec(),
+            },
+        );
+        let BlockKind::CodeBlock { highlights, .. } = &opened.document.blocks[0].kind else {
+            panic!()
+        };
+        assert_eq!(highlights, &eager);
+    }
+
+    #[test]
     fn plain_file_splits_paragraphs_on_blank_lines() {
         let path = temp_file("t.txt", "line one\nline two\n\nsecond para\n");
-        let d = open(&path).unwrap();
+        let d = open(&path, None).unwrap().document;
         std::fs::remove_file(&path).unwrap();
         assert_eq!(d.blocks.len(), 2);
         let BlockKind::Paragraph { spans } = &d.blocks[0].kind else {
@@ -239,14 +383,14 @@ mod tests {
     #[test]
     fn markdown_file_parses_as_markdown() {
         let path = temp_file("t.md", "# Title\n\nbody\n");
-        let d = open(&path).unwrap();
+        let d = open(&path, None).unwrap().document;
         std::fs::remove_file(&path).unwrap();
         assert!(matches!(&d.blocks[0].kind, BlockKind::Heading { .. }));
     }
 
     #[test]
     fn missing_file_is_an_error() {
-        assert!(open(Path::new("/nonexistent/oryx-missing.md")).is_err());
+        assert!(open(Path::new("/nonexistent/oryx-missing.md"), None).is_err());
     }
 
     #[test]

@@ -37,7 +37,7 @@ Oryx started as a personal need: reading a markdown file should not require open
 
 **Find in document.** Ctrl+F opens a floating search bar. Matches highlight as you type, in colors the active theme chooses, and Enter or F3 walks through them with a wrapping counter. Matching is smart case: an all-lowercase query matches any case, a capital letter makes it exact.
 
-**Code files too.** Oryx opens source files directly as a single highlighted document, plus plain text. The folder sidebar makes it a quick reader for any project directory.
+**Code files too.** Oryx opens source files directly as a single highlighted document, plus plain text. Opening is instant at any size: highlighting runs inside a small time budget and the rest arrives from a background thread, colors washing in from the top while the document is already readable. The folder sidebar makes it a quick reader for any project directory.
 
 ![The sidebar and a highlighted code file](screenshots/code.png)
 
@@ -131,13 +131,22 @@ Ctrl is Cmd on macOS. Copy as markdown reproduces the original source of the sel
 
 Oryx is a four stage pipeline: load, layout, paint, present. The whole document is parsed and laid out once at open, painting happens in bands around the viewport, and scrolling inside a band is a memory copy, so the frame cost of scrolling does not depend on document length. The event loop only wakes for input; idle CPU is zero.
 
-Everything is drawn by the layout engine itself, which makes the rendering fully testable as numbers: positions, wrapping, spacing, and colors are asserted in over 180 tests. Every color on screen comes from the active theme file. The dependencies are pure Rust throughout, which is what keeps the binary small, the startup instant, and the build simple on all three platforms.
+Everything is drawn by the layout engine itself, which makes the rendering fully testable as numbers: positions, wrapping, spacing, and colors are asserted in over 190 tests. Every color on screen comes from the active theme file. The dependencies are pure Rust throughout, which is what keeps the binary small, the startup instant, and the build simple on all three platforms.
 
 A typical document opens in well under 150 milliseconds cold, including engine warm-up. Startup, relayout, and paint timings are validated by a performance test in the repository.
 
+Syntax highlighting is budgeted rather than blocking: an open computes about forty milliseconds of highlighting synchronously, and a background thread delivers the rest in chunks that recolor the laid-out document in place, with no relayout. Opening a source file is effectively constant time at any size. Measured on one Linux machine, release build, eager highlighting against the budgeted open:
+
+| Document | Eager open | Budgeted open |
+|---|---|---|
+| 1MB source file | 4.2s | 41ms |
+| 8MB source file | 35.5s | 56ms |
+| 1MB markdown | 1.2s | 52ms |
+| 8MB markdown | 8.7s | 397ms |
+
 ## What Oryx does not do
 
-Oryx is a viewer for everyday documents, and stays honest about its edges. It does not edit files. It renders math as styled literals with real symbols, not full typesetting. Very large files (megabytes of dense code blocks) open in seconds rather than instantly, because syntax highlighting is done up front. The embedded HTML support is a deliberate subset: no HTML tables, no collapsible sections. macOS compiles but is untested and has no packaged build. Some of these are on the list for future versions; none of them are promises.
+Oryx is a viewer for everyday documents, and stays honest about its edges. It does not edit files. It renders math as styled literals with real symbols, not full typesetting. Very large documents (many megabytes) still pause briefly for text layout at open, and their syntax colors arrive progressively over the first moments rather than all at once. The embedded HTML support is a deliberate subset: no HTML tables, no collapsible sections. macOS compiles but is untested and has no packaged build. Some of these are on the list for future versions; none of them are promises.
 
 ## Fonts
 

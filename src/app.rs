@@ -1,17 +1,19 @@
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 
 use oryx::doc::images::{MediaCache, Waker};
 use oryx::doc::load;
 use oryx::doc::model::Document;
 use oryx::input::keymap::{self, Command};
-use oryx::layout::{layout, metrics, DecoRect, LayoutDoc, ViewConfig};
+use oryx::layout::{layout, metrics, recolor_code_lines, DecoRect, LayoutDoc, ViewConfig};
 use oryx::paint;
 use oryx::paint::painter::Painter;
 use oryx::paint::scroll::{self, BandCache};
 use oryx::platform::config::{self, Config, WindowState};
 use oryx::style::fonts::FontStore;
+use oryx::style::highlight::{Highlighter, PendingBlock};
 use oryx::style::theme::{self, Theme};
 use oryx::ui::help::Help;
 use oryx::ui::overlay::{Action, Overlay, OverlayResult};
@@ -33,9 +35,12 @@ use winit::window::{CursorIcon, Window, WindowId};
 const ICON_64: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/icon_64.rgba"));
 
 pub fn run(path: Option<PathBuf>, theme_name: Option<String>) -> anyhow::Result<()> {
-    let document = match &path {
-        Some(p) => load::open(p)?,
-        None => Document::default(),
+    let (document, pending) = match &path {
+        Some(p) => {
+            let opened = load::open(p, Some(Instant::now() + load::OPEN_BUDGET))?;
+            (opened.document, opened.pending)
+        }
+        None => (Document::default(), Vec::new()),
     };
     // Absolute from here on: a bare relative name like `README.md` has the
     // empty string as parent, which breaks the sidebar root and the dialog.
@@ -54,6 +59,11 @@ pub fn run(path: Option<PathBuf>, theme_name: Option<String>) -> anyhow::Result<
     });
     let mut media = MediaCache::new(doc_dir.clone());
     media.set_waker(waker.clone());
+    let mut highlighter = Highlighter::new();
+    {
+        let waker = waker.clone();
+        highlighter.start(pending, move || waker());
+    }
     let mut config = config::load();
     if path.is_some() {
         let dir_text = doc_dir.display().to_string();
@@ -80,6 +90,7 @@ pub fn run(path: Option<PathBuf>, theme_name: Option<String>) -> anyhow::Result<
         fonts: FontStore::new(),
         media,
         waker,
+        highlighter,
         layout: None,
         layout_width: 0.0,
         band: None,
@@ -155,6 +166,8 @@ struct App {
     media: MediaCache,
     /// Handed to every media cache so fetch threads can wake the loop.
     waker: Waker,
+    /// Background syntax highlighting worker and its arrivals queue.
+    highlighter: Highlighter,
     layout: Option<LayoutDoc>,
     layout_width: f32,
     band: Option<BandCache>,
@@ -519,6 +532,52 @@ impl App {
             self.selection = None;
             self.link_press();
         }
+        self.fold_highlights();
+    }
+
+    /// Hands pending highlight work to the worker. An empty list still
+    /// bumps the generation, so arrivals from the previous document are
+    /// dropped at the next drain.
+    fn start_highlight(&mut self, pending: Vec<PendingBlock>) {
+        let waker = self.waker.clone();
+        self.highlighter.start(pending, move || waker());
+    }
+
+    /// Folds queued highlight chunks into the document and recolors the
+    /// affected laid-out lines in place. Deferred while a selection drag
+    /// is active; releasing the mouse folds the queue.
+    fn fold_highlights(&mut self) {
+        if self.sel_anchor.is_some() {
+            return;
+        }
+        let arrivals = self.highlighter.drain();
+        if arrivals.is_empty() {
+            return;
+        }
+        for arrival in &arrivals {
+            load::fold(&mut self.document, arrival);
+            if let Some(lay) = self.layout.as_mut() {
+                recolor_code_lines(
+                    lay,
+                    &self.document,
+                    &self.theme,
+                    &mut self.fonts,
+                    &self.cfg,
+                    arrival.block,
+                    arrival.start_line..arrival.start_line + arrival.spans.len(),
+                );
+            }
+        }
+        if self.layout.is_some() {
+            // Run indices shifted under the splice, the relayout contract.
+            self.selection = None;
+            if let Some(state) = self.search.as_mut() {
+                state.stale = true;
+            }
+            self.band = None;
+            self.pending_band_for = None;
+        }
+        self.request_redraw();
     }
 
     fn request_redraw(&self) {
@@ -591,9 +650,18 @@ impl App {
     /// sidebar; sidebar clicks keep the tree in place.
     fn open_file(&mut self, path: &Path, reroot: bool) {
         let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-        let loaded = load::open(&path);
+        let loaded = load::open(&path, Some(Instant::now() + load::OPEN_BUDGET));
         let opened = loaded.is_ok();
-        self.document = loaded.unwrap_or_else(|err| load::message(&err.to_string()));
+        match loaded {
+            Ok(o) => {
+                self.document = o.document;
+                self.start_highlight(o.pending);
+            }
+            Err(err) => {
+                self.document = load::message(&err.to_string());
+                self.start_highlight(Vec::new());
+            }
+        }
         self.path = Some(path.to_path_buf());
         let dir = path
             .parent()
@@ -1066,13 +1134,15 @@ impl App {
 }
 
 impl ApplicationHandler for App {
-    /// A background fetch landed: fold it in and relayout.
+    /// A background fetch or highlight chunk landed: fold it in. Fetches
+    /// relayout; highlights only recolor.
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, _event: ()) {
         if self.media.drain_remote() {
             self.layout = None;
             self.band = None;
             self.request_redraw();
         }
+        self.fold_highlights();
     }
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {

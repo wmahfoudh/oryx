@@ -1,9 +1,12 @@
 use std::path::PathBuf;
 
 use oryx::doc::images::MediaCache;
+use oryx::doc::load;
 use oryx::doc::markdown;
-use oryx::layout::{layout, LayoutDoc, TextRun, ViewConfig};
+use oryx::doc::model::{BlockKind, Document};
+use oryx::layout::{layout, recolor_code_lines, LayoutDoc, TextRun, ViewConfig};
 use oryx::style::fonts::{FontStore, CODE_FAMILY};
+use oryx::style::highlight::{self, Arrival};
 use oryx::style::theme::Theme;
 
 fn fonts() -> FontStore {
@@ -14,17 +17,42 @@ fn cfg() -> ViewConfig {
     ViewConfig::default()
 }
 
-fn lay(source: &str, width: f32) -> LayoutDoc {
-    let doc = markdown::parse(source);
+fn lay_doc(doc: &Document, width: f32, fonts: &mut FontStore) -> LayoutDoc {
     let mut media = MediaCache::new(PathBuf::from("."));
     layout(
-        &doc,
+        doc,
         &Theme::default_dark(),
-        &mut fonts(),
+        fonts,
         &mut media,
         &cfg(),
         width,
     )
+}
+
+fn lay(source: &str, width: f32) -> LayoutDoc {
+    lay_doc(&markdown::parse(source), width, &mut fonts())
+}
+
+/// Folds full highlights into every code block, as the budget pass or
+/// the worker would.
+fn highlight_all(doc: &mut Document) {
+    for i in 0..doc.blocks.len() {
+        let BlockKind::CodeBlock {
+            language, lines, ..
+        } = &doc.blocks[i].kind
+        else {
+            continue;
+        };
+        let spans = highlight::spans(lines, language.as_deref());
+        load::fold(
+            doc,
+            &Arrival {
+                block: i,
+                start_line: 0,
+                spans,
+            },
+        );
+    }
 }
 
 fn body_run(l: &LayoutDoc) -> &TextRun {
@@ -140,7 +168,9 @@ fn link_color_and_target() {
 
 #[test]
 fn code_block_panel_and_highlighting() {
-    let l = lay("```rust\nfn main() {\n    let s = \"hi\";\n}\n```", 800.0);
+    let mut doc = markdown::parse("```rust\nfn main() {\n    let s = \"hi\";\n}\n```");
+    highlight_all(&mut doc);
+    let l = lay_doc(&doc, 800.0, &mut fonts());
     let t = Theme::default_dark();
     assert!(l.rects.iter().any(|r| r.color == t.blocks.code_bg));
     assert!(l.rects.iter().any(|r| r.color == t.blocks.code_border));
@@ -153,6 +183,83 @@ fn code_block_panel_and_highlighting() {
     assert!(l.runs.iter().any(|r| r.color == t.syntax.string));
     let rows: std::collections::BTreeSet<i64> = l.runs.iter().map(|r| r.y as i64).collect();
     assert!(rows.len() >= 3, "one row per source line, got {rows:?}");
+}
+
+#[test]
+fn unhighlighted_tail_renders_in_foreground() {
+    let mut doc = markdown::parse("```rust\nfn main() {}\nlet x = 1;\n```");
+    let BlockKind::CodeBlock {
+        language, lines, ..
+    } = &doc.blocks[0].kind
+    else {
+        panic!("expected code block")
+    };
+    let spans = highlight::spans(lines, language.as_deref());
+    load::fold(
+        &mut doc,
+        &Arrival {
+            block: 0,
+            start_line: 0,
+            spans: spans[0..1].to_vec(),
+        },
+    );
+    let l = lay_doc(&doc, 800.0, &mut fonts());
+    let t = Theme::default_dark();
+    assert!(l.runs.iter().any(|r| r.color == t.syntax.keyword));
+    let tail_y = l.runs.iter().map(|r| r.y as i64).max().unwrap();
+    assert!(l
+        .runs
+        .iter()
+        .filter(|r| r.y as i64 == tail_y)
+        .all(|r| r.color == t.surface.foreground));
+}
+
+#[test]
+fn recolor_in_place_matches_full_relayout() {
+    let source = "# Title\n\nintro paragraph\n\n\
+        ```rust\nfn main() {\n    let s = \"hi\";\n}\n```\n\ntail paragraph";
+    let mut doc = markdown::parse(source);
+    let mut store = fonts();
+    let mut lazy = lay_doc(&doc, 800.0, &mut store);
+    highlight_all(&mut doc);
+    let block = doc
+        .blocks
+        .iter()
+        .position(|b| matches!(b.kind, BlockKind::CodeBlock { .. }))
+        .unwrap();
+    recolor_code_lines(
+        &mut lazy,
+        &doc,
+        &Theme::default_dark(),
+        &mut store,
+        &cfg(),
+        block,
+        0..3,
+    );
+    let full = lay_doc(&doc, 800.0, &mut store);
+    assert_eq!(lazy.runs, full.runs);
+    assert_eq!(lazy.height, full.height);
+}
+
+#[test]
+fn recolor_in_chunks_matches_full_relayout() {
+    let mut source = String::from("```rust\n");
+    for i in 0..11 {
+        source.push_str(&format!("let value_{i} = {i}; // note {i}\n"));
+    }
+    source.push_str(&format!(
+        "let long = \"{}\"; // wraps\n```",
+        "x".repeat(200)
+    ));
+    let mut doc = markdown::parse(&source);
+    let mut store = fonts();
+    let mut lazy = lay_doc(&doc, 500.0, &mut store);
+    highlight_all(&mut doc);
+    let theme = Theme::default_dark();
+    recolor_code_lines(&mut lazy, &doc, &theme, &mut store, &cfg(), 0, 0..5);
+    recolor_code_lines(&mut lazy, &doc, &theme, &mut store, &cfg(), 0, 5..12);
+    let full = lay_doc(&doc, 500.0, &mut store);
+    assert_eq!(lazy.runs, full.runs);
 }
 
 #[test]

@@ -35,7 +35,7 @@ impl Default for ViewConfig {
 }
 
 /// One styled, positioned run of text on a single visual line.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TextRun {
     pub text: String,
     pub x: f32,
@@ -108,6 +108,25 @@ pub struct LayoutDoc {
     pub images: Vec<ImagePlace>,
     /// Heading anchor slugs and their y positions.
     pub anchors: Vec<(String, f32)>,
+    /// Per-line records for code blocks, ordered by block then line;
+    /// `recolor_code_lines` re-shapes through them.
+    pub code_lines: Vec<CodeLine>,
+}
+
+/// One laid-out code line: the runs it produced and the inputs to
+/// re-shape it, so arriving highlights recolor in place without a
+/// relayout. Code runs differ only by color across syntax roles, so
+/// re-shaping a line never moves anything.
+#[derive(Debug, Clone)]
+pub struct CodeLine {
+    pub block: usize,
+    pub line: usize,
+    runs: Range<usize>,
+    x0: f32,
+    y0: f32,
+    size: f32,
+    line_height: f32,
+    wrap_width: f32,
 }
 
 impl LayoutDoc {
@@ -1703,6 +1722,76 @@ fn place_marker(runs: Vec<TextRun>, x: f32, y: f32, block_index: usize, out: &mu
     }
 }
 
+/// Recolors the laid-out lines `lines` of code block `block` from the
+/// document's current highlights, re-shaping only those lines and
+/// splicing the runs in place. Geometry is unchanged; run indices after
+/// the spliced range shift, so callers must drop selection and search
+/// positions exactly as they do after a relayout.
+#[allow(clippy::too_many_arguments)]
+pub fn recolor_code_lines(
+    lay: &mut LayoutDoc,
+    doc: &Document,
+    theme: &Theme,
+    fonts: &mut FontStore,
+    cfg: &ViewConfig,
+    block: usize,
+    lines: Range<usize>,
+) {
+    let lo = lay
+        .code_lines
+        .partition_point(|c| (c.block, c.line) < (block, lines.start));
+    let hi = lay
+        .code_lines
+        .partition_point(|c| (c.block, c.line) < (block, lines.end));
+    if lo == hi {
+        return;
+    }
+    let Some(BlockKind::CodeBlock {
+        lines: source_lines,
+        highlights,
+        ..
+    }) = doc.blocks.get(block).map(|b| &b.kind)
+    else {
+        return;
+    };
+    let empty: Vec<(Range<usize>, SyntaxRole)> = Vec::new();
+    let run_start = lay.code_lines[lo].runs.start;
+    let run_end = lay.code_lines[hi - 1].runs.end;
+    let mut scratch = LayoutDoc::default();
+    let mut fresh: Vec<Range<usize>> = Vec::with_capacity(hi - lo);
+    for record in &lay.code_lines[lo..hi] {
+        let Some(line) = source_lines.get(record.line) else {
+            return;
+        };
+        let segments = highlights.get(record.line).unwrap_or(&empty);
+        let from = scratch.runs.len();
+        shape_code_line(
+            fonts,
+            theme,
+            cfg,
+            line,
+            segments,
+            block,
+            record.x0,
+            record.y0,
+            record.size,
+            record.line_height,
+            record.wrap_width,
+            &mut scratch,
+        );
+        fresh.push(from..scratch.runs.len());
+    }
+    let delta = scratch.runs.len() as isize - (run_end - run_start) as isize;
+    lay.runs.splice(run_start..run_end, scratch.runs);
+    for (record, range) in lay.code_lines[lo..hi].iter_mut().zip(fresh) {
+        record.runs = run_start + range.start..run_start + range.end;
+    }
+    for record in lay.code_lines[hi..].iter_mut() {
+        record.runs = record.runs.start.wrapping_add_signed(delta)
+            ..record.runs.end.wrapping_add_signed(delta);
+    }
+}
+
 /// Lays out a fenced code block: a bordered panel of monospace lines,
 /// one row per source line, no wrapping, colors from highlight roles.
 #[allow(clippy::too_many_arguments)]
@@ -1733,7 +1822,8 @@ fn layout_code(
             continue;
         }
         let segments = highlights.get(i).unwrap_or(&empty);
-        y += shape_code_line(
+        let run_start = out.runs.len();
+        let advance = shape_code_line(
             fonts,
             theme,
             cfg,
@@ -1747,6 +1837,17 @@ fn layout_code(
             wrap_width,
             out,
         );
+        out.code_lines.push(CodeLine {
+            block: block_index,
+            line: i,
+            runs: run_start..out.runs.len(),
+            x0: x0 + pad,
+            y0: y,
+            size,
+            line_height,
+            wrap_width,
+        });
+        y += advance;
     }
     let height = y - y0 + pad;
     let blocks = &theme.blocks;

@@ -1,9 +1,14 @@
 //! Maps syntect parse scopes onto theme syntax roles at load time.
 
 use std::ops::Range;
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Instant;
 
 use syntect::parsing::{ParseState, ScopeStack, SyntaxSet};
+
+/// Styled ranges for one code line.
+pub type LineSpans = Vec<(Range<usize>, SyntaxRole)>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyntaxRole {
@@ -21,39 +26,194 @@ pub enum SyntaxRole {
 
 /// Per-line styled ranges for a code block. Lines with no recognized
 /// language come back as single Plain ranges.
-pub fn spans(lines: &[String], language: Option<&str>) -> Vec<Vec<(Range<usize>, SyntaxRole)>> {
-    let set = syntax_set();
-    let syntax = language
-        .and_then(resolve_syntax)
-        .unwrap_or_else(|| set.find_syntax_plain_text());
-    let mut parse = ParseState::new(syntax);
-    let mut stack = ScopeStack::new();
-    lines
-        .iter()
-        .map(|line| {
-            let text = format!("{line}\n");
-            let ops = parse.parse_line(&text, set).unwrap_or_default();
-            let mut ranges: Vec<(Range<usize>, SyntaxRole)> = Vec::new();
-            let mut last = 0usize;
-            let mut push = |from: usize, to: usize, stack: &ScopeStack| {
-                let to = to.min(line.len());
-                if from < to {
-                    let role = role_for(stack);
-                    match ranges.last_mut() {
-                        Some((prev, r)) if *r == role && prev.end == from => prev.end = to,
-                        _ => ranges.push((from..to, role)),
-                    }
+pub fn spans(lines: &[String], language: Option<&str>) -> Vec<LineSpans> {
+    spans_until(lines, language, None)
+}
+
+/// `spans` cut off at a deadline: only whole lines computed before the
+/// deadline are returned, so the result is a prefix of the full output.
+/// None means no deadline. The one-time grammar load happens before the
+/// first deadline check and counts against the caller's budget.
+pub fn spans_until(
+    lines: &[String],
+    language: Option<&str>,
+    deadline: Option<Instant>,
+) -> Vec<LineSpans> {
+    let mut parser = Parser::new(language);
+    let mut out = Vec::with_capacity(lines.len());
+    for line in lines {
+        if deadline.is_some_and(|d| Instant::now() >= d) {
+            break;
+        }
+        out.push(parser.line(line));
+    }
+    out
+}
+
+/// Highlights a whole block in fixed-size chunks, handing each chunk and
+/// its starting line to `deliver`. Delivery order is front to back;
+/// `deliver` returning false stops between chunks. Returns whether the
+/// block completed.
+pub fn spans_chunked(
+    lines: &[String],
+    language: Option<&str>,
+    chunk_size: usize,
+    mut deliver: impl FnMut(usize, Vec<LineSpans>) -> bool,
+) -> bool {
+    let chunk_size = chunk_size.max(1);
+    let mut parser = Parser::new(language);
+    let mut start = 0;
+    while start < lines.len() {
+        let end = (start + chunk_size).min(lines.len());
+        let chunk = lines[start..end].iter().map(|l| parser.line(l)).collect();
+        if !deliver(start, chunk) {
+            return false;
+        }
+        start = end;
+    }
+    true
+}
+
+/// Lines per background delivery. Small enough that the top of a huge
+/// block colors quickly, large enough that fold-ins stay rare.
+pub const CHUNK_LINES: usize = 512;
+
+/// A code block whose highlights were not finished inside the open
+/// budget; the lines are owned so the worker needs no document access.
+pub struct PendingBlock {
+    pub block: usize,
+    pub language: Option<String>,
+    pub lines: Vec<String>,
+}
+
+/// One chunk of computed highlights for a block, `spans[i]` covering
+/// line `start_line + i`.
+pub struct Arrival {
+    pub block: usize,
+    pub start_line: usize,
+    pub spans: Vec<LineSpans>,
+}
+
+/// Owns the background highlight worker and its arrivals queue. One
+/// generation is live at a time; starting again cancels the old worker
+/// between chunks and its arrivals are dropped at drain.
+pub struct Highlighter {
+    arrivals: Arc<Mutex<Vec<(u64, Arrival)>>>,
+    generation: Arc<AtomicU64>,
+}
+
+impl Default for Highlighter {
+    fn default() -> Highlighter {
+        Highlighter::new()
+    }
+}
+
+impl Highlighter {
+    pub fn new() -> Highlighter {
+        Highlighter {
+            arrivals: Arc::new(Mutex::new(Vec::new())),
+            generation: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    /// Cancels any running worker, then highlights `pending` front to
+    /// back on a fresh thread; each chunk lands in the arrivals queue
+    /// and `waker` runs after it so the event loop can drain.
+    pub fn start(&mut self, pending: Vec<PendingBlock>, waker: impl Fn() + Send + 'static) {
+        let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        if pending.is_empty() {
+            return;
+        }
+        let arrivals = Arc::clone(&self.arrivals);
+        let current = Arc::clone(&self.generation);
+        std::thread::spawn(move || {
+            for p in pending {
+                let done = spans_chunked(
+                    &p.lines,
+                    p.language.as_deref(),
+                    CHUNK_LINES,
+                    |start, chunk| {
+                        if current.load(Ordering::SeqCst) != generation {
+                            return false;
+                        }
+                        let arrival = Arrival {
+                            block: p.block,
+                            start_line: start,
+                            spans: chunk,
+                        };
+                        arrivals
+                            .lock()
+                            .expect("arrivals lock")
+                            .push((generation, arrival));
+                        waker();
+                        true
+                    },
+                );
+                if !done {
+                    return;
                 }
-            };
-            for (index, op) in &ops {
-                push(last, *index, &stack);
-                last = (*index).max(last);
-                let _ = stack.apply(op);
             }
-            push(last, line.len(), &stack);
-            ranges
-        })
-        .collect()
+        });
+    }
+
+    /// Arrivals of the current generation in delivery order; stale
+    /// generations are dropped.
+    pub fn drain(&mut self) -> Vec<Arrival> {
+        let generation = self.generation.load(Ordering::SeqCst);
+        self.arrivals
+            .lock()
+            .expect("arrivals lock")
+            .drain(..)
+            .filter(|(g, _)| *g == generation)
+            .map(|(_, a)| a)
+            .collect()
+    }
+}
+
+/// Sequential syntect state over one code block; lines must be fed in
+/// order from the block's first line.
+struct Parser {
+    parse: ParseState,
+    stack: ScopeStack,
+}
+
+impl Parser {
+    fn new(language: Option<&str>) -> Parser {
+        let syntax = language
+            .and_then(resolve_syntax)
+            .unwrap_or_else(|| syntax_set().find_syntax_plain_text());
+        Parser {
+            parse: ParseState::new(syntax),
+            stack: ScopeStack::new(),
+        }
+    }
+
+    fn line(&mut self, line: &str) -> LineSpans {
+        let text = format!("{line}\n");
+        let ops = self
+            .parse
+            .parse_line(&text, syntax_set())
+            .unwrap_or_default();
+        let mut ranges: LineSpans = Vec::new();
+        let mut last = 0usize;
+        let mut push = |from: usize, to: usize, stack: &ScopeStack| {
+            let to = to.min(line.len());
+            if from < to {
+                let role = role_for(stack);
+                match ranges.last_mut() {
+                    Some((prev, r)) if *r == role && prev.end == from => prev.end = to,
+                    _ => ranges.push((from..to, role)),
+                }
+            }
+        };
+        for (index, op) in &ops {
+            push(last, *index, &self.stack);
+            last = (*index).max(last);
+            let _ = self.stack.apply(op);
+        }
+        push(last, line.len(), &self.stack);
+        ranges
+    }
 }
 
 fn syntax_set() -> &'static SyntaxSet {
@@ -156,6 +316,97 @@ mod tests {
         let src = lines(&["plain text"]);
         let h = spans(&src, None);
         assert!(h[0].iter().all(|(_, role)| *role == SyntaxRole::Plain));
+    }
+
+    #[test]
+    fn spans_until_past_deadline_computes_nothing() {
+        let src = lines(&["fn main() {", "}"]);
+        let h = spans_until(&src, Some("rust"), Some(Instant::now()));
+        assert!(h.is_empty());
+    }
+
+    #[test]
+    fn spans_until_without_deadline_matches_spans() {
+        let src = lines(&["fn main() {", "    let s = \"hi\";", "}"]);
+        assert_eq!(
+            spans_until(&src, Some("rust"), None),
+            spans(&src, Some("rust"))
+        );
+    }
+
+    #[test]
+    fn chunked_spans_concatenate_to_one_shot() {
+        let src: Vec<String> = (0..10).map(|i| format!("let x{i} = {i}; // n")).collect();
+        let mut starts = Vec::new();
+        let mut joined = Vec::new();
+        let complete = spans_chunked(&src, Some("rust"), 4, |start, chunk| {
+            starts.push(start);
+            joined.extend(chunk);
+            true
+        });
+        assert!(complete);
+        assert_eq!(starts, vec![0, 4, 8]);
+        assert_eq!(joined, spans(&src, Some("rust")));
+    }
+
+    #[test]
+    fn chunked_spans_stop_between_chunks_when_told() {
+        let src: Vec<String> = (0..10).map(|i| format!("let x{i} = {i};")).collect();
+        let mut deliveries = 0;
+        let complete = spans_chunked(&src, Some("rust"), 4, |_, _| {
+            deliveries += 1;
+            false
+        });
+        assert!(!complete);
+        assert_eq!(deliveries, 1);
+    }
+
+    #[test]
+    fn worker_delivers_every_line_in_order() {
+        let src: Vec<String> = (0..1200).map(|i| format!("let v{i} = {i};")).collect();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut h = Highlighter::new();
+        h.start(
+            vec![PendingBlock {
+                block: 3,
+                language: Some("rust".into()),
+                lines: src.clone(),
+            }],
+            move || {
+                let _ = tx.send(());
+            },
+        );
+        let mut got: Vec<Arrival> = Vec::new();
+        while got.iter().map(|a| a.spans.len()).sum::<usize>() < src.len() {
+            rx.recv_timeout(std::time::Duration::from_secs(10))
+                .expect("worker wake");
+            got.extend(h.drain());
+        }
+        assert!(got.iter().all(|a| a.block == 3));
+        assert_eq!(got.first().map(|a| a.start_line), Some(0));
+        let joined: Vec<LineSpans> = got.into_iter().flat_map(|a| a.spans).collect();
+        assert_eq!(joined, spans(&src, Some("rust")));
+    }
+
+    #[test]
+    fn restart_discards_stale_arrivals() {
+        let src: Vec<String> = (0..600).map(|i| format!("let v{i} = {i};")).collect();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut h = Highlighter::new();
+        h.start(
+            vec![PendingBlock {
+                block: 0,
+                language: None,
+                lines: src,
+            }],
+            move || {
+                let _ = tx.send(());
+            },
+        );
+        rx.recv_timeout(std::time::Duration::from_secs(10))
+            .expect("first wake");
+        h.start(Vec::new(), || {});
+        assert!(h.drain().is_empty());
     }
 
     #[test]

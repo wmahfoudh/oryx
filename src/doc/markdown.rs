@@ -11,7 +11,6 @@ use pulldown_cmark::{
 use crate::doc::model::{
     AlertKind, Block, BlockKind, Document, Marker, Span, SpanImage, SpanScript,
 };
-use crate::style::highlight;
 
 pub fn parse(source: &str) -> Document {
     let options = Options::ENABLE_TABLES
@@ -191,11 +190,10 @@ impl Builder {
                     while lines.last().is_some_and(|l| l.is_empty()) {
                         lines.pop();
                     }
-                    let highlights = highlight::spans(&lines, language.as_deref());
                     self.emit(BlockKind::CodeBlock {
                         language,
                         lines,
-                        highlights,
+                        highlights: Vec::new(),
                     });
                 }
             }
@@ -831,7 +829,8 @@ mod tests {
         };
         assert_eq!(language.as_deref(), Some("rust"));
         assert_eq!(lines, &["fn main() {}", "let x = 1;"]);
-        assert_eq!(highlights.len(), lines.len());
+        // Highlights come from the load budget pass, never from parse.
+        assert!(highlights.is_empty());
     }
 
     #[test]
