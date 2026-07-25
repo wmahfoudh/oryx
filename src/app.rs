@@ -1,13 +1,16 @@
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use oryx::doc::images::{MediaCache, Waker};
 use oryx::doc::load;
 use oryx::doc::model::Document;
 use oryx::input::keymap::{self, Command};
-use oryx::layout::{layout, metrics, recolor_code_lines, DecoRect, LayoutDoc, ViewConfig};
+use oryx::layout::{
+    layout_begin, layout_more, metrics, recolor_code_lines, DecoRect, LayoutDoc, LayoutPass,
+    ViewConfig, OPEN_SLICE, SLICE,
+};
 use oryx::paint;
 use oryx::paint::painter::Painter;
 use oryx::paint::scroll::{self, BandCache};
@@ -92,6 +95,12 @@ pub fn run(path: Option<PathBuf>, theme_name: Option<String>) -> anyhow::Result<
         waker,
         highlighter,
         layout: None,
+        pass: None,
+        last_pass: Duration::ZERO,
+        settle_at: None,
+        pass_spent: Duration::ZERO,
+        pending_scroll: None,
+        pending_anchor: None,
         layout_width: 0.0,
         band: None,
         scroll_y: 0.0,
@@ -169,6 +178,22 @@ struct App {
     /// Background syntax highlighting worker and its arrivals queue.
     highlighter: Highlighter,
     layout: Option<LayoutDoc>,
+    /// The pass while the document is still being placed; None once it is
+    /// complete. Positions already placed never move, so everything that
+    /// indexes the layout stays valid as it grows.
+    pass: Option<LayoutPass>,
+    /// How long the last complete pass took, which decides whether a
+    /// resize reflows live or waits for the size to settle.
+    last_pass: Duration,
+    /// A relayout deferred during a live resize, and when to run it.
+    settle_at: Option<Instant>,
+    /// Slice time the running pass has spent, which becomes `last_pass`.
+    pass_spent: Duration,
+    /// Scroll position to restore once the pass places it: a reload, or a
+    /// relayout that must keep the reading position.
+    pending_scroll: Option<f32>,
+    /// Anchor target clicked before its heading was placed.
+    pending_anchor: Option<String>,
     layout_width: f32,
     band: Option<BandCache>,
     scroll_y: f32,
@@ -826,8 +851,10 @@ impl App {
         self.band = None;
     }
 
-    /// Selects the whole document.
+    /// Selects the whole document, placing the rest of it first so the
+    /// selection covers what a copy will read.
     fn select_all(&mut self) {
+        self.finish_layout();
         let Some(lay) = self.layout.as_ref() else {
             return;
         };
@@ -888,6 +915,10 @@ impl App {
             if let Err(err) = open::that_detached(&target) {
                 eprintln!("oryx: cannot open {target}: {err}");
             }
+        } else if self.pass.is_some() {
+            // The heading sits further down than the pass has reached, so
+            // the jump waits for it instead of doing nothing.
+            self.pending_anchor = Some(target);
         }
     }
 
@@ -935,6 +966,151 @@ impl App {
         }
     }
 
+    /// Starts a pass when the layout is missing or the content width
+    /// changed, and reports whether one began. Everything that indexes the
+    /// layout is dropped here, as a full relayout always did.
+    fn start_pass(&mut self, avail: f32) -> bool {
+        if self.layout.is_some() && (self.layout_width == avail || self.settle_at.is_some()) {
+            return false;
+        }
+        if self.scroll_y > 0.0 {
+            self.pending_scroll = Some(self.scroll_y);
+        }
+        let (out, pass) = layout_begin(&self.document, &self.cfg, avail);
+        self.layout = Some(out);
+        self.pass = Some(pass);
+        self.pass_spent = Duration::ZERO;
+        self.layout_width = avail;
+        self.band = None;
+        self.pending_band_for = None;
+        // Selection positions index the old layout's runs, and so do
+        // search matches.
+        self.selection = None;
+        self.sel_anchor = None;
+        if let Some(state) = self.search.as_mut() {
+            state.stale = true;
+        }
+        true
+    }
+
+    /// Advances the pass by one slice. A pointer gesture holds it off so
+    /// selection and scrollbar dragging stay smooth; the queue resumes on
+    /// release.
+    fn slice(&mut self, budget: Duration) {
+        if self.pass.is_none()
+            || self.drag.is_some()
+            || self.sel_anchor.is_some()
+            || self.overlay_mouse
+        {
+            return;
+        }
+        let before = self.doc_height();
+        let started = Instant::now();
+        let done = {
+            let lay = self.layout.as_mut().expect("a pass has a layout");
+            let pass = self.pass.as_mut().expect("a pass is running");
+            layout_more(
+                &self.document,
+                &self.theme,
+                &mut self.fonts,
+                &mut self.media,
+                &self.cfg,
+                lay,
+                pass,
+                Some(started + budget),
+            )
+        };
+        self.pass_spent += started.elapsed();
+        if done {
+            self.pass = None;
+            self.last_pass = self.pass_spent;
+            // Matches were found against the prefix; the whole document
+            // is searchable now.
+            if let Some(state) = self.search.as_mut() {
+                state.stale = true;
+            }
+        } else {
+            self.request_redraw();
+        }
+        self.grow_band(before);
+    }
+
+    /// Runs the pass to the end. Select-all needs the whole document: a
+    /// selection over a partial layout copies a truncated document, which
+    /// no other navigation risks.
+    fn finish_layout(&mut self) {
+        if self.pass.is_none() {
+            return;
+        }
+        let before = self.doc_height();
+        {
+            let lay = self.layout.as_mut().expect("a pass has a layout");
+            let pass = self.pass.as_mut().expect("a pass is running");
+            layout_more(
+                &self.document,
+                &self.theme,
+                &mut self.fonts,
+                &mut self.media,
+                &self.cfg,
+                lay,
+                pass,
+                None,
+            );
+        }
+        self.pass = None;
+        if let Some(state) = self.search.as_mut() {
+            state.stale = true;
+        }
+        self.grow_band(before);
+        self.request_redraw();
+    }
+
+    /// Content appended below the painted band leaves its pixels valid,
+    /// and only its document height has to follow. Appending into the band
+    /// drops it.
+    fn grow_band(&mut self, before: f32) {
+        let after = self.doc_height();
+        if after == before {
+            return;
+        }
+        match self.band.as_mut() {
+            Some(band) if before < band.y_top + band.height as f32 => {
+                self.band = None;
+                self.pending_band_for = None;
+            }
+            Some(band) => band.doc_height = after,
+            None => {}
+        }
+    }
+
+    /// Applies a scroll position or an anchor asked for before the pass
+    /// had placed it.
+    fn resolve_pending(&mut self) {
+        if self.pending_scroll.is_none() && self.pending_anchor.is_none() {
+            return;
+        }
+        let height = self.doc_height();
+        let vh = self.viewport_h();
+        if let Some(target) = self.pending_scroll {
+            if scroll::reached(target, height, vh) {
+                self.pending_scroll = None;
+                self.scroll_y = target;
+            }
+        }
+        let Some(name) = self.pending_anchor.clone() else {
+            return;
+        };
+        match self.layout.as_ref().and_then(|l| l.anchor_y(&name)) {
+            Some(y) if scroll::reached(y, height, vh) || self.pass.is_none() => {
+                self.pending_anchor = None;
+                self.scroll_to(y);
+            }
+            // The pass ended without ever placing that heading.
+            None if self.pass.is_none() => self.pending_anchor = None,
+            _ => {}
+        }
+    }
+
     fn redraw(&mut self) {
         let inset = self.inset() as u32;
         let Some(size) = self.gfx.as_ref().map(|g| g.window.inner_size()) else {
@@ -947,26 +1123,13 @@ impl App {
         };
         let avail_px = size.width.saturating_sub(inset).max(1);
         let avail = avail_px as f32;
-        if self.layout.is_none() || self.layout_width != avail {
-            self.layout = Some(layout(
-                &self.document,
-                &self.theme,
-                &mut self.fonts,
-                &mut self.media,
-                &self.cfg,
-                avail,
-            ));
-            self.layout_width = avail;
-            self.band = None;
-            self.pending_band_for = None;
-            // Selection positions index the old layout's runs, and so do
-            // search matches.
-            self.selection = None;
-            self.sel_anchor = None;
-            if let Some(state) = self.search.as_mut() {
-                state.stale = true;
-            }
-        }
+        let budget = if self.start_pass(avail) {
+            OPEN_SLICE
+        } else {
+            SLICE
+        };
+        self.slice(budget);
+        self.resolve_pending();
         self.sync_search();
         let lay = self.layout.as_ref().expect("layout exists");
         self.scroll_y = scroll::clamp(self.scroll_y, lay.height, size.height as f32);
@@ -1134,6 +1297,23 @@ impl App {
 }
 
 impl ApplicationHandler for App {
+    /// A relayout deferred by a live resize waits for the size to hold
+    /// still, and the timer is the only thing that wakes an idle loop.
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(at) = self.settle_at else {
+            return;
+        };
+        if Instant::now() < at {
+            event_loop.set_control_flow(ControlFlow::WaitUntil(at));
+            return;
+        }
+        self.settle_at = None;
+        self.layout = None;
+        self.pass = None;
+        event_loop.set_control_flow(ControlFlow::Wait);
+        self.request_redraw();
+    }
+
     /// A background fetch or highlight chunk landed: fold it in. Fetches
     /// relayout; highlights only recolor.
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, _event: ()) {
@@ -1320,9 +1500,21 @@ impl ApplicationHandler for App {
                     } else {
                         self.end_selection();
                     }
+                    // The gesture held the pass off. A release that changed
+                    // nothing else still has to hand the loop back to it.
+                    if self.pass.is_some() {
+                        self.request_redraw();
+                    }
                 }
             },
             WindowEvent::Resized(size) => {
+                // A drag delivers a width per frame. When a full pass
+                // outlasts a slice, restarting it on each one would strand
+                // the reader at the top for the whole drag, so the current
+                // layout keeps painting until the size holds still.
+                if self.layout.is_some() && scroll::defer_relayout(self.last_pass, SLICE) {
+                    self.settle_at = Some(Instant::now() + scroll::SETTLE);
+                }
                 if let Some(gfx) = self.gfx.as_ref() {
                     // Track only the floating geometry; a maximized or
                     // restored-maximized window must not overwrite it.

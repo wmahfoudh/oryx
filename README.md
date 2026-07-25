@@ -1,75 +1,72 @@
 # Oryx
 
-The fastest, most beautiful markdown viewer on the planet.
+The fastest, most beautiful markdown and code viewer on the planet.
 
 ![License](https://img.shields.io/badge/license-GPL--3.0-orange)
 ![Platforms](https://img.shields.io/badge/platforms-Linux%20%7C%20Windows-blue)
 ![Built in](https://img.shields.io/badge/built%20in-Rust-black)
 
-Oryx started as a personal need: reading a markdown file should not require opening an editor, a browser tab, or an Electron app. Most tools either edit with a preview attached or embed a web engine to draw text. I read a lot of markdown and rarely edit it, so I wanted speed and convenience alone. Oryx renders markdown natively, in a single small binary that draws everything itself on the CPU, with the typography and theming a reader deserves and nothing else on screen.
+Oryx started as a personal need: reading a markdown file should not require opening an editor, a browser tab, or an Electron app. Most tools either edit with a preview attached or embed a web engine to draw text. I work with a lot of markdown and rarely edit it, so I wanted speed and convenience. Oryx renders markdown natively, in a single small binary that draws everything itself on the CPU, with the typography and theming a reader deserves, nothing else.
 
-![Oryx rendering its showcase document](screenshots/hero.png)
+[Install](#install) · [Use](#use) · [Themes](#themes)
 
-## Contents
+## Why Oryx
 
-- [Features](#features)
-- [Themes](#themes)
-- [Installation](#installation)
-- [Usage](#usage)
-- [Design](#design)
-- [What Oryx does not do](#what-oryx-does-not-do)
-- [Fonts](#fonts)
-- [Contributing](#contributing)
-- [How Oryx was built](#how-oryx-was-built)
-- [License](#license)
+**It opens instantly, whatever the size.** A normal document is on screen in well under 150 milliseconds from cold, and an 8MB file takes about a third of a second. Oryx manages that by highlighting and laying out only the first few screens before it paints, then finishing the rest in the background while you read.
 
-## Features
+**It reads, it does not edit.** There are no panes and no toolbars. F1 lists every shortcut and Escape closes whatever is open, and once you know those two keys you know your way around.
 
-**Rendering.** Headings, bold, italic, strikethrough, inline code, links, autolinks, and smart punctuation. Syntax highlighted code blocks in thirty languages, with long lines wrapped inside the panel instead of spilling out of it. Tables with striped rows, blockquotes with nesting, GitHub alerts (note, tip, important, warning, caution) with colored bars and titles, task lists, horizontal rules, YAML frontmatter as a metadata panel, and emoji shortcodes like `:tada:`.
+**It is one binary and a folder of themes.** Every dependency is pure Rust, so there is nothing to install beside it and no browser engine hiding inside. It behaves the same on a new laptop as on an old machine with no GPU.
 
-**Images and badges.** Local raster and SVG images, plus remote images fetched in the background and cached on disk, so a document full of shields.io badges renders instantly on the second open, even offline.
+## What it shows
 
-**GitHub READMEs.** The embedded HTML subset real READMEs use: centered blocks, sized images, clickable badge rows, line breaks, and inline styling tags including sub and sup. A typical project README renders the way its author intended.
+**Formatting.** The picture below covers most of it: headings, bold, italic, strikethrough, inline code, links and bare URLs, smart quotes and dashes, rules, nested blockquotes, and emoji shortcodes like `:tada:`.
 
-![A README-style badge header rendered by Oryx](screenshots/github.png)
+![Oryx rendering a markdown document](screenshots/formatting.png)
 
-**Footnotes and math.** Footnote references render superscript and click-jump to their definitions, collected at the end under a rule. Math literals render styled, with TeX commands like `\sum` and `\alpha` shown as real symbols and simple scripts raised and lowered.
+**Code.** Fenced blocks get a bordered panel and syntax colors for the languages most people write. A line too long for the panel wraps inside it. You can also point Oryx straight at a source file and it renders the whole thing as one highlighted document, plain text files included.
 
-**Find in document.** Ctrl+F opens a floating search bar. Matches highlight as you type, in colors the active theme chooses, and Enter or F3 walks through them with a wrapping counter. Matching is smart case: an all-lowercase query matches any case, a capital letter makes it exact.
+![Oryx rendering highlighted code](screenshots/code.png)
 
-**Code files too.** Oryx opens source files directly as a single highlighted document, plus plain text. Opening is instant at any size: highlighting runs inside a small time budget and the rest arrives from a background thread, colors washing in from the top while the document is already readable. The folder sidebar makes it a quick reader for any project directory.
+**Tables.** Columns keep the alignment you gave them, rows alternate their background, and each column sizes itself to its content up to a limit. A cell with a lot of text wraps inside its column, so a wide table never runs off the page.
 
-![The sidebar and a highlighted code file](screenshots/code.png)
+![Oryx rendering tables](screenshots/tables.png)
 
-**Interface.** A folder sidebar with keyboard navigation, a native open dialog, text selection with copy as plain text or as the original markdown, session zoom, reload from disk for files being edited in parallel, and a shortcuts help screen. The window reopens as you left it: size, position, and maximized state persist across sessions. Every panel is keyboard driven and mouse friendly.
+**Lists.** Ordered, unordered, nested as deep as you like. A wrapped line lines up with the text above it, not with the bullet. Task lists get real checkboxes.
 
-## Themes
+![Oryx rendering lists and task lists](screenshots/lists.png)
 
-Thirty-one themes ship with Oryx. A theme is one TOML file with 51 color roles covering every element independently; a missing key falls back to a default and a malformed file is skipped, never fatal. The built-in browser (Ctrl+T) previews and applies them live, and the built-in editor changes any role with a color picker while the document restyles behind it. Editing a bundled theme automatically edits a copy, so the shipped files stay pristine.
+**Alerts.** All five GitHub alert kinds are styled: note, tip, important, warning and caution, each with its own color and title.
 
-![The theme browser](screenshots/themes.png)
+![Oryx rendering alerts](screenshots/alerts.png)
 
-![The theme editor](screenshots/editor.png)
+**Frontmatter.** A YAML header, the kind Obsidian and static site generators put at the top of a file, becomes a small metadata panel above the document. Most viewers either print it as a paragraph or throw it away.
 
-Nine themes are original designs: `oryx-light` (the default) and its dark twin `oryx-dark`, `oryx-sand` and `oryx-night`, `inkstone`, `ember`, `meadow`, `slate`, and `be-vendible`. The rest adapt permissively licensed editor palettes, all MIT, with thanks to their authors:
+![Oryx rendering YAML frontmatter](screenshots/frontmatter.png)
 
-- Dracula ([draculatheme.com](https://draculatheme.com))
-- Nord ([nordtheme.com](https://www.nordtheme.com))
-- Gruvbox dark and light ([morhetz/gruvbox](https://github.com/morhetz/gruvbox))
-- Catppuccin Mocha and Latte ([catppuccin.com](https://catppuccin.com))
-- Tokyo Night ([enkia/tokyo-night-vscode-theme](https://github.com/enkia/tokyo-night-vscode-theme))
-- Solarized dark and light by Ethan Schoonover ([ethanschoonover.com/solarized](https://ethanschoonover.com/solarized))
-- One Dark ([atom](https://github.com/atom/atom))
-- Everforest dark and light ([sainnhe/everforest](https://github.com/sainnhe/everforest))
-- Rosé Pine and Rosé Pine Dawn ([rosepinetheme.com](https://rosepinetheme.com))
-- Kanagawa ([rebelot/kanagawa.nvim](https://github.com/rebelot/kanagawa.nvim))
-- Ayu Mirage and Light ([ayu-theme](https://github.com/ayu-theme/ayu-colors))
-- Night Owl by Sarah Drasner ([sdras/night-owl-vscode-theme](https://github.com/sdras/night-owl-vscode-theme))
-- Horizon ([jolaleye/horizon-theme-vscode](https://github.com/jolaleye/horizon-theme-vscode))
-- Flexoki dark and light by Steph Ango ([stephango.com/flexoki](https://stephango.com/flexoki))
-- GitHub Light ([primer/primitives](https://github.com/primer/primitives))
+**Math.** Math written as TeX comes out with real symbols: `\sum` is ∑, `\alpha` is α, and superscripts and subscripts sit where they should, whether the expression is inline in a sentence or centered on a line of its own.
 
-## Installation
+![Oryx rendering math](screenshots/math.png)
+
+**Footnotes.** Markers sit raised in the text and jump to their definitions, which gather at the foot of the document under a rule, in the order they were referenced.
+
+![Oryx rendering footnotes](screenshots/footnotes.png)
+
+**Images and badges.** Local images render, PNG or SVG. Remote ones are fetched in the background and cached on disk, so a README covered in shields.io badges comes up immediately the second time you open it, and keeps working offline. If a path is broken you get a placeholder with the alt text in it.
+
+![Oryx rendering images](screenshots/images.png)
+
+**GitHub READMEs.** Real READMEs lean on raw HTML for the things markdown cannot do, so Oryx handles the common subset: centered blocks, images at a set width or height, rows of clickable badges, line breaks, and the inline tags down to sub and sup.
+
+![Oryx rendering a GitHub style README](screenshots/github.png)
+
+**Find in document.** Ctrl+F opens a search bar. Matches light up as you type, the current one brighter than the rest, and Enter or F3 steps through them with a counter that wraps around.
+
+Search is smart about case: type `oryx` and you match Oryx, ORYX and oryx; add a capital and only Oryx matches. It looks everywhere text is laid out, so list items, link text, table cells, quotes and code blocks all count. A match can run across styling, so `fast viewer` turns up even when it was written as **fast** *viewer*, though it will not run from one block into the next. Zoom or reload while the bar is open and Oryx runs the query again and keeps your current match in view.
+
+**Interface.** There is a folder sidebar you can drive from the keyboard, a native open dialog, selection with copy as plain text or as the original markdown, per-session zoom, reload from disk for files you are editing elsewhere, and the shortcuts screen on F1. Oryx reopens the window where you left it, at the size you left it, and maximized if that is how you closed it.
+
+## Install
 
 ### From a release
 
@@ -93,7 +90,7 @@ make install
 
 `make install` builds the release binary, installs it to `~/.local/bin`, copies the themes to `~/.local/share/oryx/themes`, and registers the file association. Plain `cargo build --release` works too; the binary looks for `themes/` next to itself, in the XDG data directory, and in the working directory. For everyday reading use the installed binary or `--release`: a plain debug build is noticeably slower on code-heavy documents.
 
-## Usage
+## Use
 
 > There are no menus. **Press F1** for the complete shortcut list, Escape to close a panel or quit. Those two keys are all you need to know in advance.
 
@@ -127,38 +124,83 @@ oryx --version          print the version
 
 Ctrl is Cmd on macOS. Copy as markdown reproduces the original source of the selection, styles intact.
 
-## Design
+## Themes
 
-Oryx is a four stage pipeline: load, layout, paint, present. The whole document is parsed and laid out once at open, painting happens in bands around the viewport, and scrolling inside a band is a memory copy, so the frame cost of scrolling does not depend on document length. The event loop only wakes for input; idle CPU is zero.
+Thirty-one themes ship with Oryx. Each one is a single TOML file with 51 color roles, so every element can be colored on its own. Leave a key out and it falls back to a default. Write something malformed and Oryx skips the file and keeps the theme it already had, so a bad theme can never take the app down.
 
-Everything is drawn by the layout engine itself, which makes the rendering fully testable as numbers: positions, wrapping, spacing, and colors are asserted in over 190 tests. Every color on screen comes from the active theme file. The dependencies are pure Rust throughout, which is what keeps the binary small, the startup instant, and the build simple on all three platforms.
+The browser on Ctrl+T previews them and applies them live.
 
-A typical document opens in well under 150 milliseconds cold, including engine warm-up. Startup, relayout, and paint timings are validated by a performance test in the repository.
+![The theme browser](screenshots/themes.png)
 
-Syntax highlighting is budgeted rather than blocking: an open computes about forty milliseconds of highlighting synchronously, and a background thread delivers the rest in chunks that recolor the laid-out document in place, with no relayout. Opening a source file is effectively constant time at any size. Measured on one Linux machine, release build, eager highlighting against the budgeted open:
+The editor changes any role with a color picker while the document restyles behind it. Edit one of the bundled themes and Oryx quietly edits a copy, so the files it shipped with stay as they were.
 
-| Document | Eager open | Budgeted open |
+![The theme editor](screenshots/editor.png)
+
+Nine are original designs: `oryx-light` (the default) and its dark twin `oryx-dark`, `oryx-sand` and `oryx-night`, `inkstone`, `ember`, `meadow`, `slate`, and `be-vendible`. The rest adapt permissively licensed editor palettes, credited below.
+
+## Performance
+
+Oryx works in four stages: load, layout, paint, present. It parses the file when you open it, lays the blocks out in order, and paints a band that covers the viewport and a couple of screens either side. Scrolling inside that band is a memory copy, which is why the cost of a scroll frame has nothing to do with how long the document is. The event loop wakes only for input, so an idle window uses no CPU at all.
+
+Both of the expensive stages are given a time budget rather than being allowed to block, and that is what makes a large file feel like a small one.
+
+**Syntax highlighting.** Opening a file spends about forty milliseconds coloring code, and a background thread sends the rest along in chunks. Each chunk recolors lines that have already been laid out, so nothing moves on screen.
+
+**Text layout.** Opening lays out the first screens and the rest follows in order, a slice at a time, between frames. A position is exact as soon as it exists and never shifts afterwards, so a selection you make while the document is still filling stays where you put it. Zoom, the sidebar and window resizing all run through the same machinery. The scrollbar tracks what has been laid out so far.
+
+Measured on one Linux machine, release build, from launch to the first frame. The eager column is the same two stages with their budgets removed, the way earlier versions worked.
+
+| Document | Eager | Budgeted |
 |---|---|---|
-| 1MB source file | 4.2s | 41ms |
-| 8MB source file | 35.5s | 56ms |
-| 1MB markdown | 1.2s | 52ms |
-| 8MB markdown | 8.7s | 397ms |
+| 1MB source file | 4.6s | 81ms |
+| 8MB source file | 38s | 90ms |
+| 1MB markdown | 1.8s | 82ms |
+| 8MB markdown | 14s | 317ms |
 
-## What Oryx does not do
+A performance test in the repository checks the startup, relayout and paint timings.
 
-Oryx is a viewer for everyday documents, and stays honest about its edges. It does not edit files. It renders math as styled literals with real symbols, not full typesetting. Very large documents (many megabytes) still pause briefly for text layout at open, and their syntax colors arrive progressively over the first moments rather than all at once. The embedded HTML support is a deliberate subset: no HTML tables, no collapsible sections. macOS compiles but is untested and has no packaged build. Some of these are on the list for future versions; none of them are promises.
+## Limits
 
-## Fonts
+Oryx is built for everyday documents, and there are things it will not do.
 
-DejaVu Sans and Courier Prime are embedded in the binary. DejaVu is distributed under the DejaVu Fonts License; Courier Prime under the SIL Open Font License. The settings dialog can switch to any installed system family.
+- It does not edit files.
+- Math is drawn as styled text with real symbols, not properly typeset.
+- Open something several megabytes long and the colors, and the layout below the first screens, take a moment to catch up.
+- Memory grows with the file. An 8MB document costs a few hundred megabytes while it is open.
+- The HTML it understands is a deliberate subset. No HTML tables, no collapsible sections.
+- macOS compiles, but it is untested and there is no packaged build.
 
-## Contributing
+Some of these are on the list for future versions; none of them are promises.
 
-Bug reports and theme contributions are welcome on the [issue tracker](https://codeberg.org/wmahfoudh/oryx/issues). Pull requests are read with interest, without promises. `make check` is the gate: formatting, clippy for the Linux, Windows, and macOS targets, build, and the full test suite.
+## Under the hood
 
-## How Oryx was built
+The layout engine draws everything, which means the rendering can be tested as numbers rather than by eye. Over 200 tests assert positions, wrapping, spacing and colors. Every color on screen comes from the active theme file. Every dependency is pure Rust, and that is what keeps the binary small, the startup quick and the build straightforward on all three platforms.
 
-Oryx was built with the help of Claude. I did the specs, the technology and architecture decisions, feature scope, code and visual verification of every change and task. Claude wrote the implementation and its tests under that direction, following a written spec, a technical design, and a task-by-task plan, test-driven throughout, with formatting, lints for three platforms, and the full test suite gating every task.
+The files under `tests/showcase/` are the documents behind the screenshots above. Each one exercises a single feature, and they are worth opening to see what Oryx makes of them.
+
+Bug reports and theme contributions are welcome on the [issue tracker](https://codeberg.org/wmahfoudh/oryx/issues). Pull requests are read with interest, though without promises. `make check` is the gate: formatting, clippy for the Linux, Windows and macOS targets, build, and the full test suite.
+
+## Credits
+
+DejaVu Sans and Courier Prime are embedded in the binary. DejaVu is distributed under the DejaVu Fonts License, Courier Prime under the SIL Open Font License. The settings dialog can switch to any family installed on your system.
+
+The adapted themes come from these palettes, all MIT, with thanks to their authors:
+
+- Dracula ([draculatheme.com](https://draculatheme.com))
+- Nord ([nordtheme.com](https://www.nordtheme.com))
+- Gruvbox dark and light ([morhetz/gruvbox](https://github.com/morhetz/gruvbox))
+- Catppuccin Mocha and Latte ([catppuccin.com](https://catppuccin.com))
+- Tokyo Night ([enkia/tokyo-night-vscode-theme](https://github.com/enkia/tokyo-night-vscode-theme))
+- Solarized dark and light by Ethan Schoonover ([ethanschoonover.com/solarized](https://ethanschoonover.com/solarized))
+- One Dark ([atom](https://github.com/atom/atom))
+- Everforest dark and light ([sainnhe/everforest](https://github.com/sainnhe/everforest))
+- Rosé Pine and Rosé Pine Dawn ([rosepinetheme.com](https://rosepinetheme.com))
+- Kanagawa ([rebelot/kanagawa.nvim](https://github.com/rebelot/kanagawa.nvim))
+- Ayu Mirage and Light ([ayu-theme](https://github.com/ayu-theme/ayu-colors))
+- Night Owl by Sarah Drasner ([sdras/night-owl-vscode-theme](https://github.com/sdras/night-owl-vscode-theme))
+- Horizon ([jolaleye/horizon-theme-vscode](https://github.com/jolaleye/horizon-theme-vscode))
+- Flexoki dark and light by Steph Ango ([stephango.com/flexoki](https://stephango.com/flexoki))
+- GitHub Light ([primer/primitives](https://github.com/primer/primitives))
 
 ## License
 

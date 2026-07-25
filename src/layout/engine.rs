@@ -2,12 +2,15 @@
 //! Pure with respect to the window: no pixels, fully testable with numbers.
 
 use std::ops::Range;
+use std::time::{Duration, Instant};
 
 use cosmic_text::{Attrs, Buffer, Family, Metrics, Shaping, Style, Weight};
 
 use super::metrics;
 use crate::doc::images::MediaCache;
-use crate::doc::model::{AlertKind, BlockKind, Document, Marker, Span, SpanImage, SpanScript};
+use crate::doc::model::{
+    AlertKind, Block, BlockKind, Document, Marker, Span, SpanImage, SpanScript,
+};
 use crate::style::fonts::{FontStore, BODY_FAMILY, CODE_FAMILY};
 use crate::style::highlight::SyntaxRole;
 use crate::style::theme::{Rgba, Theme};
@@ -57,7 +60,7 @@ pub struct TextRun {
 
 /// A decoration rectangle: panels, bars, strike lines, table grid.
 /// Zero radii and zero stroke give a plain filled rectangle.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DecoRect {
     pub x: f32,
     pub y: f32,
@@ -117,7 +120,7 @@ pub struct LayoutDoc {
 /// re-shape it, so arriving highlights recolor in place without a
 /// relayout. Code runs differ only by color across syntax roles, so
 /// re-shaping a line never moves anything.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CodeLine {
     pub block: usize,
     pub line: usize,
@@ -161,7 +164,7 @@ impl LayoutDoc {
 }
 
 /// One image scaled and positioned in the document.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ImagePlace {
     pub src: String,
     pub x: f32,
@@ -172,6 +175,78 @@ pub struct ImagePlace {
     pub link: Option<String>,
 }
 
+/// The first slice at open: the same budget highlighting gets, which
+/// places several screens at any document size.
+pub const OPEN_SLICE: Duration = Duration::from_millis(40);
+
+/// A wash-in slice, short enough that input latency stays invisible.
+pub const SLICE: Duration = Duration::from_millis(16);
+
+/// What a slice boundary carries: the block loop's running values and,
+/// when a code block is open, the position inside it. A code file is one
+/// block, so stopping between its lines is what bounds a slice.
+pub struct LayoutPass {
+    order: Vec<usize>,
+    position: usize,
+    notes_start: usize,
+    has_notes: bool,
+    cursor: f32,
+    first: bool,
+    prev_quote_depth: u8,
+    prev_alert: Option<AlertKind>,
+    prev_is_list: bool,
+    prev_space_below: f32,
+    margin: f32,
+    content_width: f32,
+    vertical_margin: f32,
+    open: Option<OpenCode>,
+    done: bool,
+}
+
+impl LayoutPass {
+    /// True once every block is placed.
+    pub fn is_complete(&self) -> bool {
+        self.done
+    }
+}
+
+/// Where a block's output starts, so its decoration splices under its own
+/// rects and centering moves only its own runs.
+#[derive(Clone, Copy)]
+struct Marks {
+    rects: usize,
+    runs: usize,
+    images: usize,
+}
+
+/// What a block derives on entry and needs again when it finishes.
+#[derive(Clone, Copy)]
+struct Frame {
+    marks: Marks,
+    x_base: f32,
+    avail: f32,
+    gap: f32,
+    region_top: f32,
+    base_size: f32,
+    is_list: bool,
+}
+
+/// A code block placed over several steps. Its panel is pushed on entry
+/// and grows as lines land, which moves no index.
+struct OpenCode {
+    block: usize,
+    frame: Frame,
+    /// Panel background rect; the border rect follows it.
+    panel: usize,
+    y0: f32,
+    y: f32,
+    pad: f32,
+    size: f32,
+    line_height: f32,
+    wrap_width: f32,
+    line: usize,
+}
+
 pub fn layout(
     doc: &Document,
     theme: &Theme,
@@ -180,17 +255,20 @@ pub fn layout(
     cfg: &ViewConfig,
     viewport_width: f32,
 ) -> LayoutDoc {
+    let (mut out, mut pass) = layout_begin(doc, cfg, viewport_width);
+    layout_more(doc, theme, fonts, media, cfg, &mut out, &mut pass, None);
+    out
+}
+
+/// Starts a pass: derives the geometry and the block order.
+pub fn layout_begin(
+    doc: &Document,
+    cfg: &ViewConfig,
+    viewport_width: f32,
+) -> (LayoutDoc, LayoutPass) {
     let margin = metrics::MARGIN_RATIO * viewport_width;
     let vertical_margin = metrics::VERTICAL_MARGIN_EM * cfg.body_size * cfg.zoom;
     let content_width = (viewport_width - 2.0 * margin).max(50.0);
-    let mut out = LayoutDoc::default();
-    let mut cursor = 0.0_f32;
-    let mut first = true;
-
-    let mut prev_quote_depth = 0u8;
-    let mut prev_alert: Option<AlertKind> = None;
-    let mut prev_is_list = false;
-    let mut prev_space_below = 0.0_f32;
 
     // Footnote definitions collect at the document end under a rule,
     // wherever the source declared them. Model indices stay untouched so
@@ -201,266 +279,514 @@ pub fn layout(
     let has_notes = !note_order.is_empty();
     let order: Vec<usize> = body_order.into_iter().chain(note_order).collect();
 
-    for (position, &block_index) in order.iter().enumerate() {
-        let block = &doc.blocks[block_index];
-        if has_notes && position == notes_start && !first {
-            let size = cfg.body_size * cfg.zoom;
-            cursor += metrics::space_above(None, size);
+    let pass = LayoutPass {
+        order,
+        position: 0,
+        notes_start,
+        has_notes,
+        cursor: 0.0,
+        first: true,
+        prev_quote_depth: 0,
+        prev_alert: None,
+        prev_is_list: false,
+        prev_space_below: 0.0,
+        margin,
+        content_width,
+        vertical_margin,
+        open: None,
+        done: false,
+    };
+    (LayoutDoc::default(), pass)
+}
+
+/// Places steps until the deadline, or to the end when there is none.
+/// Returns true when the document is complete.
+#[allow(clippy::too_many_arguments)]
+pub fn layout_more(
+    doc: &Document,
+    theme: &Theme,
+    fonts: &mut FontStore,
+    media: &mut MediaCache,
+    cfg: &ViewConfig,
+    out: &mut LayoutDoc,
+    pass: &mut LayoutPass,
+    deadline: Option<Instant>,
+) -> bool {
+    while !pass.done {
+        if deadline.is_some_and(|at| Instant::now() >= at) {
+            return false;
+        }
+        layout_step(doc, theme, fonts, media, cfg, out, pass);
+    }
+    true
+}
+
+/// Places one step: a whole block, or one line of an open code block.
+pub fn layout_step(
+    doc: &Document,
+    theme: &Theme,
+    fonts: &mut FontStore,
+    media: &mut MediaCache,
+    cfg: &ViewConfig,
+    out: &mut LayoutDoc,
+    pass: &mut LayoutPass,
+) -> bool {
+    if pass.done {
+        return true;
+    }
+    match pass.open.take() {
+        Some(open) => place_code_line(doc, theme, fonts, cfg, open, out, pass),
+        None if pass.position < pass.order.len() => {
+            place_block(doc, theme, fonts, media, cfg, out, pass)
+        }
+        None => {}
+    }
+    if pass.open.is_none() && pass.position >= pass.order.len() {
+        pass.done = true;
+    }
+    out.height = placed_height(pass);
+    pass.done
+}
+
+/// Height of what is placed: the running cursor, or the open code block's
+/// panel bottom while it fills.
+fn placed_height(pass: &LayoutPass) -> f32 {
+    if pass.first {
+        return 0.0;
+    }
+    match &pass.open {
+        Some(open) => open.y + open.pad + pass.vertical_margin,
+        None => pass.cursor + pass.vertical_margin,
+    }
+}
+
+fn place_block(
+    doc: &Document,
+    theme: &Theme,
+    fonts: &mut FontStore,
+    media: &mut MediaCache,
+    cfg: &ViewConfig,
+    out: &mut LayoutDoc,
+    pass: &mut LayoutPass,
+) {
+    let position = pass.position;
+    let block_index = pass.order[position];
+    pass.position += 1;
+    let block = &doc.blocks[block_index];
+
+    if pass.has_notes && position == pass.notes_start && !pass.first {
+        let size = cfg.body_size * cfg.zoom;
+        pass.cursor += metrics::space_above(None, size);
+        out.rects.push(DecoRect::fill(
+            pass.margin,
+            pass.cursor,
+            pass.content_width,
+            (1.0 * cfg.zoom).max(1.0),
+            theme.blocks.rule,
+        ));
+        pass.cursor += (1.0 * cfg.zoom).max(1.0);
+    }
+    let heading = match &block.kind {
+        BlockKind::Heading { level, .. } => Some(*level),
+        _ => None,
+    };
+    let is_list = matches!(block.kind, BlockKind::ListItem { .. });
+    let base_size = match &block.kind {
+        BlockKind::Heading { spans, .. }
+        | BlockKind::Paragraph { spans }
+        | BlockKind::ListItem { spans, .. } => {
+            if spans.is_empty() {
+                return;
+            }
+            cfg.body_size * heading.map(metrics::heading_scale).unwrap_or(1.0) * cfg.zoom
+        }
+        BlockKind::CodeBlock { .. } => cfg.code_size * cfg.zoom,
+        BlockKind::Rule
+        | BlockKind::Table { .. }
+        | BlockKind::Image { .. }
+        | BlockKind::MathBlock { .. }
+        | BlockKind::Frontmatter { .. } => cfg.body_size * cfg.zoom,
+        BlockKind::FootnoteDef { .. } => 0.85 * cfg.body_size * cfg.zoom,
+    };
+    let mut gap = 0.0;
+    if pass.first {
+        pass.cursor = pass.vertical_margin;
+        pass.first = false;
+    } else if is_list && pass.prev_is_list {
+        gap = 0.25 * base_size;
+        pass.cursor += gap;
+    } else {
+        gap = metrics::space_above(heading, base_size);
+        pass.cursor += gap;
+    }
+    if let BlockKind::Heading { anchor, .. } = &block.kind {
+        out.anchors.push((anchor.clone(), pass.cursor));
+    }
+
+    let quote_indent = block.quote_depth as f32 * metrics::INDENT * cfg.zoom;
+    let quote_pad = if block.quote_depth > 0 {
+        12.0 * cfg.zoom
+    } else {
+        0.0
+    };
+    let x_base = pass.margin + quote_indent + quote_pad;
+    let avail = (pass.content_width - quote_indent - 2.0 * quote_pad).max(40.0);
+    let marks = Marks {
+        rects: out.rects.len(),
+        runs: out.runs.len(),
+        images: out.images.len(),
+    };
+
+    // The first block of an alert region gets the bold title line; the
+    // quote panel later extends up to cover it.
+    let alert_start =
+        block.alert.is_some() && (pass.prev_quote_depth == 0 || pass.prev_alert != block.alert);
+    let region_top = pass.cursor;
+    if alert_start {
+        let kind = block.alert.expect("alert start has a kind");
+        let title = [Span::plain(alert_title(kind))];
+        let base = BlockStyle {
+            size: cfg.body_size * cfg.zoom,
+            color: alert_color(theme, kind),
+            bold: true,
+            block_index,
+        };
+        let title_h = shape_block(
+            fonts,
+            theme,
+            cfg,
+            &title,
+            &base,
+            x_base,
+            pass.cursor,
+            avail,
+            out,
+        );
+        pass.cursor += title_h + 0.25 * base_size;
+    }
+
+    let frame = Frame {
+        marks,
+        x_base,
+        avail,
+        gap,
+        region_top,
+        base_size,
+        is_list,
+    };
+
+    let height = match &block.kind {
+        BlockKind::Heading { spans, .. } | BlockKind::Paragraph { spans } => {
+            let base = BlockStyle {
+                size: base_size,
+                color: match heading {
+                    Some(level) => heading_color(theme, level),
+                    None => theme.text.body,
+                },
+                bold: heading.is_some(),
+                block_index,
+            };
+            flow_or_shape(
+                fonts,
+                theme,
+                cfg,
+                media,
+                spans,
+                &base,
+                x_base,
+                pass.cursor,
+                avail,
+                out,
+            )
+        }
+        BlockKind::ListItem {
+            marker,
+            depth,
+            spans,
+        } => layout_list_item(
+            fonts,
+            theme,
+            cfg,
+            media,
+            marker,
+            *depth,
+            spans,
+            block_index,
+            x_base,
+            pass.cursor,
+            avail,
+            out,
+        ),
+        // A code file is one block, so it is opened and its lines land
+        // over as many steps as the slice budget allows.
+        BlockKind::CodeBlock { .. } => {
+            let open = open_code(theme, cfg, block_index, frame, out, pass);
+            place_code_line(doc, theme, fonts, cfg, open, out, pass);
+            return;
+        }
+        BlockKind::Rule => {
+            let thickness = (1.0 * cfg.zoom).max(1.0);
             out.rects.push(DecoRect::fill(
-                margin,
-                cursor,
-                content_width,
-                (1.0 * cfg.zoom).max(1.0),
+                x_base,
+                pass.cursor,
+                avail,
+                thickness,
                 theme.blocks.rule,
             ));
-            cursor += (1.0 * cfg.zoom).max(1.0);
+            thickness
         }
-        let heading = match &block.kind {
-            BlockKind::Heading { level, .. } => Some(*level),
-            _ => None,
-        };
-        let is_list = matches!(block.kind, BlockKind::ListItem { .. });
-        let base_size = match &block.kind {
-            BlockKind::Heading { spans, .. }
-            | BlockKind::Paragraph { spans }
-            | BlockKind::ListItem { spans, .. } => {
-                if spans.is_empty() {
-                    continue;
-                }
-                cfg.body_size * heading.map(metrics::heading_scale).unwrap_or(1.0) * cfg.zoom
-            }
-            BlockKind::CodeBlock { .. } => cfg.code_size * cfg.zoom,
-            BlockKind::Rule
-            | BlockKind::Table { .. }
-            | BlockKind::Image { .. }
-            | BlockKind::MathBlock { .. }
-            | BlockKind::Frontmatter { .. } => cfg.body_size * cfg.zoom,
-            BlockKind::FootnoteDef { .. } => 0.85 * cfg.body_size * cfg.zoom,
-        };
-        let mut gap = 0.0;
-        if first {
-            cursor = vertical_margin;
-            first = false;
-        } else if is_list && prev_is_list {
-            gap = 0.25 * base_size;
-            cursor += gap;
-        } else {
-            gap = metrics::space_above(heading, base_size);
-            cursor += gap;
-        }
-        if let BlockKind::Heading { anchor, .. } = &block.kind {
-            out.anchors.push((anchor.clone(), cursor));
-        }
-
-        let quote_indent = block.quote_depth as f32 * metrics::INDENT * cfg.zoom;
-        let quote_pad = if block.quote_depth > 0 {
-            12.0 * cfg.zoom
-        } else {
-            0.0
-        };
-        let x_base = margin + quote_indent + quote_pad;
-        let avail = (content_width - quote_indent - 2.0 * quote_pad).max(40.0);
-        let rects_mark = out.rects.len();
-        let runs_mark = out.runs.len();
-        let images_mark = out.images.len();
-
-        // The first block of an alert region gets the bold title line; the
-        // quote panel later extends up to cover it.
-        let alert_start =
-            block.alert.is_some() && (prev_quote_depth == 0 || prev_alert != block.alert);
-        let region_top = cursor;
-        if alert_start {
-            let kind = block.alert.expect("alert start has a kind");
-            let title = [Span::plain(alert_title(kind))];
-            let base = BlockStyle {
-                size: cfg.body_size * cfg.zoom,
-                color: alert_color(theme, kind),
-                bold: true,
-                block_index,
-            };
-            let title_h = shape_block(
-                fonts, theme, cfg, &title, &base, x_base, cursor, avail, &mut out,
-            );
-            cursor += title_h + 0.25 * base_size;
-        }
-
-        let height = match &block.kind {
-            BlockKind::Heading { spans, .. } | BlockKind::Paragraph { spans } => {
-                let base = BlockStyle {
-                    size: base_size,
-                    color: match heading {
-                        Some(level) => heading_color(theme, level),
-                        None => theme.text.body,
-                    },
-                    bold: heading.is_some(),
-                    block_index,
-                };
-                flow_or_shape(
-                    fonts, theme, cfg, media, spans, &base, x_base, cursor, avail, &mut out,
-                )
-            }
-            BlockKind::ListItem {
-                marker,
-                depth,
+        BlockKind::Table { header, rows } => layout_table(
+            fonts,
+            theme,
+            cfg,
+            header,
+            rows,
+            block_index,
+            x_base,
+            pass.cursor,
+            avail,
+            out,
+        ),
+        BlockKind::Image { path, alt } => layout_image(
+            fonts,
+            theme,
+            cfg,
+            media,
+            path,
+            alt,
+            block_index,
+            x_base,
+            pass.cursor,
+            avail,
+            out,
+        ),
+        BlockKind::Frontmatter { entries } => layout_frontmatter(
+            fonts,
+            theme,
+            cfg,
+            entries,
+            block_index,
+            x_base,
+            pass.cursor,
+            avail,
+            out,
+        ),
+        BlockKind::MathBlock { tex } => layout_math_block(
+            fonts,
+            theme,
+            cfg,
+            tex,
+            block_index,
+            x_base,
+            pass.cursor,
+            avail,
+            out,
+        ),
+        BlockKind::FootnoteDef { label, spans } => {
+            out.anchors.push((format!("footnote:{label}"), pass.cursor));
+            layout_footnote_def(
+                fonts,
+                theme,
+                cfg,
+                label,
                 spans,
-            } => layout_list_item(
-                fonts,
-                theme,
-                cfg,
-                media,
-                marker,
-                *depth,
-                spans,
+                base_size,
                 block_index,
                 x_base,
-                cursor,
+                pass.cursor,
                 avail,
-                &mut out,
-            ),
-            BlockKind::CodeBlock {
-                lines, highlights, ..
-            } => layout_code(
-                fonts,
-                theme,
-                cfg,
-                lines,
-                highlights,
-                block_index,
-                x_base,
-                cursor,
-                avail,
-                &mut out,
-            ),
-            BlockKind::Rule => {
-                let thickness = (1.0 * cfg.zoom).max(1.0);
-                out.rects.push(DecoRect::fill(
-                    x_base,
-                    cursor,
-                    avail,
-                    thickness,
-                    theme.blocks.rule,
-                ));
-                thickness
-            }
-            BlockKind::Table { header, rows } => layout_table(
-                fonts,
-                theme,
-                cfg,
-                header,
-                rows,
-                block_index,
-                x_base,
-                cursor,
-                avail,
-                &mut out,
-            ),
-            BlockKind::Image { path, alt } => layout_image(
-                fonts,
-                theme,
-                cfg,
-                media,
-                path,
-                alt,
-                block_index,
-                x_base,
-                cursor,
-                avail,
-                &mut out,
-            ),
-            BlockKind::Frontmatter { entries } => layout_frontmatter(
-                fonts,
-                theme,
-                cfg,
-                entries,
-                block_index,
-                x_base,
-                cursor,
-                avail,
-                &mut out,
-            ),
-            BlockKind::MathBlock { tex } => layout_math_block(
-                fonts,
-                theme,
-                cfg,
-                tex,
-                block_index,
-                x_base,
-                cursor,
-                avail,
-                &mut out,
-            ),
-            BlockKind::FootnoteDef { label, spans } => {
-                out.anchors.push((format!("footnote:{label}"), cursor));
-                layout_footnote_def(
-                    fonts,
-                    theme,
-                    cfg,
-                    label,
-                    spans,
-                    base_size,
-                    block_index,
-                    x_base,
-                    cursor,
-                    avail,
-                    &mut out,
-                )
-            }
-        };
-
-        if block.centered {
-            center_lines(&mut out, runs_mark, rects_mark, images_mark, x_base, avail);
+                out,
+            )
         }
+    };
 
-        // Quote decoration wraps the block, extending over the gap when the
-        // previous block continues the same region (quote or alert), so
-        // consecutive quoted blocks read as one. Inserted at rects_mark to
-        // paint under the block's own rects (pills, strikes, panels).
-        if block.quote_depth > 0 {
-            let continues = prev_quote_depth > 0 && prev_alert == block.alert;
-            // The previous block's trailing space belongs to the region
-            // too, plus one pixel of overlap into its panel: rasterization
-            // rounds abutting edges independently and a shared fractional
-            // edge can otherwise leave an uncovered row.
-            let top = if continues {
-                cursor - gap - prev_space_below - 1.0
-            } else {
-                region_top
+    finish_block(theme, cfg, block, frame, height, out, pass);
+}
+
+/// The tail every block runs once its height is known: centering, the
+/// quote decoration, and the advance of the carried state.
+fn finish_block(
+    theme: &Theme,
+    cfg: &ViewConfig,
+    block: &Block,
+    frame: Frame,
+    height: f32,
+    out: &mut LayoutDoc,
+    pass: &mut LayoutPass,
+) {
+    if block.centered {
+        center_lines(
+            out,
+            frame.marks.runs,
+            frame.marks.rects,
+            frame.marks.images,
+            frame.x_base,
+            frame.avail,
+        );
+    }
+
+    // Quote decoration wraps the block, extending over the gap when the
+    // previous block continues the same region (quote or alert), so
+    // consecutive quoted blocks read as one. Inserted at the block's rect
+    // mark to paint under the block's own rects (pills, strikes, panels).
+    if block.quote_depth > 0 {
+        let continues = pass.prev_quote_depth > 0 && pass.prev_alert == block.alert;
+        // The previous block's trailing space belongs to the region
+        // too, plus one pixel of overlap into its panel: rasterization
+        // rounds abutting edges independently and a shared fractional
+        // edge can otherwise leave an uncovered row.
+        let top = if continues {
+            pass.cursor - frame.gap - pass.prev_space_below - 1.0
+        } else {
+            frame.region_top
+        };
+        let panel_h = pass.cursor + height - top;
+        let mut decoration = vec![DecoRect::fill(
+            pass.margin,
+            top,
+            pass.content_width,
+            panel_h,
+            theme.blocks.quote_bg,
+        )];
+        for level in 0..block.quote_depth {
+            let bar = match block.alert {
+                Some(kind) if level == 0 => alert_color(theme, kind),
+                _ => theme.blocks.quote_bar,
             };
-            let panel_h = cursor + height - top;
-            let mut decoration = vec![DecoRect::fill(
-                margin,
+            decoration.push(DecoRect::fill(
+                pass.margin + level as f32 * metrics::INDENT * cfg.zoom,
                 top,
-                content_width,
+                3.0 * cfg.zoom,
                 panel_h,
-                theme.blocks.quote_bg,
-            )];
-            for level in 0..block.quote_depth {
-                let bar = match block.alert {
-                    Some(kind) if level == 0 => alert_color(theme, kind),
-                    _ => theme.blocks.quote_bar,
-                };
-                decoration.push(DecoRect::fill(
-                    margin + level as f32 * metrics::INDENT * cfg.zoom,
-                    top,
-                    3.0 * cfg.zoom,
-                    panel_h,
-                    bar,
-                ));
-            }
-            out.rects.splice(rects_mark..rects_mark, decoration);
+                bar,
+            ));
         }
-
-        cursor += height + metrics::space_below(base_size);
-        prev_quote_depth = block.quote_depth;
-        prev_alert = block.alert;
-        prev_is_list = is_list;
-        prev_space_below = metrics::space_below(base_size);
+        out.rects
+            .splice(frame.marks.rects..frame.marks.rects, decoration);
     }
 
-    if !first {
-        out.height = cursor + vertical_margin;
+    pass.cursor += height + metrics::space_below(frame.base_size);
+    pass.prev_quote_depth = block.quote_depth;
+    pass.prev_alert = block.alert;
+    pass.prev_is_list = frame.is_list;
+    pass.prev_space_below = metrics::space_below(frame.base_size);
+}
+
+/// Opens a code block: the panel and border take their final index with a
+/// provisional height, so later lines only grow them.
+fn open_code(
+    theme: &Theme,
+    cfg: &ViewConfig,
+    block_index: usize,
+    frame: Frame,
+    out: &mut LayoutDoc,
+    pass: &LayoutPass,
+) -> OpenCode {
+    let size = cfg.code_size * cfg.zoom;
+    let line_height = metrics::LINE_HEIGHT * size;
+    let pad = 12.0 * cfg.zoom;
+    // Long lines wrap inside the panel instead of overflowing it, so the
+    // panel height follows the shaped lines.
+    let wrap_width = (frame.avail - 2.0 * pad).max(40.0);
+    let y0 = pass.cursor;
+    let panel = out.rects.len();
+    let radius = metrics::CORNER_RADIUS * cfg.zoom;
+    let blocks = &theme.blocks;
+    let height = 2.0 * pad;
+    out.rects.push(
+        DecoRect::fill(frame.x_base, y0, frame.avail, height, blocks.code_bg)
+            .rounded(radius, radius),
+    );
+    out.rects.push(
+        DecoRect::fill(frame.x_base, y0, frame.avail, height, blocks.code_border)
+            .rounded(radius, radius)
+            .stroked((1.0 * cfg.zoom).max(1.0)),
+    );
+    OpenCode {
+        block: block_index,
+        frame,
+        panel,
+        y0,
+        y: y0 + pad,
+        pad,
+        size,
+        line_height,
+        wrap_width,
+        line: 0,
     }
-    out
+}
+
+/// Places one line of the open code block and grows its panel, or closes
+/// the block once its last line is placed.
+fn place_code_line(
+    doc: &Document,
+    theme: &Theme,
+    fonts: &mut FontStore,
+    cfg: &ViewConfig,
+    mut open: OpenCode,
+    out: &mut LayoutDoc,
+    pass: &mut LayoutPass,
+) {
+    let block = &doc.blocks[open.block];
+    let BlockKind::CodeBlock {
+        lines, highlights, ..
+    } = &block.kind
+    else {
+        return;
+    };
+    if open.line >= lines.len() {
+        finish_block(
+            theme,
+            cfg,
+            block,
+            open.frame,
+            open.y - open.y0 + open.pad,
+            out,
+            pass,
+        );
+        return;
+    }
+
+    let line = &lines[open.line];
+    if line.is_empty() {
+        open.y += open.line_height;
+    } else {
+        let empty: Vec<(Range<usize>, SyntaxRole)> = Vec::new();
+        let segments = highlights.get(open.line).unwrap_or(&empty);
+        let x0 = open.frame.x_base + open.pad;
+        let run_start = out.runs.len();
+        let advance = shape_code_line(
+            fonts,
+            theme,
+            cfg,
+            line,
+            segments,
+            open.block,
+            x0,
+            open.y,
+            open.size,
+            open.line_height,
+            open.wrap_width,
+            out,
+        );
+        out.code_lines.push(CodeLine {
+            block: open.block,
+            line: open.line,
+            runs: run_start..out.runs.len(),
+            x0,
+            y0: open.y,
+            size: open.size,
+            line_height: open.line_height,
+            wrap_width: open.wrap_width,
+        });
+        open.y += advance;
+    }
+    open.line += 1;
+
+    let height = open.y - open.y0 + open.pad;
+    out.rects[open.panel].height = height;
+    out.rects[open.panel + 1].height = height;
+    pass.open = Some(open);
 }
 
 struct BlockStyle {
@@ -1792,78 +2118,8 @@ pub fn recolor_code_lines(
     }
 }
 
-/// Lays out a fenced code block: a bordered panel of monospace lines,
-/// one row per source line, no wrapping, colors from highlight roles.
-#[allow(clippy::too_many_arguments)]
-fn layout_code(
-    fonts: &mut FontStore,
-    theme: &Theme,
-    cfg: &ViewConfig,
-    lines: &[String],
-    highlights: &[Vec<(Range<usize>, SyntaxRole)>],
-    block_index: usize,
-    x0: f32,
-    y0: f32,
-    content_width: f32,
-    out: &mut LayoutDoc,
-) -> f32 {
-    let size = cfg.code_size * cfg.zoom;
-    let line_height = metrics::LINE_HEIGHT * size;
-    let pad = 12.0 * cfg.zoom;
-    // Long lines wrap inside the panel instead of overflowing it, so the
-    // panel height follows the shaped lines.
-    let wrap_width = (content_width - 2.0 * pad).max(40.0);
-    let rects_mark = out.rects.len();
-    let empty: Vec<(Range<usize>, SyntaxRole)> = Vec::new();
-    let mut y = y0 + pad;
-    for (i, line) in lines.iter().enumerate() {
-        if line.is_empty() {
-            y += line_height;
-            continue;
-        }
-        let segments = highlights.get(i).unwrap_or(&empty);
-        let run_start = out.runs.len();
-        let advance = shape_code_line(
-            fonts,
-            theme,
-            cfg,
-            line,
-            segments,
-            block_index,
-            x0 + pad,
-            y,
-            size,
-            line_height,
-            wrap_width,
-            out,
-        );
-        out.code_lines.push(CodeLine {
-            block: block_index,
-            line: i,
-            runs: run_start..out.runs.len(),
-            x0: x0 + pad,
-            y0: y,
-            size,
-            line_height,
-            wrap_width,
-        });
-        y += advance;
-    }
-    let height = y - y0 + pad;
-    let blocks = &theme.blocks;
-    let radius = metrics::CORNER_RADIUS * cfg.zoom;
-    out.rects.splice(
-        rects_mark..rects_mark,
-        [
-            DecoRect::fill(x0, y0, content_width, height, blocks.code_bg).rounded(radius, radius),
-            DecoRect::fill(x0, y0, content_width, height, blocks.code_border)
-                .rounded(radius, radius)
-                .stroked((1.0 * cfg.zoom).max(1.0)),
-        ],
-    );
-    height
-}
-
+/// Shapes one code line: one row per source line, wrapping inside the
+/// panel, colors from the highlight roles.
 #[allow(clippy::too_many_arguments)]
 fn shape_code_line(
     fonts: &mut FontStore,

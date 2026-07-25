@@ -2,5 +2,6 @@ mod engine;
 pub mod metrics;
 
 pub use engine::{
-    layout, recolor_code_lines, CodeLine, DecoRect, ImagePlace, LayoutDoc, TextRun, ViewConfig,
+    layout, layout_begin, layout_more, layout_step, recolor_code_lines, CodeLine, DecoRect,
+    ImagePlace, LayoutDoc, LayoutPass, TextRun, ViewConfig, OPEN_SLICE, SLICE,
 };

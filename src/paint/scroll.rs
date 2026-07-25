@@ -1,6 +1,8 @@
 //! Scroll clamping and the band cache. Scrolling inside the band is a
 //! memcpy slice; the band repaints recentered only near its edges.
 
+use std::time::Duration;
+
 use crate::doc::images::MediaCache;
 use crate::layout::{DecoRect, LayoutDoc};
 use crate::style::fonts::FontStore;
@@ -8,6 +10,23 @@ use crate::style::theme::Theme;
 
 pub fn clamp(y: f32, doc_height: f32, viewport_h: f32) -> f32 {
     y.clamp(0.0, (doc_height - viewport_h).max(0.0))
+}
+
+/// How long a window size holds still before a deferred relayout runs.
+pub const SETTLE: Duration = Duration::from_millis(150);
+
+/// A scroll position held while the pass streams is restorable once the
+/// placed document is tall enough to show it, which is exactly when
+/// clamping leaves it alone.
+pub fn reached(target: f32, doc_height: f32, viewport_h: f32) -> bool {
+    clamp(target, doc_height, viewport_h) >= target
+}
+
+/// A resize drag delivers a new width per frame. Restarting a pass that
+/// cannot finish inside one slice would strand the reader at the top for
+/// the whole drag, so the current layout is kept until the size settles.
+pub fn defer_relayout(last_pass: Duration, slice: Duration) -> bool {
+    last_pass > slice
 }
 
 /// Painted pixels for `[y_top, y_top + height)` at full window width,
@@ -81,6 +100,25 @@ mod tests {
         assert_eq!(clamp(-10.0, 1000.0, 300.0), 0.0);
         assert_eq!(clamp(2000.0, 1000.0, 300.0), 700.0);
         assert_eq!(clamp(100.0, 200.0, 300.0), 0.0);
+    }
+
+    #[test]
+    fn a_target_is_reached_once_the_placed_document_shows_it() {
+        // 700px of placed document under a 300px viewport scrolls to 400.
+        assert!(!reached(500.0, 700.0, 300.0));
+        assert!(reached(400.0, 700.0, 300.0));
+        assert!(reached(500.0, 800.0, 300.0));
+        // The top is always reachable, including in an empty document.
+        assert!(reached(0.0, 0.0, 300.0));
+    }
+
+    #[test]
+    fn relayout_defers_only_when_a_pass_outlasts_a_slice() {
+        let slice = Duration::from_millis(16);
+        assert!(!defer_relayout(Duration::from_millis(5), slice));
+        assert!(!defer_relayout(slice, slice));
+        assert!(defer_relayout(Duration::from_millis(17), slice));
+        assert!(defer_relayout(Duration::from_secs(5), slice));
     }
 
     fn band(y_top: f32, height: u32, doc_height: f32) -> BandCache {

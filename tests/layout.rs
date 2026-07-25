@@ -1,10 +1,14 @@
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use oryx::doc::images::MediaCache;
 use oryx::doc::load;
 use oryx::doc::markdown;
 use oryx::doc::model::{BlockKind, Document};
-use oryx::layout::{layout, recolor_code_lines, LayoutDoc, TextRun, ViewConfig};
+use oryx::layout::{
+    layout, layout_begin, layout_more, layout_step, metrics, recolor_code_lines, LayoutDoc,
+    TextRun, ViewConfig,
+};
 use oryx::style::fonts::{FontStore, CODE_FAMILY};
 use oryx::style::highlight::{self, Arrival};
 use oryx::style::theme::Theme;
@@ -786,4 +790,319 @@ fn frontmatter_panel_precedes_all_blocks() {
     assert!(panel.y < heading.y);
     assert!(panel.y + panel.height <= heading.y);
     assert!(meta.y < heading.y);
+}
+
+// A resumable pass must place exactly what one pass places, wherever the
+// slice boundaries fall.
+
+/// One block of every kind, so a boundary can land between any two of
+/// them and every field carried across a boundary is exercised.
+const ONE_OF_EACH: &str = r#"---
+title: Sweep
+tags: layout
+---
+
+# Heading
+
+A paragraph with **bold**, *italic*, `code` and a [link](https://example.com).
+
+> Quoted first.
+>
+> Quoted second.
+
+> [!NOTE]
+> An alert body.
+
+- First item
+- Second item
+  - Nested item
+- [ ] Task item
+
+1. Ordered one
+2. Ordered two
+
+| Column | Other |
+|---|---:|
+| a | b |
+| c | d |
+
+```rust
+fn main() {
+    let x = 1;
+    println!("{x}");
+}
+```
+
+---
+
+![missing](nope.png)
+
+$$
+x^2 + y_i
+$$
+
+Text with a footnote[^1].
+
+[^1]: The definition.
+"#;
+
+/// Consecutive quoted blocks and an alert: the panel top is derived from
+/// the previous block's trailing space and gap.
+const QUOTE_REGION: &str = "Lead in.\n\n> Quoted first.\n>\n> Quoted second.\n\n\
+     > [!TIP]\n> Alert body.\n\nTail.";
+
+/// Consecutive list items take the tight gap, not the paragraph gap.
+const TIGHT_LIST: &str = "- One\n- Two\n- Three\n\nAfter.";
+
+/// Footnote definitions move to the end under a separator rule.
+const FOOTNOTES: &str = "Body[^a] and more[^b].\n\n[^a]: First note.\n\n[^b]: Second note.";
+
+/// A code block long enough that a boundary falls between its lines.
+const CODE_LINES: &str =
+    "Intro.\n\n```rust\nfn a() {}\nfn b() {}\nfn c() {}\nfn d() {}\n```\n\nOutro.";
+
+fn theme() -> Theme {
+    Theme::default_dark()
+}
+
+/// Runs `k` steps, then finishes the pass without a deadline.
+fn lay_in_two(doc: &Document, width: f32, fonts: &mut FontStore, k: usize) -> LayoutDoc {
+    let mut media = MediaCache::new(PathBuf::from("."));
+    let (mut out, mut pass) = layout_begin(doc, &cfg(), width);
+    for _ in 0..k {
+        if layout_step(
+            doc,
+            &theme(),
+            fonts,
+            &mut media,
+            &cfg(),
+            &mut out,
+            &mut pass,
+        ) {
+            break;
+        }
+    }
+    layout_more(
+        doc,
+        &theme(),
+        fonts,
+        &mut media,
+        &cfg(),
+        &mut out,
+        &mut pass,
+        None,
+    );
+    out
+}
+
+/// Steps a complete pass takes, which is the number of boundaries to sweep.
+fn step_count(doc: &Document, width: f32, fonts: &mut FontStore) -> usize {
+    let mut media = MediaCache::new(PathBuf::from("."));
+    let (mut out, mut pass) = layout_begin(doc, &cfg(), width);
+    let mut steps = 1;
+    while !layout_step(
+        doc,
+        &theme(),
+        fonts,
+        &mut media,
+        &cfg(),
+        &mut out,
+        &mut pass,
+    ) {
+        steps += 1;
+    }
+    steps
+}
+
+fn assert_same(split: &LayoutDoc, whole: &LayoutDoc, at: usize) {
+    assert_eq!(split.height, whole.height, "height, boundary after {at}");
+    assert_eq!(split.runs, whole.runs, "runs, boundary after {at}");
+    assert_eq!(split.rects, whole.rects, "rects, boundary after {at}");
+    assert_eq!(split.images, whole.images, "images, boundary after {at}");
+    assert_eq!(split.anchors, whole.anchors, "anchors, boundary after {at}");
+    assert_eq!(
+        split.code_lines, whole.code_lines,
+        "code lines, boundary after {at}"
+    );
+}
+
+/// Every boundary in the document produces the same layout as one pass.
+fn assert_sweep(source: &str) {
+    let doc = markdown::parse(source);
+    let mut fonts = fonts();
+    let whole = lay_doc(&doc, 800.0, &mut fonts);
+    let steps = step_count(&doc, 800.0, &mut fonts);
+    // A sweep over a fixture that takes one step would pass while testing
+    // nothing, so the step count is part of the assertion.
+    assert!(steps > 2, "fixture sweeps only {steps} boundaries");
+    for k in 0..=steps {
+        let split = lay_in_two(&doc, 800.0, &mut fonts, k);
+        assert_same(&split, &whole, k);
+    }
+}
+
+#[test]
+fn an_unbounded_pass_matches_layout() {
+    let doc = markdown::parse(ONE_OF_EACH);
+    let mut fonts = fonts();
+    let whole = lay_doc(&doc, 800.0, &mut fonts);
+    let mut media = MediaCache::new(PathBuf::from("."));
+    let (mut out, mut pass) = layout_begin(&doc, &cfg(), 800.0);
+    let done = layout_more(
+        &doc,
+        &theme(),
+        &mut fonts,
+        &mut media,
+        &cfg(),
+        &mut out,
+        &mut pass,
+        None,
+    );
+    assert!(done, "an unbounded pass completes");
+    assert_same(&out, &whole, 0);
+}
+
+#[test]
+fn sweep_over_one_of_each() {
+    assert_sweep(ONE_OF_EACH);
+}
+
+#[test]
+fn sweep_over_a_quote_region() {
+    assert_sweep(QUOTE_REGION);
+}
+
+#[test]
+fn sweep_over_a_tight_list() {
+    assert_sweep(TIGHT_LIST);
+}
+
+#[test]
+fn sweep_over_footnotes() {
+    assert_sweep(FOOTNOTES);
+}
+
+#[test]
+fn sweep_over_code_lines() {
+    assert_sweep(CODE_LINES);
+}
+
+#[test]
+fn a_past_deadline_places_nothing() {
+    let doc = markdown::parse(ONE_OF_EACH);
+    let mut fonts = fonts();
+    let mut media = MediaCache::new(PathBuf::from("."));
+    let (mut out, mut pass) = layout_begin(&doc, &cfg(), 800.0);
+    let done = layout_more(
+        &doc,
+        &theme(),
+        &mut fonts,
+        &mut media,
+        &cfg(),
+        &mut out,
+        &mut pass,
+        Some(Instant::now() - Duration::from_millis(1)),
+    );
+    assert!(!done, "a past deadline cannot complete the document");
+    assert_eq!(out.height, 0.0);
+    assert!(out.runs.is_empty());
+    assert!(out.rects.is_empty());
+    assert!(out.anchors.is_empty());
+}
+
+#[test]
+fn a_partial_pass_is_a_prefix_of_the_complete_one() {
+    let doc = markdown::parse(QUOTE_REGION);
+    let mut fonts = fonts();
+    let whole = lay_doc(&doc, 800.0, &mut fonts);
+    let mut media = MediaCache::new(PathBuf::from("."));
+    let (mut out, mut pass) = layout_begin(&doc, &cfg(), 800.0);
+    for k in 0..step_count(&doc, 800.0, &mut fonts) {
+        layout_step(
+            &doc,
+            &theme(),
+            &mut fonts,
+            &mut media,
+            &cfg(),
+            &mut out,
+            &mut pass,
+        );
+        assert_eq!(out.runs, whole.runs[..out.runs.len()], "runs after {k}");
+        assert_eq!(out.rects, whole.rects[..out.rects.len()], "rects after {k}");
+        assert_eq!(
+            out.anchors,
+            whole.anchors[..out.anchors.len()],
+            "anchors after {k}"
+        );
+    }
+}
+
+#[test]
+fn height_grows_to_the_complete_height() {
+    let doc = markdown::parse(ONE_OF_EACH);
+    let mut fonts = fonts();
+    let whole = lay_doc(&doc, 800.0, &mut fonts);
+    let mut media = MediaCache::new(PathBuf::from("."));
+    let (mut out, mut pass) = layout_begin(&doc, &cfg(), 800.0);
+    let mut previous = 0.0_f32;
+    loop {
+        let done = layout_step(
+            &doc,
+            &theme(),
+            &mut fonts,
+            &mut media,
+            &cfg(),
+            &mut out,
+            &mut pass,
+        );
+        assert!(out.height >= previous, "height shrank to {}", out.height);
+        assert!(out.height <= whole.height, "height passed the complete one");
+        previous = out.height;
+        if done {
+            break;
+        }
+    }
+    assert_eq!(out.height, whole.height);
+}
+
+#[test]
+fn a_partial_code_panel_covers_the_placed_lines() {
+    let doc = markdown::parse(CODE_LINES);
+    let mut fonts = fonts();
+    let theme = theme();
+    let whole = lay_doc(&doc, 800.0, &mut fonts);
+    let complete = whole
+        .rects
+        .iter()
+        .find(|r| r.color == theme.blocks.code_bg)
+        .expect("no code panel");
+    let mut media = MediaCache::new(PathBuf::from("."));
+    let (mut out, mut pass) = layout_begin(&doc, &cfg(), 800.0);
+    // The intro paragraph, then two of the four code lines.
+    for _ in 0..3 {
+        layout_step(
+            &doc,
+            &theme,
+            &mut fonts,
+            &mut media,
+            &cfg(),
+            &mut out,
+            &mut pass,
+        );
+    }
+    let panel = out
+        .rects
+        .iter()
+        .find(|r| r.color == theme.blocks.code_bg)
+        .expect("no partial code panel");
+    let last = out.runs.last().expect("no placed run");
+    let bottom = last.y + metrics::LINE_HEIGHT * last.size;
+    assert!(
+        panel.y + panel.height >= bottom,
+        "panel stops above the lines it holds"
+    );
+    assert!(
+        panel.height < complete.height,
+        "a partial panel is already at full height"
+    );
 }
