@@ -1106,3 +1106,34 @@ fn a_partial_code_panel_covers_the_placed_lines() {
         "a partial panel is already at full height"
     );
 }
+
+#[test]
+fn a_table_grants_each_column_more_than_its_text_needs() {
+    // The measuring pass shapes a cell with no wrap width; the layout pass
+    // shapes it inside the column. Font fallback can resolve differently
+    // between the two, so a column granted exactly the measured width wraps
+    // its cell in a table with room to spare.
+    let l = lay(
+        "| Shortcut | Action | Notes |\n|---|---|---|\n\
+         | Ctrl+F | Find in document | Smart case matching |\n",
+        1200.0,
+    );
+    let pad = 8.0;
+    let cell = l
+        .runs
+        .iter()
+        .find(|r| r.text == "Find in document")
+        .expect("cell laid out on one line");
+    let next_column = l
+        .runs
+        .iter()
+        .filter(|r| r.x > cell.x + cell.width)
+        .map(|r| r.x)
+        .fold(f32::MAX, f32::min);
+    let inner = next_column - pad - cell.x;
+    assert!(
+        inner > cell.width,
+        "column holds {inner} for text needing {}",
+        cell.width
+    );
+}

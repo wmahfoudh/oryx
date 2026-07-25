@@ -1191,7 +1191,12 @@ fn layout_table(
         for row in rows {
             natural = natural.max(measure(fonts, row.get(c).unwrap_or(&empty_cell), false));
         }
-        *w = natural + 2.0 * pad;
+        // One pixel of slack: the measuring pass shapes the cell without a
+        // wrap width and the layout pass shapes it inside the column, and
+        // font fallback can resolve differently between the two. Granting
+        // exactly the measured width makes a cell wrap on that difference
+        // alone, in a table with room to spare.
+        *w = natural.ceil() + 2.0 * pad + 1.0;
     }
     let naturals = widths.clone();
     let cap = avail / ncols as f32 * 1.5;
