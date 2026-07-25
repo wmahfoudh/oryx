@@ -1,6 +1,7 @@
 //! OS integration installed by `oryx --register`: a desktop entry and
-//! hicolor icons on Linux, per-extension ProgId keys on Windows, and
-//! bundle guidance on macOS. Each action prints what it wrote.
+//! hicolor icons on Linux; ProgId keys per extension and the
+//! Applications entry naming the app in Open with on Windows; bundle
+//! guidance on macOS. Each action prints what it wrote.
 
 use std::path::{Path, PathBuf};
 
@@ -96,10 +97,12 @@ pub fn register() -> std::io::Result<()> {
     Ok(())
 }
 
-/// HKCU ProgId plus an OpenWithProgids entry per supported extension.
+/// HKCU ProgId, the Applications entry whose FriendlyAppName labels the
+/// Open with menu, and an OpenWithProgids entry per supported extension.
 #[cfg(target_os = "windows")]
 fn register_windows(exe: &Path) -> std::io::Result<()> {
     use crate::doc::load;
+    use crate::platform::resource::FRIENDLY_APP_NAME;
     use winreg::enums::HKEY_CURRENT_USER;
     use winreg::RegKey;
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
@@ -112,6 +115,15 @@ fn register_windows(exe: &Path) -> std::io::Result<()> {
     let (command, _) = progid.create_subkey("shell\\open\\command")?;
     command.set_value("", &format!("\"{}\" \"%1\"", exe.display()))?;
     println!("wrote HKCU\\Software\\Classes\\Oryx.Document");
+    let exe_name = exe
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("oryx.exe");
+    let (app, _) = classes.create_subkey(format!("Applications\\{exe_name}"))?;
+    app.set_value("FriendlyAppName", &FRIENDLY_APP_NAME)?;
+    let (app_command, _) = app.create_subkey("shell\\open\\command")?;
+    app_command.set_value("", &format!("\"{}\" \"%1\"", exe.display()))?;
+    println!("wrote HKCU\\Software\\Classes\\Applications\\{exe_name}");
     for ext in load::recognized_extensions() {
         let (key, _) = classes.create_subkey(format!(".{ext}\\OpenWithProgids"))?;
         key.set_value("Oryx.Document", &"")?;
