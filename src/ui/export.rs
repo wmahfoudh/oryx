@@ -198,7 +198,14 @@ pub struct ExportDialog {
     families: Vec<String>,
     row: usize,
     pick: Option<Pick>,
+    /// Panel rectangle from the last draw, for hit testing.
     geometry: (f32, f32, f32, f32),
+    /// Where the panel would sit centred, which the drag offset is
+    /// measured against.
+    center: (f32, f32),
+    moving: bool,
+    grab: (f32, f32),
+    offset: (f32, f32),
 }
 
 impl ExportDialog {
@@ -214,6 +221,10 @@ impl ExportDialog {
             row: 0,
             pick: None,
             geometry: (0.0, 0.0, 0.0, 0.0),
+            center: (0.0, 0.0),
+            moving: false,
+            grab: (0.0, 0.0),
+            offset: (0.0, 0.0),
         }
     }
 
@@ -239,6 +250,7 @@ impl ExportDialog {
                 self.settings.code_size = step_size(self.settings.code_size, delta as f32)
             }
             Row::Page => self.settings.page = cycle_page(self.settings.page, delta),
+            Row::PageNumbers => self.settings.page_numbers = !self.settings.page_numbers,
             _ => {}
         }
     }
@@ -349,8 +361,15 @@ impl Overlay for ExportDialog {
         let (w, h) = (painter.width(), painter.height());
         let ui = &theme.ui;
         let panel_h = DIALOG_HEADER_H + ROWS.len() as f32 * DIALOG_ROW_H + DIALOG_PAD;
-        let px = ((w - DIALOG_W) / 2.0).floor();
-        let py = ((h - panel_h) / 2.0).floor();
+        let center = (
+            ((w - DIALOG_W) / 2.0).floor(),
+            ((h - panel_h) / 2.0).floor(),
+        );
+        // Clamped so a dragged panel always keeps a grabbable edge on
+        // screen, the same bounds the other panels use.
+        let px = (center.0 + self.offset.0).clamp(60.0 - DIALOG_W, w - 60.0);
+        let py = (center.1 + self.offset.1).clamp(-8.0, h - DIALOG_HEADER_H);
+        self.center = center;
         self.geometry = (px, py, DIALOG_W, panel_h);
         for (grow, alpha) in [(10.0, 14), (6.0, 22), (3.0, 34)] {
             painter.fill(
@@ -529,7 +548,15 @@ impl Overlay for ExportDialog {
 
     fn click(&mut self, x: f32, y: f32) -> OverlayResult {
         let (px, py, w, h) = self.geometry;
-        if !inside((px, py, w, h), x, y) || self.pick.is_some() {
+        if !inside((px, py, w, h), x, y) {
+            return OverlayResult::Open;
+        }
+        if y < py + DIALOG_HEADER_H {
+            self.moving = true;
+            self.grab = (x - px, y - py);
+            return OverlayResult::Open;
+        }
+        if self.pick.is_some() {
             return OverlayResult::Open;
         }
         let row = ((y - py - DIALOG_HEADER_H) / DIALOG_ROW_H).floor();
@@ -537,6 +564,20 @@ impl Overlay for ExportDialog {
             self.row = row as usize;
         }
         OverlayResult::Open
+    }
+
+    fn drag(&mut self, x: f32, y: f32) -> OverlayResult {
+        if self.moving {
+            self.offset = (
+                x - self.grab.0 - self.center.0,
+                y - self.grab.1 - self.center.1,
+            );
+        }
+        OverlayResult::Open
+    }
+
+    fn release(&mut self) {
+        self.moving = false;
     }
 }
 
@@ -598,14 +639,33 @@ mod tests {
     }
 
     #[test]
-    fn space_toggles_the_page_numbers() {
+    fn the_page_numbers_toggle_answers_the_arrows() {
         let mut d = dialog();
         d.select(Row::PageNumbers);
         let before = d.settings().page_numbers;
+        press(&mut d, NamedKey::ArrowRight);
+        assert_eq!(d.settings().page_numbers, !before, "right toggles");
+        press(&mut d, NamedKey::ArrowLeft);
+        assert_eq!(d.settings().page_numbers, before, "and left toggles back");
         press(&mut d, NamedKey::Space);
-        assert_eq!(d.settings().page_numbers, !before);
-        press(&mut d, NamedKey::Space);
-        assert_eq!(d.settings().page_numbers, before);
+        assert_eq!(d.settings().page_numbers, !before, "space still works");
+    }
+
+    #[test]
+    fn the_header_drags_the_panel_and_the_rows_do_not() {
+        let mut d = dialog();
+        d.geometry = (100.0, 100.0, DIALOG_W, 300.0);
+        d.center = (100.0, 100.0);
+        d.click(150.0, 110.0);
+        d.drag(200.0, 160.0);
+        assert_eq!(d.offset, (50.0, 50.0), "the header moves the panel");
+        d.release();
+        d.drag(400.0, 400.0);
+        assert_eq!(d.offset, (50.0, 50.0), "and stops on release");
+        d.click(150.0, 100.0 + DIALOG_HEADER_H + 5.0);
+        d.drag(300.0, 300.0);
+        assert_eq!(d.offset, (50.0, 50.0), "a row selects rather than drags");
+        assert_eq!(d.row, 0);
     }
 
     #[test]

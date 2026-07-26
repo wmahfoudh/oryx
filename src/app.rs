@@ -947,18 +947,24 @@ impl App {
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| pass.target().display().to_string());
             let target = pass.target().display().to_string();
-            let line = match pass.finish(&self.document, &self.fonts) {
+            // A finished export closes its overlay: the file on disk is
+            // the confirmation. A failure keeps it up, since a message
+            // that dismissed itself would be a message nobody read.
+            match pass.finish(&self.document, &self.fonts) {
                 Ok(pages) => {
-                    let warning = self
-                        .export_warning
-                        .take()
-                        .map(|w| format!(", {w}"))
-                        .unwrap_or_default();
-                    format!("{pages} pages to {name}{warning}")
+                    self.overlay = match self.export_warning.take() {
+                        Some(warning) => Some(Box::new(ExportProgress::settled(format!(
+                            "{pages} pages to {name}, {warning}"
+                        )))),
+                        None => None,
+                    };
                 }
-                Err(err) => format!("cannot write {target}: {err}"),
-            };
-            self.overlay = Some(Box::new(ExportProgress::settled(line)));
+                Err(err) => {
+                    self.overlay = Some(Box::new(ExportProgress::settled(format!(
+                        "cannot write {target}: {err}"
+                    ))));
+                }
+            }
         }
         self.request_redraw();
     }

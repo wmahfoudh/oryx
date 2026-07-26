@@ -97,6 +97,34 @@ fn items(layout: &LayoutDoc) -> Vec<Item> {
     out
 }
 
+/// Grows each item to cover the decoration that belongs to it and hangs
+/// below its text: a table row's stripe carries padding under its cells,
+/// and a code block's panel closes one padding below its last line. The
+/// fit is measured against these, so nothing reaches into the margin the
+/// page number sits in.
+fn extend_items(doc: &Document, layout: &LayoutDoc, items: &mut [Item]) {
+    let blocks: Vec<Option<usize>> = items.iter().map(|item| item.block(layout)).collect();
+    for (item, block) in items.iter_mut().zip(blocks) {
+        let row = layout
+            .table_rows
+            .partition_point(|band| band.top <= item.top + SLACK)
+            .saturating_sub(1);
+        if let Some(band) = layout.table_rows.get(row) {
+            if item.top >= band.top - SLACK && item.top < band.bottom {
+                item.bottom = item.bottom.max(band.bottom);
+            }
+        }
+        // Every code line reserves the panel's closing padding, not just
+        // the block's last: a panel that carries on overleaf closes on
+        // this page too, one padding below whichever line ends it.
+        let code = block
+            .is_some_and(|block| matches!(doc.blocks[block].kind, BlockKind::CodeBlock { .. }));
+        if code {
+            item.bottom += metrics::CODE_PAD;
+        }
+    }
+}
+
 /// Where each block's items begin and end, so the widow rule costs a
 /// lookup rather than a scan.
 fn block_spans(layout: &LayoutDoc, items: &[Item]) -> HashMap<usize, (usize, usize)> {
@@ -185,7 +213,8 @@ fn page_top(doc: &Document, layout: &LayoutDoc, items: &[Item], i: usize) -> f32
 /// layout's own vertical margin never doubles with the page's.
 pub fn paginate(doc: &Document, layout: &LayoutDoc, geometry: &PageGeometry) -> Vec<Page> {
     let content = geometry.content_height();
-    let items = items(layout);
+    let mut items = items(layout);
+    extend_items(doc, layout, &mut items);
     let spans = block_spans(layout, &items);
     let mut pages: Vec<Page> = Vec::new();
     let mut i = 0;
@@ -243,7 +272,7 @@ pub fn paginate(doc: &Document, layout: &LayoutDoc, geometry: &PageGeometry) -> 
             rects: Vec::new(),
         });
     }
-    close_pages(doc, layout, &items, &mut pages);
+    close_pages(&items, &mut pages);
     place_rects(layout, &mut pages);
     pages
 }
@@ -261,9 +290,9 @@ fn scaled(image: &ImagePlace, content: f32) -> ImagePlace {
 }
 
 /// Sets where each page's content ends. A page normally ends where the
-/// next begins, but a code panel carrying on overleaf keeps its padding
-/// below its last line, which is one padding past that point.
-fn close_pages(doc: &Document, layout: &LayoutDoc, items: &[Item], pages: &mut [Page]) {
+/// next begins, and past that only where an item reaches further, which
+/// is how a code panel keeps its padding below the last line it carries.
+fn close_pages(items: &[Item], pages: &mut [Page]) {
     let mut at = 0;
     for index in 0..pages.len().saturating_sub(1) {
         let next_top = pages[index + 1].top;
@@ -273,20 +302,12 @@ fn close_pages(doc: &Document, layout: &LayoutDoc, items: &[Item], pages: &mut [
         while last + 1 < items.len() && items[last + 1].top < next_top - SLACK {
             last += 1;
         }
-        pages[index].bottom = match (items.get(last), items.get(last + 1)) {
-            (Some(previous), Some(next)) => {
-                let block = previous.block(layout);
-                let continues = block.is_some() && block == next.block(layout);
-                let code = block.is_some_and(|block| {
-                    matches!(doc.blocks[block].kind, BlockKind::CodeBlock { .. })
-                });
-                if continues && code {
-                    previous.bottom + metrics::CODE_PAD
-                } else {
-                    next_top
-                }
-            }
-            _ => next_top,
+        // An item already covers the decoration that hangs below it, so
+        // its own bottom is where a code panel closes; everything else
+        // ends where the next page begins.
+        pages[index].bottom = match items.get(last) {
+            Some(previous) => next_top.max(previous.bottom),
+            None => next_top,
         };
         at = last + 1;
     }
@@ -633,6 +654,54 @@ mod rules {
             }
         }
         assert!(after_text, "the sweep put an image below text on a page");
+    }
+
+    /// The defect a page number showed in the app: a table row's stripe
+    /// carries padding below its cells and a code panel closes one
+    /// padding below its last line, so either could put a border into the
+    /// margin the number sits in. The sweep slides the boundary through
+    /// the table and the fence a line at a time.
+    #[test]
+    fn nothing_drawn_reaches_into_the_bottom_margin() {
+        let g = geometry();
+        let mut fonts = FontStore::new();
+        let mut media = MediaCache::new(PathBuf::from("tests/fixtures"));
+        let cfg = ViewConfig {
+            body_size: 11.0,
+            code_size: 9.0,
+            zoom: 1.0,
+            ..ViewConfig::default()
+        };
+        for filler in 0..30 {
+            let mut src = "Filler paragraph here.\n\n".repeat(filler);
+            src.push_str("| Shortcut | Action |\n|---|---|\n");
+            for row in 0..12 {
+                src.push_str(&format!("| Ctrl+{row} | Does thing {row} |\n"));
+            }
+            src.push_str("\n```rust\n");
+            for line in 0..12 {
+                src.push_str(&format!("let value_{line} = {line};\n"));
+            }
+            src.push_str("```\n");
+            let doc = markdown::parse(&src);
+            let l = layout(
+                &doc,
+                &Theme::default_dark(),
+                &mut fonts,
+                &mut media,
+                &cfg,
+                PageSize::A4.points().0,
+            );
+            let pages = paginate(&doc, &l, &g);
+            for (index, page) in pages.iter().enumerate() {
+                for rect in &page.rects {
+                    assert!(
+                        rect.y + rect.height - page.top <= g.content_height() + SLACK,
+                        "page {index} draws into the bottom margin with {filler} fillers"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
