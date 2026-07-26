@@ -6,7 +6,10 @@ use std::time::{Duration, Instant};
 use oryx::doc::images::{MediaCache, Waker};
 use oryx::doc::load;
 use oryx::doc::model::Document;
-use oryx::input::keymap::{self, Command};
+use oryx::input::{
+    self,
+    keymap::{self, Command},
+};
 use oryx::layout::{
     layout_begin, layout_more, metrics, recolor_code_lines, DecoRect, LayoutDoc, LayoutPass,
     ViewConfig, OPEN_SLICE, SLICE,
@@ -108,6 +111,8 @@ pub fn run(path: Option<PathBuf>, theme_name: Option<String>) -> anyhow::Result<
         modifiers: ModifiersState::empty(),
         cursor: PhysicalPosition::new(0.0, 0.0),
         drag: None,
+        last_edge_click: None,
+        hover_edge: false,
         hover_link: false,
         sel_anchor: None,
         selection: None,
@@ -200,8 +205,13 @@ struct App {
     scroll_y: f32,
     modifiers: ModifiersState,
     cursor: PhysicalPosition<f64>,
-    /// Scrollbar drag: cursor offset from the thumb top when grabbed.
-    drag: Option<f32>,
+    /// Pointer gesture on the app's own chrome, if any.
+    drag: Option<Drag>,
+    /// When the sidebar edge was last clicked, for the double click that
+    /// restores the default width.
+    last_edge_click: Option<Instant>,
+    /// Cursor currently over the sidebar's drag zone.
+    hover_edge: bool,
     /// Whether the cursor currently sits over a link, for the pointer icon.
     hover_link: bool,
     /// Selection drag in progress: the caret grabbed at mouse down.
@@ -234,6 +244,19 @@ struct App {
     /// at. Interactive frames (drag, live resize) paint the viewport
     /// directly; the expensive band builds one frame later, once stable.
     pending_band_for: Option<(u32, u32)>,
+}
+
+/// A pointer gesture on the app's own chrome.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Drag {
+    /// Scrollbar thumb, holding the cursor offset from the thumb top.
+    Scrollbar(f32),
+    /// The sidebar's right edge, holding the cursor offset from it.
+    SidebarEdge(f32),
+}
+
+fn drag_is_edge(drag: Drag) -> bool {
+    matches!(drag, Drag::SidebarEdge(_))
 }
 
 struct Gfx {
@@ -482,7 +505,7 @@ impl App {
     }
 
     fn drag_to(&mut self, cursor_y: f32) {
-        let (Some(grab), Some((_, thumb_h))) = (self.drag, self.thumb()) else {
+        let (Some(Drag::Scrollbar(grab)), Some((_, thumb_h))) = (self.drag, self.thumb()) else {
             return;
         };
         let vh = self.viewport_h();
@@ -626,17 +649,72 @@ impl App {
         }
     }
 
+    /// Grabs the sidebar's right edge when the cursor is on it, and
+    /// restores the default width on a double click. Reports whether the
+    /// press belonged to the edge.
+    fn sidebar_edge_press(&mut self) -> bool {
+        let (Some(side), x) = (self.sidebar.as_ref(), self.cursor.x as f32) else {
+            return false;
+        };
+        if !sidebar::on_edge(side.width(), x) {
+            return false;
+        }
+        let now = Instant::now();
+        let again = self
+            .last_edge_click
+            .is_some_and(|at| now.duration_since(at) < input::DOUBLE_CLICK);
+        if again {
+            self.last_edge_click = None;
+            self.resize_sidebar(sidebar::DEFAULT_WIDTH);
+        } else {
+            self.last_edge_click = Some(now);
+            self.drag = Some(Drag::SidebarEdge(x - side.width()));
+        }
+        true
+    }
+
+    /// Applies a dragged width and relays out the document under it.
+    fn resize_sidebar(&mut self, want: f32) {
+        let window_w = self
+            .gfx
+            .as_ref()
+            .map(|g| g.window.inner_size().width as f32)
+            .unwrap_or(want + sidebar::MIN_WIDTH);
+        let before = self.inset();
+        if let Some(side) = self.sidebar.as_mut() {
+            side.set_width(want, window_w);
+        }
+        if self.inset() != before {
+            self.band = None;
+            self.sidebar_canvas = None;
+        }
+        self.request_redraw();
+    }
+
+    /// Persists whether the panel is open and how wide, after a gesture
+    /// ends or the panel is toggled, never per frame.
+    fn save_sidebar_state(&mut self) {
+        self.config.sidebar_open = self.sidebar.is_some();
+        if let Some(side) = self.sidebar.as_ref() {
+            self.config.sidebar_width = side.width();
+        }
+        config::save(&self.config);
+    }
+
     /// Document area x offset: the sidebar width while it is open.
     fn inset(&self) -> f32 {
-        if self.sidebar.is_some() {
-            sidebar::WIDTH
-        } else {
-            0.0
-        }
+        self.sidebar.as_ref().map_or(0.0, |side| side.width())
     }
 
     fn toggle_sidebar(&mut self) {
-        if self.sidebar.take().is_none() {
+        self.open_sidebar(self.sidebar.is_none());
+        self.save_sidebar_state();
+    }
+
+    /// Opens or closes the panel, restoring the persisted width when it
+    /// comes back.
+    fn open_sidebar(&mut self, open: bool) {
+        if open && self.sidebar.is_none() {
             let dir = self
                 .path
                 .as_ref()
@@ -647,8 +725,15 @@ impl App {
             if let Some(path) = &self.path {
                 side.set_current(path);
             }
+            let window_w = self
+                .gfx
+                .as_ref()
+                .map(|g| g.window.inner_size().width as f32)
+                .unwrap_or(f32::MAX);
+            side.set_width(self.config.sidebar_width, window_w);
             self.sidebar = Some(side);
         } else {
+            self.sidebar = None;
             self.sidebar_canvas = None;
         }
         self.layout = None;
@@ -911,16 +996,24 @@ impl App {
     /// Track whether a link sits under the cursor and swap the pointer icon
     /// on transitions.
     fn update_hover(&mut self) {
+        let on_edge = self
+            .sidebar
+            .as_ref()
+            .is_some_and(|side| sidebar::on_edge(side.width(), self.cursor.x as f32));
         let x = self.cursor.x as f32 - self.inset();
         let y = self.cursor.y as f32 + self.scroll_y;
-        let hovering = self
-            .layout
-            .as_ref()
-            .is_some_and(|l| l.link_at(x, y).is_some());
-        if hovering != self.hover_link {
+        let hovering = !on_edge
+            && self
+                .layout
+                .as_ref()
+                .is_some_and(|l| l.link_at(x, y).is_some());
+        if hovering != self.hover_link || on_edge != self.hover_edge {
             self.hover_link = hovering;
+            self.hover_edge = on_edge;
             if let Some(gfx) = self.gfx.as_ref() {
-                let icon = if hovering {
+                let icon = if on_edge {
+                    CursorIcon::ColResize
+                } else if hovering {
                     CursorIcon::Pointer
                 } else {
                     CursorIcon::Default
@@ -944,10 +1037,10 @@ impl App {
             return;
         }
         if y >= thumb_y && y <= thumb_y + thumb_h {
-            self.drag = Some(y - thumb_y);
+            self.drag = Some(Drag::Scrollbar(y - thumb_y));
         } else {
             // Track click: jump so the thumb centers on the cursor.
-            self.drag = Some(thumb_h / 2.0);
+            self.drag = Some(Drag::Scrollbar(thumb_h / 2.0));
             self.drag_to(y);
         }
     }
@@ -1218,7 +1311,7 @@ impl App {
             self.scroll_y,
             size.height as f32,
         ) {
-            let color = if self.drag.is_some() {
+            let color = if matches!(self.drag, Some(Drag::Scrollbar(_))) {
                 self.theme.ui.scrollbar_hover
             } else {
                 self.theme.ui.scrollbar
@@ -1358,6 +1451,10 @@ impl ApplicationHandler for App {
         let surface =
             softbuffer::Surface::new(&context, window.clone()).expect("surface creation failed");
         self.gfx = Some(Gfx { window, surface });
+        // The panel comes back the way it was left, at its saved width.
+        if self.config.sidebar_open {
+            self.open_sidebar(true);
+        }
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
@@ -1423,7 +1520,7 @@ impl ApplicationHandler for App {
                     MouseScrollDelta::LineDelta(_, lines) => -lines,
                     MouseScrollDelta::PixelDelta(p) => -p.y as f32 / self.line_step(),
                 };
-                let over_sidebar = (self.cursor.x as f32) < sidebar::WIDTH;
+                let over_sidebar = (self.cursor.x as f32) < self.inset();
                 if let Some(overlay) = self.overlay.as_mut() {
                     let result = overlay.scroll(lines);
                     self.overlay_result(result);
@@ -1442,6 +1539,8 @@ impl ApplicationHandler for App {
                         let result = self.overlay.as_mut().expect("overlay open").drag(x, y);
                         self.overlay_result(result);
                     }
+                } else if let Some(Drag::SidebarEdge(grab)) = self.drag {
+                    self.resize_sidebar(position.x as f32 - grab);
                 } else if self.drag.is_some() {
                     self.drag_to(position.y as f32);
                 } else if self.sel_anchor.is_some() {
@@ -1461,7 +1560,8 @@ impl ApplicationHandler for App {
                         let (x, y) = (self.cursor.x as f32, self.cursor.y as f32);
                         let result = overlay.click(x, y);
                         self.overlay_result(result);
-                    } else if (self.cursor.x as f32) < sidebar::WIDTH && self.sidebar.is_some() {
+                    } else if self.sidebar_edge_press() {
+                    } else if (self.cursor.x as f32) < self.inset() && self.sidebar.is_some() {
                         let (x, y) = (self.cursor.x as f32, self.cursor.y as f32);
                         let opened = self.sidebar.as_mut().and_then(|s| s.click(x, y));
                         if let Some(path) = opened {
@@ -1479,7 +1579,10 @@ impl ApplicationHandler for App {
                     self.overlay_mouse = false;
                     if let Some(overlay) = self.overlay.as_mut() {
                         overlay.release();
-                    } else if self.drag.take().is_some() {
+                    } else if let Some(drag) = self.drag.take() {
+                        if drag_is_edge(drag) {
+                            self.save_sidebar_state();
+                        }
                         if let Some(gfx) = self.gfx.as_ref() {
                             gfx.window.request_redraw();
                         }

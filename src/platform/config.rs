@@ -19,6 +19,11 @@ pub struct Config {
     /// Folder of the last opened file; the open dialog starts here when
     /// no file is open. Empty means never set.
     pub last_dir: String,
+    /// Whether the folder sidebar was open at the last toggle, and how
+    /// wide it was left. Both are written when a gesture ends, not per
+    /// frame, so a drag does not hammer the disk.
+    pub sidebar_open: bool,
+    pub sidebar_width: f32,
     /// Window geometry from the last clean exit; None until the first
     /// one. Must stay the last field so its table serializes after the
     /// plain values.
@@ -68,6 +73,8 @@ impl Default for Config {
             body_size: 22.0,
             code_size: 20.0,
             last_dir: String::new(),
+            sidebar_open: false,
+            sidebar_width: crate::ui::sidebar::DEFAULT_WIDTH,
             window: None,
         }
     }
@@ -123,12 +130,29 @@ mod tests {
             body_size: 18.0,
             code_size: 16.0,
             last_dir: "/home/user/notes".to_string(),
+            sidebar_open: true,
+            sidebar_width: 320.0,
             window: None,
         };
         save_to(&path, &config);
         let loaded = load_from(&path);
         std::fs::remove_file(&path).unwrap();
         assert_eq!(loaded, config);
+    }
+
+    #[test]
+    fn a_config_written_before_the_sidebar_fields_defaults_them() {
+        let path = temp_path("older.toml");
+        std::fs::write(
+            &path,
+            "theme = \"nord\"\nbody_size = 20.0\nlast_dir = \"/tmp\"\n",
+        )
+        .unwrap();
+        let loaded = load_from(&path);
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(loaded.theme, "nord");
+        assert!(!loaded.sidebar_open, "closed until the reader opens it");
+        assert_eq!(loaded.sidebar_width, crate::ui::sidebar::DEFAULT_WIDTH);
     }
 
     #[test]

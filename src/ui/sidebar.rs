@@ -10,15 +10,64 @@ use crate::paint::painter::Painter;
 use crate::style::fonts::BODY_FAMILY;
 use crate::style::theme::{Rgba, Theme};
 
-/// Panel width in pixels while open.
-pub const WIDTH: f32 = 260.0;
+/// Panel width in pixels for a reader who has never dragged the edge.
+pub const DEFAULT_WIDTH: f32 = 260.0;
+/// Narrowest the panel goes, below which names stop being readable.
+pub const MIN_WIDTH: f32 = 160.0;
+/// Widest the panel goes whatever the window size.
+pub const MAX_WIDTH: f32 = 640.0;
+/// Document area a sidebar drag may never squeeze below.
+const MIN_DOC: f32 = 240.0;
+/// Half-width of the grab zone straddling the right edge.
+pub const GRAB: f32 = 4.0;
 
-const ROW_H: f32 = 26.0;
+const ROW_H: f32 = 30.0;
 const PAD: f32 = 10.0;
 const INDENT: f32 = 14.0;
-const TEXT_SIZE: f32 = 13.5;
-/// Room the folder icon column takes before a row's name.
-const ICON_W: f32 = 16.0;
+const TEXT_SIZE: f32 = 15.0;
+/// Room the type icon column takes before a row's name.
+const ICON_W: f32 = 18.0;
+
+/// A width the panel may actually take, given the window it sits in. The
+/// window bound wins over `MIN_WIDTH` only when the window is too narrow
+/// to honor both, in which case the panel keeps its minimum.
+pub fn clamp_width(want: f32, window_w: f32) -> f32 {
+    let max = MAX_WIDTH.min((window_w - MIN_DOC).max(MIN_WIDTH));
+    want.clamp(MIN_WIDTH, max)
+}
+
+/// Whether `x` falls in the drag zone straddling the panel's right edge.
+pub fn on_edge(width: f32, x: f32) -> bool {
+    (x - width).abs() <= GRAB
+}
+
+/// Which shape marks a file in the list.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum Icon {
+    /// Markdown, the thing Oryx is for.
+    Document,
+    Code,
+    Config,
+    Text,
+    /// Recognized by its bytes alone.
+    Unknown,
+}
+
+/// Tokens that read as configuration rather than as source. Which
+/// languages belong here is a presentation judgment, not a fact about
+/// parsing, so the list sits beside the drawing instead of beside the
+/// extension table.
+const DATA_TOKENS: &[&str] = &["ini", "json", "properties", "toml", "xml", "yaml"];
+
+fn icon_for(path: &Path) -> Icon {
+    match load::detect(path) {
+        FileKind::Markdown => Icon::Document,
+        FileKind::Code(token) if DATA_TOKENS.contains(&token) => Icon::Config,
+        FileKind::Code(_) => Icon::Code,
+        FileKind::Text => Icon::Text,
+        FileKind::Unknown => Icon::Unknown,
+    }
+}
 
 /// One visible row of the tree.
 pub struct Entry {
@@ -32,6 +81,7 @@ pub struct Entry {
 }
 
 pub struct Sidebar {
+    width: f32,
     root: PathBuf,
     entries: Vec<Entry>,
     selected: usize,
@@ -104,6 +154,7 @@ fn tree(root: &Path) -> Vec<Entry> {
 impl Sidebar {
     pub fn new(root: &Path) -> Sidebar {
         Sidebar {
+            width: DEFAULT_WIDTH,
             root: root.to_path_buf(),
             entries: tree(root),
             selected: 0,
@@ -130,6 +181,15 @@ impl Sidebar {
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    pub fn width(&self) -> f32 {
+        self.width
+    }
+
+    /// Sets the panel width, clamped to what the window can carry.
+    pub fn set_width(&mut self, want: f32, window_w: f32) {
+        self.width = clamp_width(want, window_w);
     }
 
     /// Opens or closes a directory row in place.
@@ -229,11 +289,12 @@ impl Sidebar {
     pub fn draw(&mut self, painter: &mut Painter, theme: &Theme) {
         let h = painter.height();
         let ui = &theme.ui;
-        painter.fill(0.0, 0.0, WIDTH, h, 0.0, ui.sidebar_bg);
+        let width = self.width;
+        painter.fill(0.0, 0.0, width, h, 0.0, ui.sidebar_bg);
         painter.line(
-            WIDTH - 0.5,
+            width - 0.5,
             0.0,
-            WIDTH - 0.5,
+            width - 0.5,
             h,
             1.0,
             theme.blocks.table_border,
@@ -252,7 +313,7 @@ impl Sidebar {
             slot += 1;
             let entry = &self.entries[index];
             if index == self.selected {
-                painter.fill(3.0, ry, WIDTH - 8.0, ROW_H - 2.0, 5.0, ui.overlay_highlight);
+                painter.fill(3.0, ry, width - 8.0, ROW_H - 2.0, 5.0, ui.overlay_highlight);
             }
             let x = PAD + entry.depth as f32 * INDENT;
             let mut color = if entry.is_dir {
@@ -273,10 +334,13 @@ impl Sidebar {
                 let iy = ry + (ROW_H - 12.0) / 2.0;
                 painter.fill(x, iy, 5.5, 3.0, 1.0, color);
                 painter.fill(x, iy + 2.5, 11.0, 8.0, 1.5, color);
+            } else {
+                let iy = ry + (ROW_H - 12.0) / 2.0;
+                draw_icon(painter, icon_for(&entry.path), x, iy, color, ui.sidebar_bg);
             }
             let current = self.current.as_deref() == Some(entry.path.as_path());
             let weight = if current { 700 } else { 400 };
-            let avail = WIDTH - x - ICON_W - PAD;
+            let avail = width - x - ICON_W - PAD;
             let name = truncated(painter, &entry.name, avail, weight);
             painter.text(
                 x + ICON_W,
@@ -287,6 +351,44 @@ impl Sidebar {
                 weight,
                 color,
             );
+        }
+    }
+}
+
+/// The type mark for one file, drawn in an 11 by 12 box at `x`, `y`.
+/// Every shape is built from the painter's rectangles and lines, since the
+/// UI has no icon font: the three page-shaped marks share a silhouette and
+/// differ inside it, and the two others take their own outline.
+fn draw_icon(painter: &mut Painter, icon: Icon, x: f32, y: f32, color: Rgba, bg: Rgba) {
+    const W: f32 = 10.0;
+    const H: f32 = 12.0;
+    match icon {
+        Icon::Document => {
+            painter.fill(x, y, W, H, 1.5, color);
+            // Two lines of text knocked out of the page.
+            painter.fill(x + 2.0, y + 3.5, W - 4.0, 1.5, 0.0, bg);
+            painter.fill(x + 2.0, y + 7.0, W - 4.0, 1.5, 0.0, bg);
+        }
+        Icon::Text => {
+            painter.fill(x, y, W, H, 1.5, color);
+        }
+        Icon::Unknown => {
+            painter.stroke(x, y, W, H, 1.5, 1.2, color);
+        }
+        Icon::Code => {
+            // Angle brackets, the shape source carries everywhere.
+            let mid = y + H / 2.0;
+            painter.line(x + 4.0, y + 1.5, x + 0.5, mid, 1.4, color);
+            painter.line(x + 0.5, mid, x + 4.0, y + H - 1.5, 1.4, color);
+            painter.line(x + W - 4.0, y + 1.5, x + W - 0.5, mid, 1.4, color);
+            painter.line(x + W - 0.5, mid, x + W - 4.0, y + H - 1.5, 1.4, color);
+        }
+        Icon::Config => {
+            // Three sliders with their knobs at different settings.
+            for (row, knob) in [(2.0, 6.5), (6.0, 2.0), (10.0, 5.0)] {
+                painter.fill(x, y + row - 0.5, W, 1.2, 0.6, color);
+                painter.fill(x + knob, y + row - 2.0, 2.4, 4.0, 1.0, color);
+            }
         }
     }
 }
@@ -344,6 +446,73 @@ mod tests {
 
     fn names(side: &Sidebar) -> Vec<String> {
         side.entries.iter().map(|e| e.name.clone()).collect()
+    }
+
+    #[test]
+    fn each_file_kind_takes_its_own_icon() {
+        for (name, icon) in [
+            ("notes.md", Icon::Document),
+            ("README.markdown", Icon::Document),
+            ("main.rs", Icon::Code),
+            ("build.gradle", Icon::Code),
+            ("Cargo.toml", Icon::Config),
+            ("config.yaml", Icon::Config),
+            ("app.ini", Icon::Config),
+            ("data.json", Icon::Config),
+            ("notes.txt", Icon::Text),
+            ("Makefile", Icon::Unknown),
+            (".gitignore", Icon::Unknown),
+        ] {
+            assert_eq!(icon_for(Path::new(name)), icon, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_config_language_reads_as_configuration_not_as_source() {
+        // Both are FileKind::Code; only the token separates them.
+        assert_eq!(icon_for(Path::new("a.toml")), Icon::Config);
+        assert_eq!(icon_for(Path::new("a.rs")), Icon::Code);
+    }
+
+    #[test]
+    fn width_clamps_between_its_bounds() {
+        let roomy = 1600.0;
+        assert_eq!(clamp_width(DEFAULT_WIDTH, roomy), DEFAULT_WIDTH);
+        assert_eq!(clamp_width(10.0, roomy), MIN_WIDTH, "below the minimum");
+        assert_eq!(clamp_width(9999.0, roomy), MAX_WIDTH, "above the maximum");
+    }
+
+    #[test]
+    fn a_narrow_window_bounds_the_panel_before_the_maximum_does() {
+        // 700 wide leaves 460 once the document keeps its 240.
+        assert_eq!(clamp_width(9999.0, 700.0), 460.0);
+        // Too narrow to honor both: the panel keeps its minimum and the
+        // document gives way, rather than the panel collapsing to nothing.
+        assert_eq!(clamp_width(9999.0, 300.0), MIN_WIDTH);
+        assert_eq!(clamp_width(50.0, 300.0), MIN_WIDTH);
+    }
+
+    #[test]
+    fn the_grab_zone_answers_for_the_edge_alone() {
+        let w = 260.0;
+        assert!(on_edge(w, 260.0), "on it");
+        assert!(on_edge(w, 260.0 - GRAB), "just inside");
+        assert!(on_edge(w, 260.0 + GRAB), "just outside");
+        assert!(!on_edge(w, 260.0 - GRAB - 1.0), "the list");
+        assert!(!on_edge(w, 260.0 + GRAB + 1.0), "the document");
+        assert!(!on_edge(w, 0.0));
+    }
+
+    #[test]
+    fn set_width_clamps_and_reports() {
+        let dir = temp_tree("width");
+        let mut side = Sidebar::new(&dir);
+        assert_eq!(side.width(), DEFAULT_WIDTH);
+        side.set_width(400.0, 1600.0);
+        assert_eq!(side.width(), 400.0);
+        side.set_width(20.0, 1600.0);
+        assert_eq!(side.width(), MIN_WIDTH);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

@@ -7,6 +7,7 @@ use std::time::Instant;
 
 use winit::keyboard::{Key, NamedKey};
 
+use crate::input::DOUBLE_CLICK;
 use crate::paint::painter::Painter;
 use crate::style::fonts::BODY_FAMILY;
 use crate::style::theme::{self, Rgba, Theme};
@@ -23,7 +24,6 @@ const PANEL_W: f32 = 400.0;
 const SWATCH: f32 = 16.0;
 const ICON_BOX: f32 = 22.0;
 const RADIUS: f32 = 8.0;
-const DOUBLE_CLICK_MS: u128 = 450;
 
 struct Row {
     name: String,
@@ -610,7 +610,7 @@ impl Overlay for ThemeBrowser {
         // Double click on the name starts an inline rename.
         let now = Instant::now();
         if let Some((last_index, at)) = self.last_name_click {
-            if last_index == index && now.duration_since(at).as_millis() < DOUBLE_CLICK_MS {
+            if last_index == index && now.duration_since(at) < DOUBLE_CLICK {
                 self.last_name_click = None;
                 let name = self.rows[index].name.clone();
                 self.start_rename(index, name);

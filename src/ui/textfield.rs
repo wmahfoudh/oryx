@@ -3,9 +3,11 @@
 //! appearance and the whole thing stays testable without a display.
 
 use std::ops::Range;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use winit::keyboard::{Key, NamedKey};
+
+use crate::input::DOUBLE_CLICK;
 
 /// What a key did to the field.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -20,9 +22,6 @@ pub enum Edit {
     /// Claimed, and the text changed.
     Changed,
 }
-
-/// Two clicks closer together than this select the whole field.
-pub const DOUBLE_CLICK: Duration = Duration::from_millis(450);
 
 /// A single line of editable text. The caret is a byte index and always
 /// sits on a character boundary; `anchor` holds the fixed end of a
@@ -298,6 +297,7 @@ enum Motion {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
     use winit::keyboard::SmolStr;
 
     fn ch(c: &str) -> Key {
