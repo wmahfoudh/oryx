@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
+use crate::export::ExportSettings;
 use crate::style::fonts::{BODY_FAMILY, CODE_FAMILY};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -26,6 +27,11 @@ pub struct Config {
     /// frame, so a drag does not hammer the disk.
     pub sidebar_open: bool,
     pub sidebar_width: f32,
+    /// How the reader last exported; None until the first export, which
+    /// seeds it from the fields above. A table, so it follows the plain
+    /// values and precedes the window.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub export: Option<ExportSettings>,
     /// Window geometry from the last clean exit; None until the first
     /// one. Must stay the last field so its table serializes after the
     /// plain values.
@@ -77,6 +83,7 @@ impl Default for Config {
             last_dir: String::new(),
             sidebar_open: false,
             sidebar_width: crate::ui::sidebar::DEFAULT_WIDTH,
+            export: None,
             window: None,
         }
     }
@@ -129,6 +136,7 @@ pub fn save_to(path: &Path, config: &Config) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::export::PageSize;
 
     fn temp_path(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("oryx-config-{}-{name}", std::process::id()))
@@ -179,6 +187,7 @@ mod tests {
             last_dir: "/home/user/notes".to_string(),
             sidebar_open: true,
             sidebar_width: 320.0,
+            export: None,
             window: None,
         };
         save_to(&path, &config);
@@ -200,6 +209,62 @@ mod tests {
         assert_eq!(loaded.theme, "nord");
         assert!(!loaded.sidebar_open, "closed until the reader opens it");
         assert_eq!(loaded.sidebar_width, crate::ui::sidebar::DEFAULT_WIDTH);
+    }
+
+    #[test]
+    fn export_settings_seed_from_the_appearance_settings() {
+        let config = Config {
+            theme: "nord".to_string(),
+            body_size: 22.0,
+            ..Config::default()
+        };
+        let export = ExportSettings::seeded_from(&config);
+        assert_eq!(export.theme, "nord");
+        assert_eq!(export.body_size, 22.0);
+        assert_eq!(export.code_family, config.code_family);
+        assert_eq!(export.page, PageSize::A4);
+        assert!(export.page_numbers, "on until the reader turns them off");
+    }
+
+    #[test]
+    fn a_config_written_before_the_export_table_defaults_it() {
+        let path = temp_path("no-export.toml");
+        std::fs::write(&path, "theme = \"nord\"\n").unwrap();
+        let loaded = load_from(&path);
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(loaded.export, None);
+    }
+
+    #[test]
+    fn export_table_round_trips_and_stays_before_the_window_table() {
+        let path = temp_path("export.toml");
+        let config = Config {
+            export: Some(ExportSettings {
+                theme: "oryx-light".to_string(),
+                body_family: "DejaVu Sans".to_string(),
+                code_family: "Courier Prime".to_string(),
+                body_size: 11.0,
+                code_size: 9.0,
+                page: PageSize::Letter,
+                page_numbers: false,
+            }),
+            window: Some(WindowState {
+                width: 1280,
+                height: 800,
+                x: None,
+                y: None,
+                maximized: false,
+            }),
+            ..Config::default()
+        };
+        save_to(&path, &config);
+        let text = std::fs::read_to_string(&path).unwrap();
+        let loaded = load_from(&path);
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(loaded, config);
+        let export = text.find("[export]").expect("the export table is written");
+        let window = text.find("[window]").expect("the window table is written");
+        assert!(export < window, "window stays the last table");
     }
 
     #[test]

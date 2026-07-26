@@ -11,20 +11,25 @@ arboard = { version = "3", default-features = false, features = ["wayland-data-c
 cosmic-text = "0.17.0"
 directories = "6"
 image = "0.25"
+miniz_oxide = "0.8"
 open = "5"
+pdf-writer = "0.15"
 pulldown-cmark = "0.13"
 resvg = "0.45.1"
 rfd = "0.17.2"
 serde = { version = "1", features = ["derive"] }
 softbuffer = "0.4"
+subsetter = "0.2"
 syntect = { version = "5.3.0", default-features = false, features = ["default-fancy"] }
 tiny-skia = "0.11"
 toml = "0.8"
+ttf-parser = "0.25"
 ureq = { version = "3.2.1", default-features = false, features = ["native-tls", "gzip"] }
 winit = "0.30"
 
 [dev-dependencies]
 image = "0.25"
+lopdf = "0.44"
 
 [build-dependencies]
 ico = "0.5.0"

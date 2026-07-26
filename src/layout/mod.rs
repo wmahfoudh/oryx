@@ -3,5 +3,5 @@ pub mod metrics;
 
 pub use engine::{
     layout, layout_begin, layout_more, layout_step, recolor_code_lines, CodeLine, DecoRect,
-    ImagePlace, LayoutDoc, LayoutPass, TextRun, ViewConfig, OPEN_SLICE, SLICE,
+    ImagePlace, LayoutDoc, LayoutPass, TableRow, TextRun, ViewConfig, OPEN_SLICE, SLICE,
 };

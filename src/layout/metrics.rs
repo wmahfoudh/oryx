@@ -16,6 +16,10 @@ pub const INDENT: f32 = 24.0;
 /// Corner radius for panels and table outlines, in pixels at zoom 1.
 pub const CORNER_RADIUS: f32 = 6.0;
 
+/// Inner padding of a code panel. Pagination needs it: a panel continued
+/// on the next page starts one padding above its first line.
+pub const CODE_PAD: f32 = 12.0;
+
 /// Corner radius for inline code pills, in pixels at zoom 1.
 pub const PILL_RADIUS: f32 = 4.0;
 

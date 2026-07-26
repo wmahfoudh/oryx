@@ -1137,3 +1137,14 @@ fn a_table_grants_each_column_more_than_its_text_needs() {
         cell.width
     );
 }
+
+#[test]
+fn table_rows_record_their_bands() {
+    let doc = markdown::parse("| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |");
+    let l = lay_doc(&doc, 800.0, &mut fonts());
+    assert_eq!(l.table_rows.len(), 3, "header and two body rows");
+    for pair in l.table_rows.windows(2) {
+        assert!(pair[0].bottom <= pair[1].top + 0.01, "bands do not overlap");
+        assert!(pair[0].bottom > pair[0].top, "a band has height");
+    }
+}

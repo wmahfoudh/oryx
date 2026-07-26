@@ -111,9 +111,20 @@ pub struct LayoutDoc {
     pub images: Vec<ImagePlace>,
     /// Heading anchor slugs and their y positions.
     pub anchors: Vec<(String, f32)>,
+    /// Row bands of every table, in document order. Pagination needs
+    /// them because a row is several lines that must not be split.
+    pub table_rows: Vec<TableRow>,
     /// Per-line records for code blocks, ordered by block then line;
     /// `recolor_code_lines` re-shapes through them.
     pub code_lines: Vec<CodeLine>,
+}
+
+/// One table row's vertical band, stripe and padding included.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TableRow {
+    pub block: usize,
+    pub top: f32,
+    pub bottom: f32,
 }
 
 /// One laid-out code line: the runs it produced and the inputs to
@@ -684,7 +695,7 @@ fn open_code(
 ) -> OpenCode {
     let size = cfg.code_size * cfg.zoom;
     let line_height = metrics::LINE_HEIGHT * size;
-    let pad = 12.0 * cfg.zoom;
+    let pad = metrics::CODE_PAD * cfg.zoom;
     // Long lines wrap inside the panel instead of overflowing it, so the
     // panel height follows the shaped lines.
     let wrap_width = (frame.avail - 2.0 * pad).max(40.0);
@@ -1266,6 +1277,11 @@ fn layout_table(
             shaped.push(tmp);
         }
         let full_h = row_h + 2.0 * vpad;
+        out.table_rows.push(TableRow {
+            block: block_index,
+            top: y,
+            bottom: y + full_h,
+        });
         let stripe = if *is_header {
             Some(theme.blocks.table_header_bg)
         } else if row_index % 2 == 0 {

@@ -1,7 +1,7 @@
 //! Maps syntect parse scopes onto theme syntax roles at load time.
 
 use std::ops::Range;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
@@ -100,6 +100,9 @@ pub struct Arrival {
 pub struct Highlighter {
     arrivals: Arc<Mutex<Vec<(u64, Arrival)>>>,
     generation: Arc<AtomicU64>,
+    /// Raised while a worker has blocks left. An export waits on it,
+    /// since a PDF cannot wash in after it is written.
+    running: Arc<AtomicBool>,
 }
 
 impl Default for Highlighter {
@@ -113,6 +116,7 @@ impl Highlighter {
         Highlighter {
             arrivals: Arc::new(Mutex::new(Vec::new())),
             generation: Arc::new(AtomicU64::new(0)),
+            running: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -126,6 +130,8 @@ impl Highlighter {
         }
         let arrivals = Arc::clone(&self.arrivals);
         let current = Arc::clone(&self.generation);
+        let running = Arc::clone(&self.running);
+        running.store(true, Ordering::SeqCst);
         std::thread::spawn(move || {
             for p in pending {
                 let done = spans_chunked(
@@ -150,10 +156,17 @@ impl Highlighter {
                     },
                 );
                 if !done {
+                    running.store(false, Ordering::SeqCst);
                     return;
                 }
             }
+            running.store(false, Ordering::SeqCst);
         });
+    }
+
+    /// Whether a worker still has blocks to colour.
+    pub fn is_running(&self) -> bool {
+        self.running.load(Ordering::SeqCst)
     }
 
     /// Arrivals of the current generation in delivery order; stale

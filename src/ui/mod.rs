@@ -1,3 +1,4 @@
+pub mod export;
 pub mod help;
 pub mod overlay;
 pub mod scrollbar;

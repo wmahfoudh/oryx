@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use oryx::doc::images::{MediaCache, Waker};
 use oryx::doc::load;
 use oryx::doc::model::Document;
+use oryx::export::{self, ExportPass, ExportSettings};
 use oryx::input::{
     self,
     keymap::{self, Command},
@@ -21,6 +22,7 @@ use oryx::platform::config::{self, Config, WindowState};
 use oryx::style::fonts::FontStore;
 use oryx::style::highlight::{Highlighter, PendingBlock};
 use oryx::style::theme::{self, Theme};
+use oryx::ui::export::ExportProgress;
 use oryx::ui::help::Help;
 use oryx::ui::overlay::{Action, Overlay, OverlayResult};
 use oryx::ui::scrollbar;
@@ -119,6 +121,8 @@ pub fn run(path: Option<PathBuf>, theme_name: Option<String>) -> anyhow::Result<
         clipboard: None,
         overlay: None,
         overlay_mouse: false,
+        export: None,
+        export_warning: None,
         pre_edit: None,
         overlay_canvas: None,
         sidebar: None,
@@ -230,6 +234,11 @@ struct App {
     pre_edit: Option<Theme>,
     /// Reused overlay canvas and the region the last frame painted.
     overlay_canvas: Option<OverlayCanvas>,
+    /// A running export, driven a slice at a time from the redraw.
+    export: Option<ExportPass>,
+    /// Set when the export's chosen theme no longer resolves, so the
+    /// result line can say the active one was used instead.
+    export_warning: Option<String>,
     /// Folder sidebar while open; the document lays out beside it.
     sidebar: Option<Sidebar>,
     /// Reused sidebar canvas, mirroring the overlay canvas mechanics.
@@ -308,6 +317,7 @@ impl App {
     fn run_command(&mut self, cmd: Command, event_loop: &ActiveEventLoop) {
         match cmd {
             Command::OpenFile => self.open_dialog(),
+            Command::Export => self.export_now(),
             Command::Reload => self.reload(),
             Command::Sidebar => self.toggle_sidebar(),
             Command::Help => self.toggle_help(),
@@ -835,6 +845,88 @@ impl App {
     }
 
     /// Native open dialog filtered to the recognized extensions.
+    /// Starts an export with the saved settings, or the ones seeded from
+    /// the appearance settings when nothing was ever exported. Does
+    /// nothing without a document, since there would be nothing to write.
+    fn export_now(&mut self) {
+        if self.path.is_none() {
+            return;
+        }
+        let settings = self
+            .config
+            .export
+            .clone()
+            .unwrap_or_else(|| ExportSettings::seeded_from(&self.config));
+        let (theme, fell_back) = export::resolve_theme(&theme_dirs(), &settings.theme, &self.theme);
+        let stem = self
+            .path
+            .as_ref()
+            .and_then(|p| p.file_stem())
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| String::from("document"));
+        let start = config::browse_dir([
+            self.document_dir(),
+            self.sidebar.as_ref().map(|side| side.root().to_path_buf()),
+            self.remembered_dir(),
+        ]);
+        let target = rfd::FileDialog::new()
+            .set_file_name(format!("{stem}.pdf"))
+            .set_directory(start)
+            .add_filter("PDF", &["pdf"])
+            .save_file();
+        let Some(target) = target else {
+            return;
+        };
+        let pass = ExportPass::new(&settings, theme, target);
+        self.overlay = Some(Box::new(ExportProgress::new(pass.progress())));
+        self.export_warning = fell_back.then(|| format!("theme {} is gone", settings.theme));
+        self.export = Some(pass);
+        self.request_redraw();
+    }
+
+    /// Gives the export its slice of the frame and reports where it got
+    /// to. The document's own pass waits while one is running.
+    fn export_slice(&mut self) {
+        let Some(pass) = self.export.as_mut() else {
+            return;
+        };
+        let deadline = Instant::now() + SLICE;
+        let progress = pass.step(
+            deadline,
+            &self.document,
+            &mut self.fonts,
+            &mut self.media,
+            self.highlighter.is_running(),
+        );
+        let done = pass.is_done();
+        self.overlay = Some(Box::new(ExportProgress::new(progress)));
+        if done {
+            let pass = self.export.take().expect("checked");
+            // The reader chose the folder a moment ago in the dialog, so
+            // the name is what the line is for. A failure keeps the whole
+            // path, which is what makes it diagnosable.
+            let name = pass
+                .target()
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| pass.target().display().to_string());
+            let target = pass.target().display().to_string();
+            let line = match pass.finish(&self.fonts) {
+                Ok(pages) => {
+                    let warning = self
+                        .export_warning
+                        .take()
+                        .map(|w| format!(", {w}"))
+                        .unwrap_or_default();
+                    format!("{pages} pages to {name}{warning}")
+                }
+                Err(err) => format!("cannot write {target}: {err}"),
+            };
+            self.overlay = Some(Box::new(ExportProgress::settled(line)));
+        }
+        self.request_redraw();
+    }
+
     fn open_dialog(&mut self) {
         let mut dialog = rfd::FileDialog::new()
             .add_filter("Supported files", &load::recognized_extensions())
@@ -881,6 +973,10 @@ impl App {
             OverlayResult::Open => {}
             OverlayResult::Close => {
                 self.overlay = None;
+                // Closing the progress overlay cancels the export, and
+                // nothing has reached the disk yet.
+                self.export = None;
+                self.export_warning = None;
                 // An editor closed without saving: back to the last
                 // applied state.
                 if let Some(previous) = self.pre_edit.take() {
@@ -1237,7 +1333,13 @@ impl App {
         } else {
             SLICE
         };
-        self.slice(budget);
+        // An export owns the slice while it runs; the document's own pass
+        // picks up where it left off once the file is written.
+        if self.export.is_some() {
+            self.export_slice();
+        } else {
+            self.slice(budget);
+        }
         self.resolve_pending();
         self.sync_search();
         let lay = self.layout.as_ref().expect("layout exists");
