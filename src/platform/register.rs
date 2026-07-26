@@ -154,8 +154,7 @@ mod tests {
         assert!(exts.contains(&"rs"));
         assert!(exts.contains(&"txt"));
         for ext in exts {
-            let known = ext == "txt"
-                || load::detect(Path::new(&format!("f.{ext}"))) != load::FileKind::Plain;
+            let known = load::detect(Path::new(&format!("f.{ext}"))) != load::FileKind::Unknown;
             assert!(known, "{ext} not recognized by load::detect");
         }
     }

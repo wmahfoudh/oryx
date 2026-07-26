@@ -24,7 +24,7 @@ Oryx started as a personal need: reading a markdown file should not require open
 
 ![Oryx rendering a markdown document](screenshots/formatting.png)
 
-**Code.** Fenced blocks get a bordered panel and syntax colors for the languages most people write. A line too long for the panel wraps inside it. You can also point Oryx straight at a source file and it renders the whole thing as one highlighted document, plain text files included.
+**Code.** Fenced blocks get a bordered panel and syntax colors for the languages most people write. A line too long for the panel wraps inside it. You can also point Oryx straight at a source file and it renders the whole thing as one highlighted document. Oryx opens any text file: about a hundred extensions carry syntax colors, and a file it cannot place by extension, a `Makefile` or a `.conf`, opens in the code font unstyled. Binary files are refused with a notice instead of a screen of noise.
 
 ![Oryx rendering highlighted code](screenshots/code.png)
 

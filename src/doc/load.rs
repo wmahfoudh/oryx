@@ -10,25 +10,56 @@ use crate::style::highlight::{self, Arrival, PendingBlock};
 /// background worker.
 pub const OPEN_BUDGET: Duration = Duration::from_millis(40);
 
+/// How many leading bytes the binary test looks at.
+pub const SNIFF: usize = 8192;
+
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum FileKind {
     Markdown,
     /// Carries the syntax token used for highlighting (`"rust"`, `"python"`).
     Code(&'static str),
-    Plain,
+    /// Prose, laid out as wrapped paragraphs.
+    Text,
+    /// Not identified by extension. Its content decides: text opens as code
+    /// with no language, binary is refused.
+    Unknown,
 }
 
 pub fn detect(path: &Path) -> FileKind {
     let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
-        return FileKind::Plain;
+        return FileKind::Unknown;
     };
     let ext = ext.to_ascii_lowercase();
     if ext == "md" || ext == "markdown" {
         return FileKind::Markdown;
     }
+    if ext == "txt" {
+        return FileKind::Text;
+    }
     match CODE_EXTENSIONS.binary_search_by_key(&ext.as_str(), |(k, _)| k) {
         Ok(i) => FileKind::Code(CODE_EXTENSIONS[i].1),
-        Err(_) => FileKind::Plain,
+        Err(_) => FileKind::Unknown,
+    }
+}
+
+/// A NUL byte near the start is the standard test, the one `git` and
+/// `grep -I` use: no text encoding Oryx renders produces one, and every
+/// container and executable format has one in its header.
+fn is_binary(bytes: &[u8]) -> bool {
+    bytes[..bytes.len().min(SNIFF)].contains(&0)
+}
+
+/// Whether a file on disk holds text, read from its first bytes. A file
+/// that cannot be read is not displayable either, so it answers false.
+pub fn is_text_file(path: &Path) -> bool {
+    use std::io::Read;
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut head = [0u8; SNIFF];
+    match file.read(&mut head) {
+        Ok(n) => !is_binary(&head[..n]),
+        Err(_) => false,
     }
 }
 
@@ -42,11 +73,15 @@ pub struct Opened {
 pub fn open(path: &Path, deadline: Option<Instant>) -> anyhow::Result<Opened> {
     let bytes =
         std::fs::read(path).map_err(|e| anyhow::anyhow!("cannot open {}: {e}", path.display()))?;
+    if is_binary(&bytes) {
+        anyhow::bail!("{} is not a text file", path.display());
+    }
     let text = String::from_utf8_lossy(&bytes);
     let mut document = match detect(path) {
         FileKind::Markdown => super::markdown::parse(&text),
-        FileKind::Code(token) => code_document(token, &text),
-        FileKind::Plain => plain_document(&text),
+        FileKind::Code(token) => code_document(Some(token), &text),
+        FileKind::Text => plain_document(&text),
+        FileKind::Unknown => code_document(None, &text),
     };
     let pending = apply_budget(&mut document, deadline);
     Ok(Opened { document, pending })
@@ -117,13 +152,15 @@ pub fn recognized_extensions() -> Vec<&'static str> {
 }
 
 /// The whole file as a single code block; the budget pass highlights it.
-fn code_document(token: &str, text: &str) -> Document {
+/// No token means no grammar, so the block renders in the code font
+/// unstyled.
+fn code_document(token: Option<&str>, text: &str) -> Document {
     let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
     while lines.last().is_some_and(|l| l.is_empty()) {
         lines.pop();
     }
     let mut block = Block::plain(BlockKind::CodeBlock {
-        language: Some(token.to_string()),
+        language: token.map(str::to_string),
         lines,
         highlights: Vec::new(),
     });
@@ -177,38 +214,109 @@ fn flush_plain(blocks: &mut Vec<Block>, spans: &mut Vec<Span>) {
 }
 
 /// Extension to highlight token, sorted by extension for binary search.
+///
+/// The mapping follows the bundled grammars' own extension lists, with one
+/// class of exception: an extension a grammar claims that the wider world
+/// reads as another language is left out, so `.s` stays assembly rather
+/// than R and `.l` stays lex rather than Lisp. `.p`, `.t`, `.inc`, `.tmpl`,
+/// `.tpl` and `.build` are dropped for the same reason.
+///
+/// Every token here reaches a grammar, some through `highlight::ALIASES`
+/// where the bundled set has none of its own.
 static CODE_EXTENSIONS: &[(&str, &str)] = &[
+    ("applescript", "applescript"),
+    ("as", "actionscript"),
     ("bash", "bash"),
+    ("bat", "batch"),
+    ("bib", "bibtex"),
     ("c", "c"),
     ("cc", "cpp"),
     ("cfg", "ini"),
+    ("cl", "lisp"),
+    ("clj", "clojure"),
+    ("cls", "latex"),
+    ("cmd", "batch"),
     ("cpp", "cpp"),
     ("cs", "csharp"),
     ("css", "css"),
+    ("csx", "csharp"),
+    ("cxx", "cpp"),
+    ("d", "d"),
+    ("ddl", "sql"),
+    ("di", "d"),
+    ("diff", "diff"),
+    ("dml", "sql"),
+    ("dot", "graphviz"),
+    ("dpr", "pascal"),
+    ("el", "lisp"),
+    ("erl", "erlang"),
+    ("fish", "bash"),
     ("go", "go"),
+    ("gradle", "groovy"),
+    ("groovy", "groovy"),
+    ("gv", "graphviz"),
+    ("gvy", "groovy"),
     ("h", "c"),
+    ("hh", "cpp"),
     ("hpp", "cpp"),
+    ("hrl", "erlang"),
+    ("hs", "haskell"),
+    ("htm", "html"),
     ("html", "html"),
+    ("hxx", "cpp"),
     ("ini", "ini"),
     ("java", "java"),
     ("js", "javascript"),
     ("json", "json"),
+    ("jsp", "jsp"),
     ("jsx", "javascript"),
     ("kt", "kotlin"),
+    ("lhs", "literate haskell"),
+    ("lisp", "lisp"),
+    ("ltx", "latex"),
     ("lua", "lua"),
+    ("m", "objective-c"),
+    ("mak", "makefile"),
     ("mjs", "javascript"),
+    ("mk", "makefile"),
+    ("ml", "ocaml"),
+    ("mli", "ocaml"),
+    ("mm", "objective-c++"),
+    ("opml", "xml"),
+    ("pas", "pascal"),
+    ("patch", "diff"),
     ("php", "php"),
+    ("phtml", "php"),
     ("pl", "perl"),
+    ("pm", "perl"),
+    ("pod", "perl"),
+    ("properties", "properties"),
     ("py", "python"),
+    ("pyi", "python"),
+    ("pyw", "python"),
+    ("r", "r"),
     ("rb", "ruby"),
+    ("rest", "rst"),
     ("rs", "rust"),
+    ("rss", "xml"),
+    ("rst", "rst"),
+    ("sbt", "scala"),
+    ("scala", "scala"),
+    ("scm", "lisp"),
     ("sh", "bash"),
     ("sql", "sql"),
+    ("sty", "latex"),
     ("swift", "swift"),
+    ("tcl", "tcl"),
+    ("tex", "latex"),
+    ("textile", "textile"),
     ("toml", "toml"),
     ("ts", "typescript"),
     ("tsx", "typescript"),
+    ("xhtml", "html"),
     ("xml", "xml"),
+    ("xsd", "xml"),
+    ("xslt", "xml"),
     ("yaml", "yaml"),
     ("yml", "yaml"),
     ("zsh", "bash"),
@@ -257,10 +365,94 @@ mod tests {
     }
 
     #[test]
-    fn unknown_and_missing_extensions_are_plain() {
-        assert_eq!(detect_ext("notes.xyz"), FileKind::Plain);
-        assert_eq!(detect_ext("README"), FileKind::Plain);
-        assert_eq!(detect_ext("archive.txt"), FileKind::Plain);
+    fn unknown_and_missing_extensions_are_unknown() {
+        assert_eq!(detect_ext("notes.xyz"), FileKind::Unknown);
+        assert_eq!(detect_ext("README"), FileKind::Unknown);
+        assert_eq!(detect_ext("Makefile"), FileKind::Unknown);
+        assert_eq!(detect_ext("archive.txt"), FileKind::Text);
+    }
+
+    #[test]
+    fn the_extension_table_is_sorted_and_free_of_duplicates() {
+        for pair in CODE_EXTENSIONS.windows(2) {
+            assert!(pair[0].0 < pair[1].0, "{} before {}", pair[0].0, pair[1].0);
+        }
+    }
+
+    #[test]
+    fn every_extension_reaches_a_grammar() {
+        for (ext, token) in CODE_EXTENSIONS {
+            assert!(
+                highlight::grammar_of(token).is_some(),
+                ".{ext} maps to {token}, which no grammar answers"
+            );
+        }
+    }
+
+    #[test]
+    fn extensions_reach_the_expected_grammar() {
+        for (name, grammar) in [
+            ("a.hs", "Haskell"),
+            ("a.lhs", "Literate Haskell"),
+            ("a.m", "Objective-C"),
+            ("a.mm", "Objective-C++"),
+            ("a.tex", "LaTeX"),
+            ("a.bat", "Batch File"),
+            ("a.dot", "Graphviz (DOT)"),
+            ("a.rst", "reStructuredText"),
+            ("a.scala", "Scala"),
+            ("a.erl", "Erlang"),
+            ("a.clj", "Clojure"),
+            ("a.ml", "OCaml"),
+            ("a.mk", "Makefile"),
+            ("a.diff", "Diff"),
+            ("a.properties", "Java Properties"),
+            ("a.r", "R"),
+            ("a.tcl", "Tcl"),
+            ("a.groovy", "Groovy"),
+            ("a.pas", "Pascal"),
+            ("a.htm", "HTML"),
+            ("a.cxx", "C++"),
+            ("a.pyw", "Python"),
+            ("a.toml", "JSON"),
+            ("a.ini", "Java Properties"),
+            ("a.cfg", "Java Properties"),
+            ("a.kt", "Java"),
+            ("a.swift", "Java"),
+        ] {
+            let FileKind::Code(token) = detect_ext(name) else {
+                panic!("{name} is not code")
+            };
+            assert_eq!(highlight::grammar_of(token), Some(grammar), "{name}");
+        }
+    }
+
+    #[test]
+    fn extensions_the_wider_world_reads_differently_are_left_out() {
+        for name in [
+            "boot.s",
+            "scan.l",
+            "prog.p",
+            "case.t",
+            "part.inc",
+            "page.tmpl",
+            "site.tpl",
+            "x.build",
+        ] {
+            assert_eq!(detect_ext(name), FileKind::Unknown, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_nul_byte_in_the_sniff_window_marks_binary() {
+        assert!(is_binary(b"\x7fELF\x02\x01\x01\x00"));
+        assert!(!is_binary(
+            "h\u{e9}llo w\u{f6}rld\nsecond line\n".as_bytes()
+        ));
+        assert!(!is_binary(b""));
+        let mut late = vec![b'a'; SNIFF + 16];
+        late[SNIFF + 8] = 0;
+        assert!(!is_binary(&late), "a NUL past the window does not count");
     }
 
     fn temp_file(name: &str, content: &str) -> PathBuf {
@@ -378,6 +570,43 @@ mod tests {
         let joined: String = spans.iter().map(|s| s.text.as_str()).collect();
         assert_eq!(joined, "line one\nline two");
         assert!(matches!(&d.blocks[1].kind, BlockKind::Paragraph { .. }));
+    }
+
+    #[test]
+    fn an_unknown_text_file_becomes_one_code_block_with_no_language() {
+        let path = temp_file("t.conf", "listen = 80\nroot = /srv\n");
+        let d = open(&path, None).unwrap().document;
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(d.blocks.len(), 1);
+        let BlockKind::CodeBlock {
+            language, lines, ..
+        } = &d.blocks[0].kind
+        else {
+            panic!("expected a code block")
+        };
+        assert_eq!(*language, None);
+        assert_eq!(lines, &["listen = 80", "root = /srv"]);
+    }
+
+    #[test]
+    fn an_extensionless_text_file_opens_as_code() {
+        let path = temp_file("Makefile", "all:\n\tcargo build\n");
+        let d = open(&path, None).unwrap().document;
+        std::fs::remove_file(&path).unwrap();
+        assert!(matches!(&d.blocks[0].kind, BlockKind::CodeBlock { .. }));
+    }
+
+    #[test]
+    fn a_binary_file_is_refused_by_name() {
+        let path = std::env::temp_dir().join(format!("oryx-load-{}-t.bin", std::process::id()));
+        std::fs::write(&path, b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR").unwrap();
+        let Err(err) = open(&path, None) else {
+            panic!("a binary file opened")
+        };
+        let err = err.to_string();
+        std::fs::remove_file(&path).unwrap();
+        assert!(err.contains("not a text file"), "{err}");
+        assert!(err.contains("t.bin"), "{err}");
     }
 
     #[test]

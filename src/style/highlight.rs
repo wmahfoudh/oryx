@@ -221,9 +221,40 @@ fn syntax_set() -> &'static SyntaxSet {
     SET.get_or_init(SyntaxSet::load_defaults_newlines)
 }
 
-/// Languages whose token has no grammar in the bundled set map to the
-/// closest available grammar rather than plain text.
-const ALIASES: &[(&str, &str)] = &[("csharp", "cs"), ("tsx", "js"), ("typescript", "js")];
+/// Tokens the bundled set does not answer directly, for two reasons.
+///
+/// A lookup matches a syntax name or one of its extensions, so a syntax
+/// whose name carries punctuation is reachable only through an extension:
+/// that is `batch` and `graphviz`, which are named "Batch File" and
+/// "Graphviz (DOT)".
+///
+/// The rest have no grammar at all and take the closest one that does. The
+/// substitute is chosen per language against real files, and the rule is
+/// that under-coloring beats mis-coloring: a grammar that leaves a
+/// construct plain is preferred to one that paints ordinary identifiers as
+/// types. TOML takes JSON, whose typed literals match its values, while
+/// INI takes Java Properties, whose bare `key=value` lines match its own;
+/// the two formats look alike but their values do not. Kotlin and Swift
+/// take Java, which covers their types, calls, strings and comments
+/// without mis-reading anything, at the cost of leaving `fun`, `val`,
+/// `func` and `let` uncolored.
+const ALIASES: &[(&str, &str)] = &[
+    ("batch", "bat"),
+    ("csharp", "cs"),
+    ("graphviz", "dot"),
+    ("ini", "properties"),
+    ("kotlin", "java"),
+    ("swift", "java"),
+    ("toml", "json"),
+    ("tsx", "js"),
+    ("typescript", "js"),
+];
+
+/// The bundled grammar a language token resolves to, by its syntax name,
+/// or `None` when nothing answers it and the text renders unstyled.
+pub fn grammar_of(token: &str) -> Option<&'static str> {
+    resolve_syntax(token).map(|s| s.name.as_str())
+}
 
 fn resolve_syntax(token: &str) -> Option<&'static syntect::parsing::SyntaxReference> {
     let set = syntax_set();
@@ -301,6 +332,42 @@ mod tests {
         let h = spans(&src, Some("python"));
         assert_eq!(role_at(&h[0], 0), SyntaxRole::Keyword, "def");
         assert_eq!(role_at(&h[1], 4), SyntaxRole::Keyword, "return");
+    }
+
+    #[test]
+    fn tokens_reach_their_grammar_directly_or_by_alias() {
+        assert_eq!(grammar_of("rust"), Some("Rust"));
+        assert_eq!(grammar_of("haskell"), Some("Haskell"));
+        assert_eq!(grammar_of("batch"), Some("Batch File"));
+        assert_eq!(grammar_of("graphviz"), Some("Graphviz (DOT)"));
+        assert_eq!(grammar_of("csharp"), Some("C#"));
+        assert_eq!(grammar_of("typescript"), Some("JavaScript"));
+        assert_eq!(grammar_of("toml"), Some("JSON"));
+        assert_eq!(grammar_of("ini"), Some("Java Properties"));
+        assert_eq!(grammar_of("kotlin"), Some("Java"));
+        assert_eq!(grammar_of("swift"), Some("Java"));
+    }
+
+    #[test]
+    fn a_language_with_no_grammar_and_no_alias_resolves_to_nothing() {
+        assert_eq!(grammar_of("nosuchlang"), None);
+    }
+
+    #[test]
+    fn toml_values_take_their_role_from_the_json_grammar() {
+        let src = lines(&["version = \"0.7.0\"", "lto = true", "opt-level = 3"]);
+        let h = spans(&src, Some("toml"));
+        assert_eq!(role_at(&h[0], 12), SyntaxRole::String, "quoted value");
+        assert_eq!(role_at(&h[1], 6), SyntaxRole::Keyword, "boolean");
+        assert_eq!(role_at(&h[2], 12), SyntaxRole::Number, "number");
+    }
+
+    #[test]
+    fn ini_keys_and_hash_comments_take_their_role_from_properties() {
+        let src = lines(&["# a note", "Fullscreen=true"]);
+        let h = spans(&src, Some("ini"));
+        assert_eq!(role_at(&h[0], 3), SyntaxRole::Comment, "comment body");
+        assert_eq!(role_at(&h[1], 0), SyntaxRole::Keyword, "key");
     }
 
     #[test]

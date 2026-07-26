@@ -1,7 +1,7 @@
 //! Folder sidebar: a persistent panel listing the open file's folder as a
 //! tree. Directories sort before files, both alphabetical; the listing
-//! keeps renderable files, well-known extensionless names, and dot entries
-//! (drawn dimmed). Expansion is in place and children are read on demand.
+//! keeps every file Oryx can display, including dot entries, which are
+//! drawn dimmed. Expansion is in place and children are read on demand.
 
 use std::path::{Path, PathBuf};
 
@@ -19,9 +19,6 @@ const INDENT: f32 = 14.0;
 const TEXT_SIZE: f32 = 13.5;
 /// Room the folder icon column takes before a row's name.
 const ICON_W: f32 = 16.0;
-
-/// Extensionless files worth listing; they open as plain text.
-const KNOWN_NAMES: &[&str] = &["readme", "license", "changelog", "makefile"];
 
 /// One visible row of the tree.
 pub struct Entry {
@@ -44,15 +41,16 @@ pub struct Sidebar {
     list_h: f32,
 }
 
-/// Whether a directory entry belongs in the tree.
-fn recognized(name: &str, is_dir: bool) -> bool {
-    if is_dir || name.starts_with('.') {
+/// Whether a directory entry belongs in the tree. Directories always do,
+/// and a file does when Oryx can display it, which for an extension the
+/// table does not name means reading the first bytes.
+fn recognized(path: &Path, is_dir: bool) -> bool {
+    if is_dir {
         return true;
     }
-    let path = Path::new(name);
-    match path.extension().and_then(|e| e.to_str()) {
-        Some(ext) => ext.eq_ignore_ascii_case("txt") || load::detect(path) != FileKind::Plain,
-        None => KNOWN_NAMES.contains(&name.to_ascii_lowercase().as_str()),
+    match load::detect(path) {
+        FileKind::Unknown => load::is_text_file(path),
+        _ => true,
     }
 }
 
@@ -67,7 +65,7 @@ fn scan(dir: &Path, depth: usize) -> Vec<Entry> {
         .filter_map(|e| {
             let name = e.file_name().to_str()?.to_string();
             let is_dir = e.file_type().ok()?.is_dir();
-            recognized(&name, is_dir).then(|| Entry {
+            recognized(&e.path(), is_dir).then(|| Entry {
                 hidden: name.starts_with('.'),
                 path: e.path(),
                 is_dir,
@@ -331,14 +329,15 @@ mod tests {
             "Alpha.rs",
             "notes.txt",
             "README",
-            "photo.png",
             "Cargo.lock",
             ".gitignore",
             "sub/inner.md",
-            "sub/junk.bin",
             "sub/subsub/deep.md",
         ] {
             std::fs::write(dir.join(f), "x").unwrap();
+        }
+        for f in ["photo.png", "sub/junk.bin"] {
+            std::fs::write(dir.join(f), b"\x89PNG\r\n\x1a\n\x00\x00\x00\r").unwrap();
         }
         dir
     }
@@ -348,19 +347,25 @@ mod tests {
     }
 
     #[test]
-    fn recognizes_renderable_known_and_dot_names() {
-        for name in ["a.md", "b.rs", "c.txt", "README", "LICENSE", "Makefile"] {
-            assert!(recognized(name, false), "{name}");
+    fn a_known_extension_is_listed_without_reading_the_file() {
+        for name in ["a.md", "b.rs", "c.txt", "d.hs"] {
+            assert!(recognized(Path::new(name), false), "{name}");
         }
-        for name in [".gitignore", ".env"] {
-            assert!(recognized(name, false), "{name}");
+    }
+
+    #[test]
+    fn an_unknown_extension_is_listed_when_its_bytes_are_text() {
+        let dir = temp_tree("recognize");
+        for name in ["README", "Cargo.lock", ".gitignore"] {
+            assert!(recognized(&dir.join(name), false), "{name}");
         }
-        for name in ["photo.png", "Cargo.lock", "binary", "a.pdf"] {
-            assert!(!recognized(name, false), "{name}");
+        assert!(!recognized(&dir.join("photo.png"), false));
+        assert!(!recognized(&dir.join("sub/junk.bin"), false));
+        assert!(!recognized(&dir.join("gone.unknown"), false), "unreadable");
+        for name in ["sub", ".git"] {
+            assert!(recognized(&dir.join(name), true), "{name}");
         }
-        for name in ["src", ".git", "node_modules"] {
-            assert!(recognized(name, true), "{name}");
-        }
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -375,6 +380,7 @@ mod tests {
                 "sub",
                 ".gitignore",
                 "Alpha.rs",
+                "Cargo.lock",
                 "notes.txt",
                 "README",
                 "zeta.md"
@@ -422,6 +428,7 @@ mod tests {
                 "inner.md",
                 ".gitignore",
                 "Alpha.rs",
+                "Cargo.lock",
                 "notes.txt",
                 "README",
                 "zeta.md"
@@ -442,6 +449,7 @@ mod tests {
                 "sub",
                 ".gitignore",
                 "Alpha.rs",
+                "Cargo.lock",
                 "notes.txt",
                 "README",
                 "zeta.md"
