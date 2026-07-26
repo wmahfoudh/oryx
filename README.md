@@ -8,7 +8,7 @@ The fastest, most beautiful markdown and code viewer on the planet.
 
 Oryx started as a personal need: reading a markdown file should not require opening an editor, a browser tab, or an Electron app. Most tools either edit with a preview attached or embed a web engine to draw text. I work with a lot of markdown and rarely edit it, so I wanted speed and convenience. Oryx renders markdown natively, in a single small binary that draws everything itself on the CPU, with the typography and theming a reader deserves, nothing else.
 
-[Install](#install) · [Use](#use) · [Themes](#themes)
+[Install](#install) · [Use](#use) · [Export](#export-to-pdf) · [Themes](#themes)
 
 ## Why Oryx
 
@@ -106,6 +106,8 @@ oryx --version          print the version
 | Ctrl+, | Settings |
 | Ctrl+T | Theme browser |
 | Ctrl+B | Folder sidebar |
+| Ctrl+E | Export to PDF |
+| Ctrl+Shift+E | Export settings |
 | F1 | Shortcuts help |
 | F5 / Ctrl+R | Reload from disk |
 | Ctrl+Plus / Ctrl+Minus | Zoom in / out |
@@ -121,6 +123,14 @@ oryx --version          print the version
 | Escape | Close overlay or sidebar, quit |
 
 Ctrl is Cmd on macOS. Copy as markdown reproduces the original source of the selection, styles intact.
+
+## Export to PDF
+
+Ctrl+E writes the document to a PDF and asks only where to put it. The page carries the document as you are reading it: the theme's colours to the edge of the sheet, the same headings and code panels, images and badges in place, and links that still work in a reader. Headings become the outline a viewer navigates by, text stays selectable and searchable, and the fonts travel inside the file so it reads the same anywhere.
+
+Ctrl+Shift+E opens the settings first. Theme, body font and size, code font and size, page size and page numbers, kept apart from the app's own appearance and remembered between runs. That separation is the point: read in a dark theme at 22 points and export in a light one at 11, without changing how Oryx looks. Set it once, then Ctrl+E from then on.
+
+Sizes are points on paper rather than pixels on a screen, so 11 or 12 is the usual figure for a body size. Pages break where a reader would want them to: never through a line, never leaving a heading alone at the foot of a page, never splitting a table row or a single line off a paragraph, and never cutting an image in half.
 
 ## Themes
 
@@ -174,7 +184,7 @@ Some of these are on the list for future versions; none of them are promises.
 
 ## Under the hood
 
-The layout engine draws everything, which means the rendering can be tested as numbers rather than by eye. More than 250 tests assert positions, wrapping, spacing and colors. Every color on screen comes from the active theme file. Every dependency is pure Rust, and that is what keeps the binary small, the startup quick and the build straightforward on all three platforms.
+The layout engine draws everything, which means the rendering can be tested as numbers rather than by eye. More than 300 tests assert positions, wrapping, spacing and colors, and the exported PDFs are read back through an independent parser rather than checked against themselves. Every color on screen comes from the active theme file. Every dependency is pure Rust, and that is what keeps the binary small, the startup quick and the build straightforward on all three platforms.
 
 The files under `tests/showcase/` are the documents behind the screenshots above. Each one exercises a single feature, and they are worth opening to see what Oryx makes of them.
 
