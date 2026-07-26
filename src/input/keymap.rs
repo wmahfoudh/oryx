@@ -11,6 +11,7 @@ pub enum Command {
     Reload,
     Sidebar,
     Export,
+    ExportSettings,
     Help,
     Settings,
     ThemeBrowser,
@@ -34,11 +35,12 @@ pub enum Command {
 
 impl Command {
     /// Every variant; the coverage test checks each one against the table.
-    pub const ALL: [Command; 23] = [
+    pub const ALL: [Command; 24] = [
         Command::OpenFile,
         Command::Reload,
         Command::Sidebar,
         Command::Export,
+        Command::ExportSettings,
         Command::Help,
         Command::Settings,
         Command::ThemeBrowser,
@@ -106,6 +108,11 @@ pub const SHORTCUTS: &[Shortcut] = &[
         keys: "Ctrl+E",
         action: "Export to PDF",
         bindings: &[(Binding::Ctrl("e"), Command::Export)],
+    },
+    Shortcut {
+        keys: "Ctrl+Shift+E",
+        action: "Export settings",
+        bindings: &[(Binding::CtrlShift("e"), Command::ExportSettings)],
     },
     Shortcut {
         keys: "F1",

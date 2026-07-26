@@ -1148,3 +1148,34 @@ fn table_rows_record_their_bands() {
         assert!(pair[0].bottom > pair[0].top, "a band has height");
     }
 }
+
+#[test]
+fn an_image_scales_with_the_reading_size() {
+    let doc = markdown::parse("![logo](oryx-test.png)");
+    let laid = |body: f32| {
+        let mut media = MediaCache::new(PathBuf::from("tests/fixtures"));
+        let cfg = ViewConfig {
+            body_size: body,
+            ..cfg()
+        };
+        layout(
+            &doc,
+            &Theme::default_dark(),
+            &mut fonts(),
+            &mut media,
+            &cfg,
+            2000.0,
+        )
+    };
+    let reference = laid(oryx::layout::metrics::REFERENCE_BODY);
+    let half = laid(oryx::layout::metrics::REFERENCE_BODY / 2.0);
+    assert!(!reference.images.is_empty(), "the fixture has an image");
+    assert!(
+        (half.images[0].width - reference.images[0].width / 2.0).abs() < 0.5,
+        "halving the text halves the image"
+    );
+    assert!(
+        (half.images[0].height - reference.images[0].height / 2.0).abs() < 0.5,
+        "and keeps its aspect"
+    );
+}

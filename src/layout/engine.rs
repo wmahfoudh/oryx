@@ -1338,6 +1338,14 @@ fn layout_table(
     y - y0
 }
 
+/// How much of its natural size an image is drawn at. Pixels are all an
+/// image carries, so they are read as a size for the reference body; a
+/// document set smaller scales its images down with its text rather than
+/// letting them take a share of the page that the text no longer has.
+fn image_scale(cfg: &ViewConfig) -> f32 {
+    cfg.body_size * cfg.zoom / metrics::REFERENCE_BODY
+}
+
 /// Places an image scaled down to fit the available width (never scaled
 /// up); an unloadable image becomes a bordered placeholder with alt text.
 #[allow(clippy::too_many_arguments)]
@@ -1355,7 +1363,7 @@ fn layout_image(
     out: &mut LayoutDoc,
 ) -> f32 {
     if let Some((iw, ih)) = media.dimensions(path) {
-        let width = (iw as f32).min(avail);
+        let width = (iw as f32 * image_scale(cfg)).min(avail);
         let height = ih as f32 * width / iw as f32;
         out.images.push(ImagePlace {
             src: path.to_string(),
@@ -1906,16 +1914,20 @@ fn image_size(
     avail: f32,
 ) -> (f32, f32, bool) {
     let natural = media.dimensions(&image.src);
-    let aw = image.width.map(|v| v as f32 * cfg.zoom);
-    let ah = image.height.map(|v| v as f32 * cfg.zoom);
+    let scale = image_scale(cfg);
+    let aw = image.width.map(|v| v as f32 * scale);
+    let ah = image.height.map(|v| v as f32 * scale);
     let (mut w, mut h) = match (aw, ah, natural) {
         (Some(w), Some(h), _) => (w, h),
         (Some(w), None, Some((nw, nh))) => (w, w * nh as f32 / nw as f32),
         (None, Some(h), Some((nw, nh))) => (h * nw as f32 / nh as f32, h),
-        (None, None, Some((nw, nh))) => (nw as f32, nh as f32),
+        (None, None, Some((nw, nh))) => (nw as f32 * scale, nh as f32 * scale),
         (Some(w), None, None) => (w, w * 0.5),
         (None, Some(h), None) => (h * 2.0, h),
-        (None, None, None) => (120.0_f32.min(avail), metrics::LINE_HEIGHT * cfg.body_size),
+        (None, None, None) => (
+            (120.0 * scale).min(avail),
+            metrics::LINE_HEIGHT * cfg.body_size,
+        ),
     };
     if w > avail {
         h *= avail / w;

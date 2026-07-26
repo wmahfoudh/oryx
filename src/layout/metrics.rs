@@ -16,6 +16,12 @@ pub const INDENT: f32 = 24.0;
 /// Corner radius for panels and table outlines, in pixels at zoom 1.
 pub const CORNER_RADIUS: f32 = 6.0;
 
+/// The body size an image's pixels are taken to be drawn for. An image
+/// carries a size in pixels and nothing else, so it needs a reading size
+/// to be a proportion of; at the default it keeps its natural size, and
+/// smaller or larger text scales it to match.
+pub const REFERENCE_BODY: f32 = 22.0;
+
 /// Inner padding of a code panel. Pagination needs it: a panel continued
 /// on the next page starts one padding above its first line.
 pub const CODE_PAD: f32 = 12.0;

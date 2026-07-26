@@ -6,18 +6,30 @@ use std::collections::HashMap;
 
 use cosmic_text::fontdb::ID as FaceId;
 use cosmic_text::{Attrs, Buffer, Family, Metrics, Shaping, Style, Weight};
-use pdf_writer::types::{CidFontType, FontFlags, SystemInfo, UnicodeCmap};
+use pdf_writer::types::{
+    ActionType, AnnotationType, CidFontType, FontFlags, SystemInfo, UnicodeCmap,
+};
 use pdf_writer::{Content, Filter, Finish, Name, Pdf, Rect, Ref, Str, TextStr};
 use subsetter::GlyphRemapper;
 
+use crate::doc::images::MediaCache;
+use crate::doc::model::{BlockKind, Document};
 use crate::export::paginate::Page;
-use crate::export::PageGeometry;
+use crate::export::{ExportSettings, PageGeometry};
 use crate::layout::{DecoRect, LayoutDoc, TextRun};
 use crate::style::fonts::FontStore;
 use crate::style::theme::{Rgba, Theme};
 
 /// Glyph space is a thousandth of the text size, in PDF as in OpenType.
 const GLYPH_UNITS: f32 = 1000.0;
+
+/// Resolution ceiling for an embedded image. A source finer than this at
+/// its placed size is downsampled, which keeps a photograph from carrying
+/// detail no print can show and no screen will zoom to.
+const MAX_DPI: f32 = 300.0;
+
+/// Points per inch, which is what makes a point a point.
+const POINTS_PER_INCH: f32 = 72.0;
 
 /// Bézier circle constant: the handle length that turns a quarter turn
 /// into a circular arc.
@@ -62,6 +74,33 @@ struct Segment {
     baseline: f32,
 }
 
+/// Everything an export needs that does not change from page to page.
+pub struct Job<'a> {
+    pub doc: &'a Document,
+    pub layout: &'a LayoutDoc,
+    pub theme: &'a Theme,
+    pub geometry: &'a PageGeometry,
+    pub settings: &'a ExportSettings,
+    pub title: &'a str,
+}
+
+/// A clickable box and what it points at, before the target is resolved.
+/// Internal targets cannot be written until every page has a reference.
+struct Link {
+    rect: [f32; 4],
+    target: String,
+}
+
+/// One drawn page, waiting for the objects that reference it.
+struct PageContent {
+    id: Ref,
+    top: f32,
+    faces: Vec<FaceId>,
+    alphas: Vec<u8>,
+    images: Vec<(String, Ref)>,
+    links: Vec<Link>,
+}
+
 /// Assembles the file one page at a time, so a long document can be
 /// emitted across several slices without holding the pass open.
 pub struct Builder {
@@ -71,7 +110,10 @@ pub struct Builder {
     tree_id: Ref,
     info_id: Ref,
     faces: HashMap<FaceId, FaceUse>,
-    contents: Vec<(Ref, Vec<FaceId>, Vec<u8>)>,
+    /// One XObject per source, so a logo repeated through a document is
+    /// written once and drawn many times.
+    images: HashMap<String, Ref>,
+    contents: Vec<PageContent>,
 }
 
 impl Default for Builder {
@@ -93,6 +135,7 @@ impl Builder {
             tree_id,
             info_id,
             faces: HashMap::new(),
+            images: HashMap::new(),
             contents: Vec::new(),
         }
     }
@@ -102,56 +145,267 @@ impl Builder {
     /// been through here.
     pub fn add_page(
         &mut self,
+        job: &Job,
         page: &Page,
-        layout: &LayoutDoc,
-        theme: &Theme,
-        geometry: &PageGeometry,
         fonts: &mut FontStore,
+        media: &mut MediaCache,
     ) {
-        let (data, used, alphas) = draw_page(
-            page,
-            layout,
-            theme,
-            geometry,
-            fonts,
-            &mut self.faces,
-            &mut self.alloc,
-        );
+        let geometry = job.geometry;
+        let mut content = Content::new();
+        content.save_state();
+        set_fill(&mut content, job.theme.surface.background);
+        content.rect(0.0, 0.0, geometry.width, geometry.height);
+        content.fill_nonzero();
+        content.restore_state();
+
+        let mut alphas: Vec<u8> = Vec::new();
+        for rect in &page.rects {
+            draw_rect(&mut content, rect, page.top, geometry, &mut alphas);
+        }
+
+        let mut images: Vec<(String, Ref)> = Vec::new();
+        for image in &page.images {
+            let Some(id) = self.image_object(&image.src, image.width, media) else {
+                continue;
+            };
+            let name = image_name(images.len());
+            content.save_state();
+            content.transform([
+                image.width,
+                0.0,
+                0.0,
+                image.height,
+                image.x,
+                device_y(image.y + image.height, page.top, geometry),
+            ]);
+            content.x_object(Name(name.as_bytes()));
+            content.restore_state();
+            images.push((name, id));
+        }
+
+        let mut used: Vec<FaceId> = Vec::new();
+        for run in &job.layout.runs[page.runs.clone()] {
+            self.draw_run(&mut content, run, page.top, geometry, fonts, &mut used);
+        }
+        if job.settings.page_numbers {
+            self.draw_page_number(&mut content, job, self.contents.len() + 1, fonts, &mut used);
+        }
+
+        let links = collect_links(job.layout, page, geometry);
         let content_id = self.alloc.next();
         self.pdf
-            .stream(content_id, &deflate(&data))
+            .stream(content_id, &deflate(&content.finish()))
             .filter(Filter::FlateDecode);
-        self.contents.push((content_id, used, alphas));
+        self.contents.push(PageContent {
+            id: content_id,
+            top: page.top,
+            faces: used,
+            alphas,
+            images,
+            links,
+        });
+    }
+
+    /// One run's glyphs, split by the face the shaper resolved.
+    fn draw_run(
+        &mut self,
+        content: &mut Content,
+        run: &TextRun,
+        top: f32,
+        geometry: &PageGeometry,
+        fonts: &mut FontStore,
+        used: &mut Vec<FaceId>,
+    ) {
+        for segment in shape(fonts, run) {
+            let ids = self.register(&segment);
+            if !used.contains(&segment.face) {
+                used.push(segment.face);
+            }
+            let index = self.faces[&segment.face].index;
+            let baseline = device_y(segment.baseline, top, geometry);
+            show(content, &segment, &ids, index, baseline);
+        }
+    }
+
+    /// The page number, centred in the bottom margin where nothing else
+    /// goes. It is not part of the document, so it is positioned in
+    /// device space rather than through a page top.
+    fn draw_page_number(
+        &mut self,
+        content: &mut Content,
+        job: &Job,
+        number: usize,
+        fonts: &mut FontStore,
+        used: &mut Vec<FaceId>,
+    ) {
+        let run = TextRun {
+            text: number.to_string(),
+            x: 0.0,
+            y: 0.0,
+            baseline: 0.0,
+            width: 0.0,
+            size: job.settings.code_size,
+            family: job.settings.body_family.clone(),
+            weight: 400,
+            italic: false,
+            color: job.theme.text.body,
+            link: None,
+            block: 0,
+            span: 0,
+        };
+        let mut segments = shape(fonts, &run);
+        let width = segments
+            .iter()
+            .flat_map(|segment| segment.glyphs.iter())
+            .map(|glyph| glyph.x + glyph.width)
+            .fold(0.0, f32::max);
+        let offset = (job.geometry.width - width) / 2.0;
+        let baseline = job.geometry.margin_y * 0.45;
+        for segment in &mut segments {
+            segment.x += offset;
+            for glyph in &mut segment.glyphs {
+                glyph.x += offset;
+            }
+            let ids = self.register(segment);
+            if !used.contains(&segment.face) {
+                used.push(segment.face);
+            }
+            let index = self.faces[&segment.face].index;
+            show(content, segment, &ids, index, baseline);
+        }
+    }
+
+    /// Records a segment's glyphs against its face and returns the
+    /// subset ids to write, so the content stream and the embedded font
+    /// agree on what a code means.
+    fn register(&mut self, segment: &Segment) -> Vec<(u16, f32)> {
+        let count = self.faces.len();
+        let alloc = &mut self.alloc;
+        let entry = self.faces.entry(segment.face).or_insert_with(|| FaceUse {
+            remapper: GlyphRemapper::new(),
+            text: HashMap::new(),
+            widths: HashMap::new(),
+            id: alloc.next(),
+            index: count,
+        });
+        segment
+            .glyphs
+            .iter()
+            .map(|glyph| {
+                let cid = entry.remapper.remap(glyph.id);
+                entry.text.entry(cid).or_insert_with(|| glyph.text.clone());
+                entry
+                    .widths
+                    .entry(cid)
+                    .or_insert(glyph.width * GLYPH_UNITS / segment.size);
+                (cid, glyph.x)
+            })
+            .collect()
+    }
+
+    /// The XObject for a source, written the first time it is asked for.
+    /// RGBA splits into colour and an alpha mask, which is what lets a
+    /// badge keep its transparent corners.
+    fn image_object(&mut self, src: &str, placed: f32, media: &mut MediaCache) -> Option<Ref> {
+        if let Some(id) = self.images.get(src) {
+            return Some(*id);
+        }
+        // The samples are the source's own, not the box it is drawn in:
+        // a page places an image in points, and a point holds several
+        // pixels, so sampling at the placed size prints it soft.
+        let (natural_w, natural_h) = media.dimensions(src)?;
+        let ceiling = ((placed * MAX_DPI / POINTS_PER_INCH).round() as u32).max(1);
+        let width = natural_w.min(ceiling).max(1);
+        let height = ((natural_h as f32) * (width as f32) / (natural_w as f32))
+            .round()
+            .max(1.0) as u32;
+        let pixels = media.scaled(src, width, height)?.to_vec();
+        let mut rgb = Vec::with_capacity(pixels.len() / 4 * 3);
+        let mut alpha = Vec::with_capacity(pixels.len() / 4);
+        for pixel in pixels.chunks_exact(4) {
+            rgb.extend_from_slice(&pixel[..3]);
+            alpha.push(pixel[3]);
+        }
+        let id = self.alloc.next();
+        let mask_id = alpha.iter().any(|a| *a != 255).then(|| self.alloc.next());
+        let deflated = deflate(&rgb);
+        let mut image = self.pdf.image_xobject(id, &deflated);
+        image.width(width as i32);
+        image.height(height as i32);
+        image.color_space().device_rgb();
+        image.bits_per_component(8);
+        image.filter(Filter::FlateDecode);
+        if let Some(mask) = mask_id {
+            image.s_mask(mask);
+        }
+        image.finish();
+        if let Some(mask) = mask_id {
+            let deflated = deflate(&alpha);
+            let mut gray = self.pdf.image_xobject(mask, &deflated);
+            gray.width(width as i32);
+            gray.height(height as i32);
+            gray.color_space().device_gray();
+            gray.bits_per_component(8);
+            gray.filter(Filter::FlateDecode);
+            gray.finish();
+        }
+        self.images.insert(src.to_string(), id);
+        Some(id)
     }
 
     /// Writes the faces, the page objects and the tree, then the bytes.
-    pub fn finish(self, geometry: &PageGeometry, fonts: &FontStore, title: &str) -> Vec<u8> {
-        finish(self, geometry, fonts, title)
+    pub fn finish(self, job: &Job, fonts: &FontStore) -> Vec<u8> {
+        finish(self, job, fonts)
     }
+}
 
-    pub fn pages_written(&self) -> usize {
-        self.contents.len()
+/// Every link on a page, as a box in device space and the target it
+/// carries. Runs and images both qualify.
+fn collect_links(layout: &LayoutDoc, page: &Page, geometry: &PageGeometry) -> Vec<Link> {
+    let mut links: Vec<Link> = Vec::new();
+    for run in &layout.runs[page.runs.clone()] {
+        let Some(target) = run.link.as_deref() else {
+            continue;
+        };
+        let height = crate::layout::metrics::LINE_HEIGHT * run.size;
+        links.push(Link {
+            rect: [
+                run.x,
+                device_y(run.y + height, page.top, geometry),
+                run.x + run.width,
+                device_y(run.y, page.top, geometry),
+            ],
+            target: target.to_string(),
+        });
     }
+    for image in &page.images {
+        let Some(target) = image.link.as_deref() else {
+            continue;
+        };
+        links.push(Link {
+            rect: [
+                image.x,
+                device_y(image.y + image.height, page.top, geometry),
+                image.x + image.width,
+                device_y(image.y, page.top, geometry),
+            ],
+            target: target.to_string(),
+        });
+    }
+    links
 }
 
 /// Builds a whole file in one call. The pass uses the builder directly;
 /// this is the shape the tests and any one-shot caller want.
-pub fn build(
-    pages: &[Page],
-    layout: &LayoutDoc,
-    theme: &Theme,
-    geometry: &PageGeometry,
-    fonts: &mut FontStore,
-    title: &str,
-) -> Vec<u8> {
+pub fn build(job: &Job, pages: &[Page], fonts: &mut FontStore, media: &mut MediaCache) -> Vec<u8> {
     let mut builder = Builder::new();
     for page in pages {
-        builder.add_page(page, layout, theme, geometry, fonts);
+        builder.add_page(job, page, fonts, media);
     }
-    builder.finish(geometry, fonts, title)
+    builder.finish(job, fonts)
 }
 
-fn finish(builder: Builder, geometry: &PageGeometry, fonts: &FontStore, title: &str) -> Vec<u8> {
+fn finish(builder: Builder, job: &Job, fonts: &FontStore) -> Vec<u8> {
     let Builder {
         mut pdf,
         mut alloc,
@@ -159,8 +413,10 @@ fn finish(builder: Builder, geometry: &PageGeometry, fonts: &FontStore, title: &
         tree_id,
         info_id,
         faces,
+        images: _,
         contents,
     } = builder;
+    let geometry = job.geometry;
 
     let face_ids: Vec<FaceId> = faces.keys().copied().collect();
     for face in &face_ids {
@@ -168,101 +424,227 @@ fn finish(builder: Builder, geometry: &PageGeometry, fonts: &FontStore, title: &
     }
 
     let page_ids: Vec<Ref> = contents.iter().map(|_| alloc.next()).collect();
-    for (index, (content_id, used, alphas)) in contents.iter().enumerate() {
+    let tops: Vec<f32> = contents.iter().map(|content| content.top).collect();
+
+    // Annotations are objects of their own, and an internal target needs
+    // the page reference, so they can only be written now.
+    let mut annotations: Vec<Vec<Ref>> = Vec::with_capacity(contents.len());
+    for content in &contents {
+        let mut ids = Vec::with_capacity(content.links.len());
+        for link in &content.links {
+            let id = alloc.next();
+            let mut annotation = pdf.annotation(id);
+            annotation.subtype(AnnotationType::Link);
+            annotation.rect(Rect::new(
+                link.rect[0],
+                link.rect[1],
+                link.rect[2],
+                link.rect[3],
+            ));
+            annotation.border(0.0, 0.0, 0.0, None);
+            match place(job, &tops, &link.target) {
+                Some((page, y)) => {
+                    annotation
+                        .action()
+                        .action_type(ActionType::GoTo)
+                        .destination()
+                        .page(page_ids[page])
+                        .xyz(0.0, y, None);
+                }
+                None if link.target.starts_with("http") => {
+                    annotation
+                        .action()
+                        .action_type(ActionType::Uri)
+                        .uri(Str(link.target.as_bytes()));
+                }
+                None => {}
+            }
+            annotation.finish();
+            ids.push(id);
+        }
+        annotations.push(ids);
+    }
+
+    for (index, content) in contents.iter().enumerate() {
         let mut page = pdf.page(page_ids[index]);
         page.parent(tree_id);
         page.media_box(Rect::new(0.0, 0.0, geometry.width, geometry.height));
-        page.contents(*content_id);
+        page.contents(content.id);
+        if !annotations[index].is_empty() {
+            page.annotations(annotations[index].iter().copied());
+        }
         {
             let mut resources = page.resources();
             let mut written = resources.fonts();
-            for face in used {
+            for face in &content.faces {
                 let entry = &faces[face];
                 written.pair(Name(font_name(entry.index).as_bytes()), entry.id);
             }
             written.finish();
             let mut states = resources.ext_g_states();
-            for alpha in alphas {
+            for alpha in &content.alphas {
                 states
                     .insert(Name(alpha_name(*alpha).as_bytes()))
                     .start::<pdf_writer::writers::ExtGraphicsState>()
                     .non_stroking_alpha(*alpha as f32 / 255.0);
             }
             states.finish();
+            let mut objects = resources.x_objects();
+            for (name, id) in &content.images {
+                objects.pair(Name(name.as_bytes()), *id);
+            }
+            objects.finish();
             resources.finish();
         }
         page.finish();
     }
 
+    let outline_id = write_outline(&mut pdf, &mut alloc, job, &tops, &page_ids);
+
     pdf.pages(tree_id)
         .kids(page_ids.iter().copied())
         .count(page_ids.len() as i32);
-    pdf.catalog(catalog_id).pages(tree_id);
+    let mut catalog = pdf.catalog(catalog_id);
+    catalog.pages(tree_id);
+    if let Some(outline_id) = outline_id {
+        catalog.outlines(outline_id);
+    }
+    catalog.finish();
     pdf.document_info(info_id)
-        .title(TextStr(title))
+        .title(TextStr(job.title))
         .producer(TextStr(concat!("oryx ", env!("CARGO_PKG_VERSION"))));
     pdf.finish()
 }
 
-/// One page's content stream, plus the faces and alpha values it used.
-#[allow(clippy::too_many_arguments)]
-fn draw_page(
-    page: &Page,
-    layout: &LayoutDoc,
-    theme: &Theme,
-    geometry: &PageGeometry,
-    fonts: &mut FontStore,
-    faces: &mut HashMap<FaceId, FaceUse>,
+/// Resolves an internal target to a page and a position on it. External
+/// targets and anchors the document does not carry answer None.
+fn place(job: &Job, tops: &[f32], target: &str) -> Option<(usize, f32)> {
+    let anchor = target.strip_prefix('#').unwrap_or(target);
+    let y = job
+        .layout
+        .anchors
+        .iter()
+        .find_map(|(name, y)| (name == anchor || name == target).then_some(*y))?;
+    let page = tops.partition_point(|top| *top <= y).saturating_sub(1);
+    Some((page, device_y(y, tops[page], job.geometry)))
+}
+
+/// One heading of the outline, with where it points and how it nests.
+struct Item {
+    title: String,
+    level: u8,
+    page: usize,
+    y: f32,
+    id: Ref,
+    parent: Option<usize>,
+    children: Vec<usize>,
+}
+
+/// The heading outline, nested by level. Returns None for a document
+/// with no headings, which then carries no outline at all.
+fn write_outline(
+    pdf: &mut Pdf,
     alloc: &mut Alloc,
-) -> (Vec<u8>, Vec<FaceId>, Vec<u8>) {
-    let mut content = Content::new();
-    let surface = theme.surface.background;
-    content.save_state();
-    set_fill(&mut content, surface);
-    content.rect(0.0, 0.0, geometry.width, geometry.height);
-    content.fill_nonzero();
-    content.restore_state();
-
-    let mut alphas: Vec<u8> = Vec::new();
-    for rect in &page.rects {
-        draw_rect(&mut content, rect, page.top, geometry, &mut alphas);
-    }
-
-    let mut used: Vec<FaceId> = Vec::new();
-    for run in &layout.runs[page.runs.clone()] {
-        for segment in shape(fonts, run) {
-            let count = faces.len();
-            let entry = faces.entry(segment.face).or_insert_with(|| FaceUse {
-                remapper: GlyphRemapper::new(),
-                text: HashMap::new(),
-                widths: HashMap::new(),
-                id: alloc.next(),
-                index: count,
-            });
-            let mut ids: Vec<(u16, f32)> = Vec::new();
-            for glyph in &segment.glyphs {
-                let cid = entry.remapper.remap(glyph.id);
-                entry.text.entry(cid).or_insert_with(|| glyph.text.clone());
-                entry
-                    .widths
-                    .entry(cid)
-                    .or_insert(glyph.width * GLYPH_UNITS / segment.size);
-                ids.push((cid, glyph.x));
-            }
-            if !used.contains(&segment.face) {
-                used.push(segment.face);
-            }
-            show(
-                &mut content,
-                &segment,
-                &ids,
-                entry.index,
-                page.top,
-                geometry,
-            );
+    job: &Job,
+    tops: &[f32],
+    page_ids: &[Ref],
+) -> Option<Ref> {
+    let mut items: Vec<Item> = Vec::new();
+    for block in &job.doc.blocks {
+        let BlockKind::Heading {
+            level,
+            spans,
+            anchor,
+        } = &block.kind
+        else {
+            continue;
+        };
+        let Some((page, y)) = place(job, tops, anchor) else {
+            continue;
+        };
+        let title: String = spans.iter().map(|span| span.text.as_str()).collect();
+        if title.trim().is_empty() {
+            continue;
         }
+        items.push(Item {
+            title,
+            level: *level,
+            page,
+            y,
+            id: alloc.next(),
+            parent: None,
+            children: Vec::new(),
+        });
     }
-    (content.finish().to_vec(), used, alphas)
+    if items.is_empty() {
+        return None;
+    }
+
+    // Nest by level: a heading hangs off the nearest shallower one before
+    // it, so a jump from h2 to h4 costs one level rather than failing.
+    let mut stack: Vec<usize> = Vec::new();
+    let mut roots: Vec<usize> = Vec::new();
+    for index in 0..items.len() {
+        while let Some(&top) = stack.last() {
+            if items[top].level >= items[index].level {
+                stack.pop();
+            } else {
+                break;
+            }
+        }
+        match stack.last() {
+            Some(&parent) => {
+                items[index].parent = Some(parent);
+                items[parent].children.push(index);
+            }
+            None => roots.push(index),
+        }
+        stack.push(index);
+    }
+
+    let outline_id = alloc.next();
+    let mut outline = pdf.outline(outline_id);
+    outline.first(items[roots[0]].id);
+    outline.last(items[*roots.last().expect("a root")].id);
+    outline.count(roots.len() as i32);
+    outline.finish();
+
+    for index in 0..items.len() {
+        let siblings: &[usize] = match items[index].parent {
+            Some(parent) => &items[parent].children,
+            None => &roots,
+        };
+        let at = siblings
+            .iter()
+            .position(|sibling| *sibling == index)
+            .expect("a child of its parent");
+        let previous = at.checked_sub(1).map(|before| items[siblings[before]].id);
+        let following = siblings.get(at + 1).map(|after| items[*after].id);
+        let item = &items[index];
+        let mut written = pdf.outline_item(item.id);
+        written.title(TextStr(&item.title));
+        match item.parent {
+            Some(parent) => written.parent(items[parent].id),
+            None => written.parent(outline_id),
+        };
+        if let Some(previous) = previous {
+            written.prev(previous);
+        }
+        if let Some(following) = following {
+            written.next(following);
+        }
+        if let Some(first) = item.children.first() {
+            written.first(items[*first].id);
+            written.last(items[*item.children.last().expect("a last child")].id);
+            written.count(item.children.len() as i32);
+        }
+        written
+            .dest()
+            .page(page_ids[item.page])
+            .xyz(0.0, item.y, None);
+        written.finish();
+    }
+    Some(outline_id)
 }
 
 /// Shapes a run exactly as the band painter shapes it, then splits the
@@ -316,14 +698,7 @@ fn shape(fonts: &mut FontStore, run: &TextRun) -> Vec<Segment> {
 /// Shows one segment. The glyphs are positioned by their shaped offsets
 /// rather than by the reader's idea of the advances, so a line lands
 /// where the layout put it whatever the font does with kerning.
-fn show(
-    content: &mut Content,
-    segment: &Segment,
-    ids: &[(u16, f32)],
-    index: usize,
-    top: f32,
-    geometry: &PageGeometry,
-) {
+fn show(content: &mut Content, segment: &Segment, ids: &[(u16, f32)], index: usize, baseline: f32) {
     if ids.is_empty() {
         return;
     }
@@ -331,14 +706,7 @@ fn show(
     content.begin_text();
     set_fill(content, segment.color);
     content.set_font(Name(name.as_bytes()), segment.size);
-    content.set_text_matrix([
-        1.0,
-        0.0,
-        0.0,
-        1.0,
-        segment.x,
-        device_y(segment.baseline, top, geometry),
-    ]);
+    content.set_text_matrix([1.0, 0.0, 0.0, 1.0, segment.x, baseline]);
     let mut positioned = content.show_positioned();
     let mut items = positioned.items();
     // The pen walks by the same advances the reader will use, so an
@@ -563,6 +931,10 @@ fn font_name(index: usize) -> String {
 
 fn alpha_name(alpha: u8) -> String {
     format!("GS{alpha}")
+}
+
+fn image_name(index: usize) -> String {
+    format!("Im{index}")
 }
 
 fn deflate(data: &[u8]) -> Vec<u8> {

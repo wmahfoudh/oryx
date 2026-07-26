@@ -21,8 +21,8 @@ use oryx::paint::scroll::{self, BandCache};
 use oryx::platform::config::{self, Config, WindowState};
 use oryx::style::fonts::FontStore;
 use oryx::style::highlight::{Highlighter, PendingBlock};
-use oryx::style::theme::{self, Theme};
-use oryx::ui::export::ExportProgress;
+use oryx::style::theme::{self, Rgba, Theme};
+use oryx::ui::export::{ExportDialog, ExportProgress};
 use oryx::ui::help::Help;
 use oryx::ui::overlay::{Action, Overlay, OverlayResult};
 use oryx::ui::scrollbar;
@@ -318,6 +318,7 @@ impl App {
         match cmd {
             Command::OpenFile => self.open_dialog(),
             Command::Export => self.export_now(),
+            Command::ExportSettings => self.toggle_export_settings(),
             Command::Reload => self.reload(),
             Command::Sidebar => self.toggle_sidebar(),
             Command::Help => self.toggle_help(),
@@ -852,11 +853,46 @@ impl App {
         if self.path.is_none() {
             return;
         }
-        let settings = self
-            .config
+        let settings = self.export_settings();
+        self.start_export(settings);
+    }
+
+    /// The saved export settings, or the ones seeded from the appearance
+    /// settings the first time anything is exported.
+    fn export_settings(&self) -> ExportSettings {
+        self.config
             .export
             .clone()
-            .unwrap_or_else(|| ExportSettings::seeded_from(&self.config));
+            .unwrap_or_else(|| ExportSettings::seeded_from(&self.config))
+    }
+
+    /// Opens the export settings dialog on a working copy of them.
+    fn toggle_export_settings(&mut self) {
+        if self.path.is_none() {
+            return;
+        }
+        if self.overlay.is_some() {
+            self.overlay = None;
+            return;
+        }
+        let mut themes: Vec<(String, Option<(Rgba, Rgba)>)> = Vec::new();
+        for dir in theme_dirs() {
+            for entry in theme::scan(&dir) {
+                if themes.iter().any(|(name, _)| *name == entry.name) {
+                    continue;
+                }
+                let preview = theme::preview(&entry.path);
+                themes.push((entry.name, preview));
+            }
+        }
+        let settings = self.export_settings();
+        let dialog = ExportDialog::new(settings, self.fonts.families(), themes);
+        self.overlay = Some(Box::new(dialog));
+        self.request_redraw();
+    }
+
+    /// Asks where the file goes, then starts the pass that writes it.
+    fn start_export(&mut self, settings: ExportSettings) {
         let (theme, fell_back) = export::resolve_theme(&theme_dirs(), &settings.theme, &self.theme);
         let stem = self
             .path
@@ -911,7 +947,7 @@ impl App {
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| pass.target().display().to_string());
             let target = pass.target().display().to_string();
-            let line = match pass.finish(&self.fonts) {
+            let line = match pass.finish(&self.document, &self.fonts) {
                 Ok(pages) => {
                     let warning = self
                         .export_warning
@@ -1003,6 +1039,14 @@ impl App {
                     self.overlay = Some(Box::new(editor));
                     self.set_live_theme(preview);
                 }
+            }
+            OverlayResult::Apply(Action::Export(settings)) => {
+                // The dialog is the reader's statement of preference, so
+                // it persists whether or not the export then completes.
+                self.config.export = Some(*settings.clone());
+                config::save(&self.config);
+                self.overlay = None;
+                self.start_export(*settings);
             }
             OverlayResult::Apply(Action::PreviewTheme(theme)) => {
                 self.set_live_theme(*theme);

@@ -155,6 +155,7 @@ pub struct Progress {
 /// A resumable export. Every phase stops at a deadline, so a document of
 /// any size is written without the window losing its frame.
 pub struct ExportPass {
+    settings: ExportSettings,
     theme: Theme,
     cfg: ViewConfig,
     geometry: PageGeometry,
@@ -176,6 +177,7 @@ impl ExportPass {
             .map(|stem| stem.to_string_lossy().to_string())
             .unwrap_or_default();
         ExportPass {
+            settings: settings.clone(),
             theme,
             cfg: ViewConfig {
                 body_family: settings.body_family.clone(),
@@ -244,13 +246,16 @@ impl ExportPass {
         }
         if self.phase == Phase::Emit {
             while self.next < self.pages.len() {
-                self.builder.add_page(
-                    &self.pages[self.next],
-                    &self.layout,
-                    &self.theme,
-                    &self.geometry,
-                    fonts,
-                );
+                let job = crate::export::pdf::Job {
+                    doc,
+                    layout: &self.layout,
+                    theme: &self.theme,
+                    geometry: &self.geometry,
+                    settings: &self.settings,
+                    title: &self.title,
+                };
+                self.builder
+                    .add_page(&job, &self.pages[self.next], fonts, media);
                 self.next += 1;
                 if Instant::now() >= deadline {
                     return self.progress();
@@ -276,9 +281,17 @@ impl ExportPass {
     /// Writes the assembled bytes through a sibling temporary file, so a
     /// full disk or a refused permission leaves the target as it was.
     /// Reports the page count.
-    pub fn finish(self, fonts: &FontStore) -> std::io::Result<usize> {
+    pub fn finish(self, doc: &Document, fonts: &FontStore) -> std::io::Result<usize> {
         let pages = self.pages.len();
-        let bytes = self.builder.finish(&self.geometry, fonts, &self.title);
+        let job = crate::export::pdf::Job {
+            doc,
+            layout: &self.layout,
+            theme: &self.theme,
+            geometry: &self.geometry,
+            settings: &self.settings,
+            title: &self.title,
+        };
+        let bytes = self.builder.finish(&job, fonts);
         let mut partial = self.target.clone().into_os_string();
         partial.push(".part");
         let partial = PathBuf::from(partial);

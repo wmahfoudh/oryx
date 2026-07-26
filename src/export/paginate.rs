@@ -1,9 +1,8 @@
 //! Cutting one tall column into pages. Pure: layout and page geometry in,
 //! a list of pages out, with no fonts and no PDF anywhere near it.
 
-use std::ops::Range;
-
 use std::collections::HashMap;
+use std::ops::Range;
 
 use crate::doc::model::{BlockKind, Document};
 use crate::export::PageGeometry;
@@ -18,46 +17,94 @@ const SLACK: f32 = 0.01;
 #[derive(Debug, Clone, PartialEq)]
 pub struct Page {
     pub top: f32,
+    /// Where this page's content ends. Not the next page's top: a code
+    /// panel continued overleaf keeps its inner padding at both edges, so
+    /// the two pages each carry a little of the same rectangle.
+    pub bottom: f32,
     pub runs: Range<usize>,
     pub images: Vec<ImagePlace>,
     pub rects: Vec<DecoRect>,
 }
 
-/// One visual line and the box it occupies. Runs that overlap vertically
-/// belong to the same line, which keeps a raised footnote reference with
-/// the words it follows and a table row's cells together.
-struct Line {
+/// One thing a page can hold whole: a visual line, an image, or a line
+/// with an image sitting in it. Pieces that overlap vertically belong to
+/// the same item, which keeps a raised footnote reference with the words
+/// it follows, an inline badge with its sentence, and a table row's cells
+/// together. An item is atomic, so nothing here is ever cut in half.
+struct Item {
     runs: Range<usize>,
+    images: Vec<usize>,
     top: f32,
     bottom: f32,
 }
 
-fn lines(layout: &LayoutDoc) -> Vec<Line> {
-    let mut out: Vec<Line> = Vec::new();
-    for (i, run) in layout.runs.iter().enumerate() {
-        let bottom = run.y + metrics::LINE_HEIGHT * run.size;
-        match out.last_mut() {
-            Some(line) if run.y < line.bottom - SLACK => {
-                line.runs.end = i + 1;
-                line.top = line.top.min(run.y);
-                line.bottom = line.bottom.max(bottom);
+impl Item {
+    /// The block an item belongs to, absent for an image standing alone.
+    fn block(&self, layout: &LayoutDoc) -> Option<usize> {
+        (!self.runs.is_empty()).then(|| layout.runs[self.runs.start].block)
+    }
+}
+
+/// Every run and every image, in document order, grouped into items.
+fn items(layout: &LayoutDoc) -> Vec<Item> {
+    let mut out: Vec<Item> = Vec::new();
+    let (mut run, mut image) = (0, 0);
+    loop {
+        let run_top = layout.runs.get(run).map(|r| r.y);
+        let image_top = layout.images.get(image).map(|i| i.y);
+        let take_run = match (run_top, image_top) {
+            (Some(a), Some(b)) => a <= b,
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            (None, None) => break,
+        };
+        if take_run {
+            let piece = &layout.runs[run];
+            let bottom = piece.y + metrics::LINE_HEIGHT * piece.size;
+            match out.last_mut() {
+                Some(item) if piece.y < item.bottom - SLACK => {
+                    item.runs.end = run + 1;
+                    item.top = item.top.min(piece.y);
+                    item.bottom = item.bottom.max(bottom);
+                }
+                _ => out.push(Item {
+                    runs: run..run + 1,
+                    images: Vec::new(),
+                    top: piece.y,
+                    bottom,
+                }),
             }
-            _ => out.push(Line {
-                runs: i..i + 1,
-                top: run.y,
-                bottom,
-            }),
+            run += 1;
+        } else {
+            let piece = &layout.images[image];
+            let bottom = piece.y + piece.height;
+            match out.last_mut() {
+                Some(item) if piece.y < item.bottom - SLACK => {
+                    item.images.push(image);
+                    item.top = item.top.min(piece.y);
+                    item.bottom = item.bottom.max(bottom);
+                }
+                _ => out.push(Item {
+                    runs: run..run,
+                    images: vec![image],
+                    top: piece.y,
+                    bottom,
+                }),
+            }
+            image += 1;
         }
     }
     out
 }
 
-/// Where each block's lines begin and end, so the widow rule costs a
+/// Where each block's items begin and end, so the widow rule costs a
 /// lookup rather than a scan.
-fn block_spans(layout: &LayoutDoc, lines: &[Line]) -> HashMap<usize, (usize, usize)> {
+fn block_spans(layout: &LayoutDoc, items: &[Item]) -> HashMap<usize, (usize, usize)> {
     let mut spans: HashMap<usize, (usize, usize)> = HashMap::new();
-    for (index, line) in lines.iter().enumerate() {
-        let block = layout.runs[line.runs.start].block;
+    for (index, item) in items.iter().enumerate() {
+        let Some(block) = item.block(layout) else {
+            continue;
+        };
         spans
             .entry(block)
             .and_modify(|span| span.1 = index)
@@ -66,18 +113,19 @@ fn block_spans(layout: &LayoutDoc, lines: &[Line]) -> HashMap<usize, (usize, usi
     spans
 }
 
-/// Whether a break before line `k` is one of the ones that read badly.
-/// The page currently starts at line `i`.
+/// Whether a break before item `k` is one of the ones that read badly.
+/// The page currently starts at item `i`.
 fn rejected(
     doc: &Document,
     layout: &LayoutDoc,
-    lines: &[Line],
+    items: &[Item],
     spans: &HashMap<usize, (usize, usize)>,
     i: usize,
     k: usize,
 ) -> bool {
-    let previous = layout.runs[lines[k - 1].runs.start].block;
-    let next = layout.runs[lines[k].runs.start].block;
+    let (Some(previous), Some(next)) = (items[k - 1].block(layout), items[k].block(layout)) else {
+        return false;
+    };
     // A heading belongs with what it introduces.
     if matches!(doc.blocks[previous].kind, BlockKind::Heading { .. }) {
         return true;
@@ -93,63 +141,70 @@ fn rejected(
             }
         }
     }
-    // An image moves whole rather than being cut in half. A table row
-    // needs no rule here: its cells shape into one line group, and the
-    // page top is pulled back to the band so the padding travels with it.
-    let y = lines[k].top;
-    layout
-        .images
-        .iter()
-        .any(|image| y > image.y + SLACK && y < image.y + image.height - SLACK)
+    false
 }
 
-/// Where a page starts, given the first line it carries. Decoration that
-/// sits above that line and belongs to it comes too: a continued code
+/// Where a page starts, given the first item it carries. Decoration that
+/// sits above that item and belongs to it comes too: a continued code
 /// panel keeps its inner padding, and a table row starts at its band so
 /// the stripe is not left behind on the page before.
-fn page_top(doc: &Document, layout: &LayoutDoc, lines: &[Line], i: usize) -> f32 {
-    let line = &lines[i];
-    let block = layout.runs[line.runs.start].block;
-    let continued = i > 0 && layout.runs[lines[i - 1].runs.start].block == block;
-    if continued && matches!(doc.blocks[block].kind, BlockKind::CodeBlock { .. }) {
-        return line.top - metrics::CODE_PAD;
+fn page_top(doc: &Document, layout: &LayoutDoc, items: &[Item], i: usize) -> f32 {
+    let item = &items[i];
+    if let Some(block) = item.block(layout) {
+        let continued = i > 0 && items[i - 1].block(layout) == Some(block);
+        if continued && matches!(doc.blocks[block].kind, BlockKind::CodeBlock { .. }) {
+            return item.top - metrics::CODE_PAD;
+        }
     }
     let row = layout
         .table_rows
-        .partition_point(|band| band.top <= line.top + SLACK)
+        .partition_point(|band| band.top <= item.top + SLACK)
         .saturating_sub(1);
+    let mut top = item.top;
     if let Some(band) = layout.table_rows.get(row) {
-        if line.top > band.top && line.top < band.bottom {
-            return band.top;
+        if item.top > band.top && item.top < band.bottom {
+            top = band.top;
         }
     }
-    line.top
+    if i == 0 {
+        // Everything above the first item belongs to the first page: a
+        // document can open on a panel whose padding sits above its text,
+        // and trimming to the item would push it off the sheet.
+        top = layout
+            .rects
+            .iter()
+            .map(|rect| rect.y)
+            .filter(|y| *y < top)
+            .fold(top, f32::min);
+    }
+    top
 }
 
-/// Cuts the column into pages. A page holds as many whole lines as its
+/// Cuts the column into pages. A page holds as many whole items as its
 /// content box takes, and starts flush on the first of them, so the
 /// layout's own vertical margin never doubles with the page's.
 pub fn paginate(doc: &Document, layout: &LayoutDoc, geometry: &PageGeometry) -> Vec<Page> {
     let content = geometry.content_height();
-    let lines = lines(layout);
-    let spans = block_spans(layout, &lines);
+    let items = items(layout);
+    let spans = block_spans(layout, &items);
     let mut pages: Vec<Page> = Vec::new();
     let mut i = 0;
-    while i < lines.len() {
-        let top = page_top(doc, layout, &lines, i);
+    let mut cursor = 0;
+    while i < items.len() {
+        let top = page_top(doc, layout, &items, i);
         let mut j = i;
-        while j < lines.len() && lines[j].bottom - top <= content + SLACK {
+        while j < items.len() && items[j].bottom - top <= content + SLACK {
             j += 1;
         }
-        // A line taller than the whole content box is placed anyway. It
+        // An item taller than the whole content box is placed anyway. It
         // overflows, and the pass moves on instead of stalling here.
         if j == i {
             j = i + 1;
         }
-        if j < lines.len() {
+        if j < items.len() {
             let mut candidate = j;
             loop {
-                if !rejected(doc, layout, &lines, &spans, i, candidate) {
+                if !rejected(doc, layout, &items, &spans, i, candidate) {
                     j = candidate;
                     break;
                 }
@@ -161,40 +216,80 @@ pub fn paginate(doc: &Document, layout: &LayoutDoc, geometry: &PageGeometry) -> 
                 candidate -= 1;
             }
         }
+        let end = items[j - 1].runs.end.max(cursor);
+        let carried: Vec<usize> = items[i..j]
+            .iter()
+            .flat_map(|item| item.images.clone())
+            .collect();
         pages.push(Page {
             top,
-            runs: lines[i].runs.start..lines[j - 1].runs.end,
-            images: Vec::new(),
+            bottom: f32::INFINITY,
+            runs: cursor..end,
+            images: carried
+                .iter()
+                .map(|index| scaled(&layout.images[*index], content))
+                .collect(),
             rects: Vec::new(),
         });
+        cursor = end;
         i = j;
     }
     if pages.is_empty() {
         pages.push(Page {
             top: 0.0,
+            bottom: f32::INFINITY,
             runs: 0..0,
             images: Vec::new(),
             rects: Vec::new(),
         });
     }
-    open_first_page(layout, &mut pages[0]);
+    close_pages(doc, layout, &items, &mut pages);
     place_rects(layout, &mut pages);
-    place_images(layout, &mut pages, geometry.content_height());
     pages
 }
 
-/// Lowers the first page's top to any decoration that reaches across it.
-/// A document opening on a code fence starts with the panel's padding
-/// above its first line, and that padding belongs to the page rather than
-/// being clipped off the top of it. Later pages take their top from the
-/// break, where a crossing rectangle is split square instead.
-fn open_first_page(layout: &LayoutDoc, first: &mut Page) {
-    first.top = layout
-        .rects
-        .iter()
-        .filter(|rect| rect.y < first.top && rect.y + rect.height > first.top)
-        .map(|rect| rect.y)
-        .fold(first.top, f32::min);
+/// An image taller than a whole page cannot be moved anywhere useful, so
+/// it is scaled to the content box and keeps its aspect.
+fn scaled(image: &ImagePlace, content: f32) -> ImagePlace {
+    let mut placed = image.clone();
+    if placed.height > content {
+        let scale = content / placed.height;
+        placed.width *= scale;
+        placed.height *= scale;
+    }
+    placed
+}
+
+/// Sets where each page's content ends. A page normally ends where the
+/// next begins, but a code panel carrying on overleaf keeps its padding
+/// below its last line, which is one padding past that point.
+fn close_pages(doc: &Document, layout: &LayoutDoc, items: &[Item], pages: &mut [Page]) {
+    let mut at = 0;
+    for index in 0..pages.len().saturating_sub(1) {
+        let next_top = pages[index + 1].top;
+        // The last item of this page is the one before the first item of
+        // the next, which starts at the next page's own top.
+        let mut last = at;
+        while last + 1 < items.len() && items[last + 1].top < next_top - SLACK {
+            last += 1;
+        }
+        pages[index].bottom = match (items.get(last), items.get(last + 1)) {
+            (Some(previous), Some(next)) => {
+                let block = previous.block(layout);
+                let continues = block.is_some() && block == next.block(layout);
+                let code = block.is_some_and(|block| {
+                    matches!(doc.blocks[block].kind, BlockKind::CodeBlock { .. })
+                });
+                if continues && code {
+                    previous.bottom + metrics::CODE_PAD
+                } else {
+                    next_top
+                }
+            }
+            _ => next_top,
+        };
+        at = last + 1;
+    }
 }
 
 /// Assigns every rectangle to the pages it covers, splitting the ones
@@ -208,8 +303,12 @@ fn place_rects(layout: &LayoutDoc, pages: &mut [Page]) {
     let mut open: Vec<usize> = Vec::new();
     for p in 0..pages.len() {
         let top = pages[p].top;
-        let split = pages.get(p + 1).map_or(f32::INFINITY, |q| q.top);
-        while next < order.len() && layout.rects[order[next]].y < split {
+        let bottom = pages[p].bottom;
+        // A rectangle belongs to the page its top falls in, and is drawn
+        // as far as that page's content reaches. The two differ only for
+        // a panel that carries its padding past the break.
+        let next_top = pages.get(p + 1).map_or(f32::INFINITY, |q| q.top);
+        while next < order.len() && layout.rects[order[next]].y < next_top {
             open.push(order[next]);
             next += 1;
         }
@@ -218,7 +317,7 @@ fn place_rects(layout: &LayoutDoc, pages: &mut [Page]) {
             let rect = &layout.rects[index];
             let rect_bottom = rect.y + rect.height;
             let y0 = rect.y.max(top);
-            let y1 = rect_bottom.min(split);
+            let y1 = rect_bottom.min(bottom);
             if y1 > y0 {
                 let mut piece = *rect;
                 piece.y = y0;
@@ -232,31 +331,12 @@ fn place_rects(layout: &LayoutDoc, pages: &mut [Page]) {
                 }
                 pieces.push((index, piece));
             }
-            rect_bottom > split
+            rect_bottom > next_top
         });
         // Back into layout order: paint order is what stacks a table
         // stripe under its grid lines.
         pieces.sort_by_key(|(index, _)| *index);
         pages[p].rects = pieces.into_iter().map(|(_, piece)| piece).collect();
-    }
-}
-
-/// Puts each image on the page its top falls in. A break never cuts one,
-/// so the page it starts on is the page that holds it.
-fn place_images(layout: &LayoutDoc, pages: &mut [Page], content: f32) {
-    for image in &layout.images {
-        let page = pages
-            .partition_point(|page| page.top <= image.y)
-            .saturating_sub(1);
-        let mut placed = image.clone();
-        // One taller than a whole page cannot be moved anywhere useful,
-        // so it is scaled to the content box and keeps its aspect.
-        if placed.height > content {
-            let scale = content / placed.height;
-            placed.width *= scale;
-            placed.height *= scale;
-        }
-        pages[page].images.push(placed);
     }
 }
 
@@ -385,10 +465,15 @@ mod tests {
 mod rules {
     use super::tests::{laid_out, laid_out_with_body_size};
     use super::*;
+    use crate::doc::images::MediaCache;
     use crate::doc::markdown;
     use crate::doc::model::{BlockKind, Document};
     use crate::export::{PageGeometry, PageSize};
+    use crate::layout::{layout, ViewConfig};
+    use crate::style::fonts::FontStore;
+    use crate::style::theme::Theme;
     use std::collections::HashMap;
+    use std::path::PathBuf;
 
     fn geometry() -> PageGeometry {
         PageGeometry::new(PageSize::A4, 11.0)
@@ -436,16 +521,23 @@ mod rules {
         let doc = mixed();
         let l = laid_out(&doc);
         let pages = paginate(&doc, &l, &geometry());
-        let all = lines(&l);
+        let all = items(&l);
         let mut totals: HashMap<usize, usize> = HashMap::new();
-        for line in &all {
-            *totals.entry(block_of(&l, line.runs.start)).or_default() += 1;
+        for item in &all {
+            if let Some(block) = item.block(&l) {
+                *totals.entry(block).or_default() += 1;
+            }
         }
         for page in &pages {
             let mut here: HashMap<usize, usize> = HashMap::new();
-            for line in &all {
-                if line.runs.start >= page.runs.start && line.runs.end <= page.runs.end {
-                    *here.entry(block_of(&l, line.runs.start)).or_default() += 1;
+            for item in &all {
+                let inside = !item.runs.is_empty()
+                    && item.runs.start >= page.runs.start
+                    && item.runs.end <= page.runs.end;
+                if inside {
+                    if let Some(block) = item.block(&l) {
+                        *here.entry(block).or_default() += 1;
+                    }
                 }
             }
             for (block, count) in here {
@@ -498,6 +590,51 @@ mod rules {
         }
     }
 
+    /// The defect a screenshot showed in the app: an image near the foot
+    /// of a page ran off the sheet, because the fit was measured over
+    /// text lines and an image is not one. The sweep brackets a page
+    /// boundary so the image lands at the bottom in some of its runs.
+    #[test]
+    fn an_image_never_runs_past_the_bottom_of_its_page() {
+        let g = geometry();
+        let mut fonts = FontStore::new();
+        let mut media = MediaCache::new(PathBuf::from("tests/fixtures"));
+        let cfg = ViewConfig {
+            body_size: 11.0,
+            code_size: 9.0,
+            zoom: 1.0,
+            ..ViewConfig::default()
+        };
+        let mut after_text = false;
+        for filler in 14..40 {
+            let mut src = "Filler paragraph here.\n\n".repeat(filler);
+            src.push_str("![logo](oryx-test.png)\n\n");
+            src.push_str(&"Filler paragraph here.\n\n".repeat(6));
+            let doc = markdown::parse(&src);
+            let l = layout(
+                &doc,
+                &Theme::default_dark(),
+                &mut fonts,
+                &mut media,
+                &cfg,
+                PageSize::A4.points().0,
+            );
+            let pages = paginate(&doc, &l, &g);
+            for (index, page) in pages.iter().enumerate() {
+                for image in &page.images {
+                    assert!(
+                        image.y + image.height - page.top <= g.content_height() + SLACK,
+                        "an image runs past the foot of page {index} with {filler} fillers"
+                    );
+                    // The telling case is the image sitting below text
+                    // rather than opening a page of its own.
+                    after_text |= image.y > page.top + SLACK;
+                }
+            }
+        }
+        assert!(after_text, "the sweep put an image below text on a page");
+    }
+
     #[test]
     fn an_image_taller_than_a_page_is_scaled_to_fit() {
         let doc = markdown::parse("![logo](oryx-test.png)\n");
@@ -515,6 +652,57 @@ mod rules {
         let before = source.width / source.height;
         let after = placed.width / placed.height;
         assert!((before - after).abs() < 0.01, "aspect kept");
+    }
+
+    /// The defect a split panel showed in the app: the page's clipping
+    /// edge sat one padding above its last line, so the panel stopped in
+    /// the middle of the text it was meant to hold.
+    #[test]
+    fn a_split_panel_covers_every_line_it_carries() {
+        let mut fence = String::from("```rust\n");
+        for i in 0..120 {
+            fence.push_str(&format!("let value_{i} = {i};\n"));
+        }
+        fence.push_str("```\n");
+        let doc = markdown::parse(&fence);
+        let l = laid_out(&doc);
+        let pages = paginate(&doc, &l, &geometry());
+        assert!(pages.len() > 1, "the fence spans pages");
+        for page in &pages {
+            let panel = page
+                .rects
+                .iter()
+                .find(|rect| rect.stroke == 0.0)
+                .expect("the panel is on every page the block reaches");
+            for run in &l.runs[page.runs.clone()] {
+                let bottom = run.y + metrics::LINE_HEIGHT * run.size;
+                assert!(
+                    run.y >= panel.y - SLACK,
+                    "a line sits above the panel that holds it"
+                );
+                assert!(
+                    bottom <= panel.y + panel.height + SLACK,
+                    "a line falls past the bottom of the panel that holds it"
+                );
+            }
+        }
+    }
+
+    /// The defect a badge row showed in the app: a document that opens
+    /// on images has no run above them, so trimming the page to its first
+    /// line pushed them off the top of the sheet.
+    #[test]
+    fn a_document_opening_on_an_image_keeps_it_on_the_page() {
+        let doc = markdown::parse("![logo](oryx-test.png)\n\nText below the image.\n");
+        let l = laid_out(&doc);
+        assert!(!l.images.is_empty(), "the fixture has an image");
+        let pages = paginate(&doc, &l, &geometry());
+        let image = &l.images[0];
+        assert!(image.y < l.runs[0].y, "the image is above the first line");
+        assert!(
+            (pages[0].top - image.y).abs() < SLACK,
+            "the page starts at the image, not at the first line below it"
+        );
     }
 
     #[test]

@@ -20,6 +20,8 @@ pub enum Action {
     EditTheme(PathBuf),
     /// Restyle with an in-memory theme, without persisting anything.
     PreviewTheme(Box<Theme>),
+    /// Persist the export settings, then export with them.
+    Export(Box<crate::export::ExportSettings>),
     /// Apply and persist font families and sizes.
     SetView {
         body_family: String,
