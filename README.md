@@ -14,7 +14,7 @@ Oryx started as a personal need: reading a markdown file should not require open
 
 **It opens instantly, whatever the size.** A normal document is on screen in well under 150 milliseconds from cold, and an 8MB file takes about a third of a second. Oryx manages that by highlighting and laying out only the first few screens before it paints, then finishing the rest in the background while you read.
 
-**It reads, it does not edit.** There are no panes and no toolbars. F1 lists every shortcut and Escape closes whatever is open, and once you know those two keys you know your way around.
+**It reads, it does not edit.** There are no panes and no toolbars. F1 lists every shortcut and Escape closes whatever is open.
 
 **It is one binary and a folder of themes.** Every dependency is pure Rust, so there is nothing to install beside it and no browser engine hiding inside. It behaves the same on a new laptop as on an old machine with no GPU.
 
@@ -24,7 +24,7 @@ Oryx started as a personal need: reading a markdown file should not require open
 
 ![Oryx rendering a markdown document](screenshots/formatting.png)
 
-**Code.** Fenced blocks get a bordered panel and syntax colors for the languages most people write. A line too long for the panel wraps inside it. You can also point Oryx straight at a source file and it renders the whole thing as one highlighted document. Oryx opens any text file: about a hundred extensions carry syntax colors, and a file it cannot place by extension, a `Makefile` or a `.conf`, opens in the code font unstyled. Binary files are refused with a notice instead of a screen of noise.
+**Code.** Fenced blocks get a bordered panel and syntax colors for the languages most people write. A line too long for the panel wraps inside it. You can also point Oryx straight at a source file and it renders the whole thing as one highlighted document. Close to a hundred extensions carry colors, from Rust and Python through Haskell, Scala, LaTeX, Makefiles and diffs. Anything else holding text still opens in the code font, so a `Makefile` or a `.conf` reads cleanly without them. Hand Oryx a binary and it says so in one line.
 
 ![Oryx rendering highlighted code](screenshots/code.png)
 
@@ -60,11 +60,9 @@ Oryx started as a personal need: reading a markdown file should not require open
 
 ![Oryx rendering a GitHub style README](screenshots/github.png)
 
-**Find in document.** Ctrl+F opens a search bar. Matches light up as you type, the current one brighter than the rest, and Enter or F3 steps through them with a counter that wraps around.
+**Find in document.** Ctrl+F searches, and the search is smart about case: type `oryx` and you match Oryx, ORYX and oryx; add a capital and only Oryx matches. It looks everywhere text is laid out, so list items, link text, table cells, quotes and code blocks all count. A match can run across styling, so `fast viewer` turns up even when it was written as **fast** *viewer*, though it will not run from one block into the next.
 
-Search is smart about case: type `oryx` and you match Oryx, ORYX and oryx; add a capital and only Oryx matches. It looks everywhere text is laid out, so list items, link text, table cells, quotes and code blocks all count. A match can run across styling, so `fast viewer` turns up even when it was written as **fast** *viewer*, though it will not run from one block into the next. Zoom or reload while the bar is open and Oryx runs the query again and keeps your current match in view.
-
-**Interface.** There is a folder sidebar you can drive from the keyboard, a native open dialog, selection with copy as plain text or as the original markdown, per-session zoom, reload from disk for files you are editing elsewhere, and the shortcuts screen on F1. Oryx reopens the window where you left it, at the size you left it, and maximized if that is how you closed it.
+**Interface.** A folder sidebar you can drive from the keyboard, showing a type icon beside each file. A native open dialog. Selection with copy as plain text or as the original markdown. Per-session zoom, reload from disk for files you are editing elsewhere, and the shortcuts screen on F1. Window geometry, the sidebar and the folder you were last in are remembered between runs.
 
 ## Install
 
@@ -92,7 +90,7 @@ make install
 
 ## Use
 
-> There are no menus. **Press F1** for the complete shortcut list, Escape to close a panel or quit. Those two keys are all you need to know in advance.
+> There are no menus. **Press F1** for the complete shortcut list, Escape to close a panel or quit.
 
 ```
 oryx README.md          open a file
@@ -126,7 +124,7 @@ Ctrl is Cmd on macOS. Copy as markdown reproduces the original source of the sel
 
 ## Themes
 
-Thirty-one themes ship with Oryx. Each one is a single TOML file with 51 color roles, so every element can be colored on its own. Leave a key out and it falls back to a default. Write something malformed and Oryx skips the file and keeps the theme it already had, so a bad theme can never take the app down.
+Thirty-one themes ship with Oryx. Each one is a single TOML file with 51 color roles, so every element can be colored on its own. Leave a key out and it falls back to a default. Write something malformed and Oryx skips the file and keeps the theme it already had.
 
 The browser on Ctrl+T previews them and applies them live.
 
@@ -174,7 +172,7 @@ Some of these are on the list for future versions; none of them are promises.
 
 ## Under the hood
 
-The layout engine draws everything, which means the rendering can be tested as numbers rather than by eye. Over 200 tests assert positions, wrapping, spacing and colors. Every color on screen comes from the active theme file. Every dependency is pure Rust, and that is what keeps the binary small, the startup quick and the build straightforward on all three platforms.
+The layout engine draws everything, which means the rendering can be tested as numbers rather than by eye. More than 250 tests assert positions, wrapping, spacing and colors. Every color on screen comes from the active theme file. Every dependency is pure Rust, and that is what keeps the binary small, the startup quick and the build straightforward on all three platforms.
 
 The files under `tests/showcase/` are the documents behind the screenshots above. Each one exercises a single feature, and they are worth opening to see what Oryx makes of them.
 
