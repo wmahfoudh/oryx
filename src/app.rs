@@ -839,11 +839,12 @@ impl App {
         let mut dialog = rfd::FileDialog::new()
             .add_filter("Supported files", &load::recognized_extensions())
             .add_filter("All files", &["*"]);
-        // An open sidebar is the most recent statement of where the
-        // reader is looking, so it outranks the open document's folder.
+        // The open document's folder anchors the dialog. The sidebar's root
+        // carries a session with no file open, where the first candidate is
+        // absent and the panel is the only record of where the reader is.
         let start = config::browse_dir([
-            self.sidebar.as_ref().map(|side| side.root().to_path_buf()),
             self.document_dir(),
+            self.sidebar.as_ref().map(|side| side.root().to_path_buf()),
             self.remembered_dir(),
         ]);
         dialog = dialog.set_directory(start);

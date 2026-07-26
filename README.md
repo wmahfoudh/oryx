@@ -155,6 +155,8 @@ Measured on one Linux machine, release build, from launch to the first frame. Th
 | 1MB markdown | 1.8s | 82ms |
 | 8MB markdown | 14s | 317ms |
 
+Opening a source file is effectively constant time at any size.
+
 A performance test in the repository checks the startup, relayout and paint timings.
 
 ## Limits
