@@ -153,7 +153,7 @@ impl Overlay for Help {
         );
     }
 
-    fn key(&mut self, key: &Key, _ctrl: bool) -> OverlayResult {
+    fn key(&mut self, key: &Key, _ctrl: bool, _shift: bool) -> OverlayResult {
         match key {
             Key::Named(NamedKey::Escape) => OverlayResult::Close,
             _ => OverlayResult::Open,
@@ -194,7 +194,7 @@ mod tests {
     #[test]
     fn escape_closes() {
         let mut help = Help::new();
-        let result = help.key(&Key::Named(NamedKey::Escape), false);
+        let result = help.key(&Key::Named(NamedKey::Escape), false, false);
         assert!(matches!(result, OverlayResult::Close));
     }
 
@@ -206,7 +206,7 @@ mod tests {
             Key::Named(NamedKey::ArrowDown),
             Key::Character("a".into()),
         ] {
-            assert!(matches!(help.key(&key, false), OverlayResult::Open));
+            assert!(matches!(help.key(&key, false, false), OverlayResult::Open));
         }
     }
 

@@ -3,13 +3,15 @@
 //! `theme::save`. Bundled themes save to a duplicate.
 
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use winit::keyboard::{Key, NamedKey};
 
 use crate::paint::painter::Painter;
 use crate::style::fonts::{BODY_FAMILY, CODE_FAMILY};
 use crate::style::theme::{self, Rgba, Theme};
-use crate::ui::overlay::{Action, Overlay, OverlayResult};
+use crate::ui::overlay::{inside, Action, Overlay, OverlayResult};
+use crate::ui::textfield::TextField;
 use crate::ui::theme_browser::duplicate_path;
 
 const ROW_H: f32 = 26.0;
@@ -60,7 +62,10 @@ pub struct ThemeEditor {
     /// survives while saturation or value sit at zero.
     hsv: (f32, f32, f32),
     scroll: f32,
-    hex_entry: Option<String>,
+    hex_entry: Option<TextField>,
+    /// Caret offsets for the open hex field, measured while drawing so a
+    /// later click can place the caret without a painter.
+    hex_offsets: Vec<f32>,
     drag: Option<Part>,
     /// Cursor offset from the panel origin while moving it.
     grab: (f32, f32),
@@ -103,6 +108,7 @@ impl ThemeEditor {
             selected: 0,
             scroll: 0.0,
             hex_entry: None,
+            hex_offsets: Vec::new(),
             drag: None,
             grab: (0.0, 0.0),
             offset: (0.0, 0.0),
@@ -183,13 +189,14 @@ impl ThemeEditor {
         OverlayResult::Apply(Action::SetTheme(self.target.clone()))
     }
 
-    fn hex_key(&mut self, key: &Key) -> OverlayResult {
+    fn hex_key(&mut self, key: &Key, ctrl: bool, shift: bool) -> OverlayResult {
         match key {
             Key::Named(NamedKey::Escape) => {
                 self.hex_entry = None;
+                return OverlayResult::Open;
             }
             Key::Named(NamedKey::Enter) => {
-                let buffer = self.hex_entry.clone().unwrap_or_default();
+                let buffer = self.hex_text();
                 if let Some(c) = theme::parse_hex(&buffer) {
                     self.hex_entry = None;
                     self.set_color(c);
@@ -198,28 +205,39 @@ impl ThemeEditor {
                         self.theme.clone(),
                     )));
                 }
-            }
-            Key::Named(NamedKey::Backspace) => {
-                if let Some(buffer) = self.hex_entry.as_mut() {
-                    buffer.pop();
-                }
-            }
-            Key::Character(c) => {
-                if let Some(buffer) = self.hex_entry.as_mut() {
-                    buffer.push_str(c.as_str());
-                }
+                return OverlayResult::Open;
             }
             _ => {}
+        }
+        if let Some(field) = self.hex_entry.as_mut() {
+            field.key(key, ctrl, shift);
         }
         OverlayResult::Open
     }
 
+    /// The hex under edit, empty when the field is closed.
+    fn hex_text(&self) -> String {
+        self.hex_entry
+            .as_ref()
+            .map(|f| f.text().to_string())
+            .unwrap_or_default()
+    }
+
+    /// Opens the hex field on the selected role with everything selected,
+    /// so the first keystroke replaces the value.
+    fn open_hex(&mut self) {
+        let mut field = TextField::new(theme::hex_string(self.color()));
+        field.select_all();
+        self.hex_entry = Some(field);
+    }
+
     /// Copies the hex under edit, or the selected role's value.
     fn copy_hex(&mut self) {
-        let text = self
-            .hex_entry
-            .clone()
-            .unwrap_or_else(|| theme::hex_string(self.color()));
+        let text = match self.hex_entry.as_ref() {
+            Some(field) if !field.selected_text().is_empty() => field.selected_text().to_string(),
+            Some(field) => field.text().to_string(),
+            None => theme::hex_string(self.color()),
+        };
         if self.clipboard.is_none() {
             self.clipboard = arboard::Clipboard::new().ok();
         }
@@ -244,8 +262,8 @@ impl ThemeEditor {
             return OverlayResult::Open;
         };
         let text = text.trim().to_string();
-        if let Some(buffer) = self.hex_entry.as_mut() {
-            buffer.push_str(&text);
+        if let Some(field) = self.hex_entry.as_mut() {
+            field.insert(&text);
             return OverlayResult::Open;
         }
         let color = theme::parse_hex(&text).or_else(|| theme::parse_hex(&format!("#{text}")));
@@ -290,10 +308,6 @@ impl ThemeEditor {
             }
         }
     }
-}
-
-fn inside(rect: (f32, f32, f32, f32), x: f32, y: f32) -> bool {
-    x >= rect.0 && x <= rect.0 + rect.2 && y >= rect.1 && y <= rect.1 + rect.3
 }
 
 /// Checkerboard ground for the alpha strip.
@@ -577,9 +591,11 @@ impl Overlay for ThemeEditor {
             1.0,
             app_theme.blocks.table_border,
         );
+        let mut offsets = Vec::new();
         match &self.hex_entry {
-            Some(buffer) => {
-                let valid = theme::parse_hex(buffer).is_some();
+            Some(field) => {
+                let text = field.text();
+                let valid = theme::parse_hex(text).is_some();
                 let border = if valid {
                     app_theme.text.link
                 } else {
@@ -587,17 +603,32 @@ impl Overlay for ThemeEditor {
                 };
                 painter.fill(hex.0 + 28.0, hex.1, hex.2 - 28.0, 26.0, 4.0, ui.overlay_bg);
                 painter.stroke(hex.0 + 28.0, hex.1, hex.2 - 28.0, 26.0, 4.0, 1.0, border);
-                let advance = painter.text(
-                    hex.0 + 34.0,
+                let text_x = hex.0 + 34.0;
+                if let Some(range) = field.selection() {
+                    let from = painter.measure(&text[..range.start], CODE_FAMILY, 14.0, 400);
+                    let to = painter.measure(&text[..range.end], CODE_FAMILY, 14.0, 400);
+                    painter.fill(
+                        text_x + from,
+                        hex.1 + 5.0,
+                        to - from,
+                        16.0,
+                        0.0,
+                        ui.selection_bg,
+                    );
+                }
+                painter.text(
+                    text_x,
                     hex.1 + 5.0,
-                    buffer,
+                    text,
                     CODE_FAMILY,
                     14.0,
                     400,
                     ui.overlay_fg,
                 );
+                let caret = field.caret_offset(|s| painter.measure(s, CODE_FAMILY, 14.0, 400));
+                offsets = field.offsets(|s| painter.measure(s, CODE_FAMILY, 14.0, 400));
                 painter.fill(
-                    hex.0 + 34.0 + advance + 1.0,
+                    text_x + caret + 1.0,
                     hex.1 + 5.0,
                     1.5,
                     16.0,
@@ -617,30 +648,34 @@ impl Overlay for ThemeEditor {
                 );
             }
         }
+        self.hex_offsets = offsets;
     }
 
-    fn key(&mut self, key: &Key, ctrl: bool) -> OverlayResult {
+    fn key(&mut self, key: &Key, ctrl: bool, shift: bool) -> OverlayResult {
         if ctrl {
             if let Key::Character(c) = key {
                 match c.as_str() {
                     "s" | "S" => return self.save(),
                     "c" | "C" => self.copy_hex(),
                     "v" | "V" => return self.paste_hex(),
+                    "a" | "A" => {
+                        if let Some(field) = self.hex_entry.as_mut() {
+                            field.select_all();
+                        }
+                    }
                     _ => {}
                 }
             }
             return OverlayResult::Open;
         }
         if self.hex_entry.is_some() {
-            return self.hex_key(key);
+            return self.hex_key(key, ctrl, shift);
         }
         match key {
             Key::Named(NamedKey::Escape) => return OverlayResult::Close,
             Key::Named(NamedKey::ArrowDown) => self.step(1),
             Key::Named(NamedKey::ArrowUp) => self.step(-1),
-            Key::Named(NamedKey::Enter) => {
-                self.hex_entry = Some(theme::hex_string(self.color()));
-            }
+            Key::Named(NamedKey::Enter) => self.open_hex(),
             _ => {}
         }
         OverlayResult::Open
@@ -650,6 +685,21 @@ impl Overlay for ThemeEditor {
         let (px, py, pw, ph) = self.geometry.panel;
         if x < px || x > px + pw || y < py || y > py + ph {
             return OverlayResult::Close;
+        }
+        if inside(self.geometry.hex, x, y) {
+            if self.hex_entry.is_none() {
+                // The first click opens the field with everything selected;
+                // later ones place the caret.
+                self.open_hex();
+                return OverlayResult::Open;
+            }
+            let text_x = self.geometry.hex.0 + 34.0;
+            let offsets = std::mem::take(&mut self.hex_offsets);
+            if let Some(field) = self.hex_entry.as_mut() {
+                field.click(x - text_x, &offsets, Instant::now());
+            }
+            self.hex_offsets = offsets;
+            return OverlayResult::Open;
         }
         self.hex_entry = None;
         if y < py + HEADER_H {
@@ -668,10 +718,6 @@ impl Overlay for ThemeEditor {
         if inside(self.geometry.alpha, x, y) {
             self.drag = Some(Part::Alpha);
             return self.picker_at(x, y);
-        }
-        if inside(self.geometry.hex, x, y) {
-            self.hex_entry = Some(theme::hex_string(self.color()));
-            return OverlayResult::Open;
         }
         let list_left = px;
         let list_right = px + PAD + self.geometry.list_w + PAD;

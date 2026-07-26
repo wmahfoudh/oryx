@@ -379,7 +379,7 @@ impl Overlay for Settings {
         );
     }
 
-    fn key(&mut self, key: &Key, ctrl: bool) -> OverlayResult {
+    fn key(&mut self, key: &Key, ctrl: bool, _shift: bool) -> OverlayResult {
         if ctrl {
             return OverlayResult::Open;
         }
@@ -505,7 +505,7 @@ mod tests {
     }
 
     fn press(s: &mut Settings, key: NamedKey) -> OverlayResult {
-        s.key(&Key::Named(key), false)
+        s.key(&Key::Named(key), false, false)
     }
 
     #[test]

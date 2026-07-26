@@ -40,10 +40,15 @@ pub enum OverlayResult {
     Apply(Action),
 }
 
+/// Whether a point falls inside a rect given as origin, width and height.
+pub fn inside(rect: (f32, f32, f32, f32), x: f32, y: f32) -> bool {
+    x >= rect.0 && x <= rect.0 + rect.2 && y >= rect.1 && y <= rect.1 + rect.3
+}
+
 pub trait Overlay {
     /// Paints the overlay; geometry may be cached for hit testing.
     fn draw(&mut self, painter: &mut Painter, theme: &Theme);
-    fn key(&mut self, key: &Key, ctrl: bool) -> OverlayResult;
+    fn key(&mut self, key: &Key, ctrl: bool, shift: bool) -> OverlayResult;
     /// Left click at window coordinates.
     fn click(&mut self, x: f32, y: f32) -> OverlayResult;
     /// Cursor movement while the left button is held.

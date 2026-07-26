@@ -25,6 +25,7 @@ use oryx::ui::search::{self, SearchState};
 use oryx::ui::selection::{self, RunPos, Selection};
 use oryx::ui::settings::{self, Settings};
 use oryx::ui::sidebar::{self, Sidebar};
+use oryx::ui::textfield::{Edit, TextField};
 use oryx::ui::theme_browser::ThemeBrowser;
 use oryx::ui::theme_editor::ThemeEditor;
 use winit::application::ApplicationHandler;
@@ -324,13 +325,13 @@ impl App {
     /// typing replaces it; Ctrl+F on an open bar reselects the same way.
     fn open_search(&mut self) {
         if let Some(state) = self.search.as_mut() {
-            state.selected = !state.query.is_empty();
+            state.query.select_all();
             self.request_redraw();
             return;
         }
-        let query = self.last_query.clone();
+        let mut query = TextField::new(self.last_query.clone());
+        query.select_all();
         self.search = Some(SearchState {
-            selected: !query.is_empty(),
             query,
             matches: Vec::new(),
             rects: Vec::new(),
@@ -343,7 +344,7 @@ impl App {
 
     fn close_search(&mut self) {
         if let Some(state) = self.search.take() {
-            self.last_query = state.query;
+            self.last_query = state.query.text().to_string();
             self.band = None;
             self.request_redraw();
         }
@@ -355,7 +356,7 @@ impl App {
             self.open_search();
             return;
         };
-        state.selected = false;
+        state.query.set_caret(usize::MAX);
         if state.matches.is_empty() {
             return;
         }
@@ -381,26 +382,6 @@ impl App {
                 self.step_search(!shift);
                 true
             }
-            Key::Named(NamedKey::Backspace) => {
-                let state = self.search.as_mut().expect("search open");
-                let edited = if state.selected {
-                    state.selected = false;
-                    state.query.clear();
-                    true
-                } else {
-                    state.query.pop().is_some()
-                };
-                if edited {
-                    state.stale = true;
-                    self.band = None;
-                    self.request_redraw();
-                }
-                true
-            }
-            Key::Named(NamedKey::Space) => {
-                self.push_query(" ");
-                true
-            }
             Key::Character(s) if ctrl && s.eq_ignore_ascii_case("v") => {
                 if self.clipboard.is_none() {
                     self.clipboard = arboard::Clipboard::new()
@@ -413,30 +394,35 @@ impl App {
                 }
                 true
             }
-            Key::Character(s) if !ctrl => {
-                self.push_query(s);
-                true
+            key => {
+                let state = self.search.as_mut().expect("search open");
+                match state.query.key(key, ctrl, shift) {
+                    Edit::Ignored => false,
+                    Edit::Handled => {
+                        self.request_redraw();
+                        true
+                    }
+                    Edit::Changed => {
+                        state.stale = true;
+                        self.band = None;
+                        self.request_redraw();
+                        true
+                    }
+                }
             }
-            _ => false,
         }
     }
 
-    /// Appends to the query, dropping control characters a paste may
-    /// carry; a tab or newline could otherwise cross line boundaries. A
-    /// selected query is replaced, not extended.
+    /// Inserts into the query at the caret, replacing the selection. The
+    /// field drops control characters a paste may carry, since a tab or
+    /// newline could otherwise cross line boundaries.
     fn push_query(&mut self, text: &str) {
         let Some(state) = self.search.as_mut() else {
             return;
         };
-        let clean: String = text.chars().filter(|c| !c.is_control()).collect();
-        if clean.is_empty() {
+        if state.query.insert(text) != Edit::Changed {
             return;
         }
-        if state.selected {
-            state.selected = false;
-            state.query.clear();
-        }
-        state.query.push_str(&clean);
         state.stale = true;
         self.band = None;
         self.request_redraw();
@@ -456,7 +442,7 @@ impl App {
         };
         let scroll = self.scroll_y;
         let state = self.search.as_mut().expect("search open");
-        state.matches = search::matches(lay, &state.query);
+        state.matches = search::matches(lay, state.query.text());
         state.stale = false;
         state.current = state
             .matches
@@ -1403,7 +1389,7 @@ impl ApplicationHandler for App {
                     }
                     _ if self.overlay.is_some() => {
                         let overlay = self.overlay.as_mut().expect("overlay open");
-                        let result = overlay.key(&logical_key, ctrl);
+                        let result = overlay.key(&logical_key, ctrl, shift);
                         self.overlay_result(result);
                     }
                     _ if self.search_key(&logical_key, ctrl, shift) => {}

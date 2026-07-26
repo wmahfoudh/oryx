@@ -10,7 +10,11 @@ use winit::keyboard::{Key, NamedKey};
 use crate::paint::painter::Painter;
 use crate::style::fonts::BODY_FAMILY;
 use crate::style::theme::{self, Rgba, Theme};
-use crate::ui::overlay::{Action, Overlay, OverlayResult};
+use crate::ui::overlay::{inside, Action, Overlay, OverlayResult};
+use crate::ui::textfield::TextField;
+
+/// A drawn rename field: the caret offsets of its text and its box.
+type RenameBox = (Vec<f32>, (f32, f32, f32, f32));
 
 const ROW_H: f32 = 36.0;
 const PAD: f32 = 12.0;
@@ -54,7 +58,12 @@ pub struct ThemeBrowser {
     scroll: f32,
     pending_delete: Option<usize>,
     /// Inline rename in progress: row index and the edited name.
-    renaming: Option<(usize, String)>,
+    renaming: Option<(usize, TextField)>,
+    /// Caret offsets and box of the open rename field, measured while
+    /// drawing so a later click can place the caret.
+    rename_offsets: Vec<f32>,
+    rename_rect: (f32, f32, f32, f32),
+    clipboard: Option<arboard::Clipboard>,
     last_name_click: Option<(usize, Instant)>,
     moving: bool,
     grab: (f32, f32),
@@ -71,6 +80,9 @@ impl ThemeBrowser {
             scroll: 0.0,
             pending_delete: None,
             renaming: None,
+            rename_offsets: Vec::new(),
+            rename_rect: (0.0, 0.0, 0.0, 0.0),
+            clipboard: None,
             last_name_click: None,
             moving: false,
             grab: (0.0, 0.0),
@@ -147,7 +159,8 @@ impl ThemeBrowser {
         }
         self.rescan();
         self.select_by_name(&name);
-        self.renaming = Some((self.selected, name));
+        let index = self.selected;
+        self.start_rename(index, name);
     }
 
     fn delete(&mut self, index: usize) {
@@ -162,9 +175,21 @@ impl ThemeBrowser {
         self.select(selected.min(self.rows.len().saturating_sub(1)));
     }
 
+    /// Opens the inline rename with the whole name selected, so the first
+    /// keystroke replaces it.
+    fn start_rename(&mut self, index: usize, name: String) {
+        let mut field = TextField::new(name);
+        field.select_all();
+        self.renaming = Some((index, field));
+    }
+
     /// Attempts to finish the rename in progress.
     fn commit_rename(&mut self) -> Commit {
-        let Some((index, buffer)) = self.renaming.clone() else {
+        let Some((index, buffer)) = self
+            .renaming
+            .as_ref()
+            .map(|(index, field)| (*index, field.text().to_string()))
+        else {
             return Commit::Unchanged;
         };
         let Some(row) = self.rows.get(index) else {
@@ -199,32 +224,67 @@ impl ThemeBrowser {
         Commit::Renamed(from, to)
     }
 
-    fn rename_key(&mut self, key: &Key) -> OverlayResult {
+    fn rename_key(&mut self, key: &Key, ctrl: bool, shift: bool) -> OverlayResult {
         match key {
             Key::Named(NamedKey::Escape) => {
                 self.renaming = None;
+                return OverlayResult::Open;
             }
             Key::Named(NamedKey::Enter) => {
                 if let Commit::Renamed(from, to) = self.commit_rename() {
                     return OverlayResult::Apply(Action::RenamedTheme { from, to });
                 }
-            }
-            Key::Named(NamedKey::Backspace) => {
-                if let Some((_, buffer)) = self.renaming.as_mut() {
-                    buffer.pop();
-                }
-            }
-            Key::Named(NamedKey::Space) => {
-                if let Some((_, buffer)) = self.renaming.as_mut() {
-                    buffer.push(' ');
-                }
-            }
-            Key::Character(c) => {
-                if let Some((_, buffer)) = self.renaming.as_mut() {
-                    buffer.push_str(c.as_str());
-                }
+                return OverlayResult::Open;
             }
             _ => {}
+        }
+        if ctrl {
+            if let Key::Character(c) = key {
+                match c.as_str() {
+                    "c" | "C" => return self.copy_name(),
+                    "x" | "X" => return self.copy_name(),
+                    "v" | "V" => return self.paste_name(),
+                    _ => {}
+                }
+            }
+        }
+        if let Some((_, field)) = self.renaming.as_mut() {
+            field.key(key, ctrl, shift);
+        }
+        OverlayResult::Open
+    }
+
+    /// Copies the selected part of the name under edit, or all of it.
+    fn copy_name(&mut self) -> OverlayResult {
+        let Some((_, field)) = self.renaming.as_ref() else {
+            return OverlayResult::Open;
+        };
+        let text = if field.selected_text().is_empty() {
+            field.text().to_string()
+        } else {
+            field.selected_text().to_string()
+        };
+        if self.clipboard.is_none() {
+            self.clipboard = arboard::Clipboard::new().ok();
+        }
+        if let Some(clipboard) = self.clipboard.as_mut() {
+            if let Err(err) = clipboard.set_text(text) {
+                eprintln!("oryx: clipboard copy failed: {err}");
+            }
+        }
+        OverlayResult::Open
+    }
+
+    fn paste_name(&mut self) -> OverlayResult {
+        if self.clipboard.is_none() {
+            self.clipboard = arboard::Clipboard::new().ok();
+        }
+        let text = self
+            .clipboard
+            .as_mut()
+            .and_then(|clipboard| clipboard.get_text().ok());
+        if let (Some(text), Some((_, field))) = (text, self.renaming.as_mut()) {
+            field.insert(text.trim());
         }
         OverlayResult::Open
     }
@@ -232,6 +292,7 @@ impl ThemeBrowser {
 
 impl Overlay for ThemeBrowser {
     fn draw(&mut self, painter: &mut Painter, theme: &Theme) {
+        let mut rename_box: Option<RenameBox> = None;
         let (w, h) = (painter.width(), painter.height());
         let panel_w = PANEL_W.min(w - 40.0);
         let max_h = (h * 0.8).max(ROW_H + HEADER_H + 2.0 * PAD);
@@ -315,7 +376,8 @@ impl Overlay for ThemeBrowser {
             }
 
             match &self.renaming {
-                Some((rename_index, buffer)) if *rename_index == index => {
+                Some((rename_index, field)) if *rename_index == index => {
+                    let buffer = field.text();
                     let field_w = self.geometry.edit_x - self.geometry.name_x - 10.0;
                     let valid = row
                         .path
@@ -345,7 +407,19 @@ impl Overlay for ThemeBrowser {
                         1.0,
                         border,
                     );
-                    let advance = painter.text(
+                    if let Some(range) = field.selection() {
+                        let from = painter.measure(&buffer[..range.start], BODY_FAMILY, 15.0, 400);
+                        let to = painter.measure(&buffer[..range.end], BODY_FAMILY, 15.0, 400);
+                        painter.fill(
+                            self.geometry.name_x + from,
+                            ry + 7.0,
+                            to - from,
+                            17.0,
+                            0.0,
+                            theme.ui.selection_bg,
+                        );
+                    }
+                    painter.text(
                         self.geometry.name_x,
                         ry + 6.0,
                         buffer,
@@ -354,14 +428,19 @@ impl Overlay for ThemeBrowser {
                         400,
                         theme.ui.overlay_fg,
                     );
+                    let caret = field.caret_offset(|s| painter.measure(s, BODY_FAMILY, 15.0, 400));
                     painter.fill(
-                        self.geometry.name_x + advance + 1.5,
+                        self.geometry.name_x + caret + 1.5,
                         ry + 7.0,
                         1.5,
                         17.0,
                         0.0,
                         theme.ui.overlay_fg,
                     );
+                    rename_box = Some((
+                        field.offsets(|s| painter.measure(s, BODY_FAMILY, 15.0, 400)),
+                        (self.geometry.name_x - 5.0, ry + 2.0, field_w, ROW_H - 8.0),
+                    ));
                 }
                 _ => {
                     painter.text(
@@ -450,11 +529,14 @@ impl Overlay for ThemeBrowser {
             1.0,
             theme.blocks.table_border,
         );
+        let (offsets, rect) = rename_box.unwrap_or_default();
+        self.rename_offsets = offsets;
+        self.rename_rect = rect;
     }
 
-    fn key(&mut self, key: &Key, _ctrl: bool) -> OverlayResult {
+    fn key(&mut self, key: &Key, ctrl: bool, shift: bool) -> OverlayResult {
         if self.renaming.is_some() {
-            return self.rename_key(key);
+            return self.rename_key(key, ctrl, shift);
         }
         match key {
             Key::Named(NamedKey::Escape) => return OverlayResult::Close,
@@ -478,6 +560,15 @@ impl Overlay for ThemeBrowser {
 
     fn click(&mut self, x: f32, y: f32) -> OverlayResult {
         if self.renaming.is_some() {
+            if inside(self.rename_rect, x, y) {
+                let text_x = self.rename_rect.0 + 5.0;
+                let offsets = std::mem::take(&mut self.rename_offsets);
+                if let Some((_, field)) = self.renaming.as_mut() {
+                    field.click(x - text_x, &offsets, Instant::now());
+                }
+                self.rename_offsets = offsets;
+                return OverlayResult::Open;
+            }
             // A click away commits when valid, otherwise abandons the edit.
             if let Commit::Renamed(from, to) = self.commit_rename() {
                 return OverlayResult::Apply(Action::RenamedTheme { from, to });
@@ -521,7 +612,8 @@ impl Overlay for ThemeBrowser {
         if let Some((last_index, at)) = self.last_name_click {
             if last_index == index && now.duration_since(at).as_millis() < DOUBLE_CLICK_MS {
                 self.last_name_click = None;
-                self.renaming = Some((index, self.rows[index].name.clone()));
+                let name = self.rows[index].name.clone();
+                self.start_rename(index, name);
                 return OverlayResult::Open;
             }
         }

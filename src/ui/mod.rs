@@ -5,5 +5,6 @@ pub mod search;
 pub mod selection;
 pub mod settings;
 pub mod sidebar;
+pub mod textfield;
 pub mod theme_browser;
 pub mod theme_editor;

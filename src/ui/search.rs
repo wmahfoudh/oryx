@@ -2,11 +2,14 @@
 //! visual lines. Each match is a `Selection`, so highlight geometry and
 //! scroll targets reuse the selection machinery.
 
+use std::ops::Range;
+
 use crate::layout::{LayoutDoc, TextRun};
 use crate::paint::painter::Painter;
 use crate::style::fonts::{BODY_FAMILY, CODE_FAMILY};
 use crate::style::theme::{Rgba, Theme};
 use crate::ui::selection::{RunPos, Selection, MARKER_SPAN};
+use crate::ui::textfield::TextField;
 
 /// Run index marking a boundary character no match may cover.
 const SEPARATOR: usize = usize::MAX;
@@ -23,15 +26,15 @@ const COUNTER_SIZE: f32 = 13.0;
 /// among them. `stale` marks the matches for recomputation against the
 /// current layout on the next frame; `rects` caches every match's
 /// highlight boxes with their match index, so painting a frame never
-/// re-shapes text. With `selected` the whole query stands selected, as
-/// after reopening: the next typed character replaces it.
+/// re-shapes text. The query is a `TextField`, so reopening the bar with
+/// the old query selected is a plain `select_all` and the next typed
+/// character replaces it.
 pub struct SearchState {
-    pub query: String,
+    pub query: TextField,
     pub matches: Vec<Selection>,
     pub rects: Vec<(usize, (f32, f32, f32, f32))>,
     pub current: usize,
     pub stale: bool,
-    pub selected: bool,
 }
 
 /// The floating pill over the document's top-right corner: query on the
@@ -94,20 +97,38 @@ pub fn draw_bar(painter: &mut Painter, theme: &Theme, state: &SearchState, width
     );
 
     let avail = BAR_WIDTH - 2.0 * PAD - counter_w - 12.0;
-    let shown = tail_fit(painter, &state.query, avail);
-    let shown_w = painter.measure(&shown, BODY_FAMILY, QUERY_SIZE, 400);
-    let caret_x = x + PAD + shown_w + 1.0;
-    if state.selected && !state.query.is_empty() {
+    let query = state.query.text();
+    let (window, cut) = window_fit(painter, query, state.query.caret(), avail);
+    let shown = if cut {
+        format!("\u{2026}{}", &query[window.clone()])
+    } else {
+        query[window.clone()].to_string()
+    };
+    let lead = if cut {
+        painter.measure("\u{2026}", BODY_FAMILY, QUERY_SIZE, 400)
+    } else {
+        0.0
+    };
+    // Offsets are taken inside the drawn window, so a caret in the middle
+    // of a query too long for the pill still lands under its character.
+    let x_of = |painter: &mut Painter, at: usize| {
+        let at = at.clamp(window.start, window.end);
+        lead + painter.measure(&query[window.start..at], BODY_FAMILY, QUERY_SIZE, 400)
+    };
+    if let Some(range) = state.query.selection() {
+        let from = x_of(painter, range.start);
+        let to = x_of(painter, range.end);
         painter.fill(
-            x + PAD - 2.0,
+            x + PAD + from - 2.0,
             y + 9.0,
-            shown_w + 4.0,
+            to - from + 4.0,
             BAR_HEIGHT - 18.0,
             4.0,
             ui.selection_bg,
         );
     }
-    if state.query.is_empty() {
+    let caret_x = x + PAD + x_of(painter, state.query.caret()) + 1.0;
+    if query.is_empty() {
         painter.text(
             x + PAD + 6.0,
             y + 10.0,
@@ -138,22 +159,41 @@ pub fn draw_bar(painter: &mut Painter, theme: &Theme, state: &SearchState, width
     );
 }
 
-/// The longest query tail that fits the width, with an ellipsis when
-/// leading characters fell off.
-fn tail_fit(painter: &mut Painter, query: &str, avail: f32) -> String {
-    if painter.measure(query, BODY_FAMILY, QUERY_SIZE, 400) <= avail {
-        return query.to_string();
+/// The slice of a long query that gets drawn, as a byte range that always
+/// contains the caret, and whether characters were cut from the left. The
+/// tail is preferred, since that is where typing happens; a caret left of
+/// the tail window anchors the window on itself instead.
+fn window_fit(
+    painter: &mut Painter,
+    query: &str,
+    caret: usize,
+    avail: f32,
+) -> (Range<usize>, bool) {
+    let fits = |painter: &mut Painter, text: &str| {
+        painter.measure(text, BODY_FAMILY, QUERY_SIZE, 400) <= avail
+    };
+    if fits(painter, query) {
+        return (0..query.len(), false);
     }
-    let chars: Vec<char> = query.chars().collect();
-    for start in 1..chars.len() {
-        let candidate: String = std::iter::once('\u{2026}')
-            .chain(chars[start..].iter().copied())
-            .collect();
-        if painter.measure(&candidate, BODY_FAMILY, QUERY_SIZE, 400) <= avail {
-            return candidate;
+    let mut start = query.len();
+    for (index, _) in query.char_indices().skip(1) {
+        if fits(painter, &format!("\u{2026}{}", &query[index..])) {
+            start = index;
+            break;
         }
     }
-    "\u{2026}".to_string()
+    if start <= caret {
+        return (start..query.len(), true);
+    }
+    let mut end = caret;
+    for (offset, c) in query[caret..].char_indices() {
+        let candidate = caret + offset + c.len_utf8();
+        if !fits(painter, &format!("\u{2026}{}", &query[caret..candidate])) {
+            break;
+        }
+        end = candidate;
+    }
+    (caret..end, caret > 0)
 }
 
 /// A query with any capital letter matches exactly; an all-lowercase
