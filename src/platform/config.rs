@@ -16,8 +16,10 @@ pub struct Config {
     pub code_family: String,
     pub body_size: f32,
     pub code_size: f32,
-    /// Folder of the last opened file; the open dialog starts here when
-    /// no file is open. Empty means never set.
+    /// Where the reader was last looking: the folder of the last opened
+    /// file, or the folder the sidebar was last rooted at, whichever came
+    /// last. Seeds both the sidebar and the open dialog on the next run.
+    /// Empty means never set.
     pub last_dir: String,
     /// Whether the folder sidebar was open at the last toggle, and how
     /// wide it was left. Both are written when a gesture ends, not per
@@ -80,6 +82,18 @@ impl Default for Config {
     }
 }
 
+/// Where to start browsing: the first candidate that is still a directory,
+/// falling back to the working directory. A folder that has been deleted
+/// or unmounted since the last run drops through to the next candidate
+/// rather than opening an empty tree.
+pub fn browse_dir(candidates: impl IntoIterator<Item = Option<PathBuf>>) -> PathBuf {
+    candidates
+        .into_iter()
+        .flatten()
+        .find(|dir| dir.is_dir())
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
 /// Location of the config file, None when the platform gives no home.
 pub fn path() -> Option<PathBuf> {
     ProjectDirs::from("", "", "oryx").map(|dirs| dirs.config_dir().join("config.toml"))
@@ -118,6 +132,39 @@ mod tests {
 
     fn temp_path(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("oryx-config-{}-{name}", std::process::id()))
+    }
+
+    #[test]
+    fn browse_dir_takes_the_first_folder_that_still_exists() {
+        let real = std::env::temp_dir();
+        let gone = real.join("oryx-no-such-folder-ever");
+        assert_eq!(
+            browse_dir([Some(gone.clone()), Some(real.clone())]),
+            real,
+            "a folder that vanished drops through"
+        );
+        assert_eq!(browse_dir([Some(real.clone()), Some(gone.clone())]), real);
+        assert_eq!(
+            browse_dir([None, Some(real.clone())]),
+            real,
+            "an absent candidate is skipped"
+        );
+    }
+
+    #[test]
+    fn browse_dir_falls_back_to_the_working_directory() {
+        let gone = std::env::temp_dir().join("oryx-no-such-folder-ever");
+        assert_eq!(browse_dir([None, None]), PathBuf::from("."));
+        assert_eq!(browse_dir([Some(gone)]), PathBuf::from("."));
+    }
+
+    #[test]
+    fn browse_dir_refuses_a_file_as_a_starting_folder() {
+        let file = std::env::temp_dir().join(format!("oryx-browse-{}", std::process::id()));
+        std::fs::write(&file, "x").unwrap();
+        let real = std::env::temp_dir();
+        assert_eq!(browse_dir([Some(file.clone()), Some(real.clone())]), real);
+        std::fs::remove_file(&file).unwrap();
     }
 
     #[test]

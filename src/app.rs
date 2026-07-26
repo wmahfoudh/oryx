@@ -691,6 +691,48 @@ impl App {
         self.request_redraw();
     }
 
+    /// Folder of the open document, if it has one.
+    fn document_dir(&self) -> Option<PathBuf> {
+        self.path
+            .as_ref()
+            .and_then(|p| p.parent().map(Path::to_path_buf))
+            .filter(|d| !d.as_os_str().is_empty())
+    }
+
+    /// Folder the last run was left browsing, if one was recorded.
+    fn remembered_dir(&self) -> Option<PathBuf> {
+        (!self.config.last_dir.is_empty()).then(|| PathBuf::from(&self.config.last_dir))
+    }
+
+    /// Records a folder as where the reader was last looking. Called when a
+    /// file opens and when the sidebar re-roots, so browsing away without
+    /// opening anything is still remembered.
+    fn remember_dir(&mut self, dir: &Path) {
+        let text = dir.display().to_string();
+        if text.is_empty() || self.config.last_dir == text {
+            return;
+        }
+        self.config.last_dir = text;
+        config::save(&self.config);
+    }
+
+    /// Runs a sidebar action and persists the tree's root when it moved.
+    fn sidebar_action(&mut self, act: impl FnOnce(&mut Sidebar) -> Option<PathBuf>) {
+        let Some(side) = self.sidebar.as_mut() else {
+            return;
+        };
+        let before = side.root().to_path_buf();
+        let opened = act(side);
+        let after = self.sidebar.as_ref().map(|s| s.root().to_path_buf());
+        if let Some(after) = after.filter(|after| *after != before) {
+            self.remember_dir(&after);
+        }
+        if let Some(path) = opened {
+            self.open_file(&path, false);
+        }
+        self.request_redraw();
+    }
+
     /// Persists whether the panel is open and how wide, after a gesture
     /// ends or the panel is toggled, never per frame.
     fn save_sidebar_state(&mut self) {
@@ -715,12 +757,7 @@ impl App {
     /// comes back.
     fn open_sidebar(&mut self, open: bool) {
         if open && self.sidebar.is_none() {
-            let dir = self
-                .path
-                .as_ref()
-                .and_then(|p| p.parent().map(Path::to_path_buf))
-                .filter(|d| !d.as_os_str().is_empty())
-                .unwrap_or_else(|| PathBuf::from("."));
+            let dir = config::browse_dir([self.document_dir(), self.remembered_dir()]);
             let mut side = Sidebar::new(&dir);
             if let Some(path) = &self.path {
                 side.set_current(path);
@@ -765,11 +802,7 @@ impl App {
             .filter(|d| !d.as_os_str().is_empty())
             .unwrap_or_else(|| PathBuf::from("."));
         if opened {
-            let dir_text = dir.display().to_string();
-            if self.config.last_dir != dir_text {
-                self.config.last_dir = dir_text;
-                config::save(&self.config);
-            }
+            self.remember_dir(&dir);
         }
         self.media = MediaCache::new(dir.clone());
         self.media.set_waker(self.waker.clone());
@@ -806,18 +839,14 @@ impl App {
         let mut dialog = rfd::FileDialog::new()
             .add_filter("Supported files", &load::recognized_extensions())
             .add_filter("All files", &["*"]);
-        let start = self
-            .path
-            .as_ref()
-            .and_then(|p| p.parent().map(Path::to_path_buf))
-            .filter(|d| !d.as_os_str().is_empty())
-            .or_else(|| {
-                (!self.config.last_dir.is_empty()).then(|| PathBuf::from(&self.config.last_dir))
-            })
-            .filter(|d| d.is_dir());
-        if let Some(dir) = start {
-            dialog = dialog.set_directory(dir);
-        }
+        // An open sidebar is the most recent statement of where the
+        // reader is looking, so it outranks the open document's folder.
+        let start = config::browse_dir([
+            self.sidebar.as_ref().map(|side| side.root().to_path_buf()),
+            self.document_dir(),
+            self.remembered_dir(),
+        ]);
+        dialog = dialog.set_directory(start);
         if let Some(path) = dialog.pick_file() {
             self.open_file(&path, true);
         }
@@ -1505,11 +1534,7 @@ impl ApplicationHandler for App {
                     None if self.sidebar.is_some()
                         && matches!(logical_key, Key::Named(NamedKey::Enter)) =>
                     {
-                        let opened = self.sidebar.as_mut().and_then(|s| s.enter());
-                        if let Some(path) = opened {
-                            self.open_file(&path, false);
-                        }
-                        self.request_redraw();
+                        self.sidebar_action(|side| side.enter());
                     }
                     Some(cmd) => self.run_command(cmd, event_loop),
                     None => {}
@@ -1563,11 +1588,7 @@ impl ApplicationHandler for App {
                     } else if self.sidebar_edge_press() {
                     } else if (self.cursor.x as f32) < self.inset() && self.sidebar.is_some() {
                         let (x, y) = (self.cursor.x as f32, self.cursor.y as f32);
-                        let opened = self.sidebar.as_mut().and_then(|s| s.click(x, y));
-                        if let Some(path) = opened {
-                            self.open_file(&path, false);
-                        }
-                        self.request_redraw();
+                        self.sidebar_action(|side| side.click(x, y));
                     } else {
                         self.scrollbar_press();
                         if self.drag.is_none() {
