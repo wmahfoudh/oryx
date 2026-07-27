@@ -677,6 +677,9 @@ impl App {
         if again {
             self.last_edge_click = None;
             self.resize_sidebar(sidebar::DEFAULT_WIDTH);
+            // No drag release follows a double click, so the reset
+            // persists here or not at all.
+            self.save_sidebar_state();
         } else {
             self.last_edge_click = Some(now);
             self.drag = Some(Drag::SidebarEdge(x - side.width()));
@@ -829,6 +832,10 @@ impl App {
         self.sel_anchor = None;
         self.layout = None;
         self.band = None;
+        // Both hold targets in the old document's coordinates; left
+        // alone they fire against the new one once its layout grows.
+        self.pending_scroll = None;
+        self.pending_anchor = None;
         if let Some(side) = self.sidebar.as_mut() {
             if reroot && side.root() != dir {
                 *side = Sidebar::new(&dir);

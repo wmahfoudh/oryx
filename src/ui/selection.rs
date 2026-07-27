@@ -254,7 +254,14 @@ fn line_end(source: &str, byte: usize) -> usize {
     } else {
         byte
     };
-    source[byte..].find('\n').map_or(source.len(), |i| byte + i)
+    let end = source[byte..].find('\n').map_or(source.len(), |i| byte + i);
+    // Sources are normalized at load; the strip guards text that
+    // arrived another way.
+    if source[..end].ends_with('\r') {
+        end - 1
+    } else {
+        end
+    }
 }
 
 /// Clamps to length and steps back to a UTF-8 character boundary.
@@ -427,6 +434,14 @@ mod tests {
     use crate::doc::images::MediaCache;
     use crate::doc::markdown;
     use crate::layout::{layout, ViewConfig};
+
+    #[test]
+    fn line_end_steps_back_over_a_carriage_return() {
+        let src = "alpha\r\nbeta\r\n";
+        assert_eq!(line_end(src, 2), 5, "the carriage return stays out");
+        assert_eq!(line_end(src, 9), 11, "the second line ends before its return");
+        assert_eq!(line_end("plain\nnext", 1), 5, "clean sources are untouched");
+    }
     use crate::style::theme::Theme;
     use std::path::PathBuf;
 

@@ -145,14 +145,26 @@ impl MediaCache {
     /// fetch. Always returns at once; missing pixels mean a placeholder.
     fn remote_original(&mut self, src: &str) -> Option<&RgbaImage> {
         if !self.originals.contains_key(src) && !self.remote.contains_key(src) {
-            match self.cached_bytes(src) {
-                Some(bytes) => {
-                    self.originals.insert(src.to_string(), decode(&bytes));
+            match self.cached_bytes(src).as_deref().map(decode) {
+                Some(Some(image)) => {
+                    self.originals.insert(src.to_string(), Some(image));
+                }
+                // A truncated write leaves undecodable bytes on disk;
+                // pinning them would blank the URL for every session.
+                Some(None) => {
+                    self.remove_cached(src);
+                    self.spawn_fetch(src);
                 }
                 None => self.spawn_fetch(src),
             }
         }
         self.originals.get(src).and_then(|o| o.as_ref())
+    }
+
+    fn remove_cached(&self, src: &str) {
+        if let Some(dir) = &self.cache_dir {
+            let _ = std::fs::remove_file(dir.join(fetch::key(src)));
+        }
     }
 
     fn cached_bytes(&self, src: &str) -> Option<Vec<u8>> {
@@ -222,6 +234,29 @@ mod tests {
     fn write_png(dir: &Path, name: &str, w: u32, h: u32) {
         let img = RgbaImage::from_pixel(w, h, image::Rgba([200, 100, 50, 255]));
         img.save(dir.join(name)).unwrap();
+    }
+
+    /// A truncated cache write must not pin its URL to a placeholder
+    /// forever: the bad entry goes and a fetch replaces it. The address
+    /// is TEST-NET, so the background attempt goes nowhere.
+    #[test]
+    fn a_corrupt_cache_entry_heals_by_refetching() {
+        let dir = temp_dir();
+        let cache = dir.join("corrupt-cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        let url = "https://192.0.2.1/badge.png";
+        std::fs::write(cache.join(fetch::key(url)), b"not an image").unwrap();
+        let mut media = MediaCache::with_cache_dir(dir.clone(), Some(cache.clone()));
+        assert!(media.dimensions(url).is_none());
+        assert!(
+            !cache.join(fetch::key(url)).exists(),
+            "the bad entry is removed"
+        );
+        assert!(media.remote.contains_key(url), "a refetch is under way");
+        assert!(
+            !media.originals.contains_key(url),
+            "no placeholder is pinned"
+        );
     }
 
     #[test]

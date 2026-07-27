@@ -120,7 +120,7 @@ impl Builder {
             Tag::Paragraph => {}
             Tag::Heading { level, .. } => self.heading = Some(heading_level(level)),
             Tag::BlockQuote(kind) => {
-                self.quote_depth += 1;
+                self.quote_depth = self.quote_depth.saturating_add(1);
                 self.alerts.push(kind.map(alert_kind));
             }
             Tag::CodeBlock(kind) => {
@@ -291,7 +291,13 @@ impl Builder {
         let base = self.current.0;
         let mut pos = 0usize;
         let mut rest = text;
-        while let Some(start) = rest.find("http://").or_else(|| rest.find("https://")) {
+        // Whichever scheme occurs first wins; picking one find over the
+        // other would swallow an earlier url of the other scheme.
+        let next = |rest: &str| match (rest.find("http://"), rest.find("https://")) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        while let Some(start) = next(rest) {
             let (before, from) = rest.split_at(start);
             if !before.is_empty() {
                 self.push(Span {
@@ -911,6 +917,30 @@ mod tests {
         assert_eq!(linked.len(), 1);
         assert_eq!(linked[0].text, "https://example.com");
         assert_eq!(linked[0].link.as_deref(), Some("https://example.com"));
+    }
+
+    #[test]
+    fn bare_urls_link_in_order_whichever_scheme_comes_first() {
+        for src in [
+            "see https://a.tld then http://b.tld",
+            "see http://a.tld then https://b.tld",
+        ] {
+            let d = parse(src);
+            let BlockKind::Paragraph { spans } = &d.blocks[0].kind else {
+                panic!()
+            };
+            let linked: Vec<_> = spans.iter().filter(|s| s.link.is_some()).collect();
+            assert_eq!(linked.len(), 2, "both urls link in {src:?}");
+            assert!(linked[0].text.contains("a.tld"), "in source order");
+            assert!(linked[1].text.contains("b.tld"), "in source order");
+        }
+    }
+
+    #[test]
+    fn deep_quote_nesting_never_panics() {
+        let src = "> ".repeat(300) + "text";
+        let d = parse(&src);
+        assert!(!d.blocks.is_empty());
     }
 
     #[test]

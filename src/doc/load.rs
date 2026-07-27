@@ -77,6 +77,14 @@ pub fn open(path: &Path, deadline: Option<Instant>) -> anyhow::Result<Opened> {
         anyhow::bail!("{} is not a text file", path.display());
     }
     let text = String::from_utf8_lossy(&bytes);
+    // Windows files carry CRLF; the plain-text path strips returns per
+    // line, and everything downstream (offsets, rendering, copy as
+    // markdown) assumes the source is clean of them.
+    let text = if text.contains("\r\n") {
+        std::borrow::Cow::Owned(text.replace("\r\n", "\n"))
+    } else {
+        text
+    };
     let mut document = match detect(path) {
         FileKind::Markdown => super::markdown::parse(&text),
         FileKind::Code(token) => code_document(Some(token), &text),
@@ -330,6 +338,22 @@ mod tests {
 
     fn detect_ext(name: &str) -> FileKind {
         detect(Path::new(name))
+    }
+
+    #[test]
+    fn crlf_markdown_normalizes_at_load() {
+        let dir = std::env::temp_dir().join(format!("oryx-load-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("crlf.md");
+        std::fs::write(&path, "# Title\r\n\r\nA body line.\r\n").unwrap();
+        let opened = open(&path, None).unwrap();
+        assert!(
+            !opened.document.source.contains('\r'),
+            "the source is clean"
+        );
+        let twin = crate::doc::markdown::parse("# Title\n\nA body line.\n");
+        assert_eq!(opened.document.blocks.len(), twin.blocks.len());
+        assert_eq!(opened.document.source, twin.source);
     }
 
     #[test]
