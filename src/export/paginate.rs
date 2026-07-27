@@ -101,8 +101,10 @@ fn items(layout: &LayoutDoc) -> Vec<Item> {
 /// below its text: a table row's stripe carries padding under its cells,
 /// and a code block's panel closes one padding below its last line. The
 /// fit is measured against these, so nothing reaches into the margin the
-/// page number sits in.
-fn extend_items(doc: &Document, layout: &LayoutDoc, items: &mut [Item]) {
+/// page number sits in. A row band taller than the content box is left
+/// alone: it can never travel whole, so its lines flow like a
+/// paragraph's instead of dripping one to a page.
+fn extend_items(doc: &Document, layout: &LayoutDoc, content: f32, items: &mut [Item]) {
     let blocks: Vec<Option<usize>> = items.iter().map(|item| item.block(layout)).collect();
     for (item, block) in items.iter_mut().zip(blocks) {
         let row = layout
@@ -110,7 +112,8 @@ fn extend_items(doc: &Document, layout: &LayoutDoc, items: &mut [Item]) {
             .partition_point(|band| band.top <= item.top + SLACK)
             .saturating_sub(1);
         if let Some(band) = layout.table_rows.get(row) {
-            if item.top >= band.top - SLACK && item.top < band.bottom {
+            let fits = band.bottom - band.top <= content + SLACK;
+            if fits && item.top >= band.top - SLACK && item.top < band.bottom {
                 item.bottom = item.bottom.max(band.bottom);
             }
         }
@@ -121,6 +124,13 @@ fn extend_items(doc: &Document, layout: &LayoutDoc, items: &mut [Item]) {
             .is_some_and(|block| matches!(doc.blocks[block].kind, BlockKind::CodeBlock { .. }));
         if code {
             item.bottom += metrics::CODE_PAD;
+        }
+        // A run with an Image block is a placeholder's alt text; the box
+        // closes one padding below it and the fit carries the border too.
+        let placeholder =
+            block.is_some_and(|block| matches!(doc.blocks[block].kind, BlockKind::Image { .. }));
+        if placeholder {
+            item.bottom += metrics::PLACEHOLDER_PAD;
         }
     }
 }
@@ -176,12 +186,20 @@ fn rejected(
 /// sits above that item and belongs to it comes too: a continued code
 /// panel keeps its inner padding, and a table row starts at its band so
 /// the stripe is not left behind on the page before.
-fn page_top(doc: &Document, layout: &LayoutDoc, items: &[Item], i: usize) -> f32 {
+fn page_top(doc: &Document, layout: &LayoutDoc, items: &[Item], content: f32, i: usize) -> f32 {
     let item = &items[i];
     if let Some(block) = item.block(layout) {
-        let continued = i > 0 && items[i - 1].block(layout) == Some(block);
-        if continued && matches!(doc.blocks[block].kind, BlockKind::CodeBlock { .. }) {
+        // A code line starts its page one padding up whether the panel
+        // continues or opens fresh here: the rect begins there either
+        // way, and a top left past the boundary strands an empty strip
+        // of it on the page before.
+        if matches!(doc.blocks[block].kind, BlockKind::CodeBlock { .. }) {
             return item.top - metrics::CODE_PAD;
+        }
+        // A placeholder's alt text brings its whole box: the border
+        // opens one padding above the text.
+        if matches!(doc.blocks[block].kind, BlockKind::Image { .. }) {
+            return item.top - metrics::PLACEHOLDER_PAD;
         }
     }
     let row = layout
@@ -190,7 +208,10 @@ fn page_top(doc: &Document, layout: &LayoutDoc, items: &[Item], i: usize) -> f32
         .saturating_sub(1);
     let mut top = item.top;
     if let Some(band) = layout.table_rows.get(row) {
-        if item.top > band.top && item.top < band.bottom {
+        // An over-tall band flows across pages, so a page opening inside
+        // it starts at its own first line, not back at the band.
+        let fits = band.bottom - band.top <= content + SLACK;
+        if fits && item.top > band.top && item.top < band.bottom {
             top = band.top;
         }
     }
@@ -214,13 +235,13 @@ fn page_top(doc: &Document, layout: &LayoutDoc, items: &[Item], i: usize) -> f32
 pub fn paginate(doc: &Document, layout: &LayoutDoc, geometry: &PageGeometry) -> Vec<Page> {
     let content = geometry.content_height();
     let mut items = items(layout);
-    extend_items(doc, layout, &mut items);
+    extend_items(doc, layout, content, &mut items);
     let spans = block_spans(layout, &items);
     let mut pages: Vec<Page> = Vec::new();
     let mut i = 0;
     let mut cursor = 0;
     while i < items.len() {
-        let top = page_top(doc, layout, &items, i);
+        let top = page_top(doc, layout, &items, content, i);
         let mut j = i;
         while j < items.len() && items[j].bottom - top <= content + SLACK {
             j += 1;
@@ -791,6 +812,154 @@ mod rules {
                 (first - page.top - metrics::CODE_PAD).abs() < SLACK,
                 "a continued panel starts one padding above its first line"
             );
+        }
+    }
+
+    /// The defect an exported README showed: a missing image's
+    /// placeholder box split at a page break, an empty strip of it
+    /// overlapping the page number while the alt text opened the next
+    /// page. The sweep slides the box toward the boundary a paragraph
+    /// at a time.
+    #[test]
+    fn a_placeholder_box_paginates_as_one_atom() {
+        let g = geometry();
+        let mut split_seen = false;
+        for filler in 8..40 {
+            let mut src = "Filler paragraph here.\n\n".repeat(filler);
+            src.push_str("![Oryx rendering tables](missing/tables.png)\n\n");
+            src.push_str(&"Filler paragraph here.\n\n".repeat(6));
+            let doc = markdown::parse(&src);
+            let l = laid_out(&doc);
+            assert!(
+                !l.rects.is_empty(),
+                "the missing image draws a placeholder"
+            );
+            let pages = paginate(&doc, &l, &g);
+            split_seen |= pages.len() > 1;
+            for page in &pages {
+                for rect in &l.rects {
+                    assert!(
+                        page.top <= rect.y + SLACK || page.top >= rect.y + rect.height - SLACK,
+                        "a page starts inside the placeholder with {filler} fillers"
+                    );
+                }
+                for rect in &page.rects {
+                    assert!(
+                        rect.y + rect.height - page.top <= g.content_height() + SLACK,
+                        "the placeholder reaches into the bottom margin with {filler} fillers"
+                    );
+                }
+            }
+        }
+        assert!(split_seen, "the sweep drove the box across a boundary");
+    }
+
+    /// The defect an exported page showed: a code panel that opens a
+    /// fresh page left an empty strip of itself on the page before,
+    /// carrying none of its lines.
+    #[test]
+    fn every_panel_fragment_carries_a_line() {
+        let g = geometry();
+        for filler in 0..30 {
+            let mut src = "Filler paragraph here.\n\n".repeat(filler);
+            src.push_str("```rust\n");
+            for line in 0..12 {
+                src.push_str(&format!("let value_{line} = {line};\n"));
+            }
+            src.push_str("```\n");
+            let doc = markdown::parse(&src);
+            let l = laid_out(&doc);
+            let pages = paginate(&doc, &l, &g);
+            for (index, page) in pages.iter().enumerate() {
+                for rect in &page.rects {
+                    let holds_a_line = l.runs[page.runs.clone()].iter().any(|run| {
+                        let bottom = run.y + metrics::LINE_HEIGHT * run.size;
+                        run.y < rect.y + rect.height + SLACK && bottom > rect.y - SLACK
+                    });
+                    assert!(
+                        holds_a_line,
+                        "page {index} draws an empty panel fragment with {filler} fillers"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Rows whose cells wrap over several lines stay whole wherever the
+    /// boundary falls; only a row taller than the page itself may split.
+    #[test]
+    fn a_row_that_fits_a_page_never_splits_wherever_the_break_falls() {
+        let g = geometry();
+        for filler in 0..30 {
+            let mut src = "Filler paragraph here.\n\n".repeat(filler);
+            src.push_str("| Setting | What it does |\n|---|---|\n");
+            for row in 0..8 {
+                src.push_str(&format!(
+                    "| option-{row} | A cell written long enough that it wraps over \
+                     several lines inside its column and makes the row band tall {row}. |\n"
+                ));
+            }
+            let doc = markdown::parse(&src);
+            let l = laid_out(&doc);
+            let pages = paginate(&doc, &l, &g);
+            for page in &pages {
+                for row in &l.table_rows {
+                    if row.bottom - row.top > g.content_height() {
+                        continue;
+                    }
+                    assert!(
+                        page.top <= row.top + SLACK || page.top >= row.bottom - SLACK,
+                        "a page starts inside a fitting row with {filler} fillers"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A row taller than the page cannot stay atomic, so it flows like
+    /// a paragraph: pages fill with its lines, the grid clips at the
+    /// content box with a closing edge, and the number's margin stays
+    /// clear. The field showed the alternative: one line per page for a
+    /// hundred pages, columns drawn through the page number.
+    #[test]
+    fn a_row_taller_than_a_page_flows_and_loses_nothing() {
+        let g = geometry();
+        let cell = "A very long cell indeed. ".repeat(400);
+        let src = format!("| Setting | What it does |\n|---|---|\n| tall | {cell} |\n");
+        let doc = markdown::parse(&src);
+        let l = laid_out(&doc);
+        let band = &l.table_rows[l.table_rows.len() - 1];
+        assert!(
+            band.bottom - band.top > g.content_height(),
+            "the fixture row really is taller than a page"
+        );
+        let pages = paginate(&doc, &l, &g);
+        assert!(pages.len() > 1, "the row spans pages");
+        assert_eq!(pages[0].runs.start, 0);
+        for pair in pages.windows(2) {
+            assert_eq!(pair[0].runs.end, pair[1].runs.start, "no gap, no overlap");
+        }
+        assert_eq!(pages.last().unwrap().runs.end, l.runs.len());
+        let lines = l.runs.len();
+        assert!(
+            pages.len() < lines / 8,
+            "{lines} lines drip across {} pages",
+            pages.len()
+        );
+        for (index, page) in pages.iter().enumerate() {
+            for rect in &page.rects {
+                assert!(
+                    rect.y + rect.height - page.top <= g.content_height() + SLACK,
+                    "page {index} draws grid into the bottom margin"
+                );
+            }
+            for run in &l.runs[page.runs.clone()] {
+                let bottom = run.y + metrics::LINE_HEIGHT * run.size;
+                assert!(
+                    bottom - page.top <= g.content_height() + SLACK,
+                    "page {index} puts a line into the bottom margin"
+                );
+            }
         }
     }
 }

@@ -354,7 +354,10 @@ impl Builder {
     }
 
     /// Writes the faces, the page objects and the tree, then the bytes.
-    pub fn finish(self, job: &Job, fonts: &FontStore) -> Vec<u8> {
+    /// A face that cannot be subset fails the export by name, because
+    /// embedding the whole font under subset numbering would render
+    /// every glyph wrong and still report success.
+    pub fn finish(self, job: &Job, fonts: &FontStore) -> Result<Vec<u8>, String> {
         finish(self, job, fonts)
     }
 }
@@ -397,7 +400,12 @@ fn collect_links(layout: &LayoutDoc, page: &Page, geometry: &PageGeometry) -> Ve
 
 /// Builds a whole file in one call. The pass uses the builder directly;
 /// this is the shape the tests and any one-shot caller want.
-pub fn build(job: &Job, pages: &[Page], fonts: &mut FontStore, media: &mut MediaCache) -> Vec<u8> {
+pub fn build(
+    job: &Job,
+    pages: &[Page],
+    fonts: &mut FontStore,
+    media: &mut MediaCache,
+) -> Result<Vec<u8>, String> {
     let mut builder = Builder::new();
     for page in pages {
         builder.add_page(job, page, fonts, media);
@@ -405,7 +413,7 @@ pub fn build(job: &Job, pages: &[Page], fonts: &mut FontStore, media: &mut Media
     builder.finish(job, fonts)
 }
 
-fn finish(builder: Builder, job: &Job, fonts: &FontStore) -> Vec<u8> {
+fn finish(builder: Builder, job: &Job, fonts: &FontStore) -> Result<Vec<u8>, String> {
     let Builder {
         mut pdf,
         mut alloc,
@@ -420,7 +428,7 @@ fn finish(builder: Builder, job: &Job, fonts: &FontStore) -> Vec<u8> {
 
     let face_ids: Vec<FaceId> = faces.keys().copied().collect();
     for face in &face_ids {
-        write_face(&mut pdf, &mut alloc, fonts, &faces[face], *face);
+        write_face(&mut pdf, &mut alloc, fonts, &faces[face], *face)?;
     }
 
     let page_ids: Vec<Ref> = contents.iter().map(|_| alloc.next()).collect();
@@ -513,7 +521,7 @@ fn finish(builder: Builder, job: &Job, fonts: &FontStore) -> Vec<u8> {
     pdf.document_info(info_id)
         .title(TextStr(job.title))
         .producer(TextStr(concat!("oryx ", env!("CARGO_PKG_VERSION"))));
-    pdf.finish()
+    Ok(pdf.finish())
 }
 
 /// Resolves an internal target to a page and a position on it. External
@@ -809,8 +817,17 @@ fn draw_rect(
     content.restore_state();
 }
 
-/// Subsets one face and writes the four objects a CID font needs.
-fn write_face(pdf: &mut Pdf, alloc: &mut Alloc, fonts: &FontStore, use_: &FaceUse, face: FaceId) {
+/// Subsets one face and writes the four objects a CID font needs. The
+/// embedded flavour follows the subset's own magic: TrueType outlines
+/// ride a CIDFontType2 with FontFile2, CFF outlines a CIDFontType0 with
+/// FontFile3, since a reader may reject the wrong pairing.
+fn write_face(
+    pdf: &mut Pdf,
+    alloc: &mut Alloc,
+    fonts: &FontStore,
+    use_: &FaceUse,
+    face: FaceId,
+) -> Result<(), String> {
     let cid_id = alloc.next();
     let descriptor_id = alloc.next();
     let data_id = alloc.next();
@@ -830,9 +847,18 @@ fn write_face(pdf: &mut Pdf, alloc: &mut Alloc, fonts: &FontStore, use_: &FaceUs
         .with_face_data(face, |data, index| (data.to_vec(), index));
     let (data, index) = match source {
         Some(pair) => pair,
-        None => return,
+        None => return Ok(()),
     };
-    let subset = subsetter::subset(&data, index, &use_.remapper).unwrap_or_else(|_| data.clone());
+    let subset = subsetter::subset(&data, index, &use_.remapper).map_err(|err| {
+        let family = fonts
+            .font_system
+            .db()
+            .face(face)
+            .and_then(|info| info.families.first().map(|(name, _)| name.clone()))
+            .unwrap_or_else(|| name.clone());
+        format!("cannot embed the font {family}: {err}")
+    })?;
+    let cff = subset.starts_with(b"OTTO");
     let parsed = ttf_parser::Face::parse(&data, index).ok();
     let scale = parsed
         .as_ref()
@@ -851,11 +877,19 @@ fn write_face(pdf: &mut Pdf, alloc: &mut Alloc, fonts: &FontStore, use_: &FaceUs
         .to_unicode(cmap_id);
 
     let mut cid = pdf.cid_font(cid_id);
-    cid.subtype(CidFontType::Type2)
-        .base_font(Name(name.as_bytes()))
-        .system_info(system)
-        .font_descriptor(descriptor_id)
-        .cid_to_gid_map_predefined(Name(b"Identity"));
+    cid.subtype(if cff {
+        CidFontType::Type0
+    } else {
+        CidFontType::Type2
+    })
+    .base_font(Name(name.as_bytes()))
+    .system_info(system)
+    .font_descriptor(descriptor_id);
+    // CIDToGIDMap belongs to Type2 alone; a CFF font maps through its
+    // own charset, identity here since subset ids are dense from zero.
+    if !cff {
+        cid.cid_to_gid_map_predefined(Name(b"Identity"));
+    }
     cid.widths().consecutive(0, widths.iter().copied());
     cid.finish();
 
@@ -877,8 +911,12 @@ fn write_face(pdf: &mut Pdf, alloc: &mut Alloc, fonts: &FontStore, use_: &FaceUs
                 .map(|f| f.descender() as f32 * scale)
                 .unwrap_or(-200.0),
         )
-        .stem_v(80.0)
-        .font_file2(data_id);
+        .stem_v(80.0);
+    if cff {
+        descriptor.font_file3(data_id);
+    } else {
+        descriptor.font_file2(data_id);
+    }
     if let Some(bbox) = bbox {
         descriptor.bbox(Rect::new(
             bbox.x_min as f32 * scale,
@@ -889,8 +927,14 @@ fn write_face(pdf: &mut Pdf, alloc: &mut Alloc, fonts: &FontStore, use_: &FaceUs
     }
     descriptor.finish();
 
-    pdf.stream(data_id, &deflate(&subset))
-        .filter(Filter::FlateDecode);
+    let deflated = deflate(&subset);
+    let mut stream = pdf.stream(data_id, &deflated);
+    stream.filter(Filter::FlateDecode);
+    if cff {
+        // FontFile3 carrying a whole OpenType file declares itself.
+        stream.pair(Name(b"Subtype"), Name(b"OpenType"));
+    }
+    stream.finish();
 
     let mut cmap = UnicodeCmap::new(Name(b"Custom"), system);
     for (cid, text) in &use_.text {
@@ -903,6 +947,7 @@ fn write_face(pdf: &mut Pdf, alloc: &mut Alloc, fonts: &FontStore, use_: &FaceUs
     }
     pdf.stream(cmap_id, &deflate(&cmap.finish()))
         .filter(Filter::FlateDecode);
+    Ok(())
 }
 
 fn device_y(y: f32, top: f32, geometry: &PageGeometry) -> f32 {

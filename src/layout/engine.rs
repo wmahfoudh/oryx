@@ -1375,7 +1375,7 @@ fn layout_image(
         });
         return height;
     }
-    let pad = 12.0 * cfg.zoom;
+    let pad = metrics::PLACEHOLDER_PAD * cfg.zoom;
     let radius = metrics::CORNER_RADIUS * cfg.zoom;
     let alt_span = [Span {
         text: if alt.is_empty() {

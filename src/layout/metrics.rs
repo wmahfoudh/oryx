@@ -26,6 +26,11 @@ pub const REFERENCE_BODY: f32 = 22.0;
 /// on the next page starts one padding above its first line.
 pub const CODE_PAD: f32 = 12.0;
 
+/// Inner padding of a missing image's placeholder box. Pagination needs
+/// it: the box travels whole with the alt text it holds, one padding
+/// above and below.
+pub const PLACEHOLDER_PAD: f32 = 12.0;
+
 /// Corner radius for inline code pills, in pixels at zoom 1.
 pub const PILL_RADIUS: f32 = 4.0;
 

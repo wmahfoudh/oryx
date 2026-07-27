@@ -19,14 +19,26 @@ fn export_to_bytes(doc: &Document, page: PageSize) -> Vec<u8> {
 }
 
 fn export_with(doc: &Document, page: PageSize, page_numbers: bool) -> Vec<u8> {
+    export_cfg(doc, page, page_numbers, None)
+}
+
+fn export_cfg(
+    doc: &Document,
+    page: PageSize,
+    page_numbers: bool,
+    body_family: Option<&str>,
+) -> Vec<u8> {
     let mut fonts = FontStore::new();
     let mut media = MediaCache::new(PathBuf::from("tests/fixtures"));
-    let cfg = ViewConfig {
+    let mut cfg = ViewConfig {
         body_size: 11.0,
         code_size: 9.0,
         zoom: 1.0,
         ..ViewConfig::default()
     };
+    if let Some(family) = body_family {
+        cfg.body_family = family.to_string();
+    }
     let theme = Theme::default_dark();
     let geometry = PageGeometry::new(page, cfg.body_size);
     let settings = ExportSettings {
@@ -46,7 +58,7 @@ fn export_with(doc: &Document, page: PageSize, page_numbers: bool) -> Vec<u8> {
         settings: &settings,
         title: "test",
     };
-    pdf::build(&job, &pages, &mut fonts, &mut media)
+    pdf::build(&job, &pages, &mut fonts, &mut media).expect("the export builds")
 }
 
 #[test]
@@ -273,5 +285,89 @@ fn an_image_is_embedded_at_its_own_resolution() {
     assert!(!widths.is_empty(), "the image is embedded");
     for width in widths {
         assert_eq!(width, 220, "the source's own pixels, not the placed size");
+    }
+}
+
+/// Every descendant font in the file: its subtype and which font file
+/// entry its descriptor carries.
+fn cid_fonts(pdf: &Pdf) -> Vec<(String, bool, bool)> {
+    pdf.objects
+        .values()
+        .filter_map(|object| {
+            let dict = object.as_dict().ok()?;
+            let subtype = dict.get(b"Subtype").ok()?.as_name().ok()?;
+            let subtype = String::from_utf8_lossy(subtype).to_string();
+            if subtype != "CIDFontType0" && subtype != "CIDFontType2" {
+                return None;
+            }
+            let descriptor = dict.get(b"FontDescriptor").ok()?.as_reference().ok()?;
+            let descriptor = pdf.get_object(descriptor).ok()?.as_dict().ok()?;
+            Some((
+                subtype,
+                descriptor.get(b"FontFile2").is_ok(),
+                descriptor.get(b"FontFile3").is_ok(),
+            ))
+        })
+        .collect()
+}
+
+#[test]
+fn a_truetype_face_embeds_as_cidfonttype2_with_fontfile2() {
+    let doc = markdown::parse("Some body text in the bundled face.");
+    let pdf = Pdf::load_mem(&export_to_bytes(&doc, PageSize::A4)).unwrap();
+    let fonts = cid_fonts(&pdf);
+    assert!(!fonts.is_empty(), "the file embeds a font");
+    for (subtype, file2, file3) in fonts {
+        assert_eq!(subtype, "CIDFontType2", "the bundled faces are TrueType");
+        assert!(file2 && !file3, "TrueType data rides FontFile2");
+    }
+}
+
+/// A spec-conformant pairing for CFF faces: CIDFontType0 with FontFile3.
+/// The bundled defaults are TrueType, so the case only shows with an
+/// installed OpenType/CFF family; the test hunts for one and skips with
+/// a note when the system has none.
+#[test]
+fn a_cff_face_embeds_as_cidfonttype0_with_fontfile3() {
+    let mut fonts = FontStore::new();
+    let infos: Vec<(cosmic_text::fontdb::ID, Option<String>)> = fonts
+        .font_system
+        .db()
+        .faces()
+        .map(|face| {
+            (
+                face.id,
+                face.families.first().map(|(name, _)| name.clone()),
+            )
+        })
+        .collect();
+    let mut family = None;
+    for (id, name) in infos {
+        let cff = fonts
+            .font_system
+            .db()
+            .with_face_data(id, |data, _| data.starts_with(b"OTTO"))
+            .unwrap_or(false);
+        if cff && name.is_some() {
+            family = name;
+            break;
+        }
+    }
+    let Some(family) = family else {
+        eprintln!("skipped: no OpenType/CFF face installed");
+        return;
+    };
+    let doc = markdown::parse("Some body text in a CFF face.");
+    let bytes = export_cfg(&doc, PageSize::A4, false, Some(&family));
+    let pdf = Pdf::load_mem(&bytes).unwrap();
+    let fonts = cid_fonts(&pdf);
+    assert!(
+        fonts.iter().any(|(subtype, _, _)| subtype == "CIDFontType0"),
+        "the CFF face {family} embeds as CIDFontType0, got {fonts:?}"
+    );
+    for (subtype, file2, file3) in fonts {
+        let cff = subtype == "CIDFontType0";
+        assert_eq!(file3, cff, "CFF data rides FontFile3");
+        assert_eq!(file2, !cff, "TrueType data rides FontFile2");
     }
 }

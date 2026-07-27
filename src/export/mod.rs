@@ -291,7 +291,10 @@ impl ExportPass {
             settings: &self.settings,
             title: &self.title,
         };
-        let bytes = self.builder.finish(&job, fonts);
+        let bytes = self
+            .builder
+            .finish(&job, fonts)
+            .map_err(std::io::Error::other)?;
         let mut partial = self.target.clone().into_os_string();
         partial.push(".part");
         let partial = PathBuf::from(partial);

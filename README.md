@@ -63,7 +63,7 @@ Ctrl+E writes the document to a PDF and asks only where to put it. The page carr
 
 Ctrl+Shift+E opens the export settings: theme, body font and size, code font and size, page size and page numbers. They are kept apart from the app's own appearance and remembered between runs, so reading in a dark theme at 22 points and exporting in a light one at 11 needs no switching back and forth. Sizes are points on paper, so 11 or 12 is the usual body figure.
 
-Pages break where a reader would want them to: never through a line, never leaving a heading alone at the foot of a page, never splitting a table row, and never cutting an image in half.
+Pages break where a reader would want them to: never through a line, never leaving a heading alone at the foot of a page, never cutting an image in half, and never splitting a table row that fits on a page. A row taller than the page itself is the one thing that has to split.
 
 ## Install
 
