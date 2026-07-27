@@ -13,7 +13,7 @@ Most markdown tools are editors with a preview attached, or they embed a browser
 
 ## Why Oryx
 
-**It opens instantly, whatever the size.** A normal document is on screen in well under 150 milliseconds from cold, and an 8MB file takes about a third of a second. Oryx highlights and lays out only the first few screens before it paints, then finishes the rest in the background while you read.
+**It opens instantly, whatever the size.** A normal document is on screen in well under 150 milliseconds from cold, and an 8MB file takes under half a second. Oryx highlights and lays out only the first few screens before it paints, then finishes the rest in the background while you read.
 
 **It reads, it does not edit.** There are no panes, no toolbars and no menus. F1 lists every shortcut, Escape closes whatever is open, and everything works from the keyboard.
 
@@ -149,6 +149,7 @@ Oryx is built for everyday documents, and some things are out of scope.
 - On a file several megabytes long, the colors and the layout below the first screens take a moment to catch up.
 - Memory grows with the file. An 8MB document costs a few hundred megabytes while it is open.
 - The HTML it understands is a deliberate subset. No HTML tables, no collapsible sections.
+- Remote images ride the operating system's TLS stack, which on Linux means the OpenSSL library nearly every distribution ships. Without it, badges show placeholders and everything else works.
 - macOS compiles but is untested, and there is no packaged build.
 
 ## Contributing
