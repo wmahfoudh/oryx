@@ -112,7 +112,11 @@ impl ThemeBrowser {
                 });
             }
         }
-        rows.sort_by(|a, b| a.name.cmp(&b.name));
+        // Light themes first, dark after, names inside each group, so
+        // the two halves of the collection read as two shelves.
+        rows.sort_by(|a, b| {
+            (theme::dark_rank(&a.swatches), &a.name).cmp(&(theme::dark_rank(&b.swatches), &b.name))
+        });
         self.rows = rows;
         if self.selected >= self.rows.len() {
             self.selected = self.rows.len().saturating_sub(1);
@@ -679,6 +683,30 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("oryx-dup-{}-{name}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn light_themes_sort_before_dark_ones() {
+        let dir = temp_dir("shelves");
+        std::fs::write(
+            dir.join("alpha-dark.toml"),
+            "[surface]\nbackground = \"#282a36\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("zulu-light.toml"),
+            "[surface]\nbackground = \"#fdf6e3\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("beta-light.toml"),
+            "[surface]\nbackground = \"#ffffff\"\n",
+        )
+        .unwrap();
+        let browser = ThemeBrowser::new(vec![dir.clone()], "alpha-dark");
+        let names: Vec<&str> = browser.rows.iter().map(|r| r.name.as_str()).collect();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(names, ["beta-light", "zulu-light", "alpha-dark"]);
     }
 
     #[test]

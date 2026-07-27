@@ -15,6 +15,19 @@ pub struct Rgba {
     pub a: u8,
 }
 
+impl Rgba {
+    /// Whether a background of this colour reads as light, by sRGB luma.
+    pub fn is_light(self) -> bool {
+        0.2126 * f32::from(self.r) + 0.7152 * f32::from(self.g) + 0.0722 * f32::from(self.b) > 127.5
+    }
+}
+
+/// Sort rank for a theme list: light themes first, dark after; a theme
+/// whose preview failed to load ranks dark.
+pub fn dark_rank(preview: &Option<(Rgba, Rgba)>) -> bool {
+    !preview.as_ref().is_some_and(|(bg, _)| bg.is_light())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Theme {
     pub surface: Surface,
@@ -707,6 +720,18 @@ selection_bg = "#33445566"
         let bad_color = temp_theme("badcolor", "[surface]\nbackground = \"#zzz\"\n");
         assert!(load_file(&bad_color).is_none());
         std::fs::remove_file(&bad_color).unwrap();
+    }
+
+    #[test]
+    fn light_backgrounds_read_as_light() {
+        assert!(hex("#fdf6e3").is_light(), "solarized paper");
+        assert!(hex("#ffffff").is_light());
+        assert!(!hex("#282a36").is_light(), "dracula night");
+        assert!(!hex("#000000").is_light());
+        assert!(
+            !hex("#2d353b").is_light(),
+            "everforest dark sits near the middle"
+        );
     }
 
     #[test]

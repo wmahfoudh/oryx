@@ -940,6 +940,8 @@ impl App {
                 themes.push((entry.name, preview));
             }
         }
+        // The same shelves the browser shows: light first, dark after.
+        themes.sort_by(|a, b| (theme::dark_rank(&a.1), &a.0).cmp(&(theme::dark_rank(&b.1), &b.0)));
         let settings = self.export_settings();
         let dialog = ExportDialog::new(settings, self.fonts.families(), themes);
         self.overlay = Some(Box::new(dialog));

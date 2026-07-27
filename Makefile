@@ -15,11 +15,11 @@ release:
 	mkdir -p release/linux/oryx release/windows/oryx
 	cp target/release/oryx release/linux/oryx/
 	cp -r themes release/linux/oryx/themes
-	cp LICENSE README.md packaging/install.sh release/linux/oryx/
+	cp LICENSE packaging/install.sh release/linux/oryx/
 	tar -C release/linux -czf release/oryx-$(VERSION)-linux-x86_64.tar.gz oryx
 	cp target/x86_64-pc-windows-gnu/release/oryx.exe release/windows/oryx/
 	cp -r themes release/windows/oryx/themes
-	cp LICENSE README.md packaging/install.ps1 release/windows/oryx/
+	cp LICENSE packaging/install.ps1 release/windows/oryx/
 	cd release/windows && zip -qr ../oryx-$(VERSION)-windows-x86_64.zip oryx
 	rm -rf release/linux release/windows
 	ls -l release

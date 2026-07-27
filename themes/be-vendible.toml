@@ -12,13 +12,13 @@ h6 = "#807B75"
 
 [text]
 body = "#121212"
-bold = "#000000"
+bold = "#00737E"
 italic = "#6B5F94"
 strike = "#ABA7A2"
 inline_code = "#00049E"
 inline_code_bg = "#EFECE6"
 link = "#2C32FF"
-math = "#00737E"
+math = "#0072A3"
 
 [blocks]
 code_bg = "#F4F1EC"

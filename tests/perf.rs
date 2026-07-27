@@ -9,7 +9,9 @@ use std::time::Instant;
 use oryx::doc::images::MediaCache;
 use oryx::doc::load;
 use oryx::doc::model::{BlockKind, Document};
-use oryx::layout::{layout_begin, layout_more, ViewConfig, OPEN_SLICE};
+use oryx::export::paginate::paginate;
+use oryx::export::{pdf, ExportSettings, PageGeometry, PageSize};
+use oryx::layout::{layout, layout_begin, layout_more, ViewConfig, OPEN_SLICE};
 use oryx::style::fonts::FontStore;
 use oryx::style::highlight;
 use oryx::style::theme::Theme;
@@ -100,6 +102,42 @@ fn assert_first_frame_is_whole(laid: &Laid, what: &str) {
     );
 }
 
+/// The whole export path a Ctrl+E pays after highlighting settles:
+/// layout at the page width, pagination, and emission to bytes.
+fn measure_export(doc: &Document) -> (u128, usize, usize) {
+    let mut fonts = FontStore::new();
+    let mut media = MediaCache::new(PathBuf::from("."));
+    let theme = Theme::default_dark();
+    let cfg = ViewConfig {
+        body_size: 11.0,
+        code_size: 9.0,
+        zoom: 1.0,
+        ..ViewConfig::default()
+    };
+    let geometry = PageGeometry::new(PageSize::A4, 11.0);
+    let settings = ExportSettings {
+        body_size: 11.0,
+        code_size: 9.0,
+        page: PageSize::A4,
+        page_numbers: true,
+        ..ExportSettings::default()
+    };
+    let started = Instant::now();
+    let laid = layout(doc, &theme, &mut fonts, &mut media, &cfg, geometry.width);
+    let pages = paginate(doc, &laid, &geometry);
+    let count = pages.len();
+    let job = pdf::Job {
+        doc,
+        layout: &laid,
+        theme: &theme,
+        geometry: &geometry,
+        settings: &settings,
+        title: "perf",
+    };
+    let bytes = pdf::build(&job, &pages, &mut fonts, &mut media).expect("the export builds");
+    (started.elapsed().as_millis(), count, bytes.len())
+}
+
 /// The syntect cost that lazy highlighting moves off the open path:
 /// every code block highlighted in full on warm grammars.
 fn measure_highlight(doc: &Document) -> u128 {
@@ -159,14 +197,16 @@ fn tiers_measured() {
         let laid = measure_layout(&doc);
         assert!(laid.height > 0.0, "markdown fixture laid out");
         assert_first_frame_is_whole(&laid, &format!("md {name}"));
-        print_row("md", name, open_ms, highlight_ms, &laid);
+        let export = measure_export(&doc);
+        print_row("md", name, open_ms, highlight_ms, &laid, export);
 
         let (open_ms, doc) = measure_open(&large_gen::generate_code(*bytes), "rs");
         let highlight_ms = measure_highlight(&doc);
         let laid = measure_layout(&doc);
         assert!(laid.height > 0.0, "code fixture laid out");
         assert_first_frame_is_whole(&laid, &format!("code {name}"));
-        print_row("code", name, open_ms, highlight_ms, &laid);
+        let export = measure_export(&doc);
+        print_row("code", name, open_ms, highlight_ms, &laid, export);
     }
 }
 
@@ -242,11 +282,25 @@ fn interactive_paths_measured() {
     }
 }
 
-fn print_row(kind: &str, tier: &str, open_ms: u128, highlight_ms: u128, laid: &Laid) {
+fn print_row(
+    kind: &str,
+    tier: &str,
+    open_ms: u128,
+    highlight_ms: u128,
+    laid: &Laid,
+    export: (u128, usize, usize),
+) {
+    let (export_ms, pages, pdf_bytes) = export;
     println!(
         "{kind:<4} {tier:>6}: open {open_ms:>5}ms (highlight {highlight_ms:>5}ms), \
          slice {:>3}ms placing {:>9.0}px, pass {:>5}ms, runs {:>7}, rects {:>7}, \
-         height {:>9.0}px",
-        laid.first_ms, laid.first_height, laid.ms, laid.runs, laid.rects, laid.height
+         height {:>9.0}px, pdf {export_ms:>6}ms for {pages:>5} pages ({:.1}MB)",
+        laid.first_ms,
+        laid.first_height,
+        laid.ms,
+        laid.runs,
+        laid.rects,
+        laid.height,
+        pdf_bytes as f32 / (1024.0 * 1024.0)
     );
 }

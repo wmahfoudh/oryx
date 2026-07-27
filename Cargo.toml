@@ -10,7 +10,7 @@ anyhow = "1"
 arboard = { version = "3", default-features = false, features = ["wayland-data-control"] }
 cosmic-text = "0.17.0"
 directories = "6"
-image = "0.25"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "rayon"] }
 miniz_oxide = "0.8"
 open = "5"
 pdf-writer = "0.15"
@@ -28,7 +28,7 @@ ureq = { version = "3.2.1", default-features = false, features = ["native-tls", 
 winit = "0.30"
 
 [dev-dependencies]
-image = "0.25"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "rayon"] }
 lopdf = "0.44"
 
 [build-dependencies]
@@ -37,3 +37,8 @@ resvg = "0.45.1"
 
 [target."cfg(windows)".dependencies]
 winreg = "0.56.0"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = "symbols"

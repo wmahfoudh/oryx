@@ -129,16 +129,16 @@ Ctrl is Cmd on macOS.
 
 Oryx parses the file when it opens, lays out the first screens, and paints a band that covers the viewport plus a couple of screens either side. Scrolling inside that band is a memory copy, so the cost of a scroll frame does not depend on how long the document is. Syntax highlighting and the layout below follow in the background, a slice at a time, without moving anything already on screen. The event loop wakes only for input, and an idle window uses no CPU at all.
 
-Measured on one Linux machine, release build, from cold launch to the first frame:
+Measured on one Linux machine, release build. First frame is cold launch to the first paint; the export column is Ctrl+E to the finished PDF, which lays the whole document out again at page size:
 
-| Document | First frame |
-|---|---|
-| 1MB source file | 81ms |
-| 8MB source file | 90ms |
-| 1MB markdown | 82ms |
-| 8MB markdown | 317ms |
+| Document | First frame | PDF export |
+|---|---|---|
+| 1MB source file | 81ms | 1.5s |
+| 8MB source file | 91ms | 11s |
+| 1MB markdown | 83ms | 2.2s |
+| 8MB markdown | 438ms | 17s |
 
-A performance test in the repository checks the startup, relayout and paint timings.
+The 8MB markdown export writes a 9219-page file. A performance test in the repository checks the startup, relayout, paint and export timings.
 
 ## Limits
 
