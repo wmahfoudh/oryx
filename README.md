@@ -47,7 +47,7 @@ Most markdown tools are editors with a preview attached, or they embed a browser
 
 ## Themes
 
-Thirty-one themes ship with Oryx. Each is a single TOML file with 51 color roles, so every element can be colored on its own. A missing key falls back to a default. A malformed file is skipped, and the active theme stays.
+Thirty-one themes ship with Oryx. Each is a single TOML file with 51 color roles, so every element can be colored on its own. A missing key falls back to a default. A malformed file is skipped, and the active theme stays. Delete every theme file and the next launch recreates the folder with one complete theme to build from.
 
 The browser on Ctrl+T previews themes and applies them live.
 
@@ -55,7 +55,7 @@ The browser on Ctrl+T previews themes and applies them live.
 
 The editor changes any role with a color picker while the document restyles behind it. Editing a bundled theme writes a copy, so the shipped files stay as they were. A custom theme is one TOML file dropped in the themes directory.
 
-Nine themes are original designs: `oryx-light` (the default) and its dark twin `oryx-dark`, `oryx-sand` and `oryx-night`, `inkstone`, `ember`, `meadow`, `slate`, and `be-vendible`. The rest adapt permissively licensed editor palettes, credited at the end.
+Nine themes are original designs: `oryx-light` and its dark twin `oryx-dark`, `oryx-sand` and `oryx-night`, `inkstone`, `ember`, `meadow`, `slate`, and `be-vendible`. The rest adapt permissively licensed editor palettes, credited at the end.
 
 ## Export to PDF
 

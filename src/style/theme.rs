@@ -28,6 +28,19 @@ pub fn dark_rank(preview: &Option<(Rgba, Rgba)>) -> bool {
     !preview.as_ref().is_some_and(|(bg, _)| bg.is_light())
 }
 
+/// Guarantees at least one theme file exists: when no scanned directory
+/// holds any, the target directory is created and the compiled palette
+/// is written there as `dracula.toml`, so the browser always has a row
+/// and the reader a complete file to duplicate from.
+pub fn seed(scan_dirs: &[PathBuf], target: &Path) -> std::io::Result<bool> {
+    if scan_dirs.iter().any(|dir| !scan(dir).is_empty()) {
+        return Ok(false);
+    }
+    std::fs::create_dir_all(target)?;
+    save(&target.join("dracula.toml"), &Theme::default_dark())?;
+    Ok(true)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Theme {
     pub surface: Surface,
@@ -176,75 +189,76 @@ const fn ca(r: u8, g: u8, b: u8, a: u8) -> Rgba {
 }
 
 impl Theme {
-    /// The oryx-dark palette, mirror of `themes/oryx-dark.toml`: warm
-    /// brown-black ground, headings distinguished by hue (red, gold,
-    /// olive, sienna), teal for links. Compiled-in fallback for every role.
+    /// The dracula palette, mirror of `themes/dracula.toml`
+    /// (draculatheme.com, MIT): cold blue-gray ground, pink and purple
+    /// leads, cyan links. Compiled-in fallback for every role, and the
+    /// file the seeder writes when the collection is empty.
     pub fn default_dark() -> Theme {
         Theme {
             surface: Surface {
-                background: c(0x24, 0x1E, 0x16),
-                foreground: c(0xE8, 0xDF, 0xC8),
+                background: c(0x28, 0x2A, 0x36),
+                foreground: c(0xF8, 0xF8, 0xF2),
             },
             headings: Headings {
-                h1: c(0xE2, 0x5A, 0x45),
-                h2: c(0xD4, 0xA7, 0x3C),
-                h3: c(0xA9, 0xB4, 0x4A),
-                h4: c(0xC8, 0x7B, 0x45),
-                h5: c(0xB3, 0xA8, 0x8E),
-                h6: c(0x94, 0x8A, 0x76),
+                h1: c(0xFF, 0x79, 0xC6),
+                h2: c(0xBD, 0x93, 0xF9),
+                h3: c(0x8B, 0xE9, 0xFD),
+                h4: c(0x50, 0xFA, 0x7B),
+                h5: c(0xFF, 0xB8, 0x6C),
+                h6: c(0x62, 0x72, 0xA4),
             },
             text: Text {
-                body: c(0xE8, 0xDF, 0xC8),
-                bold: c(0xF5, 0xED, 0xD8),
-                italic: c(0xD9, 0xB8, 0xA6),
-                strike: c(0x87, 0x7E, 0x71),
-                inline_code: c(0xE0, 0xB0, 0x72),
-                inline_code_bg: c(0x32, 0x2A, 0x1F),
-                link: c(0x63, 0xB3, 0xA4),
-                math: c(0xB7, 0x9F, 0xD1),
+                body: c(0xF8, 0xF8, 0xF2),
+                bold: c(0xFF, 0xB8, 0x6C),
+                italic: c(0xF1, 0xFA, 0x8C),
+                strike: c(0x62, 0x72, 0xA4),
+                inline_code: c(0x50, 0xFA, 0x7B),
+                inline_code_bg: c(0x34, 0x37, 0x46),
+                link: c(0x8B, 0xE9, 0xFD),
+                math: c(0xBD, 0x93, 0xF9),
             },
             blocks: Blocks {
-                code_bg: c(0x2C, 0x25, 0x1B),
-                code_border: c(0x40, 0x37, 0x2A),
-                quote_bg: c(0x29, 0x22, 0x18),
-                quote_bar: c(0x6B, 0x5F, 0x4B),
-                table_border: c(0x40, 0x37, 0x2A),
-                table_header_bg: c(0x32, 0x2A, 0x1F),
-                table_row_alt_bg: c(0x27, 0x20, 0x13),
-                rule: c(0x4A, 0x41, 0x32),
-                frontmatter_bg: c(0x29, 0x22, 0x18),
-                frontmatter_fg: c(0x9C, 0x90, 0x78),
+                code_bg: c(0x21, 0x22, 0x2C),
+                code_border: c(0x44, 0x47, 0x5A),
+                quote_bg: c(0x2E, 0x30, 0x40),
+                quote_bar: c(0xBD, 0x93, 0xF9),
+                table_border: c(0x44, 0x47, 0x5A),
+                table_header_bg: c(0x34, 0x37, 0x46),
+                table_row_alt_bg: c(0x2C, 0x2E, 0x3A),
+                rule: c(0x44, 0x47, 0x5A),
+                frontmatter_bg: c(0x21, 0x22, 0x2C),
+                frontmatter_fg: c(0x62, 0x72, 0xA4),
             },
             syntax: Syntax {
-                keyword: c(0xE0, 0x68, 0x45),
-                string: c(0xCE, 0x88, 0x71),
-                number: c(0xC8, 0x9B, 0x5C),
-                function: c(0xB7, 0xC2, 0x58),
-                type_: c(0x63, 0xB3, 0xA4),
-                comment: c(0x8D, 0x82, 0x71),
-                operator: c(0xB3, 0xA8, 0x8E),
-                variable: c(0xE8, 0xDF, 0xC8),
-                punctuation: c(0xA3, 0x96, 0x82),
+                keyword: c(0xFF, 0x79, 0xC6),
+                string: c(0xF1, 0xFA, 0x8C),
+                number: c(0xBD, 0x93, 0xF9),
+                function: c(0x50, 0xFA, 0x7B),
+                type_: c(0x8B, 0xE9, 0xFD),
+                comment: c(0x62, 0x72, 0xA4),
+                operator: c(0xFF, 0x79, 0xC6),
+                variable: c(0xF8, 0xF8, 0xF2),
+                punctuation: c(0xF8, 0xF8, 0xF2),
             },
             alerts: Alerts {
-                note: c(0x6F, 0xA8, 0xD9),
-                tip: c(0x8F, 0xBF, 0x6F),
-                important: c(0xB7, 0x9F, 0xD1),
-                warning: c(0xD4, 0xA7, 0x3C),
-                caution: c(0xE2, 0x5A, 0x45),
+                note: c(0x8B, 0xE9, 0xFD),
+                tip: c(0x50, 0xFA, 0x7B),
+                important: c(0xBD, 0x93, 0xF9),
+                warning: c(0xFF, 0xB8, 0x6C),
+                caution: c(0xFF, 0x55, 0x55),
             },
             ui: Ui {
-                sidebar_bg: c(0x1D, 0x18, 0x11),
-                sidebar_fg: c(0xC9, 0xBC, 0xA0),
-                sidebar_dir: c(0xE0, 0x68, 0x45),
-                scrollbar: c(0x40, 0x37, 0x2A),
-                scrollbar_hover: c(0x59, 0x50, 0x3C),
-                selection_bg: c(0x4A, 0x40, 0x28),
-                overlay_bg: c(0x2C, 0x25, 0x1B),
-                overlay_fg: c(0xE8, 0xDF, 0xC8),
-                overlay_highlight: c(0x4A, 0x40, 0x28),
-                search_match_bg: ca(0xD4, 0xA7, 0x3C, 0x4D),
-                search_current_bg: ca(0xE0, 0x68, 0x45, 0x80),
+                sidebar_bg: c(0x21, 0x22, 0x2C),
+                sidebar_fg: c(0xF8, 0xF8, 0xF2),
+                sidebar_dir: c(0xBD, 0x93, 0xF9),
+                scrollbar: c(0x44, 0x47, 0x5A),
+                scrollbar_hover: c(0x62, 0x72, 0xA4),
+                selection_bg: c(0x44, 0x47, 0x5A),
+                overlay_bg: c(0x34, 0x37, 0x46),
+                overlay_fg: c(0xF8, 0xF8, 0xF2),
+                overlay_highlight: c(0x44, 0x47, 0x5A),
+                search_match_bg: ca(0xF1, 0xFA, 0x8C, 0x38),
+                search_current_bg: ca(0xFF, 0xB8, 0x6C, 0x8C),
             },
         }
     }
@@ -720,6 +734,46 @@ selection_bg = "#33445566"
         let bad_color = temp_theme("badcolor", "[surface]\nbackground = \"#zzz\"\n");
         assert!(load_file(&bad_color).is_none());
         std::fs::remove_file(&bad_color).unwrap();
+    }
+
+    #[test]
+    fn the_compiled_fallback_mirrors_the_dracula_file() {
+        let theme = load_file(Path::new("themes/dracula.toml")).expect("the bundled file parses");
+        assert_eq!(theme, Theme::default_dark(), "file and hardcode agree");
+    }
+
+    #[test]
+    fn seeding_writes_dracula_when_no_theme_exists() {
+        let base = std::env::temp_dir().join(format!("oryx-seed-{}", std::process::id()));
+        let empty = base.join("empty");
+        let user = base.join("user/themes");
+        std::fs::create_dir_all(&empty).unwrap();
+        assert!(
+            seed(std::slice::from_ref(&empty), &user).unwrap(),
+            "an empty world seeds"
+        );
+        let written = load_file(&user.join("dracula.toml")).expect("the seeded file parses");
+        assert_eq!(written, Theme::default_dark());
+        assert!(
+            !seed(&[empty, user.clone()], &user).unwrap(),
+            "a second start leaves it alone"
+        );
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn seeding_leaves_a_populated_collection_alone() {
+        let base = std::env::temp_dir().join(format!("oryx-seeded-{}", std::process::id()));
+        let full = base.join("full");
+        let user = base.join("user/themes");
+        std::fs::create_dir_all(&full).unwrap();
+        std::fs::write(full.join("mine.toml"), "").unwrap();
+        assert!(!seed(&[full], &user).unwrap());
+        assert!(
+            !user.exists(),
+            "nothing is created behind a full collection"
+        );
+        std::fs::remove_dir_all(&base).unwrap();
     }
 
     #[test]

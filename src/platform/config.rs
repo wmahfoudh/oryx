@@ -75,7 +75,7 @@ impl WindowState {
 impl Default for Config {
     fn default() -> Config {
         Config {
-            theme: "oryx-light".to_string(),
+            theme: "dracula".to_string(),
             body_family: BODY_FAMILY.to_string(),
             code_family: CODE_FAMILY.to_string(),
             body_size: 22.0,
@@ -358,7 +358,7 @@ mod tests {
     fn missing_file_gives_defaults() {
         let loaded = load_from(Path::new("/nonexistent/oryx-config.toml"));
         assert_eq!(loaded, Config::default());
-        assert_eq!(loaded.theme, "oryx-light");
+        assert_eq!(loaded.theme, "dracula");
     }
 
     #[test]

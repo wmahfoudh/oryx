@@ -89,6 +89,14 @@ pub fn run(path: Option<PathBuf>, theme_name: Option<String>) -> anyhow::Result<
         ..ViewConfig::default()
     };
     let theme_choice = theme_name.as_deref().unwrap_or(&config.theme);
+    // At least one theme file always exists: an emptied collection is
+    // reseeded from the compiled palette before resolution runs.
+    if let Some(base) = directories::BaseDirs::new() {
+        let target = base.data_dir().join("oryx/themes");
+        if let Err(err) = theme::seed(&theme_dirs(), &target) {
+            eprintln!("oryx: cannot seed themes: {err}");
+        }
+    }
     let mut app = App {
         gfx: None,
         document,
@@ -161,7 +169,7 @@ fn theme_dirs() -> Vec<PathBuf> {
     dirs
 }
 
-/// Resolves the launch theme by name, falling back to the oryx-light file,
+/// Resolves the launch theme by name, falling back to the dracula file,
 /// then to the compiled default when no theme file is found.
 fn startup_theme(name: Option<&str>) -> Theme {
     let dirs = theme_dirs();
@@ -171,7 +179,7 @@ fn startup_theme(name: Option<&str>) -> Theme {
             None => eprintln!("oryx: theme {name:?} not found, using the default"),
         }
     }
-    theme::find(&dirs, "oryx-light").unwrap_or_else(Theme::default_dark)
+    theme::find(&dirs, "dracula").unwrap_or_else(Theme::default_dark)
 }
 
 struct App {
