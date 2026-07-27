@@ -69,7 +69,7 @@ Pages break where a reader would want them to: never through a line, never leavi
 
 ### From a release
 
-Download the archive for your platform from the [releases page](https://codeberg.org/wmahfoudh/oryx/releases), extract it, and run the installer inside:
+Download the archive for your platform from the releases page on [Codeberg](https://codeberg.org/wmahfoudh/oryx/releases) or [GitHub](https://github.com/wmahfoudh/oryx/releases), extract it, and run the installer inside:
 
 ```
 tar -xzf oryx-*-linux-x86_64.tar.gz && cd oryx && ./install.sh
@@ -82,7 +82,7 @@ On Windows, extract the zip and run `install.ps1` in PowerShell. The installer c
 Building requires Rust 1.80 or later.
 
 ```
-git clone https://codeberg.org/wmahfoudh/oryx.git
+git clone https://codeberg.org/wmahfoudh/oryx.git   # or https://github.com/wmahfoudh/oryx.git
 cd oryx
 make install
 ```
@@ -154,7 +154,7 @@ Oryx is built for everyday documents, and some things are out of scope.
 
 ## Contributing
 
-Bug reports and theme contributions are welcome on the [issue tracker](https://codeberg.org/wmahfoudh/oryx/issues). Pull requests are read with interest. `make check` is the gate: formatting, clippy for the Linux, Windows and macOS targets, build, and the full test suite. The documents under `tests/showcase/` are the ones behind the screenshots above, and each exercises a single feature.
+Bug reports and theme contributions are welcome on the issue tracker, on [Codeberg](https://codeberg.org/wmahfoudh/oryx/issues) or [GitHub](https://github.com/wmahfoudh/oryx/issues). Pull requests are read with interest. `make check` is the gate: formatting, clippy for the Linux, Windows and macOS targets, build, and the full test suite. The documents under `tests/showcase/` are the ones behind the screenshots above, and each exercises a single feature.
 
 ## Credits
 
