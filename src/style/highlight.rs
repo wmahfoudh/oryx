@@ -1,7 +1,7 @@
 //! Maps syntect parse scopes onto theme syntax roles at load time.
 
 use std::ops::Range;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
@@ -100,9 +100,11 @@ pub struct Arrival {
 pub struct Highlighter {
     arrivals: Arc<Mutex<Vec<(u64, Arrival)>>>,
     generation: Arc<AtomicU64>,
-    /// Raised while a worker has blocks left. An export waits on it,
-    /// since a PDF cannot wash in after it is written.
-    running: Arc<AtomicBool>,
+    /// Highest generation that ran to completion. A cancelled worker
+    /// never raises it, so `is_running` tracks the live generation
+    /// alone. An export waits on it, since a PDF cannot wash in after
+    /// it is written.
+    done: Arc<AtomicU64>,
 }
 
 impl Default for Highlighter {
@@ -116,7 +118,7 @@ impl Highlighter {
         Highlighter {
             arrivals: Arc::new(Mutex::new(Vec::new())),
             generation: Arc::new(AtomicU64::new(0)),
-            running: Arc::new(AtomicBool::new(false)),
+            done: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -126,15 +128,15 @@ impl Highlighter {
     pub fn start(&mut self, pending: Vec<PendingBlock>, waker: impl Fn() + Send + 'static) {
         let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         if pending.is_empty() {
+            self.done.fetch_max(generation, Ordering::SeqCst);
             return;
         }
         let arrivals = Arc::clone(&self.arrivals);
         let current = Arc::clone(&self.generation);
-        let running = Arc::clone(&self.running);
-        running.store(true, Ordering::SeqCst);
+        let done = Arc::clone(&self.done);
         std::thread::spawn(move || {
             for p in pending {
-                let done = spans_chunked(
+                let delivered = spans_chunked(
                     &p.lines,
                     p.language.as_deref(),
                     CHUNK_LINES,
@@ -155,18 +157,17 @@ impl Highlighter {
                         true
                     },
                 );
-                if !done {
-                    running.store(false, Ordering::SeqCst);
+                if !delivered {
                     return;
                 }
             }
-            running.store(false, Ordering::SeqCst);
+            done.fetch_max(generation, Ordering::SeqCst);
         });
     }
 
-    /// Whether a worker still has blocks to colour.
+    /// Whether the live worker still has blocks to colour.
     pub fn is_running(&self) -> bool {
-        self.running.load(Ordering::SeqCst)
+        self.done.load(Ordering::SeqCst) < self.generation.load(Ordering::SeqCst)
     }
 
     /// Arrivals of the current generation in delivery order; stale
@@ -327,6 +328,55 @@ mod tests {
             .find(|(r, _)| r.contains(&pos))
             .map(|(_, role)| *role)
             .unwrap_or(SyntaxRole::Plain)
+    }
+
+    fn pending_blocks(count: usize, lines_each: usize) -> Vec<PendingBlock> {
+        (0..count)
+            .map(|block| PendingBlock {
+                block,
+                language: None,
+                lines: vec![String::from("plain text line"); lines_each],
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_empty_start_reports_not_running() {
+        let mut h = Highlighter::new();
+        h.start(pending_blocks(8, 600), || {});
+        assert!(h.is_running());
+        h.start(Vec::new(), || {});
+        assert!(!h.is_running(), "an empty start supersedes the old worker");
+    }
+
+    // The block counts sweep the cancellation point across chunk
+    // boundaries; the failure is the flag dropping while the live
+    // worker still has chunks to deliver.
+    #[test]
+    fn a_cancelled_worker_does_not_mark_the_next_one_done() {
+        for blocks in [4usize, 16, 64] {
+            let mut h = Highlighter::new();
+            let second = pending_blocks(blocks, 600);
+            let expected: usize = second
+                .iter()
+                .map(|p| p.lines.len().div_ceil(CHUNK_LINES))
+                .sum();
+            h.start(pending_blocks(blocks, 600), || {});
+            h.start(second, || {});
+            let mut got = 0usize;
+            for _ in 0..20_000 {
+                got += h.drain().len();
+                if got >= expected || !h.is_running() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            got += h.drain().len();
+            assert_eq!(
+                got, expected,
+                "{blocks} blocks: the flag dropped before the live worker finished"
+            );
+        }
     }
 
     #[test]

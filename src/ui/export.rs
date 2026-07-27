@@ -132,8 +132,14 @@ impl Overlay for ExportProgress {
         );
     }
 
-    fn key(&mut self, _key: &Key, _ctrl: bool, _shift: bool) -> OverlayResult {
-        OverlayResult::Close
+    fn key(&mut self, key: &Key, _ctrl: bool, _shift: bool) -> OverlayResult {
+        match &self.state {
+            ExportState::Running(_) => match key {
+                Key::Named(NamedKey::Escape) => OverlayResult::Close,
+                _ => OverlayResult::Open,
+            },
+            ExportState::Result(_) => OverlayResult::Close,
+        }
     }
 
     fn click(&mut self, _x: f32, _y: f32) -> OverlayResult {
@@ -606,6 +612,45 @@ mod tests {
 
     fn press(dialog: &mut ExportDialog, key: NamedKey) -> OverlayResult {
         dialog.key(&Key::Named(key), false, false)
+    }
+
+    #[test]
+    fn a_running_export_cancels_on_escape_alone() {
+        let mut p = ExportProgress::new(Progress {
+            phase: crate::export::Phase::Highlight,
+            done: 0,
+            total: 0,
+        });
+        assert!(matches!(
+            p.key(&Key::Character("a".into()), false, false),
+            OverlayResult::Open
+        ));
+        assert!(matches!(
+            p.key(&Key::Named(NamedKey::F1), false, false),
+            OverlayResult::Open
+        ));
+        assert!(matches!(
+            p.key(&Key::Named(NamedKey::ArrowDown), false, false),
+            OverlayResult::Open
+        ));
+        assert!(matches!(
+            p.key(&Key::Named(NamedKey::Escape), false, false),
+            OverlayResult::Close
+        ));
+    }
+
+    #[test]
+    fn a_settled_result_dismisses_on_any_key() {
+        let mut p = ExportProgress::settled(String::from("3 pages to out.pdf"));
+        assert!(matches!(
+            p.key(&Key::Character("a".into()), false, false),
+            OverlayResult::Close
+        ));
+        let mut p = ExportProgress::settled(String::from("3 pages to out.pdf"));
+        assert!(matches!(
+            p.key(&Key::Named(NamedKey::Escape), false, false),
+            OverlayResult::Close
+        ));
     }
 
     #[test]

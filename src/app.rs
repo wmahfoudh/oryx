@@ -793,6 +793,13 @@ impl App {
     /// message instead and the app stays up. Dialog opens re-root the
     /// sidebar; sidebar clicks keep the tree in place.
     fn open_file(&mut self, path: &Path, reroot: bool) {
+        // An in-flight export steps against the document it was built
+        // for; it cannot survive the swap. Its progress overlay dies
+        // with it, since nothing would ever advance it again.
+        if self.export.take().is_some() {
+            self.overlay = None;
+        }
+        self.export_warning = None;
         let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         let loaded = load::open(&path, Some(Instant::now() + load::OPEN_BUDGET));
         let opened = loaded.is_ok();
