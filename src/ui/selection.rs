@@ -103,35 +103,7 @@ pub fn pos_at(lay: &LayoutDoc, fonts: &mut FontStore, x: f32, y: f32) -> Option<
 /// selected run fragment, in document coordinates. Boxes on the same line
 /// share the height of the line's tallest run.
 pub fn rects(sel: &Selection, lay: &LayoutDoc, fonts: &mut FontStore) -> Vec<(f32, f32, f32, f32)> {
-    let (a, b) = sel.ordered();
-    let mut out = Vec::new();
-    for index in a.run..=b.run.min(lay.runs.len().saturating_sub(1)) {
-        let run = &lay.runs[index];
-        if run.span == MARKER_SPAN {
-            continue;
-        }
-        let x0 = if index == a.run {
-            run.x + prefix_width(fonts, run, a.ch)
-        } else {
-            run.x
-        };
-        let x1 = if index == b.run {
-            run.x + prefix_width(fonts, run, b.ch)
-        } else {
-            run.x + run.width
-        };
-        if x1 <= x0 {
-            continue;
-        }
-        let height = lay
-            .runs
-            .iter()
-            .filter(|r| r.block == run.block && r.y == run.y)
-            .map(|r| metrics::LINE_HEIGHT * r.size)
-            .fold(metrics::LINE_HEIGHT * run.size, f32::max);
-        out.push((x0, run.y, x1 - x0, height));
-    }
-    out
+    rects_cached(sel, lay, fonts, &mut ShapeCache::default())
 }
 
 /// The selected range as unstyled text. Wrapped lines rejoin with a space,
@@ -366,6 +338,64 @@ fn slice_chars(text: &str, from: usize, to: usize) -> &str {
     &text[start..end]
 }
 
+/// Shaped buffers keyed by run index, reused across the matches of one
+/// search sync, so a run is shaped once however many matches it holds.
+#[derive(Default)]
+pub struct ShapeCache {
+    buffers: std::collections::HashMap<usize, Buffer>,
+}
+
+impl ShapeCache {
+    pub fn len(&self) -> usize {
+        self.buffers.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.buffers.is_empty()
+    }
+}
+
+/// As `rects`, sharing shaped runs through the cache across calls. The
+/// line-height lookup rides the y index, since it only needs the runs
+/// on the fragment's own line.
+pub fn rects_cached(
+    sel: &Selection,
+    lay: &LayoutDoc,
+    fonts: &mut FontStore,
+    cache: &mut ShapeCache,
+) -> Vec<(f32, f32, f32, f32)> {
+    let (a, b) = sel.ordered();
+    let mut out = Vec::new();
+    for index in a.run..=b.run.min(lay.runs.len().saturating_sub(1)) {
+        let run = &lay.runs[index];
+        if run.span == MARKER_SPAN {
+            continue;
+        }
+        let x0 = if index == a.run {
+            run.x + prefix_width(cache, fonts, index, run, a.ch)
+        } else {
+            run.x
+        };
+        let x1 = if index == b.run {
+            run.x + prefix_width(cache, fonts, index, run, b.ch)
+        } else {
+            run.x + run.width
+        };
+        if x1 <= x0 {
+            continue;
+        }
+        let (head, tail) = lay.runs_in(run.y, run.y);
+        let height = lay.runs[head]
+            .iter()
+            .chain(&lay.runs[tail])
+            .filter(|r| r.block == run.block && r.y == run.y)
+            .map(|r| metrics::LINE_HEIGHT * r.size)
+            .fold(metrics::LINE_HEIGHT * run.size, f32::max);
+        out.push((x0, run.y, x1 - x0, height));
+    }
+    out
+}
+
 /// Shapes a run exactly as paint does, single line at its own metrics.
 fn shape_run(fonts: &mut FontStore, run: &TextRun) -> Buffer {
     let line_height = metrics::LINE_HEIGHT * run.size;
@@ -408,8 +438,15 @@ fn char_index_at(fonts: &mut FontStore, run: &TextRun, x_local: f32) -> usize {
     run.text.chars().count()
 }
 
-/// Advance width of the first `ch` characters of a run.
-fn prefix_width(fonts: &mut FontStore, run: &TextRun, ch: usize) -> f32 {
+/// Advance width of the first `ch` characters of a run, shaping through
+/// the cache so a run shapes once per pass however often it is asked.
+fn prefix_width(
+    cache: &mut ShapeCache,
+    fonts: &mut FontStore,
+    index: usize,
+    run: &TextRun,
+    ch: usize,
+) -> f32 {
     if ch == 0 {
         return 0.0;
     }
@@ -417,7 +454,10 @@ fn prefix_width(fonts: &mut FontStore, run: &TextRun, ch: usize) -> f32 {
     if byte >= run.text.len() {
         return run.width;
     }
-    let buffer = shape_run(fonts, run);
+    let buffer = cache
+        .buffers
+        .entry(index)
+        .or_insert_with(|| shape_run(fonts, run));
     if let Some(line) = buffer.layout_runs().next() {
         for glyph in line.glyphs {
             if glyph.start >= byte {
@@ -436,10 +476,44 @@ mod tests {
     use crate::layout::{layout, ViewConfig};
 
     #[test]
+    fn cached_match_rects_equal_direct_and_share_shapings() {
+        let doc = markdown::parse(&"the word the word the word here.\n\n".repeat(8));
+        let mut fonts = FontStore::new();
+        let mut media = MediaCache::new(std::path::PathBuf::from("."));
+        let lay = layout(
+            &doc,
+            &crate::style::theme::Theme::default_dark(),
+            &mut fonts,
+            &mut media,
+            &ViewConfig::default(),
+            500.0,
+        );
+        let matches = crate::ui::search::matches(&lay, "word");
+        assert!(matches.len() >= 16, "the fixture is match-dense");
+        let mut cache = ShapeCache::default();
+        for m in &matches {
+            let direct = rects(m, &lay, &mut fonts);
+            let cached = rects_cached(m, &lay, &mut fonts, &mut cache);
+            assert_eq!(direct, cached, "the cache changes nothing visible");
+        }
+        assert!(!cache.is_empty(), "the cache actually holds shaped runs");
+        assert!(
+            cache.len() < matches.len(),
+            "{} runs shaped for {} matches: once per run, not per match",
+            cache.len(),
+            matches.len()
+        );
+    }
+
+    #[test]
     fn line_end_steps_back_over_a_carriage_return() {
         let src = "alpha\r\nbeta\r\n";
         assert_eq!(line_end(src, 2), 5, "the carriage return stays out");
-        assert_eq!(line_end(src, 9), 11, "the second line ends before its return");
+        assert_eq!(
+            line_end(src, 9),
+            11,
+            "the second line ends before its return"
+        );
         assert_eq!(line_end("plain\nnext", 1), 5, "clean sources are untouched");
     }
     use crate::style::theme::Theme;

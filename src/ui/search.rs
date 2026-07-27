@@ -32,7 +32,12 @@ const COUNTER_SIZE: f32 = 13.0;
 pub struct SearchState {
     pub query: TextField,
     pub matches: Vec<Selection>,
+    /// Highlight rects for the matches inside the band window alone;
+    /// the counter and navigation use the full match list.
     pub rects: Vec<(usize, (f32, f32, f32, f32))>,
+    /// The scroll position `rects` was computed around, so drifting a
+    /// viewport past it triggers a refresh.
+    pub rects_scroll: f32,
     pub current: usize,
     pub stale: bool,
 }

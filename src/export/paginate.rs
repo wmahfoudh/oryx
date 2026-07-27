@@ -830,10 +830,7 @@ mod rules {
             src.push_str(&"Filler paragraph here.\n\n".repeat(6));
             let doc = markdown::parse(&src);
             let l = laid_out(&doc);
-            assert!(
-                !l.rects.is_empty(),
-                "the missing image draws a placeholder"
-            );
+            assert!(!l.rects.is_empty(), "the missing image draws a placeholder");
             let pages = paginate(&doc, &l, &g);
             split_seen |= pages.len() > 1;
             for page in &pages {

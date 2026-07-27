@@ -123,6 +123,7 @@ pub fn run(path: Option<PathBuf>, theme_name: Option<String>) -> anyhow::Result<
         overlay_mouse: false,
         export: None,
         export_warning: None,
+        view_dirty: false,
         pre_edit: None,
         overlay_canvas: None,
         sidebar: None,
@@ -239,6 +240,9 @@ struct App {
     /// Set when the export's chosen theme no longer resolves, so the
     /// result line can say the active one was used instead.
     export_warning: Option<String>,
+    /// A view change waiting for its dialog to close before it writes
+    /// the config, so a held arrow key is not a disk write per repeat.
+    view_dirty: bool,
     /// Folder sidebar while open; the document lays out beside it.
     sidebar: Option<Sidebar>,
     /// Reused sidebar canvas, mirroring the overlay canvas mechanics.
@@ -369,6 +373,7 @@ impl App {
             query,
             matches: Vec::new(),
             rects: Vec::new(),
+            rects_scroll: 0.0,
             current: 0,
             stale: true,
         });
@@ -483,14 +488,44 @@ impl App {
             .iter()
             .position(|m| lay.runs[m.start.run].y >= scroll)
             .unwrap_or(0);
+        self.scroll_match_into_view();
+        self.refresh_search_rects();
+    }
+
+    /// Recomputes the highlight rects for the matches inside the band
+    /// window around the current scroll. Bounding the geometry is what
+    /// keeps a keystroke over thousands of matches cheap; scrolling past
+    /// the window refreshes it.
+    fn refresh_search_rects(&mut self) {
+        let vh = self.viewport_h();
+        let (lo, hi) = (self.scroll_y - 2.0 * vh, self.scroll_y + 3.0 * vh);
+        let scroll = self.scroll_y;
+        let Some(lay) = self.layout.as_ref() else {
+            return;
+        };
+        let Some(state) = self.search.as_mut() else {
+            return;
+        };
+        if state.stale {
+            return;
+        }
         let mut rects = Vec::new();
+        // One shaped buffer per run for the whole pass, however many
+        // matches the run holds.
+        let mut shaped = selection::ShapeCache::default();
         for (index, m) in state.matches.iter().enumerate() {
-            for rect in selection::rects(m, lay, &mut self.fonts) {
+            let Some(run) = lay.runs.get(m.start.run) else {
+                continue;
+            };
+            if run.y < lo || run.y > hi {
+                continue;
+            }
+            for rect in selection::rects_cached(m, lay, &mut self.fonts, &mut shaped) {
                 rects.push((index, rect));
             }
         }
         state.rects = rects;
-        self.scroll_match_into_view();
+        state.rects_scroll = scroll;
     }
 
     /// Centers the current match vertically when it sits off screen.
@@ -701,6 +736,12 @@ impl App {
         if self.inset() != before {
             self.band = None;
             self.sidebar_canvas = None;
+            // The same deferral a window resize gets: restarting a
+            // slow pass on every dragged frame would strand the reader
+            // at the top for the whole drag.
+            if self.layout.is_some() && scroll::defer_relayout(self.last_pass, SLICE) {
+                self.settle_at = Some(Instant::now() + scroll::SETTLE);
+            }
         }
         self.request_redraw();
     }
@@ -1029,6 +1070,10 @@ impl App {
             OverlayResult::Open => {}
             OverlayResult::Close => {
                 self.overlay = None;
+                if self.view_dirty {
+                    config::save(&self.config);
+                    self.view_dirty = false;
+                }
                 // Closing the progress overlay cancels the export, and
                 // nothing has reached the disk yet.
                 self.export = None;
@@ -1085,7 +1130,9 @@ impl App {
                 self.config.code_family = code_family;
                 self.config.body_size = body_size;
                 self.config.code_size = code_size;
-                config::save(&self.config);
+                // A held arrow key repeats this apply dozens of times a
+                // second; the disk write waits for the dialog to close.
+                self.view_dirty = true;
                 self.layout = None;
                 self.band = None;
             }
@@ -1251,6 +1298,8 @@ impl App {
         self.pass_spent = Duration::ZERO;
         self.layout_width = avail;
         self.band = None;
+        // The new width obsoletes every resized image buffer.
+        self.media.clear_scaled();
         self.pending_band_for = None;
         // Selection positions index the old layout's runs, and so do
         // search matches.
@@ -1381,6 +1430,11 @@ impl App {
     }
 
     fn redraw(&mut self) {
+        // Anything the pass or a recolor appended since the last frame
+        // joins the y index before this frame queries it.
+        if let Some(lay) = self.layout.as_mut() {
+            lay.index_more();
+        }
         let inset = self.inset() as u32;
         let Some(size) = self.gfx.as_ref().map(|g| g.window.inner_size()) else {
             return;
@@ -1406,6 +1460,12 @@ impl App {
         }
         self.resolve_pending();
         self.sync_search();
+        let drifted = self.search.as_ref().is_some_and(|state| {
+            !state.stale && (self.scroll_y - state.rects_scroll).abs() > self.viewport_h()
+        });
+        if drifted {
+            self.refresh_search_rects();
+        }
         let lay = self.layout.as_ref().expect("layout exists");
         self.scroll_y = scroll::clamp(self.scroll_y, lay.height, size.height as f32);
         let mut highlight: Vec<DecoRect> = match &self.selection {

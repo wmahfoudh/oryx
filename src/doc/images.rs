@@ -33,8 +33,30 @@ pub fn load(doc_dir: &Path, src: &str) -> Option<RgbaImage> {
 /// Rasterizes an SVG at its intrinsic size. Uses resvg's own tiny-skia
 /// pixmap and demultiplies into straight-alpha RGBA for the blit path.
 fn load_svg(bytes: &[u8]) -> Option<RgbaImage> {
-    let mut options = resvg::usvg::Options::default();
-    options.fontdb_mut().load_system_fonts();
+    // Enumerating the system fonts costs a noticeable pause and SVGs
+    // decode on the layout path, so the database is built exactly once.
+    static FONTDB: std::sync::OnceLock<Arc<resvg::usvg::fontdb::Database>> =
+        std::sync::OnceLock::new();
+    let fontdb = Arc::clone(FONTDB.get_or_init(|| {
+        let mut db = resvg::usvg::fontdb::Database::new();
+        db.load_system_fonts();
+        // The embedded faces answer the generic CSS families, so an
+        // SVG's text renders the same on every machine instead of
+        // depending on which platform names happen to exist.
+        for bytes in crate::style::fonts::EMBEDDED {
+            db.load_font_data(bytes.to_vec());
+        }
+        db.set_serif_family(crate::style::fonts::BODY_FAMILY);
+        db.set_sans_serif_family(crate::style::fonts::BODY_FAMILY);
+        db.set_cursive_family(crate::style::fonts::BODY_FAMILY);
+        db.set_fantasy_family(crate::style::fonts::BODY_FAMILY);
+        db.set_monospace_family(crate::style::fonts::CODE_FAMILY);
+        Arc::new(db)
+    }));
+    let options = resvg::usvg::Options {
+        fontdb,
+        ..Default::default()
+    };
     let tree = resvg::usvg::Tree::from_data(bytes, &options).ok()?;
     let size = tree.size().to_int_size();
     let (width, height) = (size.width().max(1), size.height().max(1));
@@ -207,6 +229,12 @@ impl MediaCache {
         self.original(src).map(|img| img.dimensions())
     }
 
+    /// Drops the resized buffers. A new layout pass changes the placed
+    /// sizes, so every entry is dead weight the moment one begins.
+    pub fn clear_scaled(&mut self) {
+        self.scaled.clear();
+    }
+
     /// RGBA bytes resized to exactly `width x height`, memoized per size.
     pub fn scaled(&mut self, src: &str, width: u32, height: u32) -> Option<&[u8]> {
         let key = (src.to_string(), width, height);
@@ -234,6 +262,33 @@ mod tests {
     fn write_png(dir: &Path, name: &str, w: u32, h: u32) {
         let img = RgbaImage::from_pixel(w, h, image::Rgba([200, 100, 50, 255]));
         img.save(dir.join(name)).unwrap();
+    }
+
+    /// Generic CSS families resolve to the faces Oryx embeds, so an SVG
+    /// badge's label renders the same on every machine instead of
+    /// vanishing when the platform lacks the database's default names.
+    #[test]
+    fn svg_text_renders_through_the_embedded_faces() {
+        let dir = temp_dir();
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="120" height="40">
+            <rect width="120" height="40" fill="#000"/>
+            <text x="10" y="28" font-family="sans-serif" font-size="20" fill="#fff">Ab</text>
+        </svg>"##;
+        std::fs::write(dir.join("text.svg"), svg).unwrap();
+        let img = load(&dir, "text.svg").expect("svg loads");
+        let lit = img.pixels().filter(|p| p[0] > 128 && p[3] > 128).count();
+        assert!(lit > 20, "the glyphs left {lit} lit pixels");
+    }
+
+    #[test]
+    fn a_new_pass_drops_the_scaled_buffers() {
+        let dir = temp_dir();
+        write_png(&dir, "evict.png", 40, 20);
+        let mut media = MediaCache::new(dir);
+        assert!(media.scaled("evict.png", 20, 10).is_some());
+        assert!(!media.scaled.is_empty());
+        media.clear_scaled();
+        assert!(media.scaled.is_empty(), "a new pass starts clean");
     }
 
     /// A truncated cache write must not pin its URL to a placeholder

@@ -170,6 +170,78 @@ fn tiers_measured() {
     }
 }
 
+/// The interactive paths the y index converted from scans to searches:
+/// link hit-testing (every mouse move) and the direct band paint (every
+/// frame of a drag or an open search). The linear hover column re-runs
+/// the pre-index scan for comparison; the band's own before figure is
+/// the 4.7ms full-scan share recorded in the backlog.
+#[test]
+#[ignore = "measurement only"]
+fn interactive_paths_measured() {
+    use oryx::layout::metrics;
+    for (name, bytes) in &TIERS[2..] {
+        let (_, doc) = measure_open(&large_gen::generate(*bytes), "md");
+        let mut fonts = FontStore::new();
+        let mut media = MediaCache::new(PathBuf::from("."));
+        let theme = Theme::default_dark();
+        let cfg = ViewConfig::default();
+        let (mut lay, mut pass) = layout_begin(&doc, &cfg, WIDTH);
+        layout_more(
+            &doc, &theme, &mut fonts, &mut media, &cfg, &mut lay, &mut pass, None,
+        );
+        lay.index_more();
+        // A fixed sample keeps the linear column bounded; per-probe cost
+        // is what matters and 2000 probes settle it.
+        let count = 2000usize;
+        let step = lay.height / count as f32;
+        let probes: Vec<f32> = (0..count).map(|i| i as f32 * step).collect();
+        let mut hits = 0usize;
+        let started = Instant::now();
+        for y in &probes {
+            if lay.link_at(WIDTH / 2.0, *y).is_some() {
+                hits += 1;
+            }
+        }
+        let indexed_us = started.elapsed().as_micros();
+        let started = Instant::now();
+        for y in &probes {
+            let linear = lay.runs.iter().find_map(|r| {
+                let target = r.link.as_deref()?;
+                let inside = WIDTH / 2.0 >= r.x
+                    && WIDTH / 2.0 <= r.x + r.width
+                    && *y >= r.y
+                    && *y <= r.y + metrics::LINE_HEIGHT * r.size;
+                inside.then_some(target)
+            });
+            if linear.is_some() {
+                hits += 1;
+            }
+        }
+        let linear_us = started.elapsed().as_micros();
+        let bands = 5u32;
+        let started = Instant::now();
+        for i in 0..bands {
+            let y = lay.height / (bands + 1) as f32 * (i + 1) as f32;
+            let _ = oryx::paint::band(
+                &lay,
+                &theme,
+                &mut fonts,
+                &mut media,
+                &[],
+                y,
+                WIDTH as u32,
+                VIEWPORT_H as u32,
+            );
+        }
+        let band_ms = started.elapsed().as_millis() / u128::from(bands);
+        println!(
+            "hover {name}: {} probes, indexed {indexed_us}us, linear {linear_us}us, \
+             {hits} hits; direct band {band_ms}ms per frame",
+            probes.len()
+        );
+    }
+}
+
 fn print_row(kind: &str, tier: &str, open_ms: u128, highlight_ms: u128, laid: &Laid) {
     println!(
         "{kind:<4} {tier:>6}: open {open_ms:>5}ms (highlight {highlight_ms:>5}ms), \

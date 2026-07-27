@@ -109,6 +109,9 @@ pub struct LayoutDoc {
     pub rects: Vec<DecoRect>,
     /// Placed images, blitted by paint from the media cache.
     pub images: Vec<ImagePlace>,
+    /// Coarse y buckets over runs, rects and images, so the band
+    /// painter and hit testing search instead of scanning.
+    index: YIndex,
     /// Heading anchor slugs and their y positions.
     pub anchors: Vec<(String, f32)>,
     /// Row bands of every table, in document order. Pagination needs
@@ -143,24 +146,133 @@ pub struct CodeLine {
     wrap_width: f32,
 }
 
+/// Height of one index bucket in layout units.
+const BUCKET_H: f32 = 512.0;
+
+/// Coarse y buckets over the layout's element vectors. Filled in append
+/// order behind a watermark; queries answer with a conservative indexed
+/// range plus the unindexed tail, so a stale index can never miss an
+/// element, only cost a longer linear tail.
+#[derive(Debug, Default)]
+pub struct YIndex {
+    runs: Buckets,
+    rects: Buckets,
+    images: Buckets,
+}
+
+/// Per bucket, the first and last element index touching it, and the
+/// watermark below which elements are noted.
+#[derive(Debug, Default)]
+struct Buckets {
+    spans: Vec<Option<(usize, usize)>>,
+    indexed: usize,
+}
+
+impl Buckets {
+    fn note(&mut self, index: usize, y0: f32, y1: f32) {
+        let b0 = (y0.max(0.0) / BUCKET_H) as usize;
+        let b1 = (y1.max(y0).max(0.0) / BUCKET_H) as usize;
+        if self.spans.len() <= b1 {
+            self.spans.resize(b1 + 1, None);
+        }
+        for bucket in b0..=b1 {
+            let entry = &mut self.spans[bucket];
+            *entry = Some(match *entry {
+                Some((first, last)) => (first.min(index), last.max(index)),
+                None => (index, index),
+            });
+        }
+    }
+
+    fn query(&self, y0: f32, y1: f32, len: usize) -> (Range<usize>, Range<usize>) {
+        let tail = self.indexed.min(len)..len;
+        if self.spans.is_empty() {
+            return (0..0, tail);
+        }
+        let top = self.spans.len() - 1;
+        let b0 = ((y0.max(0.0) / BUCKET_H) as usize).min(top);
+        let b1 = ((y1.max(y0).max(0.0) / BUCKET_H) as usize).min(top);
+        let (mut first, mut last) = (usize::MAX, 0usize);
+        for entry in self.spans[b0..=b1].iter().flatten() {
+            first = first.min(entry.0);
+            last = last.max(entry.1);
+        }
+        let head = if first == usize::MAX {
+            0..0
+        } else {
+            first..last + 1
+        };
+        (head, tail)
+    }
+
+    fn clear(&mut self) {
+        self.spans.clear();
+        self.indexed = 0;
+    }
+}
+
 impl LayoutDoc {
+    /// Extends the index over elements appended since the last call.
+    pub fn index_more(&mut self) {
+        let index = &mut self.index;
+        for (i, run) in self.runs.iter().enumerate().skip(index.runs.indexed) {
+            index
+                .runs
+                .note(i, run.y, run.y + metrics::LINE_HEIGHT * run.size);
+        }
+        index.runs.indexed = self.runs.len();
+        for (i, rect) in self.rects.iter().enumerate().skip(index.rects.indexed) {
+            index.rects.note(i, rect.y, rect.y + rect.height);
+        }
+        index.rects.indexed = self.rects.len();
+        for (i, image) in self.images.iter().enumerate().skip(index.images.indexed) {
+            index.images.note(i, image.y, image.y + image.height);
+        }
+        index.images.indexed = self.images.len();
+    }
+
+    /// Index ranges whose union holds every run touching `[y0, y1]`:
+    /// the indexed head range and the unindexed tail.
+    pub fn runs_in(&self, y0: f32, y1: f32) -> (Range<usize>, Range<usize>) {
+        self.index.runs.query(y0, y1, self.runs.len())
+    }
+
+    /// As `runs_in`, over the decoration rectangles.
+    pub fn rects_in(&self, y0: f32, y1: f32) -> (Range<usize>, Range<usize>) {
+        self.index.rects.query(y0, y1, self.rects.len())
+    }
+
+    /// As `runs_in`, over the placed images.
+    pub fn images_in(&self, y0: f32, y1: f32) -> (Range<usize>, Range<usize>) {
+        self.index.images.query(y0, y1, self.images.len())
+    }
+
     /// Link target under a point in document coordinates, if any.
-    /// The hit box of a run spans its full line height.
+    /// The hit box of a run spans its full line height. The index keeps
+    /// this a search; it runs on every mouse move.
     pub fn link_at(&self, x: f32, y: f32) -> Option<&str> {
-        let run_hit = self.runs.iter().find_map(|r| {
-            let target = r.link.as_deref()?;
-            let inside = x >= r.x
-                && x <= r.x + r.width
-                && y >= r.y
-                && y <= r.y + metrics::LINE_HEIGHT * r.size;
-            inside.then_some(target)
-        });
-        run_hit.or_else(|| {
-            self.images.iter().find_map(|i| {
-                let target = i.link.as_deref()?;
-                let inside = x >= i.x && x <= i.x + i.width && y >= i.y && y <= i.y + i.height;
+        let (head, tail) = self.runs_in(y, y);
+        let run_hit = self.runs[head]
+            .iter()
+            .chain(&self.runs[tail])
+            .find_map(|r| {
+                let target = r.link.as_deref()?;
+                let inside = x >= r.x
+                    && x <= r.x + r.width
+                    && y >= r.y
+                    && y <= r.y + metrics::LINE_HEIGHT * r.size;
                 inside.then_some(target)
-            })
+            });
+        run_hit.or_else(|| {
+            let (head, tail) = self.images_in(y, y);
+            self.images[head]
+                .iter()
+                .chain(&self.images[tail])
+                .find_map(|i| {
+                    let target = i.link.as_deref()?;
+                    let inside = x >= i.x && x <= i.x + i.width && y >= i.y && y <= i.y + i.height;
+                    inside.then_some(target)
+                })
         })
     }
 
@@ -2142,6 +2254,9 @@ pub fn recolor_code_lines(
     }
     let delta = scratch.runs.len() as isize - (run_end - run_start) as isize;
     lay.runs.splice(run_start..run_end, scratch.runs);
+    // The splice shifts every later run index, which the bucket spans
+    // hold; queries fall back to the linear tail until reindexed.
+    lay.index.runs.clear();
     for (record, range) in lay.code_lines[lo..hi].iter_mut().zip(fresh) {
         record.runs = run_start + range.start..run_start + range.end;
     }

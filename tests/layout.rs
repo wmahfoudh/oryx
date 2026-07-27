@@ -1179,3 +1179,101 @@ fn an_image_scales_with_the_reading_size() {
         "and keeps its aspect"
     );
 }
+
+/// The index answers with a superset of the linear scan and stays a
+/// search rather than a scan once the document is indexed.
+#[test]
+fn the_y_index_never_misses_an_element() {
+    let source = std::fs::read_to_string("tests/fixtures/tour.md").unwrap();
+    let mut fonts = fonts();
+    for width in [420.0, 640.0, 900.0] {
+        let mut lay = lay_doc(&markdown::parse(&source), width, &mut fonts);
+        lay.index_more();
+        assert!(lay.height > 2000.0, "the tour is tall enough to matter");
+        let slices = 37;
+        let step = lay.height / slices as f32;
+        for i in 0..slices {
+            let y0 = step * i as f32;
+            let y1 = y0 + 300.0;
+            let (head, tail) = lay.runs_in(y0, y1);
+            for (index, run) in lay.runs.iter().enumerate() {
+                let touches = run.y <= y1 && run.y + metrics::LINE_HEIGHT * run.size >= y0;
+                assert!(
+                    !touches || head.contains(&index) || tail.contains(&index),
+                    "run {index} missed at width {width} slice {i}"
+                );
+            }
+            assert!(tail.is_empty(), "everything is indexed after index_more");
+            assert!(
+                head.len() <= lay.runs.len() / 3 + 64,
+                "a slice answers {} of {} runs at width {width}",
+                head.len(),
+                lay.runs.len()
+            );
+            let (rect_head, rect_tail) = lay.rects_in(y0, y1);
+            for (index, rect) in lay.rects.iter().enumerate() {
+                let touches = rect.y <= y1 && rect.y + rect.height >= y0;
+                assert!(
+                    !touches || rect_head.contains(&index) || rect_tail.contains(&index),
+                    "rect {index} missed at width {width} slice {i}"
+                );
+            }
+            let (image_head, image_tail) = lay.images_in(y0, y1);
+            for (index, image) in lay.images.iter().enumerate() {
+                let touches = image.y <= y1 && image.y + image.height >= y0;
+                assert!(
+                    !touches || image_head.contains(&index) || image_tail.contains(&index),
+                    "image {index} missed at width {width} slice {i}"
+                );
+            }
+        }
+    }
+}
+
+/// The unindexed tail keeps queries honest between index calls while a
+/// resumable pass appends.
+#[test]
+fn the_y_index_stays_honest_while_a_pass_grows() {
+    let source = std::fs::read_to_string("tests/fixtures/tour.md").unwrap();
+    let doc = markdown::parse(&source);
+    let mut fonts = fonts();
+    let mut media = MediaCache::new(PathBuf::from("."));
+    let (mut out, mut pass) = layout_begin(&doc, &cfg(), 640.0);
+    let mut steps = 0usize;
+    loop {
+        let done = layout_step(
+            &doc,
+            &theme(),
+            &mut fonts,
+            &mut media,
+            &cfg(),
+            &mut out,
+            &mut pass,
+        );
+        steps += 1;
+        // Index on a stride so some checks run against a stale index
+        // with a real tail.
+        if steps % 11 == 0 {
+            out.index_more();
+        }
+        if steps % 5 == 0 || done {
+            let (head, tail) = out.runs_in(0.0, out.height);
+            for (index, _) in out.runs.iter().enumerate() {
+                assert!(
+                    head.contains(&index) || tail.contains(&index),
+                    "run {index} missed after {steps} steps"
+                );
+            }
+            if out.height > 1500.0 && steps % 11 == 0 {
+                let (head, tail) = out.runs_in(0.0, 200.0);
+                assert!(
+                    head.len() + tail.len() < out.runs.len(),
+                    "a slice query mid-pass is not a full scan"
+                );
+            }
+        }
+        if done {
+            break;
+        }
+    }
+}

@@ -32,7 +32,12 @@ pub fn band(
         anti_alias: false,
         ..tiny_skia::Paint::default()
     };
-    for rect in layout.rects.iter().chain(extra) {
+    let (rect_head, rect_tail) = layout.rects_in(y_top, band_bottom);
+    for rect in layout.rects[rect_head]
+        .iter()
+        .chain(&layout.rects[rect_tail])
+        .chain(extra)
+    {
         if rect.y + rect.height < y_top || rect.y > band_bottom {
             continue;
         }
@@ -70,14 +75,19 @@ pub fn band(
         }
     }
 
-    for image in &layout.images {
+    let (image_head, image_tail) = layout.images_in(y_top, band_bottom);
+    for image in layout.images[image_head]
+        .iter()
+        .chain(&layout.images[image_tail])
+    {
         if image.y + image.height < y_top || image.y > band_bottom {
             continue;
         }
         blit_image(&mut pixmap, media, image, y_top);
     }
 
-    for run in &layout.runs {
+    let (run_head, run_tail) = layout.runs_in(y_top, band_bottom);
+    for run in layout.runs[run_head].iter().chain(&layout.runs[run_tail]) {
         let line_height = metrics::LINE_HEIGHT * run.size;
         if run.y + line_height < y_top || run.y > band_bottom {
             continue;

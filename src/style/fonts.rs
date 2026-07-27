@@ -14,7 +14,7 @@ pub struct FontStore {
     pub swash: SwashCache,
 }
 
-static EMBEDDED: &[&[u8]] = &[
+pub(crate) static EMBEDDED: &[&[u8]] = &[
     include_bytes!("../../assets/fonts/DejaVuSans.ttf"),
     include_bytes!("../../assets/fonts/DejaVuSans-Bold.ttf"),
     include_bytes!("../../assets/fonts/DejaVuSans-Oblique.ttf"),

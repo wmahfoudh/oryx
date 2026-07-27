@@ -329,17 +329,12 @@ fn a_truetype_face_embeds_as_cidfonttype2_with_fontfile2() {
 /// a note when the system has none.
 #[test]
 fn a_cff_face_embeds_as_cidfonttype0_with_fontfile3() {
-    let mut fonts = FontStore::new();
+    let fonts = FontStore::new();
     let infos: Vec<(cosmic_text::fontdb::ID, Option<String>)> = fonts
         .font_system
         .db()
         .faces()
-        .map(|face| {
-            (
-                face.id,
-                face.families.first().map(|(name, _)| name.clone()),
-            )
-        })
+        .map(|face| (face.id, face.families.first().map(|(name, _)| name.clone())))
         .collect();
     let mut family = None;
     for (id, name) in infos {
@@ -362,7 +357,9 @@ fn a_cff_face_embeds_as_cidfonttype0_with_fontfile3() {
     let pdf = Pdf::load_mem(&bytes).unwrap();
     let fonts = cid_fonts(&pdf);
     assert!(
-        fonts.iter().any(|(subtype, _, _)| subtype == "CIDFontType0"),
+        fonts
+            .iter()
+            .any(|(subtype, _, _)| subtype == "CIDFontType0"),
         "the CFF face {family} embeds as CIDFontType0, got {fonts:?}"
     );
     for (subtype, file2, file3) in fonts {
