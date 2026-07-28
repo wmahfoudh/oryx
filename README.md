@@ -26,13 +26,11 @@
 
 Oryx is built mainly for the reading case: the file you want to open fast, enjoy reading, maybe export to PDF and close, without an editor or a browser tab in the way.
 
-| Principle | In practice |
-|---|---|
-| **Instant** | A document is on screen in well under 100 ms from cold, even an 8 MB file. |
-| **Distraction-free** | No panes, no toolbars, no menus. `F1` lists the shortcuts, `Esc` closes whatever is open. |
-| **Beautiful** | 31 themes addressing 51 color roles, for reading and for PDF export alike. |
-| **Self-contained** | One binary and a folder of themes. No browser engine, no runtime, no GPU requirement. |
-| **Runs anywhere** | Performs the same on a new laptop as on an old machine with no graphics card. |
+- **Instant**: A document is on screen in well under 100 ms from cold, even an 8 MB file.
+- **Distraction-free**: No panes, no toolbars, no menus. `F1` lists the shortcuts, `Esc` closes whatever is open.
+- **Beautiful**: 31 themes addressing 51 color roles, for reading and for PDF export alike.
+- **Self-contained**: One binary and a folder of themes. No browser engine, no runtime, no GPU requirement.
+- **Runs anywhere**: Performs the same on any desktop: a new laptop or an old machine with no graphics card.
 
 ## What it renders
 
@@ -58,15 +56,13 @@ All five GitHub alert kinds are styled, each with its own color and title. A YAM
 
 ## Tools
 
-| Tool | Shortcut | Details |
-|---|---|---|
-| **Find in document** | `Ctrl+F` | Smart case: `oryx` matches Oryx, ORYX and oryx; `Oryx` matches exactly. A match can cross styling, so `fast viewer` is found even when written as **fast** *viewer*. |
-| **Select and copy** | `Ctrl+C` / `Ctrl+Shift+C` | Copies a selection as plain text, or as the original markdown. |
-| **Sidebar** | `Ctrl+B` | Shows the tree around the open file, driven entirely from the keyboard. |
-| **Open file** | `Ctrl+O` | Opens the native file dialog. |
-| **Live reload** | `F5` | Reloads a file being edited elsewhere. |
-| **Zoom** | `Ctrl+Plus` / `Ctrl+Minus` | Zoom in and out. |
-| **Persistence** | - | Window geometry, active theme, sidebar and last folder are all saved and restored at every start. |
+- **Find in document**: `Ctrl+F` searches text. The search is smart about case: `oryx` matches Oryx, ORYX and oryx, while `Oryx` performs an exact match. A match can cross styling, so `fast viewer` is found even when it was written as **fast** *viewer*.
+- **Select and copy**: `Ctrl+C` copies a selection as plain text. `Ctrl+Shift+C` copies the original markdown of the selection.
+- **Sidebar**: A folder sidebar on `Ctrl+B` shows the tree around the open file and can be driven entirely from the keyboard.
+- **Open file**: `Ctrl+O` opens the native file dialog.
+- **Live reload**: `F5` reloads a file being edited elsewhere.
+- **Zoom**: `Ctrl+Plus` (in) and `Ctrl+Minus` (out).
+- **Persistence**: Window geometry, the active theme, the sidebar and the last folder are all saved and restored at every start.
 
 ## Themes
 
@@ -88,7 +84,7 @@ Nine themes are original designs: `oryx-light` and its dark twin `oryx-dark`, `o
 
 `Ctrl+E` exports the document and asks where to save it. The page carries the document as it looks on screen with the configured export theme. Headings become the outline a PDF viewer navigates by, and the fonts are embedded.
 
-Care is taken so that:
+**Care is taken so that**:
 
 - Page breaks don't happen through a line,
 - Headings are not left alone at the foot of a page,
@@ -135,10 +131,6 @@ oryx --register         # install the file association and icons
 oryx --version          # print the version
 ```
 
-<details>
-<summary><b>Full shortcut reference</b> (click to expand)</summary>
-<br>
-
 | Shortcut | Action |
 |---|---|
 | `Ctrl+O` | Open file |
@@ -162,8 +154,6 @@ oryx --version          # print the version
 | `Escape` | Close overlay or sidebar, quit |
 
 `Ctrl` is `Cmd` on macOS.
-
-</details>
 
 ## Performance
 
