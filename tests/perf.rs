@@ -13,7 +13,7 @@ use oryx::doc::model::{BlockKind, Document};
 use oryx::doc::stream::{self, Swap};
 use oryx::export::paginate::paginate;
 use oryx::export::{pdf, ExportSettings, PageGeometry, PageSize};
-use oryx::layout::{layout, layout_begin, layout_more, ViewConfig, OPEN_SLICE};
+use oryx::layout::{layout, layout_begin, layout_more, ShapePool, ViewConfig, OPEN_SLICE};
 use oryx::style::fonts::FontStore;
 use oryx::style::highlight;
 use oryx::style::theme::Theme;
@@ -74,13 +74,24 @@ struct Laid {
     rects: usize,
 }
 
-fn measure_layout(doc: &Document) -> Laid {
+fn pool() -> std::sync::Arc<ShapePool> {
+    let width = std::thread::available_parallelism()
+        .map(|n| n.get().saturating_sub(1))
+        .unwrap_or(1)
+        .clamp(1, 8);
+    std::sync::Arc::new(ShapePool::new(width, &FontStore::new().seed()))
+}
+
+fn measure_layout(doc: &Document, pool: Option<&std::sync::Arc<ShapePool>>) -> Laid {
     let mut fonts = FontStore::new();
     let mut media = MediaCache::new(PathBuf::from("."));
     let theme = Theme::default_dark();
     let cfg = ViewConfig::default();
     let started = Instant::now();
     let (mut out, mut pass) = layout_begin(doc, &cfg, WIDTH);
+    if let Some(pool) = pool {
+        pass.attach_pool(std::sync::Arc::clone(pool));
+    }
     let done = layout_more(
         doc,
         &theme,
@@ -120,7 +131,10 @@ fn assert_first_frame_is_whole(laid: &Laid, what: &str) {
 
 /// The whole export path a Ctrl+E pays after highlighting settles:
 /// layout at the page width, pagination, and emission to bytes.
-fn measure_export(doc: &Document) -> (u128, usize, usize) {
+fn measure_export(
+    doc: &Document,
+    pool: Option<&std::sync::Arc<ShapePool>>,
+) -> (u128, usize, usize) {
     let mut fonts = FontStore::new();
     let mut media = MediaCache::new(PathBuf::from("."));
     let theme = Theme::default_dark();
@@ -139,7 +153,13 @@ fn measure_export(doc: &Document) -> (u128, usize, usize) {
         ..ExportSettings::default()
     };
     let started = Instant::now();
-    let laid = layout(doc, &theme, &mut fonts, &mut media, &cfg, geometry.width);
+    let (mut laid, mut pass) = layout_begin(doc, &cfg, geometry.width);
+    if let Some(pool) = pool {
+        pass.attach_pool(std::sync::Arc::clone(pool));
+    }
+    layout_more(
+        doc, &theme, &mut fonts, &mut media, &cfg, &mut laid, &mut pass, None,
+    );
     let pages = paginate(doc, &laid, &geometry);
     let count = pages.len();
     let job = pdf::Job {
@@ -177,7 +197,7 @@ fn measure_highlight(doc: &Document) -> u128 {
 #[ignore = "timing asserts only hold in release mode"]
 fn typical_document_meets_the_budget() {
     let (open_ms, _, doc) = measure_open(&large_gen::generate(64 * 1024), "md");
-    let laid = measure_layout(&doc);
+    let laid = measure_layout(&doc, Some(&pool()));
     println!(
         "typical: open {open_ms}ms, first slice {}ms, full pass {}ms, height {:.0}px",
         laid.first_ms, laid.ms, laid.height
@@ -207,21 +227,22 @@ fn typical_document_meets_the_budget() {
 #[test]
 #[ignore = "measurement only"]
 fn tiers_measured() {
+    let pool = pool();
     for (name, bytes) in TIERS {
         let (open_ms, parse_ms, doc) = measure_open(&large_gen::generate(*bytes), "md");
         let highlight_ms = measure_highlight(&doc);
-        let laid = measure_layout(&doc);
+        let laid = measure_layout(&doc, Some(&pool));
         assert!(laid.height > 0.0, "markdown fixture laid out");
         assert_first_frame_is_whole(&laid, &format!("md {name}"));
-        let export = measure_export(&doc);
+        let export = measure_export(&doc, Some(&pool));
         print_row("md", name, open_ms, parse_ms, highlight_ms, &laid, export);
 
         let (open_ms, parse_ms, doc) = measure_open(&large_gen::generate_code(*bytes), "rs");
         let highlight_ms = measure_highlight(&doc);
-        let laid = measure_layout(&doc);
+        let laid = measure_layout(&doc, Some(&pool));
         assert!(laid.height > 0.0, "code fixture laid out");
         assert_first_frame_is_whole(&laid, &format!("code {name}"));
-        let export = measure_export(&doc);
+        let export = measure_export(&doc, Some(&pool));
         print_row("code", name, open_ms, parse_ms, highlight_ms, &laid, export);
     }
 }
@@ -365,5 +386,57 @@ fn fold_backlog_measured() {
             lay.runs.len(),
             started.elapsed().as_millis()
         );
+    }
+}
+
+/// The field scenario refined: arrivals trickling in over many drains
+/// against a fully placed layout, each drain a recolor_batch call. The
+/// full-vector rebuild paid per drain is what froze deselection for 11
+/// seconds in the field; the ranged rebuild pays for the touched span.
+#[test]
+#[ignore = "measurement only"]
+fn fold_trickle_measured() {
+    use oryx::layout::recolor_batch;
+    for (name, bytes) in &TIERS[2..] {
+        let (_, _, mut doc) = measure_open(&large_gen::generate(*bytes), "md");
+        for block in &mut doc.blocks {
+            if let BlockKind::CodeBlock {
+                language,
+                lines,
+                highlights,
+            } = &mut block.kind
+            {
+                *highlights = highlight::spans(lines, language.as_deref());
+            }
+        }
+        let mut fonts = FontStore::new();
+        let mut media = MediaCache::new(PathBuf::from("."));
+        let theme = Theme::default_dark();
+        let cfg = ViewConfig::default();
+        let patches: Vec<(usize, std::ops::Range<usize>)> = doc
+            .blocks
+            .iter()
+            .enumerate()
+            .filter_map(|(i, b)| match &b.kind {
+                BlockKind::CodeBlock { lines, .. } => Some((i, 0..lines.len())),
+                _ => None,
+            })
+            .collect();
+        for chunk in [200usize, 2000] {
+            let mut lay = layout(&doc, &theme, &mut fonts, &mut media, &cfg, WIDTH);
+            let drains: Vec<&[(usize, std::ops::Range<usize>)]> = patches.chunks(chunk).collect();
+            let count = drains.len();
+            let started = Instant::now();
+            for drain in drains {
+                recolor_batch(&mut lay, &doc, &theme, &mut fonts, &cfg, drain);
+            }
+            println!(
+                "trickle {name}: {} drains of {} blocks over {} runs in {}ms",
+                count,
+                chunk,
+                lay.runs.len(),
+                started.elapsed().as_millis()
+            );
+        }
     }
 }

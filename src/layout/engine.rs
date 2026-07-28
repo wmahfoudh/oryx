@@ -11,6 +11,7 @@ use crate::doc::images::MediaCache;
 use crate::doc::model::{
     AlertKind, Block, BlockKind, Document, Marker, Span, SpanImage, SpanScript,
 };
+use crate::layout::pool::{Job, ShapeCtx, StepKey, Work};
 use crate::style::fonts::{FontStore, BODY_FAMILY, CODE_FAMILY};
 use crate::style::highlight::SyntaxRole;
 use crate::style::theme::{Rgba, Theme};
@@ -368,14 +369,39 @@ pub struct LayoutPass {
     done: bool,
     /// Reused per-step buffer: kind emission shapes into it from zero and
     /// the splice drops it at the cursor, the arithmetic a pooled worker
-    /// will reproduce.
+    /// reproduces.
     scratch: LayoutDoc,
+    /// The shaping pool and the generation this pass last claimed. A
+    /// mismatch means another pass or a model change superseded the fed
+    /// work, and the next slice reclaims and reseeds from the
+    /// assembler's own position.
+    pool: Option<std::sync::Arc<crate::layout::pool::ShapePool>>,
+    pool_generation: u64,
+    ctx: Option<std::sync::Arc<crate::layout::pool::ShapeCtx>>,
+    /// Where seeding reached: the order position and, inside a code
+    /// block, the next line to claim.
+    seed_position: usize,
+    seed_line: usize,
 }
 
 impl LayoutPass {
     /// True once every block is placed.
     pub fn is_complete(&self) -> bool {
         self.done
+    }
+
+    /// Attaches the shaping pool; the next slice claims it and seeds
+    /// ahead. Without one the pass shapes every step itself.
+    pub fn attach_pool(&mut self, pool: std::sync::Arc<crate::layout::pool::ShapePool>) {
+        self.pool = Some(pool);
+    }
+
+    /// Marks the pool's fed work stale after a model change, a highlight
+    /// fold or a parse swap: the next slice reclaims and reseeds.
+    pub fn invalidate_pool(&mut self) {
+        if let Some(pool) = &self.pool {
+            pool.begin();
+        }
     }
 }
 
@@ -404,6 +430,8 @@ struct Frame {
 /// and grows as lines land, which moves no index.
 struct OpenCode {
     block: usize,
+    /// The block's order position, the key its line steps pool under.
+    position: usize,
     frame: Frame,
     /// Panel background rect; the border rect follows it.
     panel: usize,
@@ -465,6 +493,11 @@ pub fn layout_begin(
         open: None,
         done: false,
         scratch: LayoutDoc::default(),
+        pool: None,
+        pool_generation: 0,
+        ctx: None,
+        seed_position: 0,
+        seed_line: 0,
     };
     (LayoutDoc::default(), pass)
 }
@@ -504,13 +537,178 @@ pub fn layout_more(
     pass: &mut LayoutPass,
     deadline: Option<Instant>,
 ) -> bool {
+    pool_sync(theme, cfg, pass);
+    // Seed before the first deadline check, so even an expired slice
+    // leaves the workers fed for the next one.
+    pool_top_up(doc, pass);
     while !pass.done {
         if deadline.is_some_and(|at| Instant::now() >= at) {
             return false;
         }
+        pool_top_up(doc, pass);
         layout_step(doc, theme, fonts, media, cfg, out, pass);
     }
     true
+}
+
+/// Claims the pool when attached and not current: a fresh pass, a model
+/// change, or another pass having taken it over. Seeding restarts at the
+/// assembler's own position, so nothing stale is ever consumed.
+fn pool_sync(theme: &Theme, cfg: &ViewConfig, pass: &mut LayoutPass) {
+    let Some(pool) = pass.pool.clone() else {
+        return;
+    };
+    if pass.ctx.is_some() && pool.generation() == pass.pool_generation {
+        return;
+    }
+    pass.pool_generation = pool.begin();
+    pass.ctx = Some(std::sync::Arc::new(ShapeCtx {
+        theme: theme.clone(),
+        cfg: cfg.clone(),
+    }));
+    match &pass.open {
+        Some(open) => {
+            pass.seed_position = open.position;
+            pass.seed_line = open.line;
+        }
+        None => {
+            pass.seed_position = pass.position;
+            pass.seed_line = 0;
+        }
+    }
+}
+
+/// Keeps the claim queue ahead of the assembler by a bounded window.
+fn pool_top_up(doc: &Document, pass: &mut LayoutPass) {
+    let Some(pool) = pass.pool.clone() else {
+        return;
+    };
+    let Some(ctx) = pass.ctx.clone() else {
+        return;
+    };
+    let window = 4 * pool.width();
+    while pool.backlog() < window && pass.seed_position < pass.order.len() {
+        let index = pass.order[pass.seed_position];
+        let block = &doc.blocks[index];
+        if let BlockKind::CodeBlock {
+            lines, highlights, ..
+        } = &block.kind
+        {
+            if pass.seed_line >= lines.len() {
+                pass.seed_position += 1;
+                pass.seed_line = 0;
+                continue;
+            }
+            let line_index = pass.seed_line;
+            pass.seed_line += 1;
+            let line = &lines[line_index];
+            if line.is_empty() {
+                continue;
+            }
+            // Mirrors open_code: the pad and wrap width the assembler
+            // will place the line against.
+            let (x_base, avail) = block_geometry(block, pass.margin, pass.content_width, &ctx.cfg);
+            let size = ctx.cfg.code_size * ctx.cfg.zoom;
+            let pad = metrics::CODE_PAD * ctx.cfg.zoom;
+            pool.submit(Job {
+                generation: pass.pool_generation,
+                key: StepKey {
+                    position: pass.seed_position,
+                    line: line_index,
+                },
+                ctx: std::sync::Arc::clone(&ctx),
+                work: Work::CodeLine {
+                    line: line.clone(),
+                    segments: highlights.get(line_index).cloned().unwrap_or_default(),
+                    block_index: index,
+                    line_index,
+                    x0: x_base + pad,
+                    size,
+                    line_height: metrics::LINE_HEIGHT * size,
+                    wrap_width: (avail - 2.0 * pad).max(40.0),
+                },
+            });
+        } else {
+            let position = pass.seed_position;
+            pass.seed_position += 1;
+            pass.seed_line = 0;
+            if !poolable(block) {
+                continue;
+            }
+            let Some((heading, _, base_size)) = block_metrics(block, &ctx.cfg) else {
+                continue;
+            };
+            let (x_base, avail) = block_geometry(block, pass.margin, pass.content_width, &ctx.cfg);
+            pool.submit(Job {
+                generation: pass.pool_generation,
+                key: StepKey { position, line: 0 },
+                ctx: std::sync::Arc::clone(&ctx),
+                work: Work::Block {
+                    block: block.clone(),
+                    block_index: index,
+                    heading,
+                    base_size,
+                    x_base,
+                    avail,
+                },
+            });
+        }
+    }
+}
+
+/// Whether the pool may shape this block's kind. Image bearers need the
+/// media cache the assembler owns; code blocks pool per line instead.
+fn poolable(block: &Block) -> bool {
+    match &block.kind {
+        BlockKind::Image { .. } | BlockKind::CodeBlock { .. } => false,
+        BlockKind::Heading { spans, .. }
+        | BlockKind::Paragraph { spans }
+        | BlockKind::ListItem { spans, .. } => !spans.iter().any(|s| s.image.is_some()),
+        _ => true,
+    }
+}
+
+/// The block's own metrics: heading level, list flag, base size. None
+/// when the block emits nothing, a styled kind with no spans.
+fn block_metrics(block: &Block, cfg: &ViewConfig) -> Option<(Option<u8>, bool, f32)> {
+    let heading = match &block.kind {
+        BlockKind::Heading { level, .. } => Some(*level),
+        _ => None,
+    };
+    let is_list = matches!(block.kind, BlockKind::ListItem { .. });
+    let base_size = match &block.kind {
+        BlockKind::Heading { spans, .. }
+        | BlockKind::Paragraph { spans }
+        | BlockKind::ListItem { spans, .. } => {
+            if spans.is_empty() {
+                return None;
+            }
+            cfg.body_size * heading.map(metrics::heading_scale).unwrap_or(1.0) * cfg.zoom
+        }
+        BlockKind::CodeBlock { .. } => cfg.code_size * cfg.zoom,
+        BlockKind::Rule
+        | BlockKind::Table { .. }
+        | BlockKind::Image { .. }
+        | BlockKind::MathBlock { .. }
+        | BlockKind::Frontmatter { .. } => cfg.body_size * cfg.zoom,
+        BlockKind::FootnoteDef { .. } => 0.85 * cfg.body_size * cfg.zoom,
+    };
+    Some((heading, is_list, base_size))
+}
+
+/// The x origin and available width a block shapes against, derived from
+/// its quote depth and the pass geometry alone, so seeding and assembly
+/// agree by construction.
+fn block_geometry(block: &Block, margin: f32, content_width: f32, cfg: &ViewConfig) -> (f32, f32) {
+    let quote_indent = block.quote_depth as f32 * metrics::INDENT * cfg.zoom;
+    let quote_pad = if block.quote_depth > 0 {
+        12.0 * cfg.zoom
+    } else {
+        0.0
+    };
+    let x_base = margin + quote_indent + quote_pad;
+    let avail = (content_width - quote_indent - 2.0 * quote_pad).max(40.0);
+    (x_base, avail)
 }
 
 /// Places one step: a whole block, or one line of an open code block.
@@ -578,27 +776,8 @@ fn place_block(
         ));
         pass.cursor += (1.0 * cfg.zoom).max(1.0);
     }
-    let heading = match &block.kind {
-        BlockKind::Heading { level, .. } => Some(*level),
-        _ => None,
-    };
-    let is_list = matches!(block.kind, BlockKind::ListItem { .. });
-    let base_size = match &block.kind {
-        BlockKind::Heading { spans, .. }
-        | BlockKind::Paragraph { spans }
-        | BlockKind::ListItem { spans, .. } => {
-            if spans.is_empty() {
-                return;
-            }
-            cfg.body_size * heading.map(metrics::heading_scale).unwrap_or(1.0) * cfg.zoom
-        }
-        BlockKind::CodeBlock { .. } => cfg.code_size * cfg.zoom,
-        BlockKind::Rule
-        | BlockKind::Table { .. }
-        | BlockKind::Image { .. }
-        | BlockKind::MathBlock { .. }
-        | BlockKind::Frontmatter { .. } => cfg.body_size * cfg.zoom,
-        BlockKind::FootnoteDef { .. } => 0.85 * cfg.body_size * cfg.zoom,
+    let Some((heading, is_list, base_size)) = block_metrics(block, cfg) else {
+        return;
     };
     let mut gap = 0.0;
     if pass.first {
@@ -615,14 +794,7 @@ fn place_block(
         out.anchors.push((anchor.clone(), pass.cursor));
     }
 
-    let quote_indent = block.quote_depth as f32 * metrics::INDENT * cfg.zoom;
-    let quote_pad = if block.quote_depth > 0 {
-        12.0 * cfg.zoom
-    } else {
-        0.0
-    };
-    let x_base = pass.margin + quote_indent + quote_pad;
-    let avail = (pass.content_width - quote_indent - 2.0 * quote_pad).max(40.0);
+    let (x_base, avail) = block_geometry(block, pass.margin, pass.content_width, cfg);
     let marks = Marks {
         rects: out.rects.len(),
         runs: out.runs.len(),
@@ -669,7 +841,65 @@ fn place_block(
         is_list,
     };
 
-    let height = match &block.kind {
+    // A code file is one block, so it is opened and its lines land
+    // over as many steps as the slice budget allows.
+    if matches!(block.kind, BlockKind::CodeBlock { .. }) {
+        pass.scratch = scratch;
+        let open = open_code(theme, cfg, block_index, frame, out, pass);
+        place_code_line(doc, theme, fonts, cfg, open, out, pass);
+        return;
+    }
+    if let BlockKind::FootnoteDef { label, .. } = &block.kind {
+        out.anchors.push((format!("footnote:{label}"), pass.cursor));
+    }
+    if let Some(shaped) = pass
+        .pool
+        .as_ref()
+        .and_then(|pool| pool.take(pass.pool_generation, StepKey { position, line: 0 }))
+    {
+        pass.scratch = scratch;
+        let mut ready = shaped.scratch;
+        out.splice(&mut ready, pass.cursor);
+        finish_block(theme, cfg, block, frame, shaped.height, out, pass);
+        return;
+    }
+    let height = shape_kind(
+        fonts,
+        theme,
+        cfg,
+        media,
+        block,
+        block_index,
+        heading,
+        base_size,
+        x_base,
+        avail,
+        &mut scratch,
+    );
+    out.splice(&mut scratch, pass.cursor);
+    pass.scratch = scratch;
+    finish_block(theme, cfg, block, frame, height, out, pass);
+}
+
+/// Shapes one block's own emission into the scratch from zero: the kind
+/// dispatch the serial pass and a pool worker share. Code blocks never
+/// come here, since they open and step per line, and a worker never sees
+/// a block whose spans carry images, so its media cache stays untouched.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn shape_kind(
+    fonts: &mut FontStore,
+    theme: &Theme,
+    cfg: &ViewConfig,
+    media: &mut MediaCache,
+    block: &Block,
+    block_index: usize,
+    heading: Option<u8>,
+    base_size: f32,
+    x_base: f32,
+    avail: f32,
+    scratch: &mut LayoutDoc,
+) -> f32 {
+    match &block.kind {
         BlockKind::Heading { spans, .. } | BlockKind::Paragraph { spans } => {
             let base = BlockStyle {
                 size: base_size,
@@ -681,16 +911,7 @@ fn place_block(
                 block_index,
             };
             flow_or_shape(
-                fonts,
-                theme,
-                cfg,
-                media,
-                spans,
-                &base,
-                x_base,
-                0.0,
-                avail,
-                &mut scratch,
+                fonts, theme, cfg, media, spans, &base, x_base, 0.0, avail, scratch,
             )
         }
         BlockKind::ListItem {
@@ -709,16 +930,9 @@ fn place_block(
             x_base,
             0.0,
             avail,
-            &mut scratch,
+            scratch,
         ),
-        // A code file is one block, so it is opened and its lines land
-        // over as many steps as the slice budget allows.
-        BlockKind::CodeBlock { .. } => {
-            pass.scratch = scratch;
-            let open = open_code(theme, cfg, block_index, frame, out, pass);
-            place_code_line(doc, theme, fonts, cfg, open, out, pass);
-            return;
-        }
+        BlockKind::CodeBlock { .. } => 0.0,
         BlockKind::Rule => {
             let thickness = (1.0 * cfg.zoom).max(1.0);
             scratch.rects.push(DecoRect::fill(
@@ -740,7 +954,7 @@ fn place_block(
             x_base,
             0.0,
             avail,
-            &mut scratch,
+            scratch,
         ),
         BlockKind::Image { path, alt } => layout_image(
             fonts,
@@ -753,7 +967,7 @@ fn place_block(
             x_base,
             0.0,
             avail,
-            &mut scratch,
+            scratch,
         ),
         BlockKind::Frontmatter { entries } => layout_frontmatter(
             fonts,
@@ -764,7 +978,7 @@ fn place_block(
             x_base,
             0.0,
             avail,
-            &mut scratch,
+            scratch,
         ),
         BlockKind::MathBlock { tex } => layout_math_block(
             fonts,
@@ -775,29 +989,22 @@ fn place_block(
             x_base,
             0.0,
             avail,
-            &mut scratch,
+            scratch,
         ),
-        BlockKind::FootnoteDef { label, spans } => {
-            out.anchors.push((format!("footnote:{label}"), pass.cursor));
-            layout_footnote_def(
-                fonts,
-                theme,
-                cfg,
-                label,
-                spans,
-                base_size,
-                block_index,
-                x_base,
-                0.0,
-                avail,
-                &mut scratch,
-            )
-        }
-    };
-
-    out.splice(&mut scratch, pass.cursor);
-    pass.scratch = scratch;
-    finish_block(theme, cfg, block, frame, height, out, pass);
+        BlockKind::FootnoteDef { label, spans } => layout_footnote_def(
+            fonts,
+            theme,
+            cfg,
+            label,
+            spans,
+            base_size,
+            block_index,
+            x_base,
+            0.0,
+            avail,
+            scratch,
+        ),
+    }
 }
 
 /// The tail every block runs once its height is known: centering, the
@@ -901,6 +1108,8 @@ fn open_code(
     );
     OpenCode {
         block: block_index,
+        // place_block advanced past this block one line above.
+        position: pass.position - 1,
         frame,
         panel,
         y0,
@@ -948,34 +1157,38 @@ fn place_code_line(
     if line.is_empty() {
         open.y += open.line_height;
     } else {
-        let empty: Vec<(Range<usize>, SyntaxRole)> = Vec::new();
-        let segments = highlights.get(open.line).unwrap_or(&empty);
-        let x0 = open.frame.x_base + open.pad;
-        let mut scratch = std::mem::take(&mut pass.scratch);
-        let advance = shape_code_line(
-            fonts,
-            theme,
-            cfg,
-            line,
-            segments,
-            open.block,
-            x0,
-            0.0,
-            open.size,
-            open.line_height,
-            open.wrap_width,
-            &mut scratch,
-        );
-        scratch.code_lines.push(CodeLine {
-            block: open.block,
+        let key = StepKey {
+            position: open.position,
             line: open.line,
-            runs: 0..scratch.runs.len(),
-            x0,
-            y0: 0.0,
-            size: open.size,
-            line_height: open.line_height,
-            wrap_width: open.wrap_width,
-        });
+        };
+        let pooled = pass
+            .pool
+            .as_ref()
+            .and_then(|pool| pool.take(pass.pool_generation, key));
+        let (advance, mut scratch) = match pooled {
+            Some(shaped) => (shaped.height, shaped.scratch),
+            None => {
+                let empty: Vec<(Range<usize>, SyntaxRole)> = Vec::new();
+                let segments = highlights.get(open.line).unwrap_or(&empty);
+                let x0 = open.frame.x_base + open.pad;
+                let mut scratch = std::mem::take(&mut pass.scratch);
+                let advance = shape_code_line_step(
+                    fonts,
+                    theme,
+                    cfg,
+                    line,
+                    segments,
+                    open.block,
+                    open.line,
+                    x0,
+                    open.size,
+                    open.line_height,
+                    open.wrap_width,
+                    &mut scratch,
+                );
+                (advance, scratch)
+            }
+        };
         out.splice(&mut scratch, open.y);
         pass.scratch = scratch;
         open.y += advance;
@@ -2269,14 +2482,17 @@ fn place_marker(runs: Vec<TextRun>, x: f32, y: f32, block_index: usize, out: &mu
     }
 }
 
-/// Recolors every patched code line in one pass over the run vector:
-/// untouched stretches move through, patched lines re-shape in place, and
-/// records shift by the running delta. A drained arrival backlog costs
-/// one rebuild instead of one tail-shifting splice per arrival. Geometry
-/// is unchanged; run indices shift, so callers drop selection and search
-/// positions exactly as they do after a relayout. A record whose model
-/// line vanished keeps its old runs; arrivals are trusted only as far as
-/// the document reaches.
+/// Recolors every patched code line by rebuilding only the touched span
+/// of the run vector: untouched stretches inside it move through, patched
+/// lines re-shape in place, and everything outside the span moves once,
+/// however many drains a wash-in takes. Records shift by the running
+/// delta. Geometry is unchanged; run indices shift, so callers drop
+/// selection and search positions exactly as they do after a relayout. A
+/// record whose model line vanished keeps its old runs; arrivals are
+/// trusted only as far as the document reaches. Answers the splice it
+/// made, (first run, old end run, length delta), so callers can remap
+/// positions they hold instead of dropping them; None means no run
+/// moved.
 pub fn recolor_batch(
     lay: &mut LayoutDoc,
     doc: &Document,
@@ -2284,7 +2500,7 @@ pub fn recolor_batch(
     fonts: &mut FontStore,
     cfg: &ViewConfig,
     patches: &[(usize, Range<usize>)],
-) {
+) -> Option<(usize, usize, isize)> {
     // Records sort by (block, line) and their run ranges rise with it,
     // so the affected list visits the run vector strictly left to right.
     let mut affected: Vec<usize> = Vec::new();
@@ -2298,21 +2514,23 @@ pub fn recolor_batch(
         affected.extend(lo..hi);
     }
     if affected.is_empty() {
-        return;
+        return None;
     }
     affected.sort_unstable();
     affected.dedup();
 
-    let old_len = lay.runs.len();
-    let mut old_iter = std::mem::take(&mut lay.runs).into_iter();
-    let mut new_runs: Vec<TextRun> = Vec::with_capacity(old_len);
-    let mut copied = 0usize;
-    let mut delta = 0isize;
+    let first = affected[0];
+    let last = *affected.last().expect("affected is not empty");
+    let run_lo = lay.code_lines[first].runs.start;
+    let run_hi = lay.code_lines[last].runs.end;
+    let mut rebuilt: Vec<TextRun> = Vec::with_capacity(run_hi - run_lo);
+    let mut copied = run_lo;
     let mut scratch = LayoutDoc::default();
     let empty: Vec<(Range<usize>, SyntaxRole)> = Vec::new();
     let mut next = affected.iter().peekable();
-    for index in 0..lay.code_lines.len() {
+    for index in first..lay.code_lines.len() {
         if next.peek() != Some(&&index) {
+            let delta = (run_lo + rebuilt.len()) as isize - copied as isize;
             let record = &mut lay.code_lines[index];
             record.runs = record.runs.start.wrapping_add_signed(delta)
                 ..record.runs.end.wrapping_add_signed(delta);
@@ -2320,9 +2538,9 @@ pub fn recolor_batch(
         }
         next.next();
         let record = lay.code_lines[index].clone();
-        new_runs.extend(old_iter.by_ref().take(record.runs.start - copied));
+        rebuilt.extend_from_slice(&lay.runs[copied..record.runs.start]);
         copied = record.runs.start;
-        let from = new_runs.len();
+        let from = run_lo + rebuilt.len();
         let source = doc.blocks.get(record.block).and_then(|b| match &b.kind {
             BlockKind::CodeBlock {
                 lines, highlights, ..
@@ -2349,22 +2567,21 @@ pub fn recolor_batch(
             Some(())
         });
         if reshaped.is_some() {
-            new_runs.append(&mut scratch.runs);
-            for _ in copied..record.runs.end {
-                old_iter.next();
-            }
+            rebuilt.append(&mut scratch.runs);
         } else {
-            new_runs.extend(old_iter.by_ref().take(record.runs.end - copied));
+            rebuilt.extend_from_slice(&lay.runs[copied..record.runs.end]);
         }
         copied = record.runs.end;
-        lay.code_lines[index].runs = from..new_runs.len();
-        delta = new_runs.len() as isize - copied as isize;
+        lay.code_lines[index].runs = from..run_lo + rebuilt.len();
     }
-    new_runs.extend(old_iter);
-    lay.runs = new_runs;
+    rebuilt.extend_from_slice(&lay.runs[copied..run_hi]);
+    let delta = (run_lo + rebuilt.len()) as isize - run_hi as isize;
+    // One splice, one tail move, whatever the drain holds.
+    lay.runs.splice(run_lo..run_hi, rebuilt);
     // The rebuild moves every later run index, which the bucket spans
     // hold; queries fall back to the linear tail until reindexed.
     lay.index.runs.clear();
+    Some((run_lo, run_hi, delta))
 }
 
 /// Recolors the laid-out lines `lines` of code block `block`: the
@@ -2378,8 +2595,52 @@ pub fn recolor_code_lines(
     cfg: &ViewConfig,
     block: usize,
     lines: Range<usize>,
-) {
-    recolor_batch(lay, doc, theme, fonts, cfg, &[(block, lines)]);
+) -> Option<(usize, usize, isize)> {
+    recolor_batch(lay, doc, theme, fonts, cfg, &[(block, lines)])
+}
+
+/// Shapes one code line into the scratch from zero, record included:
+/// the unit place_code_line and a pool worker share.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn shape_code_line_step(
+    fonts: &mut FontStore,
+    theme: &Theme,
+    cfg: &ViewConfig,
+    line: &str,
+    segments: &[(Range<usize>, SyntaxRole)],
+    block_index: usize,
+    line_index: usize,
+    x0: f32,
+    size: f32,
+    line_height: f32,
+    wrap_width: f32,
+    scratch: &mut LayoutDoc,
+) -> f32 {
+    let advance = shape_code_line(
+        fonts,
+        theme,
+        cfg,
+        line,
+        segments,
+        block_index,
+        x0,
+        0.0,
+        size,
+        line_height,
+        wrap_width,
+        scratch,
+    );
+    scratch.code_lines.push(CodeLine {
+        block: block_index,
+        line: line_index,
+        runs: 0..scratch.runs.len(),
+        x0,
+        y0: 0.0,
+        size,
+        line_height,
+        wrap_width,
+    });
+    advance
 }
 
 /// Shapes one code line: one row per source line, wrapping inside the

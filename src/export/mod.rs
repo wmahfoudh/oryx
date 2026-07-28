@@ -212,6 +212,7 @@ impl ExportPass {
         fonts: &mut FontStore,
         media: &mut MediaCache,
         highlighting: bool,
+        pool: Option<&std::sync::Arc<crate::layout::ShapePool>>,
     ) -> Progress {
         if self.phase == Phase::Highlight {
             if highlighting {
@@ -221,7 +222,10 @@ impl ExportPass {
         }
         if self.phase == Phase::Layout {
             let pass = self.pass.get_or_insert_with(|| {
-                let (out, pass) = layout_begin(doc, &self.cfg, self.geometry.width);
+                let (out, mut pass) = layout_begin(doc, &self.cfg, self.geometry.width);
+                if let Some(pool) = pool {
+                    pass.attach_pool(std::sync::Arc::clone(pool));
+                }
                 self.layout = out;
                 pass
             });

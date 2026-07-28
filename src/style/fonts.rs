@@ -25,6 +25,14 @@ pub(crate) static EMBEDDED: &[&[u8]] = &[
     include_bytes!("../../assets/fonts/CourierPrime_BoldItalic.ttf"),
 ];
 
+/// Template for pooled stores: the locale and the seeded database built
+/// once, cloned per worker, so no worker pays its own system scan. The
+/// face data rides shared handles; the clone copies metadata only.
+pub struct FontSeed {
+    locale: String,
+    db: cosmic_text::fontdb::Database,
+}
+
 impl FontStore {
     pub fn new() -> FontStore {
         let mut font_system = FontSystem::new();
@@ -33,6 +41,22 @@ impl FontStore {
         }
         FontStore {
             font_system,
+            swash: SwashCache::new(),
+        }
+    }
+
+    /// The template a pool clones its workers' stores from.
+    pub fn seed(&self) -> FontSeed {
+        FontSeed {
+            locale: self.font_system.locale().to_string(),
+            db: self.font_system.db().clone(),
+        }
+    }
+
+    /// A worker's store: the template's faces, its own shaping caches.
+    pub fn pooled(seed: &FontSeed) -> FontStore {
+        FontStore {
+            font_system: FontSystem::new_with_locale_and_db(seed.locale.clone(), seed.db.clone()),
             swash: SwashCache::new(),
         }
     }
@@ -79,5 +103,13 @@ mod tests {
         let families = FontStore::new().families();
         assert_eq!(families[0], CODE_FAMILY);
         assert_eq!(families[1], BODY_FAMILY);
+    }
+
+    #[test]
+    fn a_pooled_store_sees_the_template_faces() {
+        let template = FontStore::new();
+        let pooled = FontStore::pooled(&template.seed());
+        assert_eq!(pooled.families(), template.families());
+        assert_eq!(pooled.font_system.locale(), template.font_system.locale());
     }
 }

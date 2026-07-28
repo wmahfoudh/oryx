@@ -8,7 +8,7 @@ use oryx::doc::model::{BlockKind, Document};
 use oryx::doc::stream::{self, Swap};
 use oryx::layout::{
     layout, layout_begin, layout_extend, layout_more, layout_step, metrics, recolor_batch,
-    recolor_code_lines, LayoutDoc, TextRun, ViewConfig,
+    recolor_code_lines, LayoutDoc, ShapePool, TextRun, ViewConfig,
 };
 use oryx::style::fonts::{FontStore, CODE_FAMILY};
 use oryx::style::highlight::{self, Arrival};
@@ -1610,4 +1610,182 @@ fn an_empty_batch_is_a_no_op() {
         &[],
     );
     assert_eq!(lay.runs, before);
+}
+
+#[test]
+fn a_pooled_store_lays_out_identically() {
+    let (mut doc, _) = batch_fixture();
+    highlight_all(&mut doc);
+    let mut template = fonts();
+    let seed = template.seed();
+    let direct = lay_doc(&doc, 800.0, &mut template);
+    let mut pooled = FontStore::pooled(&seed);
+    let clone = lay_doc(&doc, 800.0, &mut pooled);
+    assert_eq!(direct.runs, clone.runs);
+    assert_eq!(direct.rects, clone.rects);
+    assert_eq!(direct.height, clone.height);
+}
+
+/// Lays out with the shaping pool attached, the way the app will.
+fn lay_pooled(
+    doc: &Document,
+    width: f32,
+    store: &mut FontStore,
+    pool: &std::sync::Arc<ShapePool>,
+) -> LayoutDoc {
+    let mut media = MediaCache::new(PathBuf::from("."));
+    let (mut out, mut pass) = layout_begin(doc, &cfg(), width);
+    pass.attach_pool(std::sync::Arc::clone(pool));
+    // Seed with an expired slice, then give the workers a moment, so the
+    // pass provably consumes pooled steps instead of racing them.
+    layout_more(
+        doc,
+        &Theme::default_dark(),
+        store,
+        &mut media,
+        &cfg(),
+        &mut out,
+        &mut pass,
+        Some(Instant::now()),
+    );
+    let seeded = Instant::now();
+    while pool.completed() == 0 && seeded.elapsed() < Duration::from_secs(2) {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    layout_more(
+        doc,
+        &Theme::default_dark(),
+        store,
+        &mut media,
+        &cfg(),
+        &mut out,
+        &mut pass,
+        None,
+    );
+    out
+}
+
+#[test]
+fn a_pooled_pass_matches_the_serial_pass() {
+    let (mut doc, _) = batch_fixture();
+    highlight_all(&mut doc);
+    let mut store = fonts();
+    let serial = lay_doc(&doc, 800.0, &mut store);
+    let pool = std::sync::Arc::new(ShapePool::new(2, &store.seed()));
+    let pooled = lay_pooled(&doc, 800.0, &mut store, &pool);
+    assert!(pool.completed() > 0, "the pool did real work");
+    assert_eq!(serial.runs, pooled.runs);
+    assert_eq!(serial.rects, pooled.rects);
+    assert_eq!(serial.anchors, pooled.anchors);
+    assert_eq!(serial.table_rows, pooled.table_rows);
+    assert_eq!(serial.height, pooled.height);
+}
+
+#[test]
+fn a_pooled_code_file_matches_the_serial_pass() {
+    let mut source = String::from("```rust\n");
+    for i in 0..120 {
+        source.push_str(&format!("let value_{i} = compute({i}); // line {i}\n"));
+    }
+    source.push_str("```\n");
+    let mut doc = markdown::parse(&source);
+    highlight_all(&mut doc);
+    let mut store = fonts();
+    let serial = lay_doc(&doc, 700.0, &mut store);
+    let pool = std::sync::Arc::new(ShapePool::new(3, &store.seed()));
+    let pooled = lay_pooled(&doc, 700.0, &mut store, &pool);
+    assert!(pool.completed() > 0, "the pool shaped code lines");
+    assert_eq!(serial.runs, pooled.runs);
+    assert_eq!(serial.rects, pooled.rects);
+    assert_eq!(serial.height, pooled.height);
+}
+
+#[test]
+fn an_image_and_alert_document_matches_serial_under_the_pool() {
+    // Blocks the pool must refuse: an image block and an alert region.
+    // The assembler shapes them itself and the result stays identical.
+    let source = "before paragraph\n\n\
+        ![a missing image](nowhere.png)\n\n\
+        > [!NOTE]\n> the alert body\n\n\
+        after paragraph\n";
+    let doc = markdown::parse(source);
+    let mut store = fonts();
+    let serial = lay_doc(&doc, 800.0, &mut store);
+    let pool = std::sync::Arc::new(ShapePool::new(2, &store.seed()));
+    let pooled = lay_pooled(&doc, 800.0, &mut store, &pool);
+    assert_eq!(serial.runs, pooled.runs);
+    assert_eq!(serial.rects, pooled.rects);
+    assert_eq!(serial.height, pooled.height);
+}
+
+#[test]
+fn a_stale_pool_generation_reseeds_and_completes() {
+    let (mut doc, _) = batch_fixture();
+    highlight_all(&mut doc);
+    let mut store = fonts();
+    let serial = lay_doc(&doc, 800.0, &mut store);
+    let pool = std::sync::Arc::new(ShapePool::new(2, &store.seed()));
+    let mut media = MediaCache::new(PathBuf::from("."));
+    let (mut out, mut pass) = layout_begin(&doc, &cfg(), 800.0);
+    pass.attach_pool(std::sync::Arc::clone(&pool));
+    for _ in 0..3 {
+        layout_step(
+            &doc,
+            &Theme::default_dark(),
+            &mut store,
+            &mut media,
+            &cfg(),
+            &mut out,
+            &mut pass,
+        );
+    }
+    // Another pass claimed the pool in between, the export scenario.
+    pool.begin();
+    layout_more(
+        &doc,
+        &Theme::default_dark(),
+        &mut store,
+        &mut media,
+        &cfg(),
+        &mut out,
+        &mut pass,
+        None,
+    );
+    assert_eq!(serial.runs, out.runs);
+    assert_eq!(serial.height, out.height);
+}
+
+#[test]
+fn recolor_reports_the_spliced_range() {
+    let (mut doc, _) = batch_fixture();
+    let mut store = fonts();
+    let mut lay = lay_doc(&doc, 800.0, &mut store);
+    highlight_all(&mut doc);
+    let middle = doc
+        .blocks
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| matches!(b.kind, BlockKind::CodeBlock { .. }))
+        .map(|(i, _)| i)
+        .nth(1)
+        .expect("the fixture holds three code blocks");
+    let snapshot = lay.runs.clone();
+    let theme = Theme::default_dark();
+    let (lo, hi, delta) =
+        recolor_code_lines(&mut lay, &doc, &theme, &mut store, &cfg(), middle, 0..2)
+            .expect("a recolor that changed runs reports its splice");
+    assert_eq!(
+        lay.runs.len(),
+        snapshot.len().wrapping_add_signed(delta),
+        "the delta accounts for the length change"
+    );
+    assert!(lo < hi && hi <= snapshot.len());
+    assert_eq!(lay.runs[..lo], snapshot[..lo], "the head is untouched");
+    assert_eq!(
+        lay.runs[hi.wrapping_add_signed(delta)..],
+        snapshot[hi..],
+        "the tail moved whole"
+    );
+    let missing = recolor_code_lines(&mut lay, &doc, &theme, &mut store, &cfg(), 9999, 0..2);
+    assert!(missing.is_none(), "a no-op recolor reports nothing");
 }

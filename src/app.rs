@@ -14,7 +14,7 @@ use oryx::input::{
 };
 use oryx::layout::{
     layout_begin, layout_extend, layout_more, metrics, recolor_batch, DecoRect, LayoutDoc,
-    LayoutPass, ViewConfig, OPEN_SLICE, SLICE,
+    LayoutPass, ShapePool, ViewConfig, OPEN_SLICE, SLICE,
 };
 use oryx::paint;
 use oryx::paint::painter::Painter;
@@ -40,6 +40,9 @@ use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, Window
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{CursorIcon, Window, WindowId};
+
+/// How often owed recolors land while highlights wash in.
+const RECOLOR_WAVE: Duration = Duration::from_millis(400);
 
 /// The window icon raster produced by the build script.
 const ICON_64: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/icon_64.rgba"));
@@ -103,6 +106,12 @@ pub fn run(path: Option<PathBuf>, theme_name: Option<String>) -> anyhow::Result<
             eprintln!("oryx: cannot seed themes: {err}");
         }
     }
+    let fonts = FontStore::new();
+    let pool_width = std::thread::available_parallelism()
+        .map(|n| n.get().saturating_sub(1))
+        .unwrap_or(1)
+        .clamp(1, 8);
+    let pool = Arc::new(ShapePool::new(pool_width, &fonts.seed()));
     let mut app = App {
         gfx: None,
         document,
@@ -110,11 +119,14 @@ pub fn run(path: Option<PathBuf>, theme_name: Option<String>) -> anyhow::Result<
         theme: startup_theme(Some(theme_choice)),
         cfg,
         config,
-        fonts: FontStore::new(),
+        fonts,
+        pool,
         media,
         waker,
         highlighter,
         parser,
+        pending_recolor: Vec::new(),
+        last_recolor: Instant::now(),
         parse_pending: streamed,
         layout: None,
         pass: None,
@@ -199,6 +211,8 @@ struct App {
     cfg: ViewConfig,
     config: Config,
     fonts: FontStore,
+    /// The shaping pool every layout pass and export attaches to.
+    pool: Arc<ShapePool>,
     media: MediaCache,
     /// Handed to every media cache so fetch threads can wake the loop.
     waker: Waker,
@@ -206,6 +220,10 @@ struct App {
     highlighter: Highlighter,
     /// Background full-parse worker behind a streamed open.
     parser: ParseWorker,
+    /// Recolors owed to arrived highlights, applied in throttled waves.
+    pending_recolor: Vec<(usize, std::ops::Range<usize>)>,
+    /// When the last wave ran, pacing the next.
+    last_recolor: Instant,
     /// True from a streamed open until the worker's document lands.
     parse_pending: bool,
     layout: Option<LayoutDoc>,
@@ -678,6 +696,9 @@ impl App {
     /// held. Either way the highlight worker restarts over the whole
     /// document.
     fn land_parse(&mut self, blocks: Vec<Block>) {
+        // Owed recolors index the pre-swap model; they apply while every
+        // index is still valid.
+        self.flush_recolor();
         self.parse_pending = false;
         let spliced = match stream::swap(&self.document.blocks, blocks) {
             stream::Swap::Splice(tail) => {
@@ -707,6 +728,9 @@ impl App {
             self.sel_anchor = None;
         }
         self.start_highlight(load::pending(&self.document));
+        if let Some(pass) = self.pass.as_mut() {
+            pass.invalidate_pool();
+        }
         self.request_redraw();
     }
 
@@ -720,17 +744,39 @@ impl App {
         }
         let arrivals = self.highlighter.drain();
         if arrivals.is_empty() {
+            // The worker's last chunk can land between wakes; the wave
+            // timer in about_to_wait picks the leftovers up.
+            if !self.pending_recolor.is_empty() && !self.highlighter.is_running() {
+                self.flush_recolor();
+            }
             return;
         }
         for arrival in &arrivals {
             load::fold(&mut self.document, arrival);
         }
-        if let Some(lay) = self.layout.as_mut() {
-            let patches: Vec<(usize, std::ops::Range<usize>)> = arrivals
+        self.pending_recolor.extend(
+            arrivals
                 .iter()
-                .map(|a| (a.block, a.start_line..a.start_line + a.spans.len()))
-                .collect();
-            recolor_batch(
+                .map(|a| (a.block, a.start_line..a.start_line + a.spans.len())),
+        );
+        // Recolors land in waves: the model folds immediately, but the
+        // run vector rebuilds at most once per wave, so a trickling
+        // wash-in pays a handful of ranged rebuilds, not hundreds.
+        if self.last_recolor.elapsed() >= RECOLOR_WAVE || !self.highlighter.is_running() {
+            self.flush_recolor();
+        }
+    }
+
+    /// Applies the owed recolors in one ranged rebuild and resets the
+    /// relayout contract state.
+    fn flush_recolor(&mut self) {
+        self.last_recolor = Instant::now();
+        if self.pending_recolor.is_empty() {
+            return;
+        }
+        let patches = std::mem::take(&mut self.pending_recolor);
+        if let Some(lay) = self.layout.as_mut() {
+            let spliced = recolor_batch(
                 lay,
                 &self.document,
                 &self.theme,
@@ -738,15 +784,38 @@ impl App {
                 &self.cfg,
                 &patches,
             );
-        }
-        if self.layout.is_some() {
-            // Run indices shifted under the splice, the relayout contract.
-            self.selection = None;
-            if let Some(state) = self.search.as_mut() {
-                state.stale = true;
+            if let Some((lo, hi, delta)) = spliced {
+                // Selection endpoints ride the splice instead of dying
+                // with it; only one inside the rebuilt span is lost.
+                let remap = |pos: RunPos| -> Option<RunPos> {
+                    if pos.run < lo {
+                        Some(pos)
+                    } else if pos.run >= hi {
+                        Some(RunPos {
+                            run: pos.run.wrapping_add_signed(delta),
+                            ch: pos.ch,
+                        })
+                    } else {
+                        None
+                    }
+                };
+                self.selection = self.selection.and_then(|sel| {
+                    Some(Selection {
+                        start: remap(sel.start)?,
+                        end: remap(sel.end)?,
+                    })
+                });
+                if let Some(state) = self.search.as_mut() {
+                    state.stale = true;
+                }
+                self.band = None;
+                self.pending_band_for = None;
             }
-            self.band = None;
-            self.pending_band_for = None;
+        }
+        // Seeded jobs cloned the model before the fold; the reseed reads
+        // it fresh.
+        if let Some(pass) = self.pass.as_mut() {
+            pass.invalidate_pool();
         }
         self.request_redraw();
     }
@@ -970,6 +1039,7 @@ impl App {
         self.scroll_y = 0.0;
         self.selection = None;
         self.sel_anchor = None;
+        self.pending_recolor.clear();
         self.layout = None;
         self.band = None;
         // Both hold targets in the old document's coordinates; left
@@ -1092,6 +1162,7 @@ impl App {
             &mut self.fonts,
             &mut self.media,
             self.highlighter.is_running(),
+            Some(&self.pool),
         );
         let done = pass.is_done();
         self.overlay = Some(Box::new(ExportProgress::new(progress)));
@@ -1403,7 +1474,11 @@ impl App {
         if self.scroll_y > 0.0 {
             self.pending_scroll = Some(self.scroll_y);
         }
-        let (out, pass) = layout_begin(&self.document, &self.cfg, avail);
+        let (out, mut pass) = layout_begin(&self.document, &self.cfg, avail);
+        pass.attach_pool(Arc::clone(&self.pool));
+        // A fresh pass shapes with the model's current colors; owed
+        // recolors have nothing left to patch.
+        self.pending_recolor.clear();
         self.layout = Some(out);
         self.pass = Some(pass);
         self.pass_spent = Duration::ZERO;
@@ -1755,6 +1830,15 @@ impl ApplicationHandler for App {
     /// A relayout deferred by a live resize waits for the size to hold
     /// still, and the timer is the only thing that wakes an idle loop.
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if !self.pending_recolor.is_empty() {
+            let due = self.last_recolor + RECOLOR_WAVE;
+            if Instant::now() >= due {
+                self.flush_recolor();
+                event_loop.set_control_flow(ControlFlow::Wait);
+            } else {
+                event_loop.set_control_flow(ControlFlow::WaitUntil(due));
+            }
+        }
         let Some(at) = self.settle_at else {
             return;
         };

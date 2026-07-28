@@ -12,7 +12,7 @@ pub struct Document {
     pub source: String,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Block {
     /// 0 when the block is not inside a blockquote.
     pub quote_depth: u8,
@@ -39,7 +39,7 @@ impl Block {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum BlockKind {
     Heading {
         level: u8,
