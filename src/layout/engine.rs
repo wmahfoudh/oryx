@@ -122,6 +122,48 @@ pub struct LayoutDoc {
     pub code_lines: Vec<CodeLine>,
 }
 
+impl LayoutDoc {
+    /// Drains a step's scratch into the document with every position
+    /// dropped by `top` and every carried run index shifted behind the
+    /// existing elements. Height stays the caller's: the pass owns the
+    /// cursor. The scratch comes back empty for reuse.
+    pub fn splice(&mut self, scratch: &mut LayoutDoc, top: f32) {
+        let base_runs = self.runs.len();
+        self.runs.extend(scratch.runs.drain(..).map(|mut run| {
+            run.y += top;
+            run.baseline += top;
+            run
+        }));
+        self.rects.extend(scratch.rects.drain(..).map(|mut rect| {
+            rect.y += top;
+            rect
+        }));
+        self.images
+            .extend(scratch.images.drain(..).map(|mut image| {
+                image.y += top;
+                image
+            }));
+        self.anchors
+            .extend(scratch.anchors.drain(..).map(|mut anchor| {
+                anchor.1 += top;
+                anchor
+            }));
+        self.table_rows
+            .extend(scratch.table_rows.drain(..).map(|mut row| {
+                row.top += top;
+                row.bottom += top;
+                row
+            }));
+        self.code_lines
+            .extend(scratch.code_lines.drain(..).map(|mut line| {
+                line.runs = line.runs.start + base_runs..line.runs.end + base_runs;
+                line.y0 += top;
+                line
+            }));
+        scratch.height = 0.0;
+    }
+}
+
 /// One table row's vertical band, stripe and padding included.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TableRow {
@@ -324,6 +366,10 @@ pub struct LayoutPass {
     vertical_margin: f32,
     open: Option<OpenCode>,
     done: bool,
+    /// Reused per-step buffer: kind emission shapes into it from zero and
+    /// the splice drops it at the cursor, the arithmetic a pooled worker
+    /// will reproduce.
+    scratch: LayoutDoc,
 }
 
 impl LayoutPass {
@@ -418,6 +464,7 @@ pub fn layout_begin(
         vertical_margin,
         open: None,
         done: false,
+        scratch: LayoutDoc::default(),
     };
     (LayoutDoc::default(), pass)
 }
@@ -587,6 +634,7 @@ fn place_block(
     let alert_start =
         block.alert.is_some() && (pass.prev_quote_depth == 0 || pass.prev_alert != block.alert);
     let region_top = pass.cursor;
+    let mut scratch = std::mem::take(&mut pass.scratch);
     if alert_start {
         let kind = block.alert.expect("alert start has a kind");
         let title = [Span::plain(alert_title(kind))];
@@ -603,10 +651,11 @@ fn place_block(
             &title,
             &base,
             x_base,
-            pass.cursor,
+            0.0,
             avail,
-            out,
+            &mut scratch,
         );
+        out.splice(&mut scratch, pass.cursor);
         pass.cursor += title_h + 0.25 * base_size;
     }
 
@@ -639,9 +688,9 @@ fn place_block(
                 spans,
                 &base,
                 x_base,
-                pass.cursor,
+                0.0,
                 avail,
-                out,
+                &mut scratch,
             )
         }
         BlockKind::ListItem {
@@ -658,22 +707,23 @@ fn place_block(
             spans,
             block_index,
             x_base,
-            pass.cursor,
+            0.0,
             avail,
-            out,
+            &mut scratch,
         ),
         // A code file is one block, so it is opened and its lines land
         // over as many steps as the slice budget allows.
         BlockKind::CodeBlock { .. } => {
+            pass.scratch = scratch;
             let open = open_code(theme, cfg, block_index, frame, out, pass);
             place_code_line(doc, theme, fonts, cfg, open, out, pass);
             return;
         }
         BlockKind::Rule => {
             let thickness = (1.0 * cfg.zoom).max(1.0);
-            out.rects.push(DecoRect::fill(
+            scratch.rects.push(DecoRect::fill(
                 x_base,
-                pass.cursor,
+                0.0,
                 avail,
                 thickness,
                 theme.blocks.rule,
@@ -688,9 +738,9 @@ fn place_block(
             rows,
             block_index,
             x_base,
-            pass.cursor,
+            0.0,
             avail,
-            out,
+            &mut scratch,
         ),
         BlockKind::Image { path, alt } => layout_image(
             fonts,
@@ -701,9 +751,9 @@ fn place_block(
             alt,
             block_index,
             x_base,
-            pass.cursor,
+            0.0,
             avail,
-            out,
+            &mut scratch,
         ),
         BlockKind::Frontmatter { entries } => layout_frontmatter(
             fonts,
@@ -712,9 +762,9 @@ fn place_block(
             entries,
             block_index,
             x_base,
-            pass.cursor,
+            0.0,
             avail,
-            out,
+            &mut scratch,
         ),
         BlockKind::MathBlock { tex } => layout_math_block(
             fonts,
@@ -723,9 +773,9 @@ fn place_block(
             tex,
             block_index,
             x_base,
-            pass.cursor,
+            0.0,
             avail,
-            out,
+            &mut scratch,
         ),
         BlockKind::FootnoteDef { label, spans } => {
             out.anchors.push((format!("footnote:{label}"), pass.cursor));
@@ -738,13 +788,15 @@ fn place_block(
                 base_size,
                 block_index,
                 x_base,
-                pass.cursor,
+                0.0,
                 avail,
-                out,
+                &mut scratch,
             )
         }
     };
 
+    out.splice(&mut scratch, pass.cursor);
+    pass.scratch = scratch;
     finish_block(theme, cfg, block, frame, height, out, pass);
 }
 
@@ -899,7 +951,7 @@ fn place_code_line(
         let empty: Vec<(Range<usize>, SyntaxRole)> = Vec::new();
         let segments = highlights.get(open.line).unwrap_or(&empty);
         let x0 = open.frame.x_base + open.pad;
-        let run_start = out.runs.len();
+        let mut scratch = std::mem::take(&mut pass.scratch);
         let advance = shape_code_line(
             fonts,
             theme,
@@ -908,22 +960,24 @@ fn place_code_line(
             segments,
             open.block,
             x0,
-            open.y,
+            0.0,
             open.size,
             open.line_height,
             open.wrap_width,
-            out,
+            &mut scratch,
         );
-        out.code_lines.push(CodeLine {
+        scratch.code_lines.push(CodeLine {
             block: open.block,
             line: open.line,
-            runs: run_start..out.runs.len(),
+            runs: 0..scratch.runs.len(),
             x0,
-            y0: open.y,
+            y0: 0.0,
             size: open.size,
             line_height: open.line_height,
             wrap_width: open.wrap_width,
         });
+        out.splice(&mut scratch, open.y);
+        pass.scratch = scratch;
         open.y += advance;
     }
     open.line += 1;

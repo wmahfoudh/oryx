@@ -1416,3 +1416,86 @@ fn a_mid_pass_extension_matches_a_from_scratch_layout() {
     assert_eq!(lazy.runs, scratch.runs);
     assert_eq!(lazy.height, scratch.height);
 }
+
+#[test]
+fn splice_offsets_positions_and_carried_indices() {
+    let mut store = fonts();
+    // The target holds unrelated content first, so the splice must shift
+    // the carried record indices by the existing lengths, not only the
+    // positions.
+    let doc_a = markdown::parse("# Alpha\n\na paragraph without code\n\n> quoted\n");
+    let mut target = lay_doc(&doc_a, 800.0, &mut store);
+    let base_runs = target.runs.len();
+    let base_rects = target.rects.len();
+    let base_anchors = target.anchors.len();
+    let height_a = target.height;
+
+    let mut doc_b = markdown::parse(
+        "second heading text\n-------\n\n```rust\nfn main() {}\nlet x = 1;\n```\n\n\
+         |a|b|\n|-|-|\n|1|2|\n",
+    );
+    let mut reference = lay_doc(&doc_b, 800.0, &mut store);
+    let mut scratch = lay_doc(&doc_b, 800.0, &mut store);
+    let top = 4096.0;
+    target.splice(&mut scratch, top);
+
+    assert_eq!(target.height, height_a, "the caller owns the height");
+    assert!(scratch.runs.is_empty(), "the scratch drains for reuse");
+    assert_eq!(target.runs.len(), base_runs + reference.runs.len());
+    for (spliced, direct) in target.runs[base_runs..].iter().zip(&reference.runs) {
+        assert_eq!(spliced.text, direct.text);
+        assert_eq!(spliced.x, direct.x);
+        assert_eq!(spliced.y, direct.y + top);
+        assert_eq!(spliced.baseline, direct.baseline + top);
+    }
+    assert_eq!(target.rects.len(), base_rects + reference.rects.len());
+    for (spliced, direct) in target.rects[base_rects..].iter().zip(&reference.rects) {
+        assert_eq!(spliced.x, direct.x);
+        assert_eq!(spliced.y, direct.y + top);
+        assert_eq!(spliced.height, direct.height);
+    }
+    for (spliced, direct) in target.anchors[base_anchors..]
+        .iter()
+        .zip(&reference.anchors)
+    {
+        assert_eq!(spliced.0, direct.0);
+        assert_eq!(spliced.1, direct.1 + top);
+    }
+    assert_eq!(target.table_rows.len(), reference.table_rows.len());
+    for (spliced, direct) in target.table_rows.iter().zip(&reference.table_rows) {
+        assert_eq!(spliced.top, direct.top + top);
+        assert_eq!(spliced.bottom, direct.bottom + top);
+    }
+
+    // The code line records must re-shape at the spliced position: a
+    // recolor through them lands on the appended runs, moves nothing,
+    // and leaves the head untouched.
+    highlight_all(&mut doc_b);
+    let block = doc_b
+        .blocks
+        .iter()
+        .position(|b| matches!(b.kind, BlockKind::CodeBlock { .. }))
+        .expect("the fixture holds code");
+    let theme = Theme::default_dark();
+    recolor_code_lines(
+        &mut reference,
+        &doc_b,
+        &theme,
+        &mut store,
+        &cfg(),
+        block,
+        0..2,
+    );
+    recolor_code_lines(&mut target, &doc_b, &theme, &mut store, &cfg(), block, 0..2);
+    assert_eq!(target.runs.len(), base_runs + reference.runs.len());
+    for (spliced, direct) in target.runs[base_runs..].iter().zip(&reference.runs) {
+        assert_eq!(spliced.color, direct.color);
+        assert_eq!(spliced.text, direct.text);
+        assert_eq!(spliced.y, direct.y + top);
+    }
+    let a_reference = lay_doc(&doc_a, 800.0, &mut store);
+    for (kept, direct) in target.runs[..base_runs].iter().zip(&a_reference.runs) {
+        assert_eq!(kept.text, direct.text);
+        assert_eq!(kept.y, direct.y);
+    }
+}
