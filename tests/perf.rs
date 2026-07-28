@@ -322,3 +322,48 @@ fn print_row(
         pdf_bytes as f32 / (1024.0 * 1024.0)
     );
 }
+
+/// The field scenario behind the batched fold: a full arrival backlog
+/// recolored against a completely placed layout. The pre-batch cost was
+/// one tail-shifting splice per arrival, 43 seconds in the field on the
+/// huge tier; the batch pays one rebuild.
+#[test]
+#[ignore = "measurement only"]
+fn fold_backlog_measured() {
+    use oryx::layout::recolor_batch;
+    for (name, bytes) in &TIERS[2..] {
+        let (_, _, mut doc) = measure_open(&large_gen::generate(*bytes), "md");
+        for block in &mut doc.blocks {
+            if let BlockKind::CodeBlock {
+                language,
+                lines,
+                highlights,
+            } = &mut block.kind
+            {
+                *highlights = highlight::spans(lines, language.as_deref());
+            }
+        }
+        let mut fonts = FontStore::new();
+        let mut media = MediaCache::new(PathBuf::from("."));
+        let theme = Theme::default_dark();
+        let cfg = ViewConfig::default();
+        let mut lay = layout(&doc, &theme, &mut fonts, &mut media, &cfg, WIDTH);
+        let patches: Vec<(usize, std::ops::Range<usize>)> = doc
+            .blocks
+            .iter()
+            .enumerate()
+            .filter_map(|(i, b)| match &b.kind {
+                BlockKind::CodeBlock { lines, .. } => Some((i, 0..lines.len())),
+                _ => None,
+            })
+            .collect();
+        let started = Instant::now();
+        recolor_batch(&mut lay, &doc, &theme, &mut fonts, &cfg, &patches);
+        println!(
+            "fold {name}: {} blocks over {} runs in {}ms",
+            patches.len(),
+            lay.runs.len(),
+            started.elapsed().as_millis()
+        );
+    }
+}

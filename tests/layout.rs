@@ -7,8 +7,8 @@ use oryx::doc::markdown;
 use oryx::doc::model::{BlockKind, Document};
 use oryx::doc::stream::{self, Swap};
 use oryx::layout::{
-    layout, layout_begin, layout_extend, layout_more, layout_step, metrics, recolor_code_lines,
-    LayoutDoc, TextRun, ViewConfig,
+    layout, layout_begin, layout_extend, layout_more, layout_step, metrics, recolor_batch,
+    recolor_code_lines, LayoutDoc, TextRun, ViewConfig,
 };
 use oryx::style::fonts::{FontStore, CODE_FAMILY};
 use oryx::style::highlight::{self, Arrival};
@@ -1498,4 +1498,116 @@ fn splice_offsets_positions_and_carried_indices() {
         assert_eq!(kept.text, direct.text);
         assert_eq!(kept.y, direct.y);
     }
+}
+
+/// Three code blocks with prose between them, highlighted in full, for
+/// the batch recolor equivalences.
+fn batch_fixture() -> (Document, String) {
+    let source = "intro paragraph\n\n\
+        ```rust\nfn one() {}\nlet a = \"s\";\n```\n\n\
+        middle paragraph\n\n\
+        ```rust\nfn two() {}\nlet b = 1;\n```\n\n\
+        ```python\ndef three():\n    return 3\n```\n\n\
+        closing paragraph\n"
+        .to_string();
+    (markdown::parse(&source), source)
+}
+
+#[test]
+fn a_multi_patch_batch_matches_the_sequential_path() {
+    let (mut doc, _) = batch_fixture();
+    let mut store = fonts();
+    let mut batched = lay_doc(&doc, 800.0, &mut store);
+    let mut sequential = lay_doc(&doc, 800.0, &mut store);
+    highlight_all(&mut doc);
+    let blocks: Vec<usize> = doc
+        .blocks
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| matches!(b.kind, BlockKind::CodeBlock { .. }))
+        .map(|(i, _)| i)
+        .collect();
+    let theme = Theme::default_dark();
+    let patches: Vec<(usize, std::ops::Range<usize>)> = blocks.iter().map(|&b| (b, 0..2)).collect();
+    recolor_batch(&mut batched, &doc, &theme, &mut store, &cfg(), &patches);
+    for &b in &blocks {
+        recolor_code_lines(&mut sequential, &doc, &theme, &mut store, &cfg(), b, 0..2);
+    }
+    assert_eq!(batched.runs, sequential.runs);
+    let scratch = lay_doc(&doc, 800.0, &mut store);
+    assert_eq!(batched.runs, scratch.runs, "and both match a fresh layout");
+}
+
+#[test]
+fn a_middle_patch_shifts_later_records_like_the_sequential_path() {
+    let (mut doc, _) = batch_fixture();
+    let mut store = fonts();
+    let mut batched = lay_doc(&doc, 800.0, &mut store);
+    let mut sequential = lay_doc(&doc, 800.0, &mut store);
+    highlight_all(&mut doc);
+    let blocks: Vec<usize> = doc
+        .blocks
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| matches!(b.kind, BlockKind::CodeBlock { .. }))
+        .map(|(i, _)| i)
+        .collect();
+    let middle = blocks[1];
+    let theme = Theme::default_dark();
+    recolor_batch(
+        &mut batched,
+        &doc,
+        &theme,
+        &mut store,
+        &cfg(),
+        &[(middle, 0..2)],
+    );
+    recolor_code_lines(
+        &mut sequential,
+        &doc,
+        &theme,
+        &mut store,
+        &cfg(),
+        middle,
+        0..2,
+    );
+    assert_eq!(batched.runs, sequential.runs);
+    // The record shift is observable through a later recolor: it must
+    // land on the last block's runs in both.
+    recolor_code_lines(
+        &mut batched,
+        &doc,
+        &theme,
+        &mut store,
+        &cfg(),
+        blocks[2],
+        0..2,
+    );
+    recolor_code_lines(
+        &mut sequential,
+        &doc,
+        &theme,
+        &mut store,
+        &cfg(),
+        blocks[2],
+        0..2,
+    );
+    assert_eq!(batched.runs, sequential.runs);
+}
+
+#[test]
+fn an_empty_batch_is_a_no_op() {
+    let (doc, _) = batch_fixture();
+    let mut store = fonts();
+    let mut lay = lay_doc(&doc, 800.0, &mut store);
+    let before = lay.runs.clone();
+    recolor_batch(
+        &mut lay,
+        &doc,
+        &Theme::default_dark(),
+        &mut store,
+        &cfg(),
+        &[],
+    );
+    assert_eq!(lay.runs, before);
 }

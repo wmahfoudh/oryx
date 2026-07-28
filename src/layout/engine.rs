@@ -2269,11 +2269,106 @@ fn place_marker(runs: Vec<TextRun>, x: f32, y: f32, block_index: usize, out: &mu
     }
 }
 
-/// Recolors the laid-out lines `lines` of code block `block` from the
-/// document's current highlights, re-shaping only those lines and
-/// splicing the runs in place. Geometry is unchanged; run indices after
-/// the spliced range shift, so callers must drop selection and search
-/// positions exactly as they do after a relayout.
+/// Recolors every patched code line in one pass over the run vector:
+/// untouched stretches move through, patched lines re-shape in place, and
+/// records shift by the running delta. A drained arrival backlog costs
+/// one rebuild instead of one tail-shifting splice per arrival. Geometry
+/// is unchanged; run indices shift, so callers drop selection and search
+/// positions exactly as they do after a relayout. A record whose model
+/// line vanished keeps its old runs; arrivals are trusted only as far as
+/// the document reaches.
+pub fn recolor_batch(
+    lay: &mut LayoutDoc,
+    doc: &Document,
+    theme: &Theme,
+    fonts: &mut FontStore,
+    cfg: &ViewConfig,
+    patches: &[(usize, Range<usize>)],
+) {
+    // Records sort by (block, line) and their run ranges rise with it,
+    // so the affected list visits the run vector strictly left to right.
+    let mut affected: Vec<usize> = Vec::new();
+    for (block, lines) in patches {
+        let lo = lay
+            .code_lines
+            .partition_point(|c| (c.block, c.line) < (*block, lines.start));
+        let hi = lay
+            .code_lines
+            .partition_point(|c| (c.block, c.line) < (*block, lines.end));
+        affected.extend(lo..hi);
+    }
+    if affected.is_empty() {
+        return;
+    }
+    affected.sort_unstable();
+    affected.dedup();
+
+    let old_len = lay.runs.len();
+    let mut old_iter = std::mem::take(&mut lay.runs).into_iter();
+    let mut new_runs: Vec<TextRun> = Vec::with_capacity(old_len);
+    let mut copied = 0usize;
+    let mut delta = 0isize;
+    let mut scratch = LayoutDoc::default();
+    let empty: Vec<(Range<usize>, SyntaxRole)> = Vec::new();
+    let mut next = affected.iter().peekable();
+    for index in 0..lay.code_lines.len() {
+        if next.peek() != Some(&&index) {
+            let record = &mut lay.code_lines[index];
+            record.runs = record.runs.start.wrapping_add_signed(delta)
+                ..record.runs.end.wrapping_add_signed(delta);
+            continue;
+        }
+        next.next();
+        let record = lay.code_lines[index].clone();
+        new_runs.extend(old_iter.by_ref().take(record.runs.start - copied));
+        copied = record.runs.start;
+        let from = new_runs.len();
+        let source = doc.blocks.get(record.block).and_then(|b| match &b.kind {
+            BlockKind::CodeBlock {
+                lines, highlights, ..
+            } => Some((lines, highlights)),
+            _ => None,
+        });
+        let reshaped = source.and_then(|(source_lines, highlights)| {
+            let line = source_lines.get(record.line)?;
+            let segments = highlights.get(record.line).unwrap_or(&empty);
+            shape_code_line(
+                fonts,
+                theme,
+                cfg,
+                line,
+                segments,
+                record.block,
+                record.x0,
+                record.y0,
+                record.size,
+                record.line_height,
+                record.wrap_width,
+                &mut scratch,
+            );
+            Some(())
+        });
+        if reshaped.is_some() {
+            new_runs.append(&mut scratch.runs);
+            for _ in copied..record.runs.end {
+                old_iter.next();
+            }
+        } else {
+            new_runs.extend(old_iter.by_ref().take(record.runs.end - copied));
+        }
+        copied = record.runs.end;
+        lay.code_lines[index].runs = from..new_runs.len();
+        delta = new_runs.len() as isize - copied as isize;
+    }
+    new_runs.extend(old_iter);
+    lay.runs = new_runs;
+    // The rebuild moves every later run index, which the bucket spans
+    // hold; queries fall back to the linear tail until reindexed.
+    lay.index.runs.clear();
+}
+
+/// Recolors the laid-out lines `lines` of code block `block`: the
+/// one-patch batch.
 #[allow(clippy::too_many_arguments)]
 pub fn recolor_code_lines(
     lay: &mut LayoutDoc,
@@ -2284,62 +2379,7 @@ pub fn recolor_code_lines(
     block: usize,
     lines: Range<usize>,
 ) {
-    let lo = lay
-        .code_lines
-        .partition_point(|c| (c.block, c.line) < (block, lines.start));
-    let hi = lay
-        .code_lines
-        .partition_point(|c| (c.block, c.line) < (block, lines.end));
-    if lo == hi {
-        return;
-    }
-    let Some(BlockKind::CodeBlock {
-        lines: source_lines,
-        highlights,
-        ..
-    }) = doc.blocks.get(block).map(|b| &b.kind)
-    else {
-        return;
-    };
-    let empty: Vec<(Range<usize>, SyntaxRole)> = Vec::new();
-    let run_start = lay.code_lines[lo].runs.start;
-    let run_end = lay.code_lines[hi - 1].runs.end;
-    let mut scratch = LayoutDoc::default();
-    let mut fresh: Vec<Range<usize>> = Vec::with_capacity(hi - lo);
-    for record in &lay.code_lines[lo..hi] {
-        let Some(line) = source_lines.get(record.line) else {
-            return;
-        };
-        let segments = highlights.get(record.line).unwrap_or(&empty);
-        let from = scratch.runs.len();
-        shape_code_line(
-            fonts,
-            theme,
-            cfg,
-            line,
-            segments,
-            block,
-            record.x0,
-            record.y0,
-            record.size,
-            record.line_height,
-            record.wrap_width,
-            &mut scratch,
-        );
-        fresh.push(from..scratch.runs.len());
-    }
-    let delta = scratch.runs.len() as isize - (run_end - run_start) as isize;
-    lay.runs.splice(run_start..run_end, scratch.runs);
-    // The splice shifts every later run index, which the bucket spans
-    // hold; queries fall back to the linear tail until reindexed.
-    lay.index.runs.clear();
-    for (record, range) in lay.code_lines[lo..hi].iter_mut().zip(fresh) {
-        record.runs = run_start + range.start..run_start + range.end;
-    }
-    for record in lay.code_lines[hi..].iter_mut() {
-        record.runs = record.runs.start.wrapping_add_signed(delta)
-            ..record.runs.end.wrapping_add_signed(delta);
-    }
+    recolor_batch(lay, doc, theme, fonts, cfg, &[(block, lines)]);
 }
 
 /// Shapes one code line: one row per source line, wrapping inside the

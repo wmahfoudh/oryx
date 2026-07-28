@@ -13,7 +13,7 @@ use oryx::input::{
     keymap::{self, Command},
 };
 use oryx::layout::{
-    layout_begin, layout_extend, layout_more, metrics, recolor_code_lines, DecoRect, LayoutDoc,
+    layout_begin, layout_extend, layout_more, metrics, recolor_batch, DecoRect, LayoutDoc,
     LayoutPass, ViewConfig, OPEN_SLICE, SLICE,
 };
 use oryx::paint;
@@ -711,8 +711,9 @@ impl App {
     }
 
     /// Folds queued highlight chunks into the document and recolors the
-    /// affected laid-out lines in place. Deferred while a selection drag
-    /// is active; releasing the mouse folds the queue.
+    /// affected laid-out lines in one batch: a backlog costs one pass
+    /// over the run vector however many arrivals it holds. Deferred while
+    /// a selection drag is active; releasing the mouse folds the queue.
     fn fold_highlights(&mut self) {
         if self.sel_anchor.is_some() {
             return;
@@ -723,17 +724,20 @@ impl App {
         }
         for arrival in &arrivals {
             load::fold(&mut self.document, arrival);
-            if let Some(lay) = self.layout.as_mut() {
-                recolor_code_lines(
-                    lay,
-                    &self.document,
-                    &self.theme,
-                    &mut self.fonts,
-                    &self.cfg,
-                    arrival.block,
-                    arrival.start_line..arrival.start_line + arrival.spans.len(),
-                );
-            }
+        }
+        if let Some(lay) = self.layout.as_mut() {
+            let patches: Vec<(usize, std::ops::Range<usize>)> = arrivals
+                .iter()
+                .map(|a| (a.block, a.start_line..a.start_line + a.spans.len()))
+                .collect();
+            recolor_batch(
+                lay,
+                &self.document,
+                &self.theme,
+                &mut self.fonts,
+                &self.cfg,
+                &patches,
+            );
         }
         if self.layout.is_some() {
             // Run indices shifted under the splice, the relayout contract.
