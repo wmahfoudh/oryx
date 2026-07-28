@@ -5,9 +5,10 @@ use oryx::doc::images::MediaCache;
 use oryx::doc::load;
 use oryx::doc::markdown;
 use oryx::doc::model::{BlockKind, Document};
+use oryx::doc::stream::{self, Swap};
 use oryx::layout::{
-    layout, layout_begin, layout_more, layout_step, metrics, recolor_code_lines, LayoutDoc,
-    TextRun, ViewConfig,
+    layout, layout_begin, layout_extend, layout_more, layout_step, metrics, recolor_code_lines,
+    LayoutDoc, TextRun, ViewConfig,
 };
 use oryx::style::fonts::{FontStore, CODE_FAMILY};
 use oryx::style::highlight::{self, Arrival};
@@ -1276,4 +1277,142 @@ fn the_y_index_stays_honest_while_a_pass_grows() {
             break;
         }
     }
+}
+
+/// Lays out a prefix of the source, splices the parse worker's tail the
+/// way the app does, and hands back the extended layout with its pass.
+fn splice_at(
+    source: &str,
+    cut: usize,
+    width: f32,
+    store: &mut FontStore,
+) -> (Document, LayoutDoc, oryx::layout::LayoutPass) {
+    let mut doc = markdown::parse(&source[..cut]);
+    doc.source = source.to_string();
+    let mut media = MediaCache::new(PathBuf::from("."));
+    let (mut lazy, mut pass) = layout_begin(&doc, &cfg(), width);
+    layout_more(
+        &doc,
+        &Theme::default_dark(),
+        store,
+        &mut media,
+        &cfg(),
+        &mut lazy,
+        &mut pass,
+        None,
+    );
+    assert!(pass.is_complete(), "the prefix lays out whole");
+    let full = markdown::parse(source);
+    let Swap::Splice(tail) = stream::swap(&doc.blocks, full.blocks) else {
+        panic!("the fixture cut splices")
+    };
+    doc.blocks.extend(tail);
+    assert!(layout_extend(&doc, &mut pass), "a note-free prefix extends");
+    layout_more(
+        &doc,
+        &Theme::default_dark(),
+        store,
+        &mut media,
+        &cfg(),
+        &mut lazy,
+        &mut pass,
+        None,
+    );
+    (doc, lazy, pass)
+}
+
+#[test]
+fn an_extended_pass_matches_a_from_scratch_layout() {
+    let source = "# Title\n\nintro paragraph\n\n```rust\nfn a() {}\n```\n\n\
+        - item one\n- item two\n\ntail paragraph\n\n> a closing quote\n";
+    let cut = source.find("- item").expect("the fixture holds a list");
+    let mut store = fonts();
+    let (doc, lazy, pass) = splice_at(source, cut, 800.0, &mut store);
+    assert!(pass.is_complete());
+    let scratch = lay_doc(&doc, 800.0, &mut store);
+    assert_eq!(lazy.runs, scratch.runs);
+    assert_eq!(lazy.rects, scratch.rects);
+    assert_eq!(lazy.height, scratch.height);
+}
+
+#[test]
+fn tail_footnotes_extend_into_the_note_section() {
+    let source = "intro paragraph\n\nbody with a note[^1]\n\n[^1]: the note text\n";
+    let cut = source.find("body").expect("the fixture holds a body");
+    let mut store = fonts();
+    let (doc, lazy, _) = splice_at(source, cut, 800.0, &mut store);
+    let scratch = lay_doc(&doc, 800.0, &mut store);
+    assert_eq!(lazy.runs, scratch.runs);
+    assert_eq!(lazy.rects, scratch.rects);
+    assert_eq!(lazy.height, scratch.height);
+}
+
+#[test]
+fn a_prefix_with_placed_footnotes_refuses_extension() {
+    let source = "a paragraph with a note[^1]\n\n[^1]: placed early\n\nlate paragraph\n";
+    let cut = source.find("late").expect("the fixture holds a tail");
+    let mut doc = markdown::parse(&source[..cut]);
+    doc.source = source.to_string();
+    let mut store = fonts();
+    let mut media = MediaCache::new(PathBuf::from("."));
+    let (mut lazy, mut pass) = layout_begin(&doc, &cfg(), 800.0);
+    layout_more(
+        &doc,
+        &Theme::default_dark(),
+        &mut store,
+        &mut media,
+        &cfg(),
+        &mut lazy,
+        &mut pass,
+        None,
+    );
+    let full = markdown::parse(source);
+    let Swap::Splice(tail) = stream::swap(&doc.blocks, full.blocks) else {
+        panic!("the fixture cut splices")
+    };
+    doc.blocks.extend(tail);
+    assert!(
+        !layout_extend(&doc, &mut pass),
+        "a placed note section cannot take body blocks after it"
+    );
+}
+
+#[test]
+fn a_mid_pass_extension_matches_a_from_scratch_layout() {
+    let source = "# Title\n\none paragraph\n\nanother paragraph\n\nlast paragraph\n";
+    let cut = source.find("another").expect("the fixture holds a middle");
+    let mut doc = markdown::parse(&source[..cut]);
+    doc.source = source.to_string();
+    let mut store = fonts();
+    let mut media = MediaCache::new(PathBuf::from("."));
+    let (mut lazy, mut pass) = layout_begin(&doc, &cfg(), 800.0);
+    layout_step(
+        &doc,
+        &Theme::default_dark(),
+        &mut store,
+        &mut media,
+        &cfg(),
+        &mut lazy,
+        &mut pass,
+    );
+    assert!(!pass.is_complete(), "the prefix is mid-pass");
+    let full = markdown::parse(source);
+    let Swap::Splice(tail) = stream::swap(&doc.blocks, full.blocks) else {
+        panic!("the fixture cut splices")
+    };
+    doc.blocks.extend(tail);
+    assert!(layout_extend(&doc, &mut pass));
+    layout_more(
+        &doc,
+        &Theme::default_dark(),
+        &mut store,
+        &mut media,
+        &cfg(),
+        &mut lazy,
+        &mut pass,
+        None,
+    );
+    let scratch = lay_doc(&doc, 800.0, &mut store);
+    assert_eq!(lazy.runs, scratch.runs);
+    assert_eq!(lazy.height, scratch.height);
 }

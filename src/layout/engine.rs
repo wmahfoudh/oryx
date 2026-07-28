@@ -422,6 +422,28 @@ pub fn layout_begin(
     (LayoutDoc::default(), pass)
 }
 
+/// Extends a pass over a document that grew by appending blocks, the
+/// parse swap's splice. The placed prefix stays; answers false when the
+/// pass cannot extend, because a placed footnote section would put
+/// appended body blocks after the notes, and the caller restarts instead.
+pub fn layout_extend(doc: &Document, pass: &mut LayoutPass) -> bool {
+    if pass.has_notes {
+        return false;
+    }
+    let covered = pass.order.len();
+    if doc.blocks.len() <= covered {
+        return true;
+    }
+    let (body, notes): (Vec<usize>, Vec<usize>) = (covered..doc.blocks.len())
+        .partition(|&i| !matches!(doc.blocks[i].kind, BlockKind::FootnoteDef { .. }));
+    pass.order.extend(body);
+    pass.notes_start = pass.order.len();
+    pass.has_notes = !notes.is_empty();
+    pass.order.extend(notes);
+    pass.done = false;
+    true
+}
+
 /// Places steps until the deadline, or to the end when there is none.
 /// Returns true when the document is complete.
 #[allow(clippy::too_many_arguments)]

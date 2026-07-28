@@ -8,7 +8,9 @@ use std::time::Instant;
 
 use oryx::doc::images::MediaCache;
 use oryx::doc::load;
+use oryx::doc::markdown;
 use oryx::doc::model::{BlockKind, Document};
+use oryx::doc::stream::{self, Swap};
 use oryx::export::paginate::paginate;
 use oryx::export::{pdf, ExportSettings, PageGeometry, PageSize};
 use oryx::layout::{layout, layout_begin, layout_more, ViewConfig, OPEN_SLICE};
@@ -29,15 +31,29 @@ const TIERS: &[(&str, usize)] = &[
 ];
 
 /// The app's open path: the fixture written to disk, then read, parsed,
-/// and highlighted inside the sync budget.
-fn measure_open(source: &str, ext: &str) -> (u128, Document) {
+/// and highlighted inside the sync budget. A streamed open then pays the
+/// worker's full parse and the swap, timed as the parse column; the
+/// document handed on is whole either way, so the later columns always
+/// measure the full tier.
+fn measure_open(source: &str, ext: &str) -> (u128, u128, Document) {
     let path = std::env::temp_dir().join(format!("oryx-perf-{}.{ext}", std::process::id()));
     std::fs::write(&path, source).expect("write fixture");
     let started = Instant::now();
     let opened = load::open(&path, Some(Instant::now() + load::OPEN_BUDGET)).expect("open fixture");
-    let ms = started.elapsed().as_millis();
+    let open_ms = started.elapsed().as_millis();
     std::fs::remove_file(&path).ok();
-    (ms, opened.document)
+    let mut doc = opened.document;
+    let mut parse_ms = 0;
+    if opened.streamed {
+        let started = Instant::now();
+        let full = markdown::parse(&doc.source);
+        match stream::swap(&doc.blocks, full.blocks) {
+            Swap::Splice(tail) => doc.blocks.extend(tail),
+            Swap::Replace(blocks) => doc.blocks = blocks,
+        }
+        parse_ms = started.elapsed().as_millis();
+    }
+    (open_ms, parse_ms, doc)
 }
 
 const WIDTH: f32 = 1200.0;
@@ -160,7 +176,7 @@ fn measure_highlight(doc: &Document) -> u128 {
 #[test]
 #[ignore = "timing asserts only hold in release mode"]
 fn typical_document_meets_the_budget() {
-    let (open_ms, doc) = measure_open(&large_gen::generate(64 * 1024), "md");
+    let (open_ms, _, doc) = measure_open(&large_gen::generate(64 * 1024), "md");
     let laid = measure_layout(&doc);
     println!(
         "typical: open {open_ms}ms, first slice {}ms, full pass {}ms, height {:.0}px",
@@ -192,21 +208,21 @@ fn typical_document_meets_the_budget() {
 #[ignore = "measurement only"]
 fn tiers_measured() {
     for (name, bytes) in TIERS {
-        let (open_ms, doc) = measure_open(&large_gen::generate(*bytes), "md");
+        let (open_ms, parse_ms, doc) = measure_open(&large_gen::generate(*bytes), "md");
         let highlight_ms = measure_highlight(&doc);
         let laid = measure_layout(&doc);
         assert!(laid.height > 0.0, "markdown fixture laid out");
         assert_first_frame_is_whole(&laid, &format!("md {name}"));
         let export = measure_export(&doc);
-        print_row("md", name, open_ms, highlight_ms, &laid, export);
+        print_row("md", name, open_ms, parse_ms, highlight_ms, &laid, export);
 
-        let (open_ms, doc) = measure_open(&large_gen::generate_code(*bytes), "rs");
+        let (open_ms, parse_ms, doc) = measure_open(&large_gen::generate_code(*bytes), "rs");
         let highlight_ms = measure_highlight(&doc);
         let laid = measure_layout(&doc);
         assert!(laid.height > 0.0, "code fixture laid out");
         assert_first_frame_is_whole(&laid, &format!("code {name}"));
         let export = measure_export(&doc);
-        print_row("code", name, open_ms, highlight_ms, &laid, export);
+        print_row("code", name, open_ms, parse_ms, highlight_ms, &laid, export);
     }
 }
 
@@ -220,7 +236,7 @@ fn tiers_measured() {
 fn interactive_paths_measured() {
     use oryx::layout::metrics;
     for (name, bytes) in &TIERS[2..] {
-        let (_, doc) = measure_open(&large_gen::generate(*bytes), "md");
+        let (_, _, doc) = measure_open(&large_gen::generate(*bytes), "md");
         let mut fonts = FontStore::new();
         let mut media = MediaCache::new(PathBuf::from("."));
         let theme = Theme::default_dark();
@@ -286,13 +302,15 @@ fn print_row(
     kind: &str,
     tier: &str,
     open_ms: u128,
+    parse_ms: u128,
     highlight_ms: u128,
     laid: &Laid,
     export: (u128, usize, usize),
 ) {
     let (export_ms, pages, pdf_bytes) = export;
     println!(
-        "{kind:<4} {tier:>6}: open {open_ms:>5}ms (highlight {highlight_ms:>5}ms), \
+        "{kind:<4} {tier:>6}: open {open_ms:>5}ms (parse {parse_ms:>4}ms, \
+         highlight {highlight_ms:>5}ms), \
          slice {:>3}ms placing {:>9.0}px, pass {:>5}ms, runs {:>7}, rects {:>7}, \
          height {:>9.0}px, pdf {export_ms:>6}ms for {pages:>5} pages ({:.1}MB)",
         laid.first_ms,

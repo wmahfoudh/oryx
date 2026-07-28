@@ -68,6 +68,9 @@ pub fn is_text_file(path: &Path) -> bool {
 pub struct Opened {
     pub document: Document,
     pub pending: Vec<PendingBlock>,
+    /// True when the document holds only a parsed prefix and the parse
+    /// worker owes the rest; the blocks cover the source up to the cut.
+    pub streamed: bool,
 }
 
 pub fn open(path: &Path, deadline: Option<Instant>) -> anyhow::Result<Opened> {
@@ -85,14 +88,55 @@ pub fn open(path: &Path, deadline: Option<Instant>) -> anyhow::Result<Opened> {
     } else {
         text
     };
+    let mut streamed = false;
     let mut document = match detect(path) {
-        FileKind::Markdown => super::markdown::parse(&text),
+        // A markdown file past the prefix target parses only up to the
+        // cut; the worker owes the rest and the swap lands it. The full
+        // source rides along so every range is in final coordinates.
+        FileKind::Markdown => match super::stream::cut(&text) {
+            Some(cut) => {
+                streamed = true;
+                let mut prefix = super::markdown::parse(&text[..cut]);
+                prefix.source = text.to_string();
+                prefix
+            }
+            None => super::markdown::parse(&text),
+        },
         FileKind::Code(token) => code_document(Some(token), &text),
         FileKind::Text => plain_document(&text),
         FileKind::Unknown => code_document(None, &text),
     };
     let pending = apply_budget(&mut document, deadline);
-    Ok(Opened { document, pending })
+    Ok(Opened {
+        document,
+        pending,
+        streamed,
+    })
+}
+
+/// Every code block whose highlight prefix is incomplete, for restarting
+/// the highlight worker after the parse swap. Unlike `apply_budget` it
+/// leaves computed highlights alone.
+pub fn pending(doc: &Document) -> Vec<PendingBlock> {
+    let mut pending = Vec::new();
+    for (index, block) in doc.blocks.iter().enumerate() {
+        let BlockKind::CodeBlock {
+            language,
+            lines,
+            highlights,
+        } = &block.kind
+        else {
+            continue;
+        };
+        if highlights.len() < lines.len() {
+            pending.push(PendingBlock {
+                block: index,
+                language: language.clone(),
+                lines: lines.clone(),
+            });
+        }
+    }
+    pending
 }
 
 /// Highlights code blocks in document order until the deadline, leaving
@@ -580,6 +624,61 @@ mod tests {
             panic!()
         };
         assert_eq!(highlights, &eager);
+    }
+
+    #[test]
+    fn an_over_target_markdown_opens_with_a_prefix_over_the_full_source() {
+        let para = "A paragraph of plain filler text for the streaming fixture.\n\n";
+        let source = para.repeat(2 + crate::doc::stream::PREFIX_TARGET / para.len());
+        let path = temp_file("stream.md", &source);
+        let opened = open(&path, None).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert!(opened.streamed, "an over-target markdown streams");
+        assert_eq!(opened.document.source, source, "the source is whole");
+        let full = crate::doc::markdown::parse(&source);
+        let n = opened.document.blocks.len();
+        assert!(n > 0 && n < full.blocks.len(), "the blocks cover a prefix");
+        assert_eq!(opened.document.blocks, full.blocks[..n], "the head matches");
+    }
+
+    #[test]
+    fn an_under_target_markdown_takes_the_sync_path() {
+        let path = temp_file("sync.md", "# Title\n\na paragraph\n");
+        let opened = open(&path, None).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert!(!opened.streamed);
+        let full = crate::doc::markdown::parse("# Title\n\na paragraph\n");
+        assert_eq!(opened.document.blocks, full.blocks);
+    }
+
+    #[test]
+    fn a_code_file_never_streams() {
+        let line = "let value = compute(input); // filler\n";
+        let source = line.repeat(2 + crate::doc::stream::PREFIX_TARGET / line.len());
+        let path = temp_file("stream.rs", &source);
+        let opened = open(&path, Some(Instant::now())).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert!(!opened.streamed);
+        assert_eq!(opened.document.blocks.len(), 1, "one block, whole file");
+    }
+
+    #[test]
+    fn pending_lists_only_incomplete_code_blocks() {
+        let mut doc = crate::doc::markdown::parse(
+            "```rust\nfn a() {}\n```\n\ntext\n\n```python\nx = 1\ny = 2\n```\n",
+        );
+        let BlockKind::CodeBlock {
+            lines, highlights, ..
+        } = &mut doc.blocks[0].kind
+        else {
+            panic!("expected a code block")
+        };
+        *highlights = highlight::spans(lines, Some("rust"));
+        let pending = pending(&doc);
+        assert_eq!(pending.len(), 1, "the complete block is not redone");
+        assert_eq!(pending[0].block, 2);
+        assert_eq!(pending[0].language.as_deref(), Some("python"));
+        assert_eq!(pending[0].lines, ["x = 1", "y = 2"]);
     }
 
     #[test]

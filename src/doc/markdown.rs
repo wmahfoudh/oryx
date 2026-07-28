@@ -13,6 +13,13 @@ use crate::doc::model::{
 };
 
 pub fn parse(source: &str) -> Document {
+    parse_unless(source, || false).expect("an unconditional parse completes")
+}
+
+/// Parses unless `bail` answers true, checked every few thousand events.
+/// The parse worker passes its generation check, so a superseded document
+/// is never built to the end. A bailed parse answers None.
+pub fn parse_unless(source: &str, bail: impl Fn() -> bool) -> Option<Document> {
     let options = Options::ENABLE_TABLES
         | Options::ENABLE_FOOTNOTES
         | Options::ENABLE_STRIKETHROUGH
@@ -22,13 +29,19 @@ pub fn parse(source: &str) -> Document {
         | Options::ENABLE_YAML_STYLE_METADATA_BLOCKS
         | Options::ENABLE_GFM;
     let mut builder = Builder::default();
-    for (event, range) in Parser::new_ext(source, options).into_offset_iter() {
+    for (count, (event, range)) in Parser::new_ext(source, options)
+        .into_offset_iter()
+        .enumerate()
+    {
+        if count % 4096 == 0 && bail() {
+            return None;
+        }
         builder.event(event, range);
     }
-    Document {
+    Some(Document {
         blocks: builder.blocks,
         source: source.to_string(),
-    }
+    })
 }
 
 /// Inline containers the builder can be inside. Paragraphs inside list items

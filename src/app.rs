@@ -5,15 +5,16 @@ use std::time::{Duration, Instant};
 
 use oryx::doc::images::{MediaCache, Waker};
 use oryx::doc::load;
-use oryx::doc::model::Document;
+use oryx::doc::model::{Block, Document};
+use oryx::doc::stream::{self, ParseWorker};
 use oryx::export::{self, ExportPass, ExportSettings};
 use oryx::input::{
     self,
     keymap::{self, Command},
 };
 use oryx::layout::{
-    layout_begin, layout_more, metrics, recolor_code_lines, DecoRect, LayoutDoc, LayoutPass,
-    ViewConfig, OPEN_SLICE, SLICE,
+    layout_begin, layout_extend, layout_more, metrics, recolor_code_lines, DecoRect, LayoutDoc,
+    LayoutPass, ViewConfig, OPEN_SLICE, SLICE,
 };
 use oryx::paint;
 use oryx::paint::painter::Painter;
@@ -44,12 +45,12 @@ use winit::window::{CursorIcon, Window, WindowId};
 const ICON_64: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/icon_64.rgba"));
 
 pub fn run(path: Option<PathBuf>, theme_name: Option<String>) -> anyhow::Result<()> {
-    let (document, pending) = match &path {
+    let (document, pending, streamed) = match &path {
         Some(p) => {
             let opened = load::open(p, Some(Instant::now() + load::OPEN_BUDGET))?;
-            (opened.document, opened.pending)
+            (opened.document, opened.pending, opened.streamed)
         }
-        None => (Document::default(), Vec::new()),
+        None => (Document::default(), Vec::new(), false),
     };
     // Absolute from here on: a bare relative name like `README.md` has the
     // empty string as parent, which breaks the sidebar root and the dialog.
@@ -72,6 +73,11 @@ pub fn run(path: Option<PathBuf>, theme_name: Option<String>) -> anyhow::Result<
     {
         let waker = waker.clone();
         highlighter.start(pending, move || waker());
+    }
+    let mut parser = ParseWorker::new();
+    if streamed {
+        let waker = waker.clone();
+        parser.start(document.source.clone(), move || waker());
     }
     let mut config = config::load();
     if path.is_some() {
@@ -108,6 +114,8 @@ pub fn run(path: Option<PathBuf>, theme_name: Option<String>) -> anyhow::Result<
         media,
         waker,
         highlighter,
+        parser,
+        parse_pending: streamed,
         layout: None,
         pass: None,
         last_pass: Duration::ZERO,
@@ -196,10 +204,15 @@ struct App {
     waker: Waker,
     /// Background syntax highlighting worker and its arrivals queue.
     highlighter: Highlighter,
+    /// Background full-parse worker behind a streamed open.
+    parser: ParseWorker,
+    /// True from a streamed open until the worker's document lands.
+    parse_pending: bool,
     layout: Option<LayoutDoc>,
-    /// The pass while the document is still being placed; None once it is
-    /// complete. Positions already placed never move, so everything that
-    /// indexes the layout stays valid as it grows.
+    /// The pass while a layout exists. It outlives completion so the
+    /// parse swap can extend it over the appended tail. Positions already
+    /// placed never move, so everything that indexes the layout stays
+    /// valid as it grows.
     pass: Option<LayoutPass>,
     /// How long the last complete pass took, which decides whether a
     /// resize reflows live or waits for the size to settle.
@@ -631,6 +644,72 @@ impl App {
         self.highlighter.start(pending, move || waker());
     }
 
+    /// Hands the full source to the parse worker; the prefix on screen
+    /// grows into its delivery when it lands.
+    fn start_parse(&mut self) {
+        self.parse_pending = true;
+        let waker = self.waker.clone();
+        self.parser
+            .start(self.document.source.clone(), move || waker());
+    }
+
+    /// Lands a parked parse delivery. Deferred while any drag is live: a
+    /// replace would pull the layout out from under it.
+    fn fold_parse(&mut self) {
+        if self.sel_anchor.is_some() || self.drag.is_some() {
+            return;
+        }
+        if let Some(blocks) = self.parser.drain() {
+            self.land_parse(blocks);
+        }
+    }
+
+    /// Joins the parse worker and lands its document now, for the
+    /// completions that need the whole model.
+    fn finish_parse(&mut self) {
+        if let Some(blocks) = self.parser.finish() {
+            self.land_parse(blocks);
+        }
+    }
+
+    /// Lands the worker's blocks. A splice appends behind the kept prefix
+    /// and the pass resumes over the tail, moving nothing on screen; a
+    /// replace swaps the model and relayouts from scratch with the scroll
+    /// held. Either way the highlight worker restarts over the whole
+    /// document.
+    fn land_parse(&mut self, blocks: Vec<Block>) {
+        self.parse_pending = false;
+        let spliced = match stream::swap(&self.document.blocks, blocks) {
+            stream::Swap::Splice(tail) => {
+                self.document.blocks.extend(tail);
+                self.pass
+                    .as_mut()
+                    .is_some_and(|pass| layout_extend(&self.document, pass))
+            }
+            stream::Swap::Replace(blocks) => {
+                self.document.blocks = blocks;
+                false
+            }
+        };
+        if spliced {
+            // Append-only growth: placed positions and the painted band
+            // stay valid and the selection keeps its runs. Search grows
+            // stale to pick up the tail.
+            if let Some(state) = self.search.as_mut() {
+                state.stale = true;
+            }
+        } else {
+            self.layout = None;
+            self.pass = None;
+            self.band = None;
+            self.pending_band_for = None;
+            self.selection = None;
+            self.sel_anchor = None;
+        }
+        self.start_highlight(load::pending(&self.document));
+        self.request_redraw();
+    }
+
     /// Folds queued highlight chunks into the document and recolors the
     /// affected laid-out lines in place. Deferred while a selection drag
     /// is active; releasing the mouse folds the queue.
@@ -859,10 +938,18 @@ impl App {
             Ok(o) => {
                 self.document = o.document;
                 self.start_highlight(o.pending);
+                if o.streamed {
+                    self.start_parse();
+                } else {
+                    self.parser.cancel();
+                    self.parse_pending = false;
+                }
             }
             Err(err) => {
                 self.document = load::message(&err.to_string());
                 self.start_highlight(Vec::new());
+                self.parser.cancel();
+                self.parse_pending = false;
             }
         }
         self.path = Some(path.to_path_buf());
@@ -958,6 +1045,9 @@ impl App {
 
     /// Asks where the file goes, then starts the pass that writes it.
     fn start_export(&mut self, settings: ExportSettings) {
+        // The export steps against the document it is built for; a
+        // prefix would write a truncated file.
+        self.finish_parse();
         let (theme, fell_back) = export::resolve_theme(&theme_dirs(), &settings.theme, &self.theme);
         let stem = self
             .path
@@ -1172,6 +1262,13 @@ impl App {
     /// Selects the whole document, placing the rest of it first so the
     /// selection covers what a copy will read.
     fn select_all(&mut self) {
+        // The whole model first: a selection over a prefix would copy a
+        // truncated document. A replace drops the layout, so it may have
+        // to restart before it can complete.
+        self.finish_parse();
+        if self.layout.is_none() && self.layout_width > 0.0 {
+            self.start_pass(self.layout_width);
+        }
         self.finish_layout();
         let Some(lay) = self.layout.as_ref() else {
             return;
@@ -1233,7 +1330,7 @@ impl App {
             if let Err(err) = open::that_detached(&target) {
                 eprintln!("oryx: cannot open {target}: {err}");
             }
-        } else if self.pass.is_some() {
+        } else if self.layout_pending() {
             // The heading sits further down than the pass has reached, so
             // the jump waits for it instead of doing nothing.
             self.pending_anchor = Some(target);
@@ -1321,11 +1418,22 @@ impl App {
         true
     }
 
+    /// Whether a pass exists with blocks still to place.
+    fn pass_active(&self) -> bool {
+        self.pass.as_ref().is_some_and(|p| !p.is_complete())
+    }
+
+    /// Whether the layout still owes places: the pass has blocks left, or
+    /// the parse worker owes a document that will grow it.
+    fn layout_pending(&self) -> bool {
+        self.pass_active() || self.parse_pending
+    }
+
     /// Advances the pass by one slice. A pointer gesture holds it off so
     /// selection and scrollbar dragging stay smooth; the queue resumes on
     /// release.
     fn slice(&mut self, budget: Duration) {
-        if self.pass.is_none()
+        if !self.pass_active()
             || self.drag.is_some()
             || self.sel_anchor.is_some()
             || self.overlay_mouse
@@ -1350,7 +1458,6 @@ impl App {
         };
         self.pass_spent += started.elapsed();
         if done {
-            self.pass = None;
             self.last_pass = self.pass_spent;
             // Matches were found against the prefix; the whole document
             // is searchable now.
@@ -1367,7 +1474,7 @@ impl App {
     /// selection over a partial layout copies a truncated document, which
     /// no other navigation risks.
     fn finish_layout(&mut self) {
-        if self.pass.is_none() {
+        if !self.pass_active() {
             return;
         }
         let before = self.doc_height();
@@ -1385,7 +1492,6 @@ impl App {
                 None,
             );
         }
-        self.pass = None;
         if let Some(state) = self.search.as_mut() {
             state.stale = true;
         }
@@ -1429,12 +1535,12 @@ impl App {
             return;
         };
         match self.layout.as_ref().and_then(|l| l.anchor_y(&name)) {
-            Some(y) if scroll::reached(y, height, vh) || self.pass.is_none() => {
+            Some(y) if scroll::reached(y, height, vh) || !self.layout_pending() => {
                 self.pending_anchor = None;
                 self.scroll_to(y);
             }
             // The pass ended without ever placing that heading.
-            None if self.pass.is_none() => self.pending_anchor = None,
+            None if !self.layout_pending() => self.pending_anchor = None,
             _ => {}
         }
     }
@@ -1659,14 +1765,16 @@ impl ApplicationHandler for App {
         self.request_redraw();
     }
 
-    /// A background fetch or highlight chunk landed: fold it in. Fetches
-    /// relayout; highlights only recolor.
+    /// A background fetch, parse delivery or highlight chunk landed: fold
+    /// it in. Fetches relayout; highlights only recolor. The parse lands
+    /// first so a stale highlight generation dies before it recolors.
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, _event: ()) {
         if self.media.drain_remote() {
             self.layout = None;
             self.band = None;
             self.request_redraw();
         }
+        self.fold_parse();
         self.fold_highlights();
     }
 
@@ -1847,9 +1955,11 @@ impl ApplicationHandler for App {
                     } else {
                         self.end_selection();
                     }
-                    // The gesture held the pass off. A release that changed
-                    // nothing else still has to hand the loop back to it.
-                    if self.pass.is_some() {
+                    // The gesture held the pass off, and possibly a parked
+                    // parse delivery. A release that changed nothing else
+                    // still has to hand the loop back to them.
+                    self.fold_parse();
+                    if self.layout_pending() {
                         self.request_redraw();
                     }
                 }
