@@ -5,7 +5,9 @@
 use std::collections::HashMap;
 
 use cosmic_text::fontdb::ID as FaceId;
-use cosmic_text::{Attrs, Buffer, Family, Metrics, Shaping, Style, Weight};
+use cosmic_text::{
+    Attrs, Buffer, CacheKey, CacheKeyFlags, Family, Metrics, Shaping, Style, SwashContent, Weight,
+};
 use pdf_writer::types::{
     ActionType, AnnotationType, CidFontType, FontFlags, SystemInfo, UnicodeCmap,
 };
@@ -113,8 +115,31 @@ pub struct Builder {
     /// One XObject per source, so a logo repeated through a document is
     /// written once and drawn many times.
     images: HashMap<String, Ref>,
+    /// Faces with no outline tables, the color bitmap fonts emoji
+    /// resolve through; no subset can carry them, so their glyphs embed
+    /// as images.
+    bitmap: HashMap<FaceId, bool>,
+    /// One image XObject per bitmap glyph and raster size, shared
+    /// across pages; None records a glyph that produced no raster.
+    glyph_images: HashMap<(FaceId, u16, u32), Option<GlyphImage>>,
     contents: Vec<PageContent>,
 }
+
+/// An embedded bitmap glyph: its object, the raster's pixel geometry,
+/// and the placement offsets around the baseline origin in raster
+/// pixels, as the scaler reported them.
+#[derive(Clone, Copy)]
+struct GlyphImage {
+    id: Ref,
+    width: u32,
+    height: u32,
+    left: i32,
+    top: i32,
+}
+
+/// Raster pixels per point for embedded bitmap glyphs, the same 300 dpi
+/// ceiling placed images sample at.
+const GLYPH_RASTER: f32 = MAX_DPI / POINTS_PER_INCH;
 
 impl Default for Builder {
     fn default() -> Builder {
@@ -136,6 +161,8 @@ impl Builder {
             info_id,
             faces: HashMap::new(),
             images: HashMap::new(),
+            bitmap: HashMap::new(),
+            glyph_images: HashMap::new(),
             contents: Vec::new(),
         }
     }
@@ -185,10 +212,25 @@ impl Builder {
 
         let mut used: Vec<FaceId> = Vec::new();
         for run in &job.layout.runs[page.runs.clone()] {
-            self.draw_run(&mut content, run, page.top, geometry, fonts, &mut used);
+            self.draw_run(
+                &mut content,
+                run,
+                page.top,
+                geometry,
+                fonts,
+                &mut used,
+                &mut images,
+            );
         }
         if job.settings.page_numbers {
-            self.draw_page_number(&mut content, job, self.contents.len() + 1, fonts, &mut used);
+            self.draw_page_number(
+                &mut content,
+                job,
+                self.contents.len() + 1,
+                fonts,
+                &mut used,
+                &mut images,
+            );
         }
 
         let links = collect_links(job.layout, page, geometry);
@@ -207,6 +249,7 @@ impl Builder {
     }
 
     /// One run's glyphs, split by the face the shaper resolved.
+    #[allow(clippy::too_many_arguments)]
     fn draw_run(
         &mut self,
         content: &mut Content,
@@ -215,8 +258,13 @@ impl Builder {
         geometry: &PageGeometry,
         fonts: &mut FontStore,
         used: &mut Vec<FaceId>,
+        images: &mut Vec<(String, Ref)>,
     ) {
         for segment in shape(fonts, run) {
+            if self.is_bitmap_face(fonts, segment.face) {
+                self.draw_bitmap_segment(content, &segment, top, geometry, fonts, images);
+                continue;
+            }
             let ids = self.register(&segment);
             if !used.contains(&segment.face) {
                 used.push(segment.face);
@@ -227,9 +275,138 @@ impl Builder {
         }
     }
 
+    /// Whether a face carries no outline tables, which is what emoji
+    /// fonts like Noto Color Emoji look like: bitmap strikes only, so
+    /// the subsetter cannot embed them.
+    fn is_bitmap_face(&mut self, fonts: &mut FontStore, face: FaceId) -> bool {
+        if let Some(known) = self.bitmap.get(&face) {
+            return *known;
+        }
+        let bitmap = fonts
+            .font_system
+            .db()
+            .with_face_data(face, |data, index| {
+                ttf_parser::Face::parse(data, index)
+                    .map(|face| {
+                        let tables = face.tables();
+                        tables.glyf.is_none() && tables.cff.is_none() && tables.cff2.is_none()
+                    })
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false);
+        self.bitmap.insert(face, bitmap);
+        bitmap
+    }
+
+    /// Bitmap glyphs draw as images at their shaped positions, sampled
+    /// at the 300 dpi ceiling placed images use, so an emoji never fails
+    /// the export. Text extraction loses these glyphs; the surrounding
+    /// text is untouched.
+    fn draw_bitmap_segment(
+        &mut self,
+        content: &mut Content,
+        segment: &Segment,
+        top: f32,
+        geometry: &PageGeometry,
+        fonts: &mut FontStore,
+        images: &mut Vec<(String, Ref)>,
+    ) {
+        let baseline = device_y(segment.baseline, top, geometry);
+        for glyph in &segment.glyphs {
+            let Some(image) = self.glyph_image(fonts, segment.face, glyph.id, segment.size) else {
+                continue;
+            };
+            let name = image_name(images.len());
+            content.save_state();
+            content.transform([
+                image.width as f32 / GLYPH_RASTER,
+                0.0,
+                0.0,
+                image.height as f32 / GLYPH_RASTER,
+                glyph.x + image.left as f32 / GLYPH_RASTER,
+                baseline + (image.top - image.height as i32) as f32 / GLYPH_RASTER,
+            ]);
+            content.x_object(Name(name.as_bytes()));
+            content.restore_state();
+            images.push((name, image.id));
+        }
+    }
+
+    /// One rasterized glyph as an image XObject, written once per glyph
+    /// and raster size and reused across pages.
+    fn glyph_image(
+        &mut self,
+        fonts: &mut FontStore,
+        face: FaceId,
+        glyph: u16,
+        size: f32,
+    ) -> Option<GlyphImage> {
+        let raster_size = size * GLYPH_RASTER;
+        let key = (face, glyph, raster_size.to_bits());
+        if let Some(cached) = self.glyph_images.get(&key) {
+            return *cached;
+        }
+        // Weight only drives synthetic bolding, which bitmap strikes
+        // ignore; the shaper already resolved the face.
+        let (cache_key, _, _) = CacheKey::new(
+            face,
+            glyph,
+            raster_size,
+            (0.0, 0.0),
+            Weight::NORMAL,
+            CacheKeyFlags::empty(),
+        );
+        let raster = fonts
+            .swash
+            .get_image_uncached(&mut fonts.font_system, cache_key)
+            .filter(|img| {
+                img.placement.width > 0
+                    && img.placement.height > 0
+                    && img.content == SwashContent::Color
+            });
+        let built = raster.map(|img| {
+            let (width, height) = (img.placement.width, img.placement.height);
+            let mut rgb = Vec::with_capacity(img.data.len() / 4 * 3);
+            let mut alpha = Vec::with_capacity(img.data.len() / 4);
+            for pixel in img.data.chunks_exact(4) {
+                rgb.extend_from_slice(&pixel[..3]);
+                alpha.push(pixel[3]);
+            }
+            let id = self.alloc.next();
+            let mask_id = self.alloc.next();
+            let deflated = deflate(&rgb);
+            let mut xobject = self.pdf.image_xobject(id, &deflated);
+            xobject.width(width as i32);
+            xobject.height(height as i32);
+            xobject.color_space().device_rgb();
+            xobject.bits_per_component(8);
+            xobject.filter(Filter::FlateDecode);
+            xobject.s_mask(mask_id);
+            xobject.finish();
+            let deflated = deflate(&alpha);
+            let mut gray = self.pdf.image_xobject(mask_id, &deflated);
+            gray.width(width as i32);
+            gray.height(height as i32);
+            gray.color_space().device_gray();
+            gray.bits_per_component(8);
+            gray.filter(Filter::FlateDecode);
+            gray.finish();
+            GlyphImage {
+                id,
+                width,
+                height,
+                left: img.placement.left,
+                top: img.placement.top,
+            }
+        });
+        self.glyph_images.insert(key, built);
+        built
+    }
+
     /// The page number, centred in the bottom margin where nothing else
     /// goes. It is not part of the document, so it is positioned in
     /// device space rather than through a page top.
+    #[allow(clippy::too_many_arguments)]
     fn draw_page_number(
         &mut self,
         content: &mut Content,
@@ -237,6 +414,7 @@ impl Builder {
         number: usize,
         fonts: &mut FontStore,
         used: &mut Vec<FaceId>,
+        images: &mut Vec<(String, Ref)>,
     ) {
         let run = TextRun {
             text: number.to_string(),
@@ -265,6 +443,13 @@ impl Builder {
             segment.x += offset;
             for glyph in &mut segment.glyphs {
                 glyph.x += offset;
+            }
+            if self.is_bitmap_face(fonts, segment.face) {
+                // The number's baseline is already in device space;
+                // this top makes the segment's device_y answer it.
+                let top = baseline - (job.geometry.height - job.geometry.margin_y);
+                self.draw_bitmap_segment(content, segment, top, job.geometry, fonts, images);
+                continue;
             }
             let ids = self.register(segment);
             if !used.contains(&segment.face) {
@@ -417,6 +602,8 @@ fn finish(builder: Builder, job: &Job, fonts: &FontStore) -> Result<Vec<u8>, Str
     let Builder {
         mut pdf,
         mut alloc,
+        bitmap: _,
+        glyph_images: _,
         catalog_id,
         tree_id,
         info_id,
@@ -570,7 +757,10 @@ fn write_outline(
         let Some((page, y)) = place(job, tops, anchor) else {
             continue;
         };
-        let title: String = spans.iter().map(|span| span.text.as_str()).collect();
+        let title: String = spans
+            .iter()
+            .map(|span| span.text(&job.doc.source))
+            .collect();
         if title.trim().is_empty() {
             continue;
         }

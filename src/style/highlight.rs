@@ -7,6 +7,8 @@ use std::time::Instant;
 
 use syntect::parsing::{ParseState, ScopeStack, SyntaxSet};
 
+use crate::doc::model::CodeBody;
+
 /// Styled ranges for one code line.
 pub type LineSpans = Vec<(Range<usize>, SyntaxRole)>;
 
@@ -26,8 +28,8 @@ pub enum SyntaxRole {
 
 /// Per-line styled ranges for a code block. Lines with no recognized
 /// language come back as single Plain ranges.
-pub fn spans(lines: &[String], language: Option<&str>) -> Vec<LineSpans> {
-    spans_until(lines, language, None)
+pub fn spans(source: &str, lines: &CodeBody, language: Option<&str>) -> Vec<LineSpans> {
+    spans_until(source, lines, language, None)
 }
 
 /// `spans` cut off at a deadline: only whole lines computed before the
@@ -35,13 +37,14 @@ pub fn spans(lines: &[String], language: Option<&str>) -> Vec<LineSpans> {
 /// None means no deadline. The one-time grammar load happens before the
 /// first deadline check and counts against the caller's budget.
 pub fn spans_until(
-    lines: &[String],
+    source: &str,
+    lines: &CodeBody,
     language: Option<&str>,
     deadline: Option<Instant>,
 ) -> Vec<LineSpans> {
     let mut parser = Parser::new(language);
     let mut out = Vec::with_capacity(lines.len());
-    for line in lines {
+    for line in lines.iter(source) {
         if deadline.is_some_and(|d| Instant::now() >= d) {
             break;
         }
@@ -55,7 +58,8 @@ pub fn spans_until(
 /// `deliver` returning false stops between chunks. Returns whether the
 /// block completed.
 pub fn spans_chunked(
-    lines: &[String],
+    source: &str,
+    lines: &CodeBody,
     language: Option<&str>,
     chunk_size: usize,
     mut deliver: impl FnMut(usize, Vec<LineSpans>) -> bool,
@@ -65,7 +69,9 @@ pub fn spans_chunked(
     let mut start = 0;
     while start < lines.len() {
         let end = (start + chunk_size).min(lines.len());
-        let chunk = lines[start..end].iter().map(|l| parser.line(l)).collect();
+        let chunk = (start..end)
+            .map(|i| parser.line(lines.line(source, i)))
+            .collect();
         if !deliver(start, chunk) {
             return false;
         }
@@ -79,11 +85,13 @@ pub fn spans_chunked(
 pub const CHUNK_LINES: usize = 512;
 
 /// A code block whose highlights were not finished inside the open
-/// budget; the lines are owned so the worker needs no document access.
+/// budget. The worker shares the source through the `Arc` and the line
+/// ranges index it, so nothing owns a copy of the text.
 pub struct PendingBlock {
     pub block: usize,
     pub language: Option<String>,
-    pub lines: Vec<String>,
+    pub source: Arc<str>,
+    pub lines: CodeBody,
 }
 
 /// One chunk of computed highlights for a block, `spans[i]` covering
@@ -137,6 +145,7 @@ impl Highlighter {
         std::thread::spawn(move || {
             for p in pending {
                 let delivered = spans_chunked(
+                    &p.source,
                     &p.lines,
                     p.language.as_deref(),
                     CHUNK_LINES,
@@ -319,8 +328,8 @@ fn role_for(stack: &ScopeStack) -> SyntaxRole {
 mod tests {
     use super::*;
 
-    fn lines(v: &[&str]) -> Vec<String> {
-        v.iter().map(|s| s.to_string()).collect()
+    fn lines(v: &[&str]) -> CodeBody {
+        CodeBody::from_text(&v.join("\n"))
     }
 
     fn role_at(line: &[(Range<usize>, SyntaxRole)], pos: usize) -> SyntaxRole {
@@ -334,8 +343,9 @@ mod tests {
         (0..count)
             .map(|block| PendingBlock {
                 block,
+                source: Arc::from(""),
                 language: None,
-                lines: vec![String::from("plain text line"); lines_each],
+                lines: CodeBody::from_text(&"plain text line\n".repeat(lines_each)),
             })
             .collect()
     }
@@ -382,7 +392,7 @@ mod tests {
     #[test]
     fn rust_keyword_string_comment() {
         let src = lines(&["fn main() {", "    // a note", "    let s = \"hi\";", "}"]);
-        let h = spans(&src, Some("rust"));
+        let h = spans("", &src, Some("rust"));
         assert_eq!(h.len(), 4);
         assert_eq!(role_at(&h[0], 0), SyntaxRole::Keyword, "fn");
         assert_eq!(role_at(&h[1], 6), SyntaxRole::Comment, "comment body");
@@ -392,7 +402,7 @@ mod tests {
     #[test]
     fn python_keyword() {
         let src = lines(&["def greet(name):", "    return name"]);
-        let h = spans(&src, Some("python"));
+        let h = spans("", &src, Some("python"));
         assert_eq!(role_at(&h[0], 0), SyntaxRole::Keyword, "def");
         assert_eq!(role_at(&h[1], 4), SyntaxRole::Keyword, "return");
     }
@@ -419,7 +429,7 @@ mod tests {
     #[test]
     fn toml_values_take_their_role_from_the_json_grammar() {
         let src = lines(&["version = \"0.7.0\"", "lto = true", "opt-level = 3"]);
-        let h = spans(&src, Some("toml"));
+        let h = spans("", &src, Some("toml"));
         assert_eq!(role_at(&h[0], 12), SyntaxRole::String, "quoted value");
         assert_eq!(role_at(&h[1], 6), SyntaxRole::Keyword, "boolean");
         assert_eq!(role_at(&h[2], 12), SyntaxRole::Number, "number");
@@ -428,7 +438,7 @@ mod tests {
     #[test]
     fn ini_keys_and_hash_comments_take_their_role_from_properties() {
         let src = lines(&["# a note", "Fullscreen=true"]);
-        let h = spans(&src, Some("ini"));
+        let h = spans("", &src, Some("ini"));
         assert_eq!(role_at(&h[0], 3), SyntaxRole::Comment, "comment body");
         assert_eq!(role_at(&h[1], 0), SyntaxRole::Keyword, "key");
     }
@@ -436,7 +446,7 @@ mod tests {
     #[test]
     fn unknown_language_is_plain() {
         let src = lines(&["anything at all"]);
-        let h = spans(&src, Some("nosuchlang"));
+        let h = spans("", &src, Some("nosuchlang"));
         assert_eq!(h.len(), 1);
         assert!(h[0].iter().all(|(_, role)| *role == SyntaxRole::Plain));
     }
@@ -444,14 +454,14 @@ mod tests {
     #[test]
     fn no_language_is_plain() {
         let src = lines(&["plain text"]);
-        let h = spans(&src, None);
+        let h = spans("", &src, None);
         assert!(h[0].iter().all(|(_, role)| *role == SyntaxRole::Plain));
     }
 
     #[test]
     fn spans_until_past_deadline_computes_nothing() {
         let src = lines(&["fn main() {", "}"]);
-        let h = spans_until(&src, Some("rust"), Some(Instant::now()));
+        let h = spans_until("", &src, Some("rust"), Some(Instant::now()));
         assert!(h.is_empty());
     }
 
@@ -459,31 +469,39 @@ mod tests {
     fn spans_until_without_deadline_matches_spans() {
         let src = lines(&["fn main() {", "    let s = \"hi\";", "}"]);
         assert_eq!(
-            spans_until(&src, Some("rust"), None),
-            spans(&src, Some("rust"))
+            spans_until("", &src, Some("rust"), None),
+            spans("", &src, Some("rust"))
         );
     }
 
     #[test]
     fn chunked_spans_concatenate_to_one_shot() {
-        let src: Vec<String> = (0..10).map(|i| format!("let x{i} = {i}; // n")).collect();
+        let src = CodeBody::from_text(
+            &(0..10)
+                .map(|i| format!("let x{i} = {i}; // n\n"))
+                .collect::<String>(),
+        );
         let mut starts = Vec::new();
         let mut joined = Vec::new();
-        let complete = spans_chunked(&src, Some("rust"), 4, |start, chunk| {
+        let complete = spans_chunked("", &src, Some("rust"), 4, |start, chunk| {
             starts.push(start);
             joined.extend(chunk);
             true
         });
         assert!(complete);
         assert_eq!(starts, vec![0, 4, 8]);
-        assert_eq!(joined, spans(&src, Some("rust")));
+        assert_eq!(joined, spans("", &src, Some("rust")));
     }
 
     #[test]
     fn chunked_spans_stop_between_chunks_when_told() {
-        let src: Vec<String> = (0..10).map(|i| format!("let x{i} = {i};")).collect();
+        let src = CodeBody::from_text(
+            &(0..10)
+                .map(|i| format!("let x{i} = {i};\n"))
+                .collect::<String>(),
+        );
         let mut deliveries = 0;
-        let complete = spans_chunked(&src, Some("rust"), 4, |_, _| {
+        let complete = spans_chunked("", &src, Some("rust"), 4, |_, _| {
             deliveries += 1;
             false
         });
@@ -493,12 +511,17 @@ mod tests {
 
     #[test]
     fn worker_delivers_every_line_in_order() {
-        let src: Vec<String> = (0..1200).map(|i| format!("let v{i} = {i};")).collect();
+        let src = CodeBody::from_text(
+            &(0..1200)
+                .map(|i| format!("let v{i} = {i};\n"))
+                .collect::<String>(),
+        );
         let (tx, rx) = std::sync::mpsc::channel();
         let mut h = Highlighter::new();
         h.start(
             vec![PendingBlock {
                 block: 3,
+                source: Arc::from(""),
                 language: Some("rust".into()),
                 lines: src.clone(),
             }],
@@ -515,17 +538,22 @@ mod tests {
         assert!(got.iter().all(|a| a.block == 3));
         assert_eq!(got.first().map(|a| a.start_line), Some(0));
         let joined: Vec<LineSpans> = got.into_iter().flat_map(|a| a.spans).collect();
-        assert_eq!(joined, spans(&src, Some("rust")));
+        assert_eq!(joined, spans("", &src, Some("rust")));
     }
 
     #[test]
     fn restart_discards_stale_arrivals() {
-        let src: Vec<String> = (0..600).map(|i| format!("let v{i} = {i};")).collect();
+        let src = CodeBody::from_text(
+            &(0..600)
+                .map(|i| format!("let v{i} = {i};\n"))
+                .collect::<String>(),
+        );
         let (tx, rx) = std::sync::mpsc::channel();
         let mut h = Highlighter::new();
         h.start(
             vec![PendingBlock {
                 block: 0,
+                source: Arc::from(""),
                 language: None,
                 lines: src,
             }],
@@ -542,7 +570,7 @@ mod tests {
     #[test]
     fn empty_lines_produce_empty_ranges() {
         let src = lines(&["", "x"]);
-        let h = spans(&src, Some("rust"));
+        let h = spans("", &src, Some("rust"));
         assert_eq!(h.len(), 2);
         assert!(h[0].is_empty());
     }

@@ -41,6 +41,7 @@ fn lay(source: &str, width: f32) -> LayoutDoc {
 /// Folds full highlights into every code block, as the budget pass or
 /// the worker would.
 fn highlight_all(doc: &mut Document) {
+    let source = std::sync::Arc::clone(&doc.source);
     for i in 0..doc.blocks.len() {
         let BlockKind::CodeBlock {
             language, lines, ..
@@ -48,7 +49,7 @@ fn highlight_all(doc: &mut Document) {
         else {
             continue;
         };
-        let spans = highlight::spans(lines, language.as_deref());
+        let spans = highlight::spans(&source, lines, language.as_deref());
         load::fold(
             doc,
             &Arrival {
@@ -193,13 +194,14 @@ fn code_block_panel_and_highlighting() {
 #[test]
 fn unhighlighted_tail_renders_in_foreground() {
     let mut doc = markdown::parse("```rust\nfn main() {}\nlet x = 1;\n```");
+    let source = std::sync::Arc::clone(&doc.source);
     let BlockKind::CodeBlock {
         language, lines, ..
     } = &doc.blocks[0].kind
     else {
         panic!("expected code block")
     };
-    let spans = highlight::spans(lines, language.as_deref());
+    let spans = highlight::spans(&source, lines, language.as_deref());
     load::fold(
         &mut doc,
         &Arrival {
@@ -256,7 +258,7 @@ fn recolor_in_chunks_matches_full_relayout() {
         "let long = \"{}\"; // wraps\n```",
         "x".repeat(200)
     ));
-    let mut doc = markdown::parse(&source);
+    let mut doc = markdown::parse(source.as_str());
     let mut store = fonts();
     let mut lazy = lay_doc(&doc, 500.0, &mut store);
     highlight_all(&mut doc);
@@ -1188,7 +1190,7 @@ fn the_y_index_never_misses_an_element() {
     let source = std::fs::read_to_string("tests/fixtures/tour.md").unwrap();
     let mut fonts = fonts();
     for width in [420.0, 640.0, 900.0] {
-        let mut lay = lay_doc(&markdown::parse(&source), width, &mut fonts);
+        let mut lay = lay_doc(&markdown::parse(source.as_str()), width, &mut fonts);
         lay.index_more();
         assert!(lay.height > 2000.0, "the tour is tall enough to matter");
         let slices = 37;
@@ -1236,7 +1238,7 @@ fn the_y_index_never_misses_an_element() {
 #[test]
 fn the_y_index_stays_honest_while_a_pass_grows() {
     let source = std::fs::read_to_string("tests/fixtures/tour.md").unwrap();
-    let doc = markdown::parse(&source);
+    let doc = markdown::parse(source.as_str());
     let mut fonts = fonts();
     let mut media = MediaCache::new(PathBuf::from("."));
     let (mut out, mut pass) = layout_begin(&doc, &cfg(), 640.0);
@@ -1288,7 +1290,7 @@ fn splice_at(
     store: &mut FontStore,
 ) -> (Document, LayoutDoc, oryx::layout::LayoutPass) {
     let mut doc = markdown::parse(&source[..cut]);
-    doc.source = source.to_string();
+    doc.source = std::sync::Arc::from(source);
     let mut media = MediaCache::new(PathBuf::from("."));
     let (mut lazy, mut pass) = layout_begin(&doc, &cfg(), width);
     layout_more(
@@ -1352,7 +1354,7 @@ fn a_prefix_with_placed_footnotes_refuses_extension() {
     let source = "a paragraph with a note[^1]\n\n[^1]: placed early\n\nlate paragraph\n";
     let cut = source.find("late").expect("the fixture holds a tail");
     let mut doc = markdown::parse(&source[..cut]);
-    doc.source = source.to_string();
+    doc.source = std::sync::Arc::from(source);
     let mut store = fonts();
     let mut media = MediaCache::new(PathBuf::from("."));
     let (mut lazy, mut pass) = layout_begin(&doc, &cfg(), 800.0);
@@ -1382,7 +1384,7 @@ fn a_mid_pass_extension_matches_a_from_scratch_layout() {
     let source = "# Title\n\none paragraph\n\nanother paragraph\n\nlast paragraph\n";
     let cut = source.find("another").expect("the fixture holds a middle");
     let mut doc = markdown::parse(&source[..cut]);
-    doc.source = source.to_string();
+    doc.source = std::sync::Arc::from(source);
     let mut store = fonts();
     let mut media = MediaCache::new(PathBuf::from("."));
     let (mut lazy, mut pass) = layout_begin(&doc, &cfg(), 800.0);
@@ -1510,7 +1512,7 @@ fn batch_fixture() -> (Document, String) {
         ```python\ndef three():\n    return 3\n```\n\n\
         closing paragraph\n"
         .to_string();
-    (markdown::parse(&source), source)
+    (markdown::parse(source.as_str()), source)
 }
 
 #[test]
@@ -1688,7 +1690,7 @@ fn a_pooled_code_file_matches_the_serial_pass() {
         source.push_str(&format!("let value_{i} = compute({i}); // line {i}\n"));
     }
     source.push_str("```\n");
-    let mut doc = markdown::parse(&source);
+    let mut doc = markdown::parse(source.as_str());
     highlight_all(&mut doc);
     let mut store = fonts();
     let serial = lay_doc(&doc, 700.0, &mut store);
@@ -1788,4 +1790,40 @@ fn recolor_reports_the_spliced_range() {
     );
     let missing = recolor_code_lines(&mut lay, &doc, &theme, &mut store, &cfg(), 9999, 0..2);
     assert!(missing.is_none(), "a no-op recolor reports nothing");
+}
+
+/// The field scenario behind the coverage walk in markdown copy: the
+/// showcase collection carries footnote definitions three files in, the
+/// notes section lays out last, and a select-all copy must still cover
+/// the source tail.
+#[test]
+fn showcase_select_all_markdown_copy_covers_the_whole_source() {
+    let mut names: Vec<_> = std::fs::read_dir("tests/showcase")
+        .expect("showcase directory")
+        .map(|entry| entry.expect("entry").path())
+        .collect();
+    names.sort();
+    let mut source = String::new();
+    for path in names {
+        source.push_str(&std::fs::read_to_string(path).expect("showcase file"));
+    }
+    let doc = markdown::parse(source.as_str());
+    let mut fonts = FontStore::new();
+    let mut media = MediaCache::new(PathBuf::from("tests/showcase"));
+    let lay = oryx::layout::layout(
+        &doc,
+        &Theme::default_dark(),
+        &mut fonts,
+        &mut media,
+        &ViewConfig::default(),
+        1200.0,
+    );
+    let sel = oryx::ui::selection::all(&lay).expect("the document selects");
+    let md = oryx::ui::selection::markdown(&sel, &lay, &doc);
+    assert!(
+        md.len() >= source.trim_end().len(),
+        "the copy dropped {} of {} source bytes",
+        source.len() - md.len(),
+        source.len()
+    );
 }

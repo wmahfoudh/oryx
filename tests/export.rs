@@ -96,7 +96,7 @@ fn the_media_box_matches_the_chosen_page_size() {
 
 #[test]
 fn a_long_document_pages_and_stays_readable() {
-    let doc = markdown::parse(&"A paragraph that says something.\n\n".repeat(200));
+    let doc = markdown::parse("A paragraph that says something.\n\n".repeat(200).as_str());
     let bytes = export_to_bytes(&doc, PageSize::A4);
     let pdf = Pdf::load_mem(&bytes).unwrap();
     let count = pdf.get_pages().len();
@@ -228,7 +228,7 @@ fn an_external_link_becomes_a_uri_annotation() {
 
 #[test]
 fn an_anchor_link_points_at_the_page_holding_its_heading() {
-    let doc = markdown::parse(&format!(
+    let doc = markdown::parse(format!(
         "[jump](#target)\n\n{}\n## Target\n\nThe section.\n",
         "Filler paragraph here.\n\n".repeat(140)
     ));
@@ -246,7 +246,7 @@ fn the_outline_carries_every_heading_in_order() {
 
 #[test]
 fn page_numbers_appear_only_when_they_are_on() {
-    let doc = markdown::parse(&"Filler paragraph here.\n\n".repeat(200));
+    let doc = markdown::parse("Filler paragraph here.\n\n".repeat(200).as_str());
     let with = Pdf::load_mem(&export_with(&doc, PageSize::A4, true)).unwrap();
     let without = Pdf::load_mem(&export_with(&doc, PageSize::A4, false)).unwrap();
     let numbered = with.extract_text(&[2]).unwrap();
@@ -257,7 +257,7 @@ fn page_numbers_appear_only_when_they_are_on() {
 
 #[test]
 fn a_repeated_image_is_embedded_once() {
-    let doc = markdown::parse(&"![logo](oryx-test.png)\n\n".repeat(40));
+    let doc = markdown::parse("![logo](oryx-test.png)\n\n".repeat(40).as_str());
     let pdf = Pdf::load_mem(&export_to_bytes(&doc, PageSize::A4)).unwrap();
     let count = image_xobjects(&pdf);
     assert!(count >= 1, "the image is embedded at all");
@@ -367,4 +367,48 @@ fn a_cff_face_embeds_as_cidfonttype0_with_fontfile3() {
         assert_eq!(file3, cff, "CFF data rides FontFile3");
         assert_eq!(file2, !cff, "TrueType data rides FontFile2");
     }
+}
+
+// The field failure behind this test: a document whose emoji resolve
+// through a color bitmap font (Noto Color Emoji has no outlines) failed
+// the whole export at the subsetter. Bitmap glyphs embed as images
+// instead. On a machine without such a font the emoji resolves to an
+// outline face and the test still pins that the export succeeds and the
+// surrounding text survives.
+#[test]
+fn emoji_exports_without_failing_the_document() {
+    let doc = markdown::parse("before \u{1F389} after\n");
+    let bytes = export_to_bytes(&doc, PageSize::A4);
+    let pdf = Pdf::load_mem(&bytes).expect("a reader parses the file");
+    assert_eq!(pdf.get_pages().len(), 1);
+    let text = pdf.extract_text(&[1]).expect("text extracts");
+    assert!(text.contains("before"), "got {text:?}");
+    assert!(text.contains("after"), "got {text:?}");
+}
+
+/// The showcase collection is the field's export scenario: emoji through
+/// a bitmap font where one is installed, footnotes, tables, math. The
+/// export must build and keep the text a reader extracts.
+#[test]
+fn the_showcase_collection_exports() {
+    let mut names: Vec<_> = std::fs::read_dir("tests/showcase")
+        .expect("showcase directory")
+        .map(|entry| entry.expect("entry").path())
+        .collect();
+    names.sort();
+    let mut source = String::new();
+    for path in names {
+        source.push_str(&std::fs::read_to_string(path).expect("showcase file"));
+    }
+    let doc = markdown::parse(source.as_str());
+    let bytes = export_to_bytes(&doc, PageSize::A4);
+    let pdf = Pdf::load_mem(&bytes).expect("a reader parses the file");
+    let pages: Vec<u32> = pdf.get_pages().keys().copied().collect();
+    assert!(pages.len() > 1, "the collection spans pages");
+    let text = pdf.extract_text(&pages).expect("text extracts");
+    assert!(
+        text.contains("pushed around"),
+        "the footnote text survives, got tail {:?}",
+        &text[text.len().saturating_sub(200)..]
+    );
 }

@@ -1,9 +1,11 @@
 //! File loading and type detection by extension.
 
+use std::ops::Range;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::doc::model::{Block, BlockKind, Document, Span};
+use crate::doc::model::{Block, BlockKind, CodeBody, Document, Span};
 use crate::style::highlight::{self, Arrival, PendingBlock};
 
 /// Sync highlighting budget at open; whatever remains goes to the
@@ -97,10 +99,10 @@ pub fn open(path: &Path, deadline: Option<Instant>) -> anyhow::Result<Opened> {
             Some(cut) => {
                 streamed = true;
                 let mut prefix = super::markdown::parse(&text[..cut]);
-                prefix.source = text.to_string();
+                prefix.source = Arc::from(&*text);
                 prefix
             }
-            None => super::markdown::parse(&text),
+            None => super::markdown::parse(&*text),
         },
         FileKind::Code(token) => code_document(Some(token), &text),
         FileKind::Text => plain_document(&text),
@@ -132,6 +134,7 @@ pub fn pending(doc: &Document) -> Vec<PendingBlock> {
             pending.push(PendingBlock {
                 block: index,
                 language: language.clone(),
+                source: Arc::clone(&doc.source),
                 lines: lines.clone(),
             });
         }
@@ -143,6 +146,7 @@ pub fn pending(doc: &Document) -> Vec<PendingBlock> {
 /// each block's computed prefix in place; returns the unfinished blocks.
 fn apply_budget(doc: &mut Document, deadline: Option<Instant>) -> Vec<PendingBlock> {
     let mut pending = Vec::new();
+    let source = Arc::clone(&doc.source);
     for (index, block) in doc.blocks.iter_mut().enumerate() {
         let BlockKind::CodeBlock {
             language,
@@ -152,11 +156,12 @@ fn apply_budget(doc: &mut Document, deadline: Option<Instant>) -> Vec<PendingBlo
         else {
             continue;
         };
-        *highlights = highlight::spans_until(lines, language.as_deref(), deadline);
+        *highlights = highlight::spans_until(&source, lines, language.as_deref(), deadline);
         if highlights.len() < lines.len() {
             pending.push(PendingBlock {
                 block: index,
                 language: language.clone(),
+                source: Arc::clone(&source),
                 lines: lines.clone(),
             });
         }
@@ -205,21 +210,29 @@ pub fn recognized_extensions() -> Vec<&'static str> {
 
 /// The whole file as a single code block; the budget pass highlights it.
 /// No token means no grammar, so the block renders in the code font
-/// unstyled.
+/// unstyled. The lines are ranges into the source: a code file was two
+/// full copies of itself before layout ran, now it is one.
 fn code_document(token: Option<&str>, text: &str) -> Document {
-    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+    let base = text.as_ptr() as usize;
+    let mut lines: Vec<Range<u32>> = text
+        .lines()
+        .map(|line| {
+            let start = (line.as_ptr() as usize - base) as u32;
+            start..start + line.len() as u32
+        })
+        .collect();
     while lines.last().is_some_and(|l| l.is_empty()) {
         lines.pop();
     }
     let mut block = Block::plain(BlockKind::CodeBlock {
         language: token.map(str::to_string),
-        lines,
+        lines: CodeBody::verbatim(lines),
         highlights: Vec::new(),
     });
     block.range = 0..text.len();
     Document {
         blocks: vec![block],
-        source: text.to_string(),
+        source: Arc::from(text),
     }
 }
 
@@ -238,7 +251,8 @@ fn plain_document(text: &str) -> Document {
                 spans.push(Span::plain("\n"));
             }
             let mut span = Span::plain(line);
-            span.range = offset..offset + line.len();
+            span.range = offset as u32..(offset + line.len()) as u32;
+            span.seal(text);
             spans.push(span);
         }
         offset += raw.len() + 1;
@@ -246,7 +260,7 @@ fn plain_document(text: &str) -> Document {
     flush_plain(&mut blocks, &mut spans);
     Document {
         blocks,
-        source: text.to_string(),
+        source: Arc::from(text),
     }
 }
 
@@ -257,7 +271,7 @@ fn flush_plain(blocks: &mut Vec<Block>, spans: &mut Vec<Span>) {
     let spans = std::mem::take(spans);
     let with_range: Vec<_> = spans.iter().filter(|s| !s.range.is_empty()).collect();
     let range = match (with_range.first(), with_range.last()) {
-        (Some(first), Some(last)) => first.range.start..last.range.end,
+        (Some(first), Some(last)) => first.range.start as usize..last.range.end as usize,
         _ => 0..0,
     };
     let mut block = Block::plain(BlockKind::Paragraph { spans });
@@ -543,7 +557,10 @@ mod tests {
             panic!("expected code block, got {:?}", d.blocks)
         };
         assert_eq!(language.as_deref(), Some("python"));
-        assert_eq!(lines, &["def f():", "    return 1"]);
+        assert_eq!(
+            lines.iter(&d.source).collect::<Vec<_>>(),
+            ["def f():", "    return 1"]
+        );
         assert_eq!(highlights.len(), 2);
     }
 
@@ -582,7 +599,10 @@ mod tests {
         else {
             panic!("expected code block")
         };
-        assert_eq!(highlights, &highlight::spans(lines, Some("rust")));
+        assert_eq!(
+            highlights,
+            &highlight::spans(&opened.document.source, lines, Some("rust"))
+        );
         assert!(highlights
             .iter()
             .flatten()
@@ -598,7 +618,7 @@ mod tests {
             let BlockKind::CodeBlock { lines, .. } = &opened.document.blocks[0].kind else {
                 panic!("expected code block")
             };
-            highlight::spans(lines, Some("rust"))
+            highlight::spans(&opened.document.source, lines, Some("rust"))
         };
         fold(
             &mut opened.document,
@@ -634,8 +654,8 @@ mod tests {
         let opened = open(&path, None).unwrap();
         std::fs::remove_file(&path).unwrap();
         assert!(opened.streamed, "an over-target markdown streams");
-        assert_eq!(opened.document.source, source, "the source is whole");
-        let full = crate::doc::markdown::parse(&source);
+        assert_eq!(&*opened.document.source, source, "the source is whole");
+        let full = crate::doc::markdown::parse(source.as_str());
         let n = opened.document.blocks.len();
         assert!(n > 0 && n < full.blocks.len(), "the blocks cover a prefix");
         assert_eq!(opened.document.blocks, full.blocks[..n], "the head matches");
@@ -667,18 +687,25 @@ mod tests {
         let mut doc = crate::doc::markdown::parse(
             "```rust\nfn a() {}\n```\n\ntext\n\n```python\nx = 1\ny = 2\n```\n",
         );
+        let source = Arc::clone(&doc.source);
         let BlockKind::CodeBlock {
             lines, highlights, ..
         } = &mut doc.blocks[0].kind
         else {
             panic!("expected a code block")
         };
-        *highlights = highlight::spans(lines, Some("rust"));
+        *highlights = highlight::spans(&source, lines, Some("rust"));
         let pending = pending(&doc);
         assert_eq!(pending.len(), 1, "the complete block is not redone");
         assert_eq!(pending[0].block, 2);
         assert_eq!(pending[0].language.as_deref(), Some("python"));
-        assert_eq!(pending[0].lines, ["x = 1", "y = 2"]);
+        assert_eq!(
+            pending[0]
+                .lines
+                .iter(&pending[0].source)
+                .collect::<Vec<_>>(),
+            ["x = 1", "y = 2"]
+        );
     }
 
     #[test]
@@ -690,7 +717,7 @@ mod tests {
         let BlockKind::Paragraph { spans } = &d.blocks[0].kind else {
             panic!()
         };
-        let joined: String = spans.iter().map(|s| s.text.as_str()).collect();
+        let joined: String = spans.iter().map(|s| s.text(&d.source)).collect();
         assert_eq!(joined, "line one\nline two");
         assert!(matches!(&d.blocks[1].kind, BlockKind::Paragraph { .. }));
     }
@@ -708,7 +735,10 @@ mod tests {
             panic!("expected a code block")
         };
         assert_eq!(*language, None);
-        assert_eq!(lines, &["listen = 80", "root = /srv"]);
+        assert_eq!(
+            lines.iter(&d.source).collect::<Vec<_>>(),
+            ["listen = 80", "root = /srv"]
+        );
     }
 
     #[test]
@@ -752,7 +782,7 @@ mod tests {
         let BlockKind::Paragraph { spans } = &d.blocks[0].kind else {
             panic!("expected a paragraph")
         };
-        assert_eq!(spans[0].text, "cannot open /x: denied");
+        assert_eq!(spans[0].text(&d.source), "cannot open /x: denied");
     }
 
     #[test]

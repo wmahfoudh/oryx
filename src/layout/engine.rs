@@ -537,7 +537,7 @@ pub fn layout_more(
     pass: &mut LayoutPass,
     deadline: Option<Instant>,
 ) -> bool {
-    pool_sync(theme, cfg, pass);
+    pool_sync(doc, theme, cfg, pass);
     // Seed before the first deadline check, so even an expired slice
     // leaves the workers fed for the next one.
     pool_top_up(doc, pass);
@@ -554,7 +554,7 @@ pub fn layout_more(
 /// Claims the pool when attached and not current: a fresh pass, a model
 /// change, or another pass having taken it over. Seeding restarts at the
 /// assembler's own position, so nothing stale is ever consumed.
-fn pool_sync(theme: &Theme, cfg: &ViewConfig, pass: &mut LayoutPass) {
+fn pool_sync(doc: &Document, theme: &Theme, cfg: &ViewConfig, pass: &mut LayoutPass) {
     let Some(pool) = pass.pool.clone() else {
         return;
     };
@@ -565,6 +565,7 @@ fn pool_sync(theme: &Theme, cfg: &ViewConfig, pass: &mut LayoutPass) {
     pass.ctx = Some(std::sync::Arc::new(ShapeCtx {
         theme: theme.clone(),
         cfg: cfg.clone(),
+        source: std::sync::Arc::clone(&doc.source),
     }));
     match &pass.open {
         Some(open) => {
@@ -601,7 +602,7 @@ fn pool_top_up(doc: &Document, pass: &mut LayoutPass) {
             }
             let line_index = pass.seed_line;
             pass.seed_line += 1;
-            let line = &lines[line_index];
+            let line = lines.line(&doc.source, line_index);
             if line.is_empty() {
                 continue;
             }
@@ -618,7 +619,7 @@ fn pool_top_up(doc: &Document, pass: &mut LayoutPass) {
                 },
                 ctx: std::sync::Arc::clone(&ctx),
                 work: Work::CodeLine {
-                    line: line.clone(),
+                    line: line.to_string(),
                     segments: highlights.get(line_index).cloned().unwrap_or_default(),
                     block_index: index,
                     line_index,
@@ -820,6 +821,7 @@ fn place_block(
             fonts,
             theme,
             cfg,
+            &doc.source,
             &title,
             &base,
             x_base,
@@ -867,6 +869,7 @@ fn place_block(
         fonts,
         theme,
         cfg,
+        &doc.source,
         media,
         block,
         block_index,
@@ -890,6 +893,7 @@ pub(crate) fn shape_kind(
     fonts: &mut FontStore,
     theme: &Theme,
     cfg: &ViewConfig,
+    source: &str,
     media: &mut MediaCache,
     block: &Block,
     block_index: usize,
@@ -911,7 +915,7 @@ pub(crate) fn shape_kind(
                 block_index,
             };
             flow_or_shape(
-                fonts, theme, cfg, media, spans, &base, x_base, 0.0, avail, scratch,
+                fonts, theme, cfg, source, media, spans, &base, x_base, 0.0, avail, scratch,
             )
         }
         BlockKind::ListItem {
@@ -922,6 +926,7 @@ pub(crate) fn shape_kind(
             fonts,
             theme,
             cfg,
+            source,
             media,
             marker,
             *depth,
@@ -948,6 +953,7 @@ pub(crate) fn shape_kind(
             fonts,
             theme,
             cfg,
+            source,
             header,
             rows,
             block_index,
@@ -960,6 +966,7 @@ pub(crate) fn shape_kind(
             fonts,
             theme,
             cfg,
+            source,
             media,
             path,
             alt,
@@ -973,6 +980,7 @@ pub(crate) fn shape_kind(
             fonts,
             theme,
             cfg,
+            source,
             entries,
             block_index,
             x_base,
@@ -984,6 +992,7 @@ pub(crate) fn shape_kind(
             fonts,
             theme,
             cfg,
+            source,
             tex,
             block_index,
             x_base,
@@ -995,6 +1004,7 @@ pub(crate) fn shape_kind(
             fonts,
             theme,
             cfg,
+            source,
             label,
             spans,
             base_size,
@@ -1153,7 +1163,7 @@ fn place_code_line(
         return;
     }
 
-    let line = &lines[open.line];
+    let line = lines.line(&doc.source, open.line);
     if line.is_empty() {
         open.y += open.line_height;
     } else {
@@ -1306,6 +1316,7 @@ fn shape_block(
     fonts: &mut FontStore,
     theme: &Theme,
     cfg: &ViewConfig,
+    source: &str,
     spans: &[Span],
     base: &BlockStyle,
     x0: f32,
@@ -1321,10 +1332,10 @@ fn shape_block(
     let mut origins: Vec<usize> = Vec::new();
     let mut styles: Vec<SpanStyle> = Vec::new();
     for (si, span) in spans.iter().enumerate() {
-        if span.math && span.text != "\n" {
-            for (text, script) in math_scripts(&tex_symbols(&span.text)) {
+        if span.math && span.text(source) != "\n" {
+            for (text, script) in math_scripts(&tex_symbols(span.text(source))) {
                 let mut piece = span.clone();
-                piece.text = text;
+                piece.set_text(text);
                 let mut style = span_style(theme, cfg, base, &piece);
                 if script != Script::Normal {
                     style.rise = match script {
@@ -1348,12 +1359,13 @@ fn shape_block(
     let mut segment: Vec<usize> = Vec::new();
     let mut i = 0;
     while i <= shaped.len() {
-        let is_break = i == shaped.len() || shaped[i].text == "\n";
+        let is_break = i == shaped.len() || shaped[i].text(source) == "\n";
         if is_break {
             if !segment.is_empty() {
                 height += shape_segment(
                     fonts,
                     cfg,
+                    source,
                     &shaped,
                     &styles,
                     &origins,
@@ -1381,6 +1393,7 @@ fn shape_block(
 fn shape_segment(
     fonts: &mut FontStore,
     cfg: &ViewConfig,
+    source: &str,
     spans: &[Span],
     styles: &[SpanStyle],
     origins: &[usize],
@@ -1408,7 +1421,7 @@ fn shape_segment(
             if (st.size - base.size).abs() > f32::EPSILON {
                 attrs = attrs.metrics(Metrics::new(st.size, line_height));
             }
-            (spans[si].text.as_str(), attrs)
+            (spans[si].text(source), attrs)
         })
         .collect();
     let default_attrs = Attrs::new().family(Family::Name(&cfg.body_family));
@@ -1492,6 +1505,7 @@ fn layout_list_item(
     fonts: &mut FontStore,
     theme: &Theme,
     cfg: &ViewConfig,
+    source: &str,
     media: &mut MediaCache,
     marker: &Marker,
     depth: u8,
@@ -1550,7 +1564,7 @@ fn layout_list_item(
         block_index,
     };
     let height = flow_or_shape(
-        fonts, theme, cfg, media, spans, &base, text_x, y0, text_w, out,
+        fonts, theme, cfg, source, media, spans, &base, text_x, y0, text_w, out,
     );
     height.max(line_height)
 }
@@ -1563,6 +1577,7 @@ fn layout_table(
     fonts: &mut FontStore,
     theme: &Theme,
     cfg: &ViewConfig,
+    source: &str,
     header: &[Vec<Span>],
     rows: &[Vec<Vec<Span>>],
     block_index: usize,
@@ -1591,7 +1606,7 @@ fn layout_table(
             block_index,
         };
         shape_block(
-            fonts, theme, cfg, spans, &base, 0.0, 0.0, 100_000.0, &mut tmp,
+            fonts, theme, cfg, source, spans, &base, 0.0, 0.0, 100_000.0, &mut tmp,
         );
         tmp.runs.iter().map(|r| r.x + r.width).fold(0.0, f32::max)
     };
@@ -1667,6 +1682,7 @@ fn layout_table(
                 fonts,
                 theme,
                 cfg,
+                source,
                 spans,
                 &base,
                 0.0,
@@ -1754,6 +1770,7 @@ fn layout_image(
     fonts: &mut FontStore,
     theme: &Theme,
     cfg: &ViewConfig,
+    source: &str,
     media: &mut MediaCache,
     path: &str,
     alt: &str,
@@ -1778,15 +1795,11 @@ fn layout_image(
     }
     let pad = metrics::PLACEHOLDER_PAD * cfg.zoom;
     let radius = metrics::CORNER_RADIUS * cfg.zoom;
-    let alt_span = [Span {
-        text: if alt.is_empty() {
-            path.to_string()
-        } else {
-            alt.to_string()
-        },
-        italic: true,
-        ..Span::default()
-    }];
+    let alt_span = {
+        let mut span = Span::plain(if alt.is_empty() { path } else { alt });
+        span.italic = true;
+        [span]
+    };
     let base = BlockStyle {
         size: cfg.body_size * cfg.zoom,
         color: theme.blocks.frontmatter_fg,
@@ -1798,6 +1811,7 @@ fn layout_image(
         fonts,
         theme,
         cfg,
+        source,
         &alt_span,
         &base,
         x0 + pad,
@@ -2005,6 +2019,7 @@ fn layout_frontmatter(
     fonts: &mut FontStore,
     theme: &Theme,
     cfg: &ViewConfig,
+    source: &str,
     entries: &[(String, String)],
     block_index: usize,
     x0: f32,
@@ -2032,6 +2047,7 @@ fn layout_frontmatter(
         fonts,
         theme,
         cfg,
+        source,
         &spans,
         &base,
         x0 + pad,
@@ -2060,6 +2076,7 @@ fn layout_math_block(
     fonts: &mut FontStore,
     theme: &Theme,
     cfg: &ViewConfig,
+    source: &str,
     tex: &str,
     block_index: usize,
     x0: f32,
@@ -2069,10 +2086,10 @@ fn layout_math_block(
 ) -> f32 {
     let pad = 12.0 * cfg.zoom;
     let radius = metrics::CORNER_RADIUS * cfg.zoom;
-    let span = Span {
-        text: tex.trim().to_string(),
-        math: true,
-        ..Span::default()
+    let span = {
+        let mut span = Span::plain(tex.trim());
+        span.math = true;
+        span
     };
     let base = BlockStyle {
         size: cfg.body_size * cfg.zoom,
@@ -2086,6 +2103,7 @@ fn layout_math_block(
         fonts,
         theme,
         cfg,
+        source,
         &[span],
         &base,
         x0 + pad,
@@ -2122,6 +2140,7 @@ fn layout_footnote_def(
     fonts: &mut FontStore,
     theme: &Theme,
     cfg: &ViewConfig,
+    source: &str,
     label: &str,
     spans: &[Span],
     base_size: f32,
@@ -2139,7 +2158,18 @@ fn layout_footnote_def(
         block_index,
     };
     let runs_mark = out.runs.len();
-    shape_block(fonts, theme, cfg, &marker, &marker_base, x0, y0, avail, out);
+    shape_block(
+        fonts,
+        theme,
+        cfg,
+        source,
+        &marker,
+        &marker_base,
+        x0,
+        y0,
+        avail,
+        out,
+    );
     let marker_w = out.runs[runs_mark..]
         .iter()
         .map(|r| r.x + r.width)
@@ -2156,6 +2186,7 @@ fn layout_footnote_def(
         fonts,
         theme,
         cfg,
+        source,
         spans,
         &base,
         x0 + indent,
@@ -2172,6 +2203,7 @@ fn flow_or_shape(
     fonts: &mut FontStore,
     theme: &Theme,
     cfg: &ViewConfig,
+    source: &str,
     media: &mut MediaCache,
     spans: &[Span],
     base: &BlockStyle,
@@ -2181,9 +2213,11 @@ fn flow_or_shape(
     out: &mut LayoutDoc,
 ) -> f32 {
     if spans.iter().any(|s| s.image.is_some()) {
-        layout_flow(fonts, theme, cfg, media, spans, base, x0, y0, avail, out)
+        layout_flow(
+            fonts, theme, cfg, source, media, spans, base, x0, y0, avail, out,
+        )
     } else {
-        shape_block(fonts, theme, cfg, spans, base, x0, y0, avail, out)
+        shape_block(fonts, theme, cfg, source, spans, base, x0, y0, avail, out)
     }
 }
 
@@ -2204,6 +2238,7 @@ fn layout_flow(
     fonts: &mut FontStore,
     theme: &Theme,
     cfg: &ViewConfig,
+    source: &str,
     media: &mut MediaCache,
     spans: &[Span],
     base: &BlockStyle,
@@ -2226,7 +2261,10 @@ fn layout_flow(
             while i < spans.len() && spans[i].image.is_none() {
                 i += 1;
             }
-            if spans[start..i].iter().all(|s| s.text.trim().is_empty()) {
+            if spans[start..i]
+                .iter()
+                .all(|s| s.text(source).trim().is_empty())
+            {
                 continue;
             }
             if let Some(l) = line.take() {
@@ -2240,14 +2278,14 @@ fn layout_flow(
                 .map(|(si, s)| {
                     let mut c = s.clone();
                     if si < start || si >= i || s.image.is_some() {
-                        c.text = String::new();
+                        c.clear_text();
                         c.image = None;
                     }
                     c
                 })
                 .collect();
             let runs_mark = out.runs.len();
-            let h = shape_block(fonts, theme, cfg, &masked, base, x0, y, avail, out);
+            let h = shape_block(fonts, theme, cfg, source, &masked, base, x0, y, avail, out);
             let last_top = out.runs[runs_mark..].iter().map(|r| r.y).fold(y, f32::max);
             let end_x = out.runs[runs_mark..]
                 .iter()
@@ -2548,7 +2586,10 @@ pub fn recolor_batch(
             _ => None,
         });
         let reshaped = source.and_then(|(source_lines, highlights)| {
-            let line = source_lines.get(record.line)?;
+            if record.line >= source_lines.len() {
+                return None;
+            }
+            let line = source_lines.line(&doc.source, record.line);
             let segments = highlights.get(record.line).unwrap_or(&empty);
             shape_code_line(
                 fonts,

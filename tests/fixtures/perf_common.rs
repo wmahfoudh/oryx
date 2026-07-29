@@ -5,6 +5,7 @@
 #![allow(dead_code)]
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Instant;
 
 use oryx::doc::images::MediaCache;
@@ -52,7 +53,7 @@ pub fn measure_open(source: &str, ext: &str) -> (u128, u128, Document) {
     let mut parse_ms = 0;
     if opened.streamed {
         let started = Instant::now();
-        let full = markdown::parse(&doc.source);
+        let full = markdown::parse(Arc::clone(&doc.source));
         match stream::swap(&doc.blocks, full.blocks) {
             Swap::Splice(tail) => doc.blocks.extend(tail),
             Swap::Replace(blocks) => doc.blocks = blocks,
@@ -188,6 +189,7 @@ pub fn measure_highlight(doc: &mut Document) -> u128 {
     // millisecond each, and per-block as_millis() truncates them all to
     // zero.
     let mut total = std::time::Duration::ZERO;
+    let source = std::sync::Arc::clone(&doc.source);
     for block in &mut doc.blocks {
         if let BlockKind::CodeBlock {
             language,
@@ -196,7 +198,7 @@ pub fn measure_highlight(doc: &mut Document) -> u128 {
         } = &mut block.kind
         {
             let started = Instant::now();
-            let spans = highlight::spans(lines, language.as_deref());
+            let spans = highlight::spans(&source, lines, language.as_deref());
             total += started.elapsed();
             *highlights = spans;
         }

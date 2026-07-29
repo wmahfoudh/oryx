@@ -136,8 +136,32 @@ pub fn markdown(sel: &Selection, lay: &LayoutDoc, doc: &Document) -> String {
         return String::new();
     }
     let (a, b) = sel.ordered();
-    let start = source_pos(doc, lay, &a, Edge::Start);
-    let end = source_pos(doc, lay, &b, Edge::End);
+    let mut start = source_pos(doc, lay, &a, Edge::Start);
+    let mut end = source_pos(doc, lay, &b, Edge::End);
+    // Layout order is not source order: footnote definitions place at
+    // the end as the notes section while living mid-document. The
+    // endpoints keep their character precision; every block strictly
+    // inside the selection widens the slice to its whole source lines,
+    // so a selection over reordered blocks never drops the source tail.
+    let lo = a.run.min(lay.runs.len() - 1);
+    let hi = b.run.min(lay.runs.len() - 1);
+    let edge_blocks = (lay.runs[lo].block, lay.runs[hi].block);
+    let mut covered = usize::MAX;
+    for run in &lay.runs[lo..=hi] {
+        if run.span == MARKER_SPAN || run.block == covered {
+            continue;
+        }
+        covered = run.block;
+        if covered == edge_blocks.0 || covered == edge_blocks.1 {
+            continue;
+        }
+        let range = &doc.blocks[covered].range;
+        if range.is_empty() {
+            continue;
+        }
+        start = start.min(line_start(&doc.source, range.start));
+        end = end.max(line_end(&doc.source, range.end));
+    }
     let start = floor_boundary(&doc.source, start);
     let end = floor_boundary(&doc.source, end.max(start));
     doc.source[start..end].to_string()
@@ -173,18 +197,15 @@ fn source_pos(doc: &Document, lay: &LayoutDoc, pos: &RunPos, edge: Edge) -> usiz
     if let Some(span) = span {
         // Character precision holds only when the span survived parsing
         // verbatim and the run's slice locates uniquely inside it.
-        let verbatim = doc
-            .source
-            .get(span.range.clone())
-            .is_some_and(|s| s == span.text);
-        if verbatim {
-            if let Some(offset) = span.text.find(run.text.as_str()) {
-                return span.range.start + offset + byte_of_char(&run.text, pos.ch);
+        if span.is_verbatim() {
+            let text = span.text(&doc.source);
+            if let Some(offset) = text.find(run.text.as_str()) {
+                return span.range.start as usize + offset + byte_of_char(&run.text, pos.ch);
             }
         }
         return match edge {
-            Edge::Start => span.range.start,
-            Edge::End => span.range.end,
+            Edge::Start => span.range.start as usize,
+            Edge::End => span.range.end as usize,
         };
     }
     match edge {
@@ -306,7 +327,7 @@ fn separator(doc: &Document, prev: &TextRun, cur: &TextRun) -> Cow<'static, str>
                     .get(prev.span + 1..cur.span)
                     .unwrap_or(&[])
                     .iter()
-                    .any(|s| s.text == "\n")
+                    .any(|s| s.text(&doc.source) == "\n")
             });
             if hard_break { "\n" } else { " " }.into()
         }
@@ -477,7 +498,7 @@ mod tests {
 
     #[test]
     fn cached_match_rects_equal_direct_and_share_shapings() {
-        let doc = markdown::parse(&"the word the word the word here.\n\n".repeat(8));
+        let doc = markdown::parse("the word the word the word here.\n\n".repeat(8).as_str());
         let mut fonts = FontStore::new();
         let mut media = MediaCache::new(std::path::PathBuf::from("."));
         let lay = layout(
@@ -591,6 +612,37 @@ mod tests {
     fn markdown_partial_selection_slices_characters() {
         let source = "alpha one\n\nsecond beta";
         let (doc, l, _) = lay_doc(source);
+        let sel = Selection {
+            start: RunPos { run: 0, ch: 6 },
+            end: RunPos { run: 1, ch: 6 },
+        };
+        assert_eq!(markdown(&sel, &l, &doc), "one\n\nsecond");
+    }
+
+    // Footnote definitions lay out at the end as the notes section, so a
+    // select-all's last run belongs to a block that sits mid-source; the
+    // slice must still cover every selected block.
+    #[test]
+    fn markdown_select_all_covers_blocks_laid_out_of_source_order() {
+        let source =
+            "body one.\n\nA claim[^n] made here.\n\n[^n]: The note text.\n\nbody two ends here.\n";
+        let (doc, l, _) = lay_doc(source);
+        let sel = all(&l).expect("the document selects");
+        let md = markdown(&sel, &l, &doc);
+        assert!(
+            md.contains("body two ends here."),
+            "the copy covered the source tail, got {md:?}"
+        );
+        assert!(md.starts_with("body one."), "got {md:?}");
+        assert!(md.contains("[^n]: The note text."));
+    }
+
+    #[test]
+    fn markdown_partial_precision_survives_the_coverage_walk() {
+        let source = "alpha one\n\nsecond beta\n\n[^x]: a note\n\nafter[^x] text\n";
+        let (doc, l, _) = lay_doc(source);
+        // A selection inside the first two body blocks stays precise and
+        // never grows over the note or the trailing paragraph.
         let sel = Selection {
             start: RunPos { run: 0, ch: 6 },
             end: RunPos { run: 1, ch: 6 },

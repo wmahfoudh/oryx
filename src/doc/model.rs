@@ -1,15 +1,38 @@
 //! Document model: the visual-free representation every later stage consumes.
 
 use std::ops::Range;
+use std::sync::Arc;
 
 use crate::style::highlight::SyntaxRole;
 
-#[derive(Debug, Default, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub struct Document {
     pub blocks: Vec<Block>,
     /// The text the document was parsed from; block and span ranges index
-    /// into it. Markdown copy slices it directly.
-    pub source: String,
+    /// into it. Markdown copy slices it directly. Shared with the parse
+    /// and highlight workers, which clone the `Arc`, never the text.
+    pub source: Arc<str>,
+}
+
+impl Default for Document {
+    fn default() -> Document {
+        Document {
+            blocks: Vec::new(),
+            source: Arc::from(""),
+        }
+    }
+}
+
+/// Slices a model range out of the source. Model offsets are `u32` bytes
+/// created at shaper cluster boundaries or newline splits; the asserts
+/// catch any seam that lets one land inside a multi-byte character.
+pub(crate) fn slice<'a>(source: &'a str, range: &Range<u32>) -> &'a str {
+    let (start, end) = (range.start as usize, range.end as usize);
+    debug_assert!(
+        source.is_char_boundary(start) && source.is_char_boundary(end),
+        "model range {start}..{end} off a char boundary"
+    );
+    &source[start..end]
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -51,7 +74,7 @@ pub enum BlockKind {
     },
     CodeBlock {
         language: Option<String>,
-        lines: Vec<String>,
+        lines: CodeBody,
         /// One vector of styled ranges per line, computed at load.
         highlights: Vec<Vec<(Range<usize>, SyntaxRole)>>,
     },
@@ -79,6 +102,64 @@ pub enum BlockKind {
     Frontmatter {
         entries: Vec<(String, String)>,
     },
+}
+
+/// A code block's lines as byte ranges. The ranges index the document
+/// source when the body survived parsing verbatim, which fenced blocks
+/// and code files always do; an indented block strips its indent, so the
+/// normalized body is owned and the ranges index it instead.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct CodeBody {
+    owned: Option<Box<str>>,
+    lines: Vec<Range<u32>>,
+}
+
+impl CodeBody {
+    /// Lines slicing the source directly.
+    pub(crate) fn verbatim(lines: Vec<Range<u32>>) -> CodeBody {
+        CodeBody { owned: None, lines }
+    }
+
+    /// Lines over an owned body; ranges index the body.
+    pub fn from_text(text: &str) -> CodeBody {
+        let base = text.as_ptr() as usize;
+        let mut lines: Vec<Range<u32>> = text
+            .lines()
+            .map(|line| {
+                let start = (line.as_ptr() as usize - base) as u32;
+                start..start + line.len() as u32
+            })
+            .collect();
+        while lines.last().is_some_and(|l| l.is_empty()) {
+            lines.pop();
+        }
+        CodeBody {
+            owned: Some(text.into()),
+            lines,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.lines.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.lines.is_empty()
+    }
+
+    pub fn is_verbatim(&self) -> bool {
+        self.owned.is_none()
+    }
+
+    pub fn line<'a>(&'a self, source: &'a str, index: usize) -> &'a str {
+        let base = self.owned.as_deref().unwrap_or(source);
+        slice(base, &self.lines[index])
+    }
+
+    pub fn iter<'a>(&'a self, source: &'a str) -> impl Iterator<Item = &'a str> {
+        let base = self.owned.as_deref().unwrap_or(source);
+        self.lines.iter().map(move |range| slice(base, range))
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -117,7 +198,12 @@ pub enum SpanScript {
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct Span {
-    pub text: String,
+    /// Owned text when parsing transformed it away from the source slice
+    /// (smart punctuation, entities, emoji shortcodes, stripped HTML,
+    /// merges over gaps) and for synthesized spans; `None` when `range`
+    /// slices the text out of the source, decided once by `seal`. Read
+    /// through `text`.
+    owned: Option<String>,
     pub bold: bool,
     pub italic: bool,
     pub strike: bool,
@@ -129,15 +215,15 @@ pub struct Span {
     /// Set when the span is an inline image flowing with the text.
     pub image: Option<SpanImage>,
     /// Byte range of the span's origin in `Document::source`. The slice may
-    /// differ from `text` when parsing transformed it (smart punctuation,
-    /// emoji, stripped HTML); empty for synthesized spans.
-    pub range: Range<usize>,
+    /// differ from the text when parsing transformed it; empty for
+    /// synthesized spans.
+    pub range: Range<u32>,
 }
 
 impl Default for Span {
     fn default() -> Span {
         Span {
-            text: String::new(),
+            owned: Some(String::new()),
             bold: false,
             italic: false,
             strike: false,
@@ -154,8 +240,80 @@ impl Default for Span {
 impl Span {
     pub fn plain(text: impl Into<String>) -> Self {
         Span {
-            text: text.into(),
+            owned: Some(text.into()),
             ..Span::default()
+        }
+    }
+
+    /// The display text: the source slice for a verbatim span, the owned
+    /// text otherwise.
+    pub fn text<'a>(&'a self, source: &'a str) -> &'a str {
+        match &self.owned {
+            Some(text) => text,
+            None => slice(source, &self.range),
+        }
+    }
+
+    /// True when `range` slices the display text out of the source.
+    pub fn is_verbatim(&self) -> bool {
+        self.owned.is_none()
+    }
+
+    pub(crate) fn set_text(&mut self, text: impl Into<String>) {
+        self.owned = Some(text.into());
+    }
+
+    pub(crate) fn clear_text(&mut self) {
+        self.owned = Some(String::new());
+    }
+
+    /// The text before `seal` decided ownership; the builder reads and
+    /// merges through this, and every span still owns its text then.
+    pub(crate) fn raw_text(&self) -> &str {
+        self.owned.as_deref().unwrap_or_default()
+    }
+
+    pub(crate) fn raw_text_mut(&mut self) -> &mut String {
+        self.owned.get_or_insert_with(String::new)
+    }
+
+    /// Drops the owned text when the source slice already carries it.
+    /// One byte compare per span, once, when the document is complete.
+    pub(crate) fn seal(&mut self, source: &str) {
+        let sealed = self.owned.as_ref().is_some_and(|text| {
+            !self.range.is_empty()
+                && source
+                    .get(self.range.start as usize..self.range.end as usize)
+                    .is_some_and(|slice| slice == text.as_str())
+        });
+        if sealed {
+            self.owned = None;
+        }
+    }
+}
+
+/// Seals every span of every block against the source.
+pub(crate) fn seal_blocks(blocks: &mut [Block], source: &str) {
+    for block in blocks {
+        match &mut block.kind {
+            BlockKind::Heading { spans, .. }
+            | BlockKind::Paragraph { spans }
+            | BlockKind::ListItem { spans, .. }
+            | BlockKind::FootnoteDef { spans, .. } => {
+                for span in spans {
+                    span.seal(source);
+                }
+            }
+            BlockKind::Table { header, rows } => {
+                for span in header
+                    .iter_mut()
+                    .flatten()
+                    .chain(rows.iter_mut().flatten().flatten())
+                {
+                    span.seal(source);
+                }
+            }
+            _ => {}
         }
     }
 }

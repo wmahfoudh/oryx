@@ -148,15 +148,17 @@ impl ParseWorker {
     }
 
     /// Parses the whole source off the main thread and runs the waker
-    /// when the blocks are ready. Starting again cancels the running
-    /// worker.
-    pub fn start(&mut self, source: String, waker: impl Fn() + Send + 'static) {
+    /// when the blocks are ready. The worker shares the document's
+    /// source through the `Arc`, owning no copy. Starting again cancels
+    /// the running worker.
+    pub fn start(&mut self, source: impl Into<Arc<str>>, waker: impl Fn() + Send + 'static) {
+        let source: Arc<str> = source.into();
         let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         let slot = Arc::clone(&self.slot);
         let current = Arc::clone(&self.generation);
         self.handle = Some(std::thread::spawn(move || {
             let bail = || current.load(Ordering::SeqCst) != generation;
-            let Some(document) = crate::doc::markdown::parse_unless(&source, bail) else {
+            let Some(document) = crate::doc::markdown::parse_unless(source, bail) else {
                 return;
             };
             {
@@ -222,7 +224,7 @@ mod tests {
         let flag = Arc::clone(&woke);
         worker.start(source.clone(), move || flag.store(true, Ordering::SeqCst));
         let blocks = drain_within(&mut worker, 2000).expect("a delivery arrives");
-        assert_eq!(blocks, crate::doc::markdown::parse(&source).blocks);
+        assert_eq!(blocks, crate::doc::markdown::parse(source.as_str()).blocks);
         assert!(woke.load(Ordering::SeqCst), "the waker ran");
         assert!(worker.drain().is_none(), "a delivery drains once");
     }
@@ -235,7 +237,7 @@ mod tests {
         worker.start(first, || {});
         worker.start(second.clone(), || {});
         let blocks = drain_within(&mut worker, 2000).expect("the live delivery arrives");
-        assert_eq!(blocks, crate::doc::markdown::parse(&second).blocks);
+        assert_eq!(blocks, crate::doc::markdown::parse(second.as_str()).blocks);
     }
 
     #[test]
@@ -252,14 +254,14 @@ mod tests {
         let source = "```rust\nfn a() {}\n```\n\npara one\n\npara two\n";
         let cut = cut_at(source, 1, 1024).expect("the fixture cuts");
         let mut doc = crate::doc::markdown::parse(&source[..cut]);
-        doc.source = source.to_string();
+        doc.source = std::sync::Arc::from(source);
         let BlockKind::CodeBlock {
             lines, highlights, ..
         } = &mut doc.blocks[0].kind
         else {
             panic!("the prefix starts with the code block")
         };
-        *highlights = crate::style::highlight::spans(lines, Some("rust"));
+        *highlights = crate::style::highlight::spans(source, lines, Some("rust"));
         let full = crate::doc::markdown::parse(source);
         let Swap::Splice(tail) = swap(&doc.blocks, full.blocks) else {
             panic!("a clean cut splices")
@@ -283,7 +285,7 @@ mod tests {
         let source = "a [site][ref] paragraph\n\ntail paragraph\n\n[ref]: https://example.com\n";
         let cut = cut_at(source, 4, 1024).expect("the fixture cuts");
         let mut doc = crate::doc::markdown::parse(&source[..cut]);
-        doc.source = source.to_string();
+        doc.source = std::sync::Arc::from(source);
         let full = crate::doc::markdown::parse(source);
         let Swap::Replace(blocks) = swap(&doc.blocks, full.blocks) else {
             panic!("an unresolved reference cannot splice")
@@ -308,7 +310,7 @@ mod tests {
         assert!(worker.finish().is_none(), "nothing owed before a start");
         worker.start(source.clone(), || {});
         let blocks = worker.finish().expect("finish waits for the blocks");
-        assert_eq!(blocks, crate::doc::markdown::parse(&source).blocks);
+        assert_eq!(blocks, crate::doc::markdown::parse(source.as_str()).blocks);
         assert!(worker.finish().is_none(), "a delivery is owed once");
     }
 

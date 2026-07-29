@@ -3,23 +3,30 @@
 //! selection can slice the original markdown back out.
 
 use std::ops::Range;
+use std::sync::Arc;
 
 use pulldown_cmark::{
     BlockQuoteKind, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd,
 };
 
 use crate::doc::model::{
-    AlertKind, Block, BlockKind, Document, Marker, Span, SpanImage, SpanScript,
+    seal_blocks, AlertKind, Block, BlockKind, CodeBody, Document, Marker, Span, SpanImage,
+    SpanScript,
 };
 
-pub fn parse(source: &str) -> Document {
+pub fn parse(source: impl Into<Arc<str>>) -> Document {
     parse_unless(source, || false).expect("an unconditional parse completes")
 }
 
 /// Parses unless `bail` answers true, checked every few thousand events.
 /// The parse worker passes its generation check, so a superseded document
 /// is never built to the end. A bailed parse answers None.
-pub fn parse_unless(source: &str, bail: impl Fn() -> bool) -> Option<Document> {
+///
+/// The source arrives as (or becomes) an `Arc<str>` the document keeps;
+/// the parse allocates no second copy of it, and `seal_blocks` drops
+/// every span text the source already carries.
+pub fn parse_unless(source: impl Into<Arc<str>>, bail: impl Fn() -> bool) -> Option<Document> {
+    let source: Arc<str> = source.into();
     let options = Options::ENABLE_TABLES
         | Options::ENABLE_FOOTNOTES
         | Options::ENABLE_STRIKETHROUGH
@@ -28,8 +35,8 @@ pub fn parse_unless(source: &str, bail: impl Fn() -> bool) -> Option<Document> {
         | Options::ENABLE_MATH
         | Options::ENABLE_YAML_STYLE_METADATA_BLOCKS
         | Options::ENABLE_GFM;
-    let mut builder = Builder::default();
-    for (count, (event, range)) in Parser::new_ext(source, options)
+    let mut builder = Builder::new(Arc::clone(&source));
+    for (count, (event, range)) in Parser::new_ext(&source, options)
         .into_offset_iter()
         .enumerate()
     {
@@ -38,16 +45,16 @@ pub fn parse_unless(source: &str, bail: impl Fn() -> bool) -> Option<Document> {
         }
         builder.event(event, range);
     }
-    Some(Document {
-        blocks: builder.blocks,
-        source: source.to_string(),
-    })
+    let mut blocks = builder.blocks;
+    seal_blocks(&mut blocks, &source);
+    Some(Document { blocks, source })
 }
 
 /// Inline containers the builder can be inside. Paragraphs inside list items
 /// or footnote definitions flush as those blocks, not as plain paragraphs.
-#[derive(Default)]
 struct Builder {
+    /// The text being parsed; code bodies verify verbatim against it.
+    source: Arc<str>,
     blocks: Vec<Block>,
     spans: Vec<Span>,
     quote_depth: u8,
@@ -59,6 +66,9 @@ struct Builder {
     item_markers: Vec<Option<Marker>>,
     heading: Option<u8>,
     code: Option<(Option<String>, String)>,
+    /// Source offset of the code body's first text event; the verbatim
+    /// check compares the accumulated body against the source there.
+    code_start: Option<usize>,
     table: Option<TableAcc>,
     image: Option<(String, String)>,
     footnote: Option<String>,
@@ -89,33 +99,67 @@ struct TableAcc {
 }
 
 impl Builder {
+    fn new(source: Arc<str>) -> Builder {
+        Builder {
+            source,
+            blocks: Vec::new(),
+            spans: Vec::new(),
+            quote_depth: 0,
+            alerts: Vec::new(),
+            lists: Vec::new(),
+            item_markers: Vec::new(),
+            heading: None,
+            code: None,
+            code_start: None,
+            table: None,
+            image: None,
+            footnote: None,
+            in_metadata: false,
+            metadata: Vec::new(),
+            html_block: false,
+            html_tail: String::new(),
+            html_center: Vec::new(),
+            html_code: 0,
+            html_sub: 0,
+            html_sup: 0,
+            bold: 0,
+            italic: 0,
+            strike: 0,
+            link: None,
+            current: (0, 0),
+        }
+    }
+
     fn event(&mut self, event: Event, range: Range<usize>) {
         self.current = (range.start, range.end);
         match event {
             Event::Start(tag) => self.start(tag),
             Event::End(tag) => self.end(tag),
             Event::Text(text) => self.text(&text),
-            Event::Code(text) => self.push(Span {
-                text: text.into_string(),
-                code: true,
-                ..self.style()
-            }),
-            Event::InlineMath(tex) => self.push(Span {
-                text: tex.into_string(),
-                math: true,
-                ..self.style()
-            }),
+            Event::Code(text) => {
+                let mut span = self.style();
+                span.set_text(text.into_string());
+                span.code = true;
+                self.push(span);
+            }
+            Event::InlineMath(tex) => {
+                let mut span = self.style();
+                span.set_text(tex.into_string());
+                span.math = true;
+                self.push(span);
+            }
             Event::DisplayMath(tex) => {
                 self.flush_spans();
                 self.emit(BlockKind::MathBlock {
                     tex: tex.into_string(),
                 });
             }
-            Event::FootnoteReference(label) => self.push(Span {
-                text: label.to_string(),
-                link: Some(format!("footnote:{label}")),
-                ..self.style()
-            }),
+            Event::FootnoteReference(label) => {
+                let mut span = self.style();
+                span.set_text(label.to_string());
+                span.link = Some(format!("footnote:{label}"));
+                self.push(span);
+            }
             Event::TaskListMarker(checked) => {
                 if let Some(slot) = self.item_markers.last_mut() {
                     *slot = Some(Marker::Task { checked });
@@ -199,10 +243,7 @@ impl Builder {
             }
             TagEnd::CodeBlock => {
                 if let Some((language, text)) = self.code.take() {
-                    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
-                    while lines.last().is_some_and(|l| l.is_empty()) {
-                        lines.pop();
-                    }
+                    let lines = self.code_body(&text);
                     self.emit(BlockKind::CodeBlock {
                         language,
                         lines,
@@ -251,7 +292,7 @@ impl Builder {
                 // nothing else collapses back to a block image at flush.
                 if let Some((path, alt)) = self.image.take() {
                     let mut span = self.style();
-                    span.text = alt;
+                    span.set_text(alt);
                     span.image = Some(SpanImage {
                         src: path,
                         width: None,
@@ -275,8 +316,37 @@ impl Builder {
         }
     }
 
+    /// The accumulated code body as line ranges: into the source when the
+    /// body sits there verbatim (fenced blocks), into an owned copy when
+    /// parsing normalized it (indented blocks strip their indent).
+    fn code_body(&mut self, text: &str) -> CodeBody {
+        let start = self.code_start.take().unwrap_or(0);
+        let verbatim = self
+            .source
+            .get(start..start + text.len())
+            .is_some_and(|s| s == text);
+        if !verbatim {
+            return CodeBody::from_text(text);
+        }
+        let base = text.as_ptr() as usize;
+        let mut lines: Vec<Range<u32>> = text
+            .lines()
+            .map(|line| {
+                let at = (start + (line.as_ptr() as usize - base)) as u32;
+                at..at + line.len() as u32
+            })
+            .collect();
+        while lines.last().is_some_and(|l| l.is_empty()) {
+            lines.pop();
+        }
+        CodeBody::verbatim(lines)
+    }
+
     fn text(&mut self, text: &str) {
         if let Some((_, code)) = self.code.as_mut() {
+            if self.code_start.is_none() {
+                self.code_start = Some(self.current.0);
+            }
             code.push_str(text);
             return;
         }
@@ -313,23 +383,21 @@ impl Builder {
         while let Some(start) = next(rest) {
             let (before, from) = rest.split_at(start);
             if !before.is_empty() {
-                self.push(Span {
-                    text: before.to_string(),
-                    range: base + pos..base + pos + before.len(),
-                    ..self.style()
-                });
+                let mut span = self.style();
+                span.set_text(before);
+                span.range = (base + pos) as u32..(base + pos + before.len()) as u32;
+                self.push(span);
             }
             let end = from
                 .find(|c: char| c.is_whitespace() || c == '<' || c == '>')
                 .unwrap_or(from.len());
             let (url, after) = from.split_at(end);
             let url = url.trim_end_matches(['.', ',', ';', ':', '!', '?', ')', '"', '\'']);
-            self.push(Span {
-                text: url.to_string(),
-                link: Some(url.to_string()),
-                range: base + pos + start..base + pos + start + url.len(),
-                ..self.style()
-            });
+            let mut span = self.style();
+            span.set_text(url);
+            span.link = Some(url.to_string());
+            span.range = (base + pos + start) as u32..(base + pos + start + url.len()) as u32;
+            self.push(span);
             pos += start + url.len();
             rest = &from[url.len()..];
             if rest == after && rest.is_empty() {
@@ -337,11 +405,10 @@ impl Builder {
             }
         }
         if !rest.is_empty() {
-            self.push(Span {
-                text: rest.to_string(),
-                range: base + pos..base + pos + rest.len(),
-                ..self.style()
-            });
+            let mut span = self.style();
+            span.set_text(rest);
+            span.range = (base + pos) as u32..(base + pos + rest.len()) as u32;
+            self.push(span);
         }
     }
 
@@ -427,7 +494,7 @@ impl Builder {
                     return;
                 };
                 let mut span = self.style();
-                span.text = html_attr(attrs, "alt").unwrap_or_default();
+                span.set_text(html_attr(attrs, "alt").unwrap_or_default());
                 span.image = Some(SpanImage {
                     src,
                     width: html_attr(attrs, "width").and_then(|v| v.parse().ok()),
@@ -450,29 +517,28 @@ impl Builder {
     }
 
     fn style(&self) -> Span {
-        Span {
-            text: String::new(),
-            bold: self.bold > 0,
-            italic: self.italic > 0,
-            strike: self.strike > 0,
-            code: self.html_code > 0,
-            math: false,
-            script: if self.html_sub > 0 {
-                SpanScript::Sub
-            } else if self.html_sup > 0 {
-                SpanScript::Sup
-            } else {
-                SpanScript::None
-            },
-            link: self.link.clone(),
-            image: None,
-            range: self.current.0..self.current.1,
-        }
+        let mut span = Span::plain("");
+        span.bold = self.bold > 0;
+        span.italic = self.italic > 0;
+        span.strike = self.strike > 0;
+        span.code = self.html_code > 0;
+        span.script = if self.html_sub > 0 {
+            SpanScript::Sub
+        } else if self.html_sup > 0 {
+            SpanScript::Sup
+        } else {
+            SpanScript::None
+        };
+        span.link = self.link.clone();
+        span.range = self.current.0 as u32..self.current.1 as u32;
+        span
     }
 
     /// Appends a span, merging with the previous one when styles match.
+    /// Every span still owns its text here; `seal_blocks` decides
+    /// borrowing once the document is complete.
     fn push(&mut self, span: Span) {
-        if span.text.is_empty() {
+        if span.raw_text().is_empty() {
             return;
         }
         if let Some(last) = self.spans.last_mut() {
@@ -485,10 +551,10 @@ impl Builder {
                 && last.link == span.link
                 && last.image.is_none()
                 && span.image.is_none()
-                && span.text != "\n"
-                && last.text != "\n";
+                && span.raw_text() != "\n"
+                && last.raw_text() != "\n";
             if same_style {
-                last.text.push_str(&span.text);
+                last.raw_text_mut().push_str(span.raw_text());
                 if last.range.is_empty() {
                     last.range = span.range;
                 } else if !span.range.is_empty() {
@@ -515,7 +581,7 @@ impl Builder {
             let solo = spans
                 .iter()
                 .filter(|s| s.image.is_none())
-                .all(|s| s.text.trim().is_empty());
+                .all(|s| s.raw_text().trim().is_empty());
             let images: Vec<&Span> = spans.iter().filter(|s| s.image.is_some()).collect();
             if solo && images.len() == 1 {
                 let span = images[0];
@@ -523,7 +589,7 @@ impl Builder {
                 if span.link.is_none() && image.width.is_none() && image.height.is_none() {
                     let kind = BlockKind::Image {
                         path: image.src.clone(),
-                        alt: span.text.clone(),
+                        alt: span.raw_text().to_string(),
                     };
                     self.emit(kind);
                     return;
@@ -609,7 +675,7 @@ fn html_attr(attrs: &str, name: &str) -> Option<String> {
 
 /// Smallest range covering every nonempty span range.
 fn extent<'a>(spans: impl Iterator<Item = &'a Span>) -> Range<usize> {
-    let mut start = usize::MAX;
+    let mut start = u32::MAX;
     let mut end = 0;
     for span in spans {
         if !span.range.is_empty() {
@@ -617,10 +683,10 @@ fn extent<'a>(spans: impl Iterator<Item = &'a Span>) -> Range<usize> {
             end = end.max(span.range.end);
         }
     }
-    if start == usize::MAX {
+    if start == u32::MAX {
         0..0
     } else {
-        start..end
+        start as usize..end as usize
     }
 }
 
@@ -646,8 +712,9 @@ fn alert_kind(kind: BlockQuoteKind) -> AlertKind {
 }
 
 /// GitHub-style slug: lowercase, alphanumerics kept, spaces to hyphens.
+/// Runs at heading end, before sealing, so every span still owns its text.
 fn slug(spans: &[Span]) -> String {
-    let text: String = spans.iter().map(|s| s.text.as_str()).collect();
+    let text: String = spans.iter().map(|s| s.raw_text()).collect();
     let mut out = String::new();
     for c in text.chars() {
         if c.is_alphanumeric() {
@@ -791,6 +858,10 @@ mod tests {
     use super::parse;
     use crate::doc::model::*;
 
+    fn to_usize(range: &std::ops::Range<u32>) -> std::ops::Range<usize> {
+        range.start as usize..range.end as usize
+    }
+
     #[test]
     fn heading_maps_level_spans_anchor() {
         let d = parse("## Hello *World*");
@@ -803,8 +874,8 @@ mod tests {
             panic!("expected heading, got {:?}", d.blocks)
         };
         assert_eq!(*level, 2);
-        assert_eq!(spans[0].text, "Hello ");
-        assert!(spans[1].italic && spans[1].text == "World");
+        assert_eq!(spans[0].text(&d.source), "Hello ");
+        assert!(spans[1].italic && spans[1].text(&d.source) == "World");
         assert_eq!(anchor, "hello-world");
     }
 
@@ -814,12 +885,12 @@ mod tests {
         let BlockKind::Paragraph { spans } = &d.blocks[0].kind else {
             panic!()
         };
-        assert_eq!(spans[0].text, "plain ");
+        assert_eq!(spans[0].text(&d.source), "plain ");
         assert!(!spans[0].bold && !spans[0].italic && !spans[0].strike && !spans[0].code);
-        assert!(spans[1].bold && spans[1].text == "bold");
-        assert!(spans[3].italic && spans[3].text == "ital");
-        assert!(spans[5].strike && spans[5].text == "gone");
-        assert!(spans[7].code && spans[7].text == "code");
+        assert!(spans[1].bold && spans[1].text(&d.source) == "bold");
+        assert!(spans[3].italic && spans[3].text(&d.source) == "ital");
+        assert!(spans[5].strike && spans[5].text(&d.source) == "gone");
+        assert!(spans[7].code && spans[7].text(&d.source) == "code");
     }
 
     #[test]
@@ -847,7 +918,10 @@ mod tests {
             panic!()
         };
         assert_eq!(language.as_deref(), Some("rust"));
-        assert_eq!(lines, &["fn main() {}", "let x = 1;"]);
+        assert_eq!(
+            lines.iter(&d.source).collect::<Vec<_>>(),
+            ["fn main() {}", "let x = 1;"]
+        );
         // Highlights come from the load budget pass, never from parse.
         assert!(highlights.is_empty());
     }
@@ -894,7 +968,7 @@ mod tests {
             panic!()
         };
         assert_eq!(header.len(), 2);
-        assert_eq!(header[0][0].text, "a");
+        assert_eq!(header[0][0].text(&d.source), "a");
         assert_eq!(rows.len(), 1);
         assert!(rows[0][1][0].bold);
     }
@@ -928,7 +1002,7 @@ mod tests {
         };
         let linked: Vec<_> = spans.iter().filter(|s| s.link.is_some()).collect();
         assert_eq!(linked.len(), 1);
-        assert_eq!(linked[0].text, "https://example.com");
+        assert_eq!(linked[0].text(&d.source), "https://example.com");
         assert_eq!(linked[0].link.as_deref(), Some("https://example.com"));
     }
 
@@ -944,15 +1018,21 @@ mod tests {
             };
             let linked: Vec<_> = spans.iter().filter(|s| s.link.is_some()).collect();
             assert_eq!(linked.len(), 2, "both urls link in {src:?}");
-            assert!(linked[0].text.contains("a.tld"), "in source order");
-            assert!(linked[1].text.contains("b.tld"), "in source order");
+            assert!(
+                linked[0].text(&d.source).contains("a.tld"),
+                "in source order"
+            );
+            assert!(
+                linked[1].text(&d.source).contains("b.tld"),
+                "in source order"
+            );
         }
     }
 
     #[test]
     fn deep_quote_nesting_never_panics() {
         let src = "> ".repeat(300) + "text";
-        let d = parse(&src);
+        let d = parse(src.as_str());
         assert!(!d.blocks.is_empty());
     }
 
@@ -968,7 +1048,7 @@ mod tests {
             panic!()
         };
         assert_eq!(label, "1");
-        assert_eq!(spans[0].text, "the note");
+        assert_eq!(spans[0].text(&d.source), "the note");
     }
 
     #[test]
@@ -978,7 +1058,7 @@ mod tests {
             panic!()
         };
         let m = spans.iter().find(|s| s.math).unwrap();
-        assert_eq!(m.text, "x^2");
+        assert_eq!(m.text(&d.source), "x^2");
         let BlockKind::MathBlock { tex } = &d.blocks[1].kind else {
             panic!()
         };
@@ -1002,7 +1082,7 @@ mod tests {
         let BlockKind::Paragraph { spans } = &d.blocks[0].kind else {
             panic!()
         };
-        let text: String = spans.iter().map(|s| s.text.as_str()).collect();
+        let text: String = spans.iter().map(|s| s.text(&d.source)).collect();
         assert!(text.contains('\u{1F389}'), "tada missing in {text:?}");
         assert!(text.contains('\u{1F680}'), "rocket missing in {text:?}");
     }
@@ -1041,7 +1121,7 @@ mod tests {
         assert_eq!(images[0].image.as_ref().unwrap().height, Some(130));
         assert_eq!(images[1].link.as_deref(), Some("https://x.tld"));
         assert!(
-            !spans.iter().any(|s| s.text.contains("height")),
+            !spans.iter().any(|s| s.text(&d.source).contains("height")),
             "no leaked attribute text"
         );
     }
@@ -1052,14 +1132,14 @@ mod tests {
         let BlockKind::Paragraph { spans } = &d.blocks[0].kind else {
             panic!()
         };
-        assert!(spans.iter().any(|s| s.bold && s.text == "bold"));
+        assert!(spans.iter().any(|s| s.bold && s.text(&d.source) == "bold"));
         assert!(spans
             .iter()
-            .any(|s| s.script == SpanScript::Sub && s.text == "2"));
+            .any(|s| s.script == SpanScript::Sub && s.text(&d.source) == "2"));
         assert!(spans
             .iter()
-            .any(|s| s.script == SpanScript::Sup && s.text == "9"));
-        assert!(spans.iter().any(|s| s.code && s.text == "Ctrl"));
+            .any(|s| s.script == SpanScript::Sup && s.text(&d.source) == "9"));
+        assert!(spans.iter().any(|s| s.code && s.text(&d.source) == "Ctrl"));
     }
 
     #[test]
@@ -1073,7 +1153,7 @@ mod tests {
             .find(|s| s.image.is_some())
             .expect("inline image span");
         assert_eq!(img.image.as_ref().unwrap().src, "https://img.tld/c.svg");
-        assert_eq!(img.text, "badge");
+        assert_eq!(img.text(&d.source), "badge");
     }
 
     #[test]
@@ -1096,7 +1176,7 @@ mod tests {
         let BlockKind::Paragraph { spans } = &d.blocks[0].kind else {
             panic!()
         };
-        let text: String = spans.iter().map(|s| s.text.as_str()).collect();
+        let text: String = spans.iter().map(|s| s.text(&d.source)).collect();
         assert_eq!(text, "before mid after");
     }
 
@@ -1106,7 +1186,7 @@ mod tests {
         let BlockKind::Paragraph { spans } = &d.blocks[0].kind else {
             panic!()
         };
-        assert!(spans.iter().any(|s| s.text == "\n"));
+        assert!(spans.iter().any(|s| s.text(&d.source) == "\n"));
     }
 
     #[test]
@@ -1115,20 +1195,20 @@ mod tests {
         let BlockKind::Paragraph { spans } = &d.blocks[0].kind else {
             panic!()
         };
-        assert!(spans[0].text.starts_with('\u{201C}'));
+        assert!(spans[0].text(&d.source).starts_with('\u{201C}'));
     }
 
     #[test]
     fn ranges_index_the_source() {
         let src = "# Title\n\npara **bold** end\n\n```rust\nlet x = 1;\n```\n\n> quoted";
         let d = parse(src);
-        assert_eq!(d.source, src);
+        assert_eq!(&*d.source, src);
         assert_eq!(&src[d.blocks[0].range.clone()], "Title");
         let BlockKind::Paragraph { spans } = &d.blocks[1].kind else {
             panic!()
         };
-        assert_eq!(&src[spans[0].range.clone()], "para ");
-        assert_eq!(&src[spans[1].range.clone()], "bold");
+        assert_eq!(&src[to_usize(&spans[0].range)], "para ");
+        assert_eq!(&src[to_usize(&spans[1].range)], "bold");
         let code = &src[d.blocks[2].range.clone()];
         assert!(code.starts_with("```rust"), "code range was {code:?}");
         assert!(code.trim_end().ends_with("```"), "code range was {code:?}");
@@ -1145,5 +1225,126 @@ mod tests {
     #[test]
     fn empty_input_is_empty_document() {
         assert_eq!(parse("").blocks.len(), 0);
+    }
+
+    fn para_spans(d: &Document) -> &[Span] {
+        let BlockKind::Paragraph { spans } = &d.blocks[0].kind else {
+            panic!("expected paragraph, got {:?}", d.blocks)
+        };
+        spans
+    }
+
+    #[test]
+    fn untransformed_spans_borrow_the_source() {
+        let d = parse("plain **bold** and *italic* text");
+        for span in para_spans(&d) {
+            assert!(
+                span.is_verbatim(),
+                "span {:?} should borrow",
+                span.text(&d.source)
+            );
+        }
+        assert_eq!(para_spans(&d)[0].text(&d.source), "plain ");
+        assert_eq!(para_spans(&d)[1].text(&d.source), "bold");
+    }
+
+    #[test]
+    fn bare_urls_borrow_around_the_link() {
+        let d = parse("see https://a.example now");
+        let spans = para_spans(&d);
+        assert_eq!(spans.len(), 3);
+        for span in spans {
+            assert!(span.is_verbatim(), "{:?}", span.text(&d.source));
+        }
+        assert_eq!(spans[1].text(&d.source), "https://a.example");
+        assert_eq!(spans[1].link.as_deref(), Some("https://a.example"));
+    }
+
+    #[test]
+    fn multibyte_spans_borrow_and_slice_cleanly() {
+        let d = parse("# 你好 🚀 world");
+        let BlockKind::Heading { spans, .. } = &d.blocks[0].kind else {
+            panic!()
+        };
+        assert!(spans[0].is_verbatim());
+        assert_eq!(spans[0].text(&d.source), "你好 🚀 world");
+    }
+
+    #[test]
+    fn smart_punctuation_owns_its_text() {
+        let d = parse("\"quoted\" words");
+        let spans = para_spans(&d);
+        assert!(!spans[0].is_verbatim(), "smart quotes rewrite the text");
+        assert_eq!(spans[0].text(&d.source), "\u{201C}quoted\u{201D} words");
+    }
+
+    #[test]
+    fn decoded_entities_own_their_text() {
+        let d = parse("AT&amp;T works");
+        let spans = para_spans(&d);
+        assert!(!spans[0].is_verbatim(), "the entity decodes away");
+        assert_eq!(spans[0].text(&d.source), "AT&T works");
+    }
+
+    #[test]
+    fn emoji_shortcodes_own_their_text() {
+        let d = parse("ship it :tada: today");
+        let spans = para_spans(&d);
+        assert!(!spans[0].is_verbatim());
+        assert_eq!(spans[0].text(&d.source), "ship it \u{1F389} today");
+    }
+
+    #[test]
+    fn merge_across_a_soft_break_owns() {
+        let d = parse("first line\nsecond line");
+        let spans = para_spans(&d);
+        assert_eq!(spans[0].text(&d.source), "first line second line");
+        assert!(!spans[0].is_verbatim(), "the newline became a space");
+    }
+
+    #[test]
+    fn contiguous_verbatim_text_borrows_whole() {
+        // 2 * 3 never opens emphasis, so however pulldown splits the
+        // events, the merged text equals the source slice and borrows.
+        let d = parse("the product 2 * 3 * 4 stands");
+        let spans = para_spans(&d);
+        assert_eq!(spans.len(), 1);
+        assert!(spans[0].is_verbatim());
+        assert_eq!(spans[0].text(&d.source), "the product 2 * 3 * 4 stands");
+    }
+
+    #[test]
+    fn fenced_code_lines_borrow_the_source() {
+        let d = parse("```rust\nfn main() {}\n// emoji 🚀 CJK 你好\n```");
+        let BlockKind::CodeBlock { lines, .. } = &d.blocks[0].kind else {
+            panic!()
+        };
+        assert!(lines.is_verbatim(), "fence bodies are verbatim");
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines.line(&d.source, 0), "fn main() {}");
+        assert_eq!(lines.line(&d.source, 1), "// emoji 🚀 CJK 你好");
+    }
+
+    #[test]
+    fn indented_code_owns_its_body() {
+        let d = parse("    let x = 1;\n    let y = 2;\n");
+        let BlockKind::CodeBlock { lines, .. } = &d.blocks[0].kind else {
+            panic!("expected code block, got {:?}", d.blocks)
+        };
+        assert!(!lines.is_verbatim(), "the indent is stripped");
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines.line(&d.source, 0), "let x = 1;");
+        assert_eq!(lines.line(&d.source, 1), "let y = 2;");
+    }
+
+    #[test]
+    fn synthesized_spans_stay_owned() {
+        let d = parse("a  \nb");
+        let spans = para_spans(&d);
+        let brk = spans
+            .iter()
+            .find(|s| s.text(&d.source) == "\n")
+            .expect("hard break span");
+        assert!(!brk.is_verbatim());
     }
 }

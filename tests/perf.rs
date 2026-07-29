@@ -209,6 +209,7 @@ fn print_row(
 fn fold_backlog_measured() {
     for (name, bytes) in &TIERS[2..] {
         let (_, _, mut doc) = measure_open(&large_gen::generate(*bytes), "md");
+        let source = std::sync::Arc::clone(&doc.source);
         for block in &mut doc.blocks {
             if let BlockKind::CodeBlock {
                 language,
@@ -216,7 +217,7 @@ fn fold_backlog_measured() {
                 highlights,
             } = &mut block.kind
             {
-                *highlights = highlight::spans(lines, language.as_deref());
+                *highlights = highlight::spans(&source, lines, language.as_deref());
             }
         }
         let mut fonts = FontStore::new();
@@ -253,6 +254,7 @@ fn fold_backlog_measured() {
 fn fold_trickle_measured() {
     for (name, bytes) in &TIERS[2..] {
         let (_, _, mut doc) = measure_open(&large_gen::generate(*bytes), "md");
+        let source = std::sync::Arc::clone(&doc.source);
         for block in &mut doc.blocks {
             if let BlockKind::CodeBlock {
                 language,
@@ -260,7 +262,7 @@ fn fold_trickle_measured() {
                 highlights,
             } = &mut block.kind
             {
-                *highlights = highlight::spans(lines, language.as_deref());
+                *highlights = highlight::spans(&source, lines, language.as_deref());
             }
         }
         let mut fonts = FontStore::new();

@@ -24,10 +24,12 @@ pub struct StepKey {
     pub line: usize,
 }
 
-/// What a worker shapes against for one pass generation.
+/// What a worker shapes against for one pass generation. The source
+/// rides along so a cloned block's verbatim spans resolve their text.
 pub struct ShapeCtx {
     pub theme: Theme,
     pub cfg: ViewConfig,
+    pub source: Arc<str>,
 }
 
 /// One claimed unit of shaping: a whole block's kind emission, or one
@@ -193,6 +195,7 @@ fn worker(shared: Arc<Shared>, mut fonts: crate::style::fonts::FontStore) {
                 &mut fonts,
                 &job.ctx.theme,
                 &job.ctx.cfg,
+                &job.ctx.source,
                 &mut media,
                 block,
                 *block_index,

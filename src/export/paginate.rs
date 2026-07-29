@@ -418,7 +418,7 @@ mod tests {
     }
 
     fn many_paragraphs() -> Document {
-        markdown::parse(&"A paragraph that says something.\n\n".repeat(120))
+        markdown::parse("A paragraph that says something.\n\n".repeat(120).as_str())
     }
 
     #[test]
@@ -490,7 +490,7 @@ mod tests {
             fence.push_str(&format!("let value_{i} = {i};\n"));
         }
         fence.push_str("```\n");
-        let doc = markdown::parse(&fence);
+        let doc = markdown::parse(fence.as_str());
         let l = laid_out(&doc);
         let pages = paginate(&doc, &l, &PageGeometry::new(PageSize::A4, 11.0));
         assert!(pages.len() > 1, "90 code lines need more than one page");
@@ -535,7 +535,7 @@ mod rules {
                 ));
             }
         }
-        markdown::parse(&src)
+        markdown::parse(src.as_str())
     }
 
     fn block_of(layout: &LayoutDoc, run: usize) -> usize {
@@ -599,7 +599,7 @@ mod rules {
         for row in 0..40 {
             src.push_str(&format!("| cell {row} | value {row} |\n"));
         }
-        let doc = markdown::parse(&src);
+        let doc = markdown::parse(src.as_str());
         let l = laid_out(&doc);
         let pages = paginate(&doc, &l, &geometry());
         assert!(!l.table_rows.is_empty(), "the fixture has a table");
@@ -618,7 +618,7 @@ mod rules {
         let mut src = String::from("Filler paragraph.\n\n".repeat(28).as_str());
         src.push_str("![logo](oryx-test.png)\n\n");
         src.push_str(&"Filler paragraph.\n\n".repeat(28));
-        let doc = markdown::parse(&src);
+        let doc = markdown::parse(src.as_str());
         let l = laid_out(&doc);
         let pages = paginate(&doc, &l, &geometry());
         assert!(!l.images.is_empty(), "the fixture has an image");
@@ -652,7 +652,7 @@ mod rules {
             let mut src = "Filler paragraph here.\n\n".repeat(filler);
             src.push_str("![logo](oryx-test.png)\n\n");
             src.push_str(&"Filler paragraph here.\n\n".repeat(6));
-            let doc = markdown::parse(&src);
+            let doc = markdown::parse(src.as_str());
             let l = layout(
                 &doc,
                 &Theme::default_dark(),
@@ -704,7 +704,7 @@ mod rules {
                 src.push_str(&format!("let value_{line} = {line};\n"));
             }
             src.push_str("```\n");
-            let doc = markdown::parse(&src);
+            let doc = markdown::parse(src.as_str());
             let l = layout(
                 &doc,
                 &Theme::default_dark(),
@@ -754,7 +754,7 @@ mod rules {
             fence.push_str(&format!("let value_{i} = {i};\n"));
         }
         fence.push_str("```\n");
-        let doc = markdown::parse(&fence);
+        let doc = markdown::parse(fence.as_str());
         let l = laid_out(&doc);
         let pages = paginate(&doc, &l, &geometry());
         assert!(pages.len() > 1, "the fence spans pages");
@@ -802,7 +802,7 @@ mod rules {
             fence.push_str(&format!("let value_{i} = {i};\n"));
         }
         fence.push_str("```\n");
-        let doc = markdown::parse(&fence);
+        let doc = markdown::parse(fence.as_str());
         let l = laid_out(&doc);
         let pages = paginate(&doc, &l, &geometry());
         assert!(pages.len() > 1, "the fence spans pages");
@@ -828,7 +828,7 @@ mod rules {
             let mut src = "Filler paragraph here.\n\n".repeat(filler);
             src.push_str("![Oryx rendering tables](missing/tables.png)\n\n");
             src.push_str(&"Filler paragraph here.\n\n".repeat(6));
-            let doc = markdown::parse(&src);
+            let doc = markdown::parse(src.as_str());
             let l = laid_out(&doc);
             assert!(!l.rects.is_empty(), "the missing image draws a placeholder");
             let pages = paginate(&doc, &l, &g);
@@ -864,7 +864,7 @@ mod rules {
                 src.push_str(&format!("let value_{line} = {line};\n"));
             }
             src.push_str("```\n");
-            let doc = markdown::parse(&src);
+            let doc = markdown::parse(src.as_str());
             let l = laid_out(&doc);
             let pages = paginate(&doc, &l, &g);
             for (index, page) in pages.iter().enumerate() {
@@ -896,7 +896,7 @@ mod rules {
                      several lines inside its column and makes the row band tall {row}. |\n"
                 ));
             }
-            let doc = markdown::parse(&src);
+            let doc = markdown::parse(src.as_str());
             let l = laid_out(&doc);
             let pages = paginate(&doc, &l, &g);
             for page in &pages {
@@ -923,7 +923,7 @@ mod rules {
         let g = geometry();
         let cell = "A very long cell indeed. ".repeat(400);
         let src = format!("| Setting | What it does |\n|---|---|\n| tall | {cell} |\n");
-        let doc = markdown::parse(&src);
+        let doc = markdown::parse(src.as_str());
         let l = laid_out(&doc);
         let band = &l.table_rows[l.table_rows.len() - 1];
         assert!(
