@@ -2,18 +2,15 @@
 //! release mode locally with:
 //!   cargo test --release --test perf -- --ignored --nocapture --test-threads=1
 //! Parallel test threads contend for cores and skew every timing.
+//! The memory tiers live in tests/perf_mem.rs, a separate binary, so
+//! its counting allocator never taxes a timing measured here.
 
 use std::path::PathBuf;
 use std::time::Instant;
 
 use oryx::doc::images::MediaCache;
-use oryx::doc::load;
-use oryx::doc::markdown;
-use oryx::doc::model::{BlockKind, Document};
-use oryx::doc::stream::{self, Swap};
-use oryx::export::paginate::paginate;
-use oryx::export::{pdf, ExportSettings, PageGeometry, PageSize};
-use oryx::layout::{layout, layout_begin, layout_more, ShapePool, ViewConfig, OPEN_SLICE};
+use oryx::doc::model::BlockKind;
+use oryx::layout::{layout, layout_begin, layout_more, recolor_batch, ViewConfig};
 use oryx::style::fonts::FontStore;
 use oryx::style::highlight;
 use oryx::style::theme::Theme;
@@ -21,173 +18,13 @@ use oryx::style::theme::Theme;
 #[path = "fixtures/large_gen.rs"]
 mod large_gen;
 
-/// Byte sizes for the measurement tiers, shared by the markdown and the
-/// whole-file code fixtures so their rows compare directly.
-const TIERS: &[(&str, usize)] = &[
-    ("small", 64 * 1024),
-    ("medium", 256 * 1024),
-    ("large", 1024 * 1024),
-    ("huge", 8 * 1024 * 1024),
-];
+#[path = "fixtures/perf_common.rs"]
+mod perf_common;
 
-/// The app's open path: the fixture written to disk, then read, parsed,
-/// and highlighted inside the sync budget. A streamed open then pays the
-/// worker's full parse and the swap, timed as the parse column; the
-/// document handed on is whole either way, so the later columns always
-/// measure the full tier.
-fn measure_open(source: &str, ext: &str) -> (u128, u128, Document) {
-    let path = std::env::temp_dir().join(format!("oryx-perf-{}.{ext}", std::process::id()));
-    std::fs::write(&path, source).expect("write fixture");
-    let started = Instant::now();
-    let opened = load::open(&path, Some(Instant::now() + load::OPEN_BUDGET)).expect("open fixture");
-    let open_ms = started.elapsed().as_millis();
-    std::fs::remove_file(&path).ok();
-    let mut doc = opened.document;
-    let mut parse_ms = 0;
-    if opened.streamed {
-        let started = Instant::now();
-        let full = markdown::parse(&doc.source);
-        match stream::swap(&doc.blocks, full.blocks) {
-            Swap::Splice(tail) => doc.blocks.extend(tail),
-            Swap::Replace(blocks) => doc.blocks = blocks,
-        }
-        parse_ms = started.elapsed().as_millis();
-    }
-    (open_ms, parse_ms, doc)
-}
-
-const WIDTH: f32 = 1200.0;
-
-/// A representative window height, so the open slice can be held to the
-/// three viewport heights the first band needs.
-const VIEWPORT_H: f32 = 800.0;
-
-/// The layout as the app runs it: one budgeted slice before the first
-/// frame, then the rest streaming behind it. The run and rect counts
-/// size what the pass materializes, which the paint scan walks.
-struct Laid {
-    first_ms: u128,
-    first_height: f32,
-    ms: u128,
-    height: f32,
-    runs: usize,
-    rects: usize,
-}
-
-fn pool() -> std::sync::Arc<ShapePool> {
-    let width = std::thread::available_parallelism()
-        .map(|n| n.get().saturating_sub(1))
-        .unwrap_or(1)
-        .clamp(1, 8);
-    std::sync::Arc::new(ShapePool::new(width, &FontStore::new().seed()))
-}
-
-fn measure_layout(doc: &Document, pool: Option<&std::sync::Arc<ShapePool>>) -> Laid {
-    let mut fonts = FontStore::new();
-    let mut media = MediaCache::new(PathBuf::from("."));
-    let theme = Theme::default_dark();
-    let cfg = ViewConfig::default();
-    let started = Instant::now();
-    let (mut out, mut pass) = layout_begin(doc, &cfg, WIDTH);
-    if let Some(pool) = pool {
-        pass.attach_pool(std::sync::Arc::clone(pool));
-    }
-    let done = layout_more(
-        doc,
-        &theme,
-        &mut fonts,
-        &mut media,
-        &cfg,
-        &mut out,
-        &mut pass,
-        Some(Instant::now() + OPEN_SLICE),
-    );
-    let first_ms = started.elapsed().as_millis();
-    let first_height = out.height;
-    if !done {
-        layout_more(
-            doc, &theme, &mut fonts, &mut media, &cfg, &mut out, &mut pass, None,
-        );
-    }
-    Laid {
-        first_ms,
-        first_height,
-        ms: started.elapsed().as_millis(),
-        height: out.height,
-        runs: out.runs.len(),
-        rects: out.rects.len(),
-    }
-}
-
-/// The open slice must leave the first band whole, which is the viewport
-/// plus two viewport heights, or place the document outright.
-fn assert_first_frame_is_whole(laid: &Laid, what: &str) {
-    assert!(
-        laid.first_height >= 3.0 * VIEWPORT_H || laid.first_height == laid.height,
-        "{what}: open slice placed {:.0}px, short of the first band",
-        laid.first_height
-    );
-}
-
-/// The whole export path a Ctrl+E pays after highlighting settles:
-/// layout at the page width, pagination, and emission to bytes.
-fn measure_export(
-    doc: &Document,
-    pool: Option<&std::sync::Arc<ShapePool>>,
-) -> (u128, usize, usize) {
-    let mut fonts = FontStore::new();
-    let mut media = MediaCache::new(PathBuf::from("."));
-    let theme = Theme::default_dark();
-    let cfg = ViewConfig {
-        body_size: 11.0,
-        code_size: 9.0,
-        zoom: 1.0,
-        ..ViewConfig::default()
-    };
-    let geometry = PageGeometry::new(PageSize::A4, 11.0);
-    let settings = ExportSettings {
-        body_size: 11.0,
-        code_size: 9.0,
-        page: PageSize::A4,
-        page_numbers: true,
-        ..ExportSettings::default()
-    };
-    let started = Instant::now();
-    let (mut laid, mut pass) = layout_begin(doc, &cfg, geometry.width);
-    if let Some(pool) = pool {
-        pass.attach_pool(std::sync::Arc::clone(pool));
-    }
-    layout_more(
-        doc, &theme, &mut fonts, &mut media, &cfg, &mut laid, &mut pass, None,
-    );
-    let pages = paginate(doc, &laid, &geometry);
-    let count = pages.len();
-    let job = pdf::Job {
-        doc,
-        layout: &laid,
-        theme: &theme,
-        geometry: &geometry,
-        settings: &settings,
-        title: "perf",
-    };
-    let bytes = pdf::build(&job, &pages, &mut fonts, &mut media).expect("the export builds");
-    (started.elapsed().as_millis(), count, bytes.len())
-}
-
-/// The syntect cost that lazy highlighting moves off the open path:
-/// every code block highlighted in full on warm grammars.
-fn measure_highlight(doc: &Document) -> u128 {
-    let started = Instant::now();
-    for block in &doc.blocks {
-        if let BlockKind::CodeBlock {
-            language, lines, ..
-        } = &block.kind
-        {
-            let _ = highlight::spans(lines, language.as_deref());
-        }
-    }
-    started.elapsed().as_millis()
-}
+use perf_common::{
+    assert_first_frame_is_whole, measure_export, measure_highlight, measure_layout, measure_open,
+    pool, settle_recolor, Laid, TIERS, VIEWPORT_H, WIDTH,
+};
 
 /// The product promise: typical documents open instantly. A 64KB mixed
 /// document with dense code blocks is already a long, heavy README.
@@ -197,7 +34,7 @@ fn measure_highlight(doc: &Document) -> u128 {
 #[ignore = "timing asserts only hold in release mode"]
 fn typical_document_meets_the_budget() {
     let (open_ms, _, doc) = measure_open(&large_gen::generate(64 * 1024), "md");
-    let laid = measure_layout(&doc, Some(&pool()));
+    let (laid, _resident) = measure_layout(&doc, Some(&pool()));
     println!(
         "typical: open {open_ms}ms, first slice {}ms, full pass {}ms, height {:.0}px",
         laid.first_ms, laid.ms, laid.height
@@ -224,24 +61,43 @@ fn typical_document_meets_the_budget() {
 /// first row pays the one-time grammar and font warm-up, as a real cold
 /// start does. The huge highlight columns take a minute or two; that
 /// work leaving the open path is the point.
+///
+/// The timing columns measure the open-path layout of the uncolored
+/// document, exactly the app's open, so they compare across entries.
+/// The document then folds its highlights and the layout recolors in
+/// one batch, the state the app settles into after the wash-in, so the
+/// run and rect counts report the settled layout and the export covers
+/// the colored document, the state the app's export waits for.
 #[test]
 #[ignore = "measurement only"]
 fn tiers_measured() {
     let pool = pool();
     for (name, bytes) in TIERS {
-        let (open_ms, parse_ms, doc) = measure_open(&large_gen::generate(*bytes), "md");
-        let highlight_ms = measure_highlight(&doc);
-        let laid = measure_layout(&doc, Some(&pool));
+        let source = large_gen::generate(*bytes);
+        let mut fonts = FontStore::new();
+        let (open_ms, parse_ms, mut doc) = measure_open(&source, "md");
+        let (mut laid, mut resident) = measure_layout(&doc, Some(&pool));
         assert!(laid.height > 0.0, "markdown fixture laid out");
         assert_first_frame_is_whole(&laid, &format!("md {name}"));
+        let highlight_ms = measure_highlight(&mut doc);
+        settle_recolor(&doc, &mut resident, &mut fonts);
+        laid.runs = resident.runs.len();
+        laid.rects = resident.rects.len();
+        drop(resident);
         let export = measure_export(&doc, Some(&pool));
         print_row("md", name, open_ms, parse_ms, highlight_ms, &laid, export);
 
-        let (open_ms, parse_ms, doc) = measure_open(&large_gen::generate_code(*bytes), "rs");
-        let highlight_ms = measure_highlight(&doc);
-        let laid = measure_layout(&doc, Some(&pool));
+        let source = large_gen::generate_code(*bytes);
+        let mut fonts = FontStore::new();
+        let (open_ms, parse_ms, mut doc) = measure_open(&source, "rs");
+        let (mut laid, mut resident) = measure_layout(&doc, Some(&pool));
         assert!(laid.height > 0.0, "code fixture laid out");
         assert_first_frame_is_whole(&laid, &format!("code {name}"));
+        let highlight_ms = measure_highlight(&mut doc);
+        settle_recolor(&doc, &mut resident, &mut fonts);
+        laid.runs = resident.runs.len();
+        laid.rects = resident.rects.len();
+        drop(resident);
         let export = measure_export(&doc, Some(&pool));
         print_row("code", name, open_ms, parse_ms, highlight_ms, &laid, export);
     }
@@ -351,7 +207,6 @@ fn print_row(
 #[test]
 #[ignore = "measurement only"]
 fn fold_backlog_measured() {
-    use oryx::layout::recolor_batch;
     for (name, bytes) in &TIERS[2..] {
         let (_, _, mut doc) = measure_open(&large_gen::generate(*bytes), "md");
         for block in &mut doc.blocks {
@@ -396,7 +251,6 @@ fn fold_backlog_measured() {
 #[test]
 #[ignore = "measurement only"]
 fn fold_trickle_measured() {
-    use oryx::layout::recolor_batch;
     for (name, bytes) in &TIERS[2..] {
         let (_, _, mut doc) = measure_open(&large_gen::generate(*bytes), "md");
         for block in &mut doc.blocks {
