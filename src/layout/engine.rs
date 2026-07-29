@@ -953,6 +953,11 @@ fn place_block(
             avail,
             &mut scratch,
         );
+        // The title is a decoration with no model home; it takes no
+        // part in selection or search.
+        for run in &mut scratch.runs {
+            run.span = usize::MAX;
+        }
         out.splice(&mut scratch, pass.cursor);
         pass.cursor += title_h + 0.25 * base_size;
     }
@@ -2139,6 +2144,15 @@ fn tex_symbols(tex: &str) -> String {
 
 /// Splits a TeX literal into script segments: `^` and `_` bind the next
 /// character or braced group, as in TeX. Anything unmatched stays literal.
+/// The display text a math literal renders as, scripts flattened: the
+/// text the screen shows, which model copy and search read.
+pub fn math_display(tex: &str) -> String {
+    math_scripts(&tex_symbols(tex.trim()))
+        .into_iter()
+        .map(|(text, _)| text)
+        .collect()
+}
+
 fn math_scripts(tex: &str) -> Vec<(String, Script)> {
     fn flush(normal: &mut String, out: &mut Vec<(String, Script)>) {
         if !normal.is_empty() {
@@ -2227,6 +2241,7 @@ fn layout_frontmatter(
         bold: false,
         block_index,
     };
+    let runs_mark = out.runs.len();
     let rects_mark = out.rects.len();
     let text_h = shape_block(
         fonts,
@@ -2241,6 +2256,11 @@ fn layout_frontmatter(
         avail - 2.0 * pad,
         out,
     );
+    // Selection addresses frontmatter by entry; the synthesized list
+    // interleaves newline spans, so the entry is half the span index.
+    for run in &mut out.runs[runs_mark..] {
+        run.span /= 2;
+    }
     let box_h = text_h + 2.0 * pad;
     out.rects.splice(
         rects_mark..rects_mark,

@@ -5,15 +5,16 @@
 use std::ops::Range;
 
 use crate::doc::model::Document;
-use crate::layout::{LayoutDoc, TextRun};
 use crate::paint::painter::Painter;
 use crate::style::fonts::{BODY_FAMILY, CODE_FAMILY};
 use crate::style::theme::{Rgba, Theme};
-use crate::ui::selection::{RunPos, Selection, MARKER_SPAN};
+use crate::ui::selection::{block_pieces, ModelPos, Piece, Selection};
 use crate::ui::textfield::TextField;
 
 /// Run index marking a boundary character no match may cover.
-const SEPARATOR: usize = usize::MAX;
+/// A character no query can contain, planted between blocks so a match
+/// never crosses them.
+const BLOCK_SEP: char = '\u{1}';
 
 const BAR_WIDTH: f32 = 280.0;
 const BAR_HEIGHT: f32 = 40.0;
@@ -214,17 +215,20 @@ fn fold(c: char) -> char {
     c.to_lowercase().next().unwrap_or(c)
 }
 
-/// One searchable character and the run position it came from.
-struct Pos {
-    run: usize,
-    ch: usize,
+/// One searchable character: its model position (None for the block
+/// separators and display joiners), the character, and its byte length
+/// for computing end positions.
+struct HChar {
+    pos: Option<ModelPos>,
     c: char,
+    len: usize,
 }
 
-/// Every match in layout order. Runs concatenate per visual line so a
-/// match crosses style boundaries; lines, blocks, table cells, and gaps
-/// left by inline images never join. Empty query, no matches.
-pub fn matches(lay: &LayoutDoc, doc: &Document, query: &str) -> Vec<Selection> {
+/// Every match in document order, found in the model's display text, so
+/// matching needs no layout. Display joiners (tabs between table cells,
+/// newlines between rows and code lines) keep a phrase from matching
+/// across them, and blocks never join. Empty query, no matches.
+pub fn matches(doc: &Document, query: &str) -> Vec<Selection> {
     if query.is_empty() {
         return Vec::new();
     }
@@ -234,26 +238,25 @@ pub fn matches(lay: &LayoutDoc, doc: &Document, query: &str) -> Vec<Selection> {
     } else {
         query.chars().map(fold).collect()
     };
-    let hay = haystack(lay, doc);
+    let hay = haystack(doc);
     let mut out = Vec::new();
     let mut i = 0;
     while i + needle.len() <= hay.len() {
         let window = &hay[i..i + needle.len()];
-        let hit = window.iter().zip(&needle).all(|(pos, want)| {
-            pos.run != SEPARATOR && (if sensitive { pos.c } else { fold(pos.c) }) == *want
+        let hit = window.iter().zip(&needle).all(|(h, want)| {
+            h.c != BLOCK_SEP && (if sensitive { h.c } else { fold(h.c) }) == *want
         });
         if hit {
-            let (first, last) = (&window[0], &window[needle.len() - 1]);
-            out.push(Selection {
-                start: RunPos {
-                    run: first.run,
-                    ch: first.ch,
-                },
-                end: RunPos {
-                    run: last.run,
-                    ch: last.ch + 1,
-                },
+            let start = window.iter().find_map(|h| h.pos);
+            let end = window.iter().rev().find_map(|h| {
+                h.pos.map(|p| ModelPos {
+                    byte: p.byte + h.len,
+                    ..p
+                })
             });
+            if let (Some(start), Some(end)) = (start, end) {
+                out.push(Selection { start, end });
+            }
             i += needle.len();
         } else {
             i += 1;
@@ -262,34 +265,60 @@ pub fn matches(lay: &LayoutDoc, doc: &Document, query: &str) -> Vec<Selection> {
     out
 }
 
-/// The document's text as one character sequence. A separator lands
-/// between visual lines, at table cell boundaries (span numbering
-/// restarts per cell, mirroring the selection separator rule), and
-/// across horizontal gaps such as inline images.
-fn haystack(lay: &LayoutDoc, doc: &Document) -> Vec<Pos> {
-    let mut out = Vec::new();
-    let mut prev: Option<&TextRun> = None;
-    for (index, run) in lay.runs.iter().enumerate() {
-        if run.span == MARKER_SPAN {
-            continue;
-        }
-        if let Some(p) = prev {
-            let same_line = p.block == run.block && p.y == run.y;
-            let boundary = !same_line || run.span <= p.span || run.x > p.x + p.width + 1.0;
-            if boundary {
-                out.push(Pos {
-                    run: SEPARATOR,
-                    ch: 0,
-                    c: '\t',
-                });
+/// The document's display text as one character sequence, walked from
+/// the model through the same pieces the copies use.
+fn haystack(doc: &Document) -> Vec<HChar> {
+    let mut out: Vec<HChar> = Vec::new();
+    for index in 0..doc.blocks.len() {
+        let mut opened = false;
+        for piece in block_pieces(doc, index) {
+            match piece {
+                Piece::Sep(sep) => {
+                    for c in sep.chars() {
+                        push_char(&mut out, &mut opened, None, c);
+                    }
+                }
+                Piece::Label(label) => {
+                    for c in label.chars() {
+                        push_char(&mut out, &mut opened, None, c);
+                    }
+                }
+                Piece::Addr { span, text } => {
+                    let mut byte = 0usize;
+                    for c in text.chars() {
+                        let pos = ModelPos {
+                            block: index,
+                            span,
+                            byte,
+                        };
+                        push_char(&mut out, &mut opened, Some(pos), c);
+                        byte += c.len_utf8();
+                    }
+                }
             }
         }
-        for (ch, c) in lay.run_text(doc, run).chars().enumerate() {
-            out.push(Pos { run: index, ch, c });
-        }
-        prev = Some(run);
     }
     out
+}
+
+/// Appends one character, planting the block separator ahead of a
+/// block's first character.
+fn push_char(out: &mut Vec<HChar>, opened: &mut bool, pos: Option<ModelPos>, c: char) {
+    if !*opened {
+        if !out.is_empty() {
+            out.push(HChar {
+                pos: None,
+                c: BLOCK_SEP,
+                len: 0,
+            });
+        }
+        *opened = true;
+    }
+    out.push(HChar {
+        pos,
+        c,
+        len: c.len_utf8(),
+    });
 }
 
 /// The neighboring match index with wraparound in either direction.
@@ -307,107 +336,115 @@ pub fn step(current: usize, len: usize, forward: bool) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::doc::images::MediaCache;
     use crate::doc::markdown;
-    use crate::layout::{layout, ViewConfig};
-    use crate::style::fonts::FontStore;
-    use crate::style::theme::Theme;
-    use crate::ui::selection::RunPos;
-    use std::path::PathBuf;
-
-    fn lay(source: &str) -> (crate::doc::model::Document, LayoutDoc) {
-        let doc = markdown::parse(source);
-        let mut fonts = FontStore::new();
-        let mut media = MediaCache::new(PathBuf::from("."));
-        let l = layout(
-            &doc,
-            &Theme::default_dark(),
-            &mut fonts,
-            &mut media,
-            &ViewConfig::default(),
-            2000.0,
-        );
-        (doc, l)
-    }
+    use crate::ui::selection::ModelPos;
 
     #[test]
     fn lowercase_query_matches_any_case() {
         assert!(!smart_case_sensitive("panel"));
         assert!(!smart_case_sensitive("3/17"));
-        let (doc, l) = lay("Panel PANEL panel");
-        assert_eq!(matches(&l, &doc, "panel").len(), 3);
+        let doc = markdown::parse("Panel PANEL panel");
+        assert_eq!(matches(&doc, "panel").len(), 3);
     }
 
     #[test]
     fn capital_query_matches_exactly() {
         assert!(smart_case_sensitive("Panel"));
-        let (doc, l) = lay("Panel PANEL panel");
-        let found = matches(&l, &doc, "Panel");
+        let doc = markdown::parse("Panel PANEL panel");
+        let found = matches(&doc, "Panel");
         assert_eq!(
             found,
             vec![Selection {
-                start: RunPos { run: 0, ch: 0 },
-                end: RunPos { run: 0, ch: 5 },
+                start: ModelPos {
+                    block: 0,
+                    span: 0,
+                    byte: 0
+                },
+                end: ModelPos {
+                    block: 0,
+                    span: 0,
+                    byte: 5
+                },
             }]
         );
     }
 
     #[test]
     fn match_crosses_a_style_boundary() {
-        let (doc, l) = lay("**pan**el rest");
-        assert_eq!(l.runs.len(), 2, "bold and plain runs expected");
-        let found = matches(&l, &doc, "panel");
+        let doc = markdown::parse("**pan**el rest");
+        let found = matches(&doc, "panel");
         assert_eq!(
             found,
             vec![Selection {
-                start: RunPos { run: 0, ch: 0 },
-                end: RunPos { run: 1, ch: 2 },
+                start: ModelPos {
+                    block: 0,
+                    span: 0,
+                    byte: 0
+                },
+                end: ModelPos {
+                    block: 0,
+                    span: 1,
+                    byte: 2
+                },
             }]
         );
     }
 
     #[test]
     fn no_match_across_blocks() {
-        let (doc, l) = lay("one\n\ntwo");
-        assert!(matches(&l, &doc, "onetwo").is_empty());
-        assert!(matches(&l, &doc, "netw").is_empty());
+        let doc = markdown::parse("one\n\ntwo");
+        assert!(matches(&doc, "onetwo").is_empty());
+        assert!(matches(&doc, "netw").is_empty());
     }
 
     #[test]
     fn no_match_across_table_cells() {
-        let (doc, l) = lay("| ab | cd |\n|---|---|\n| ef | gh |");
-        assert!(matches(&l, &doc, "bc").is_empty());
-        assert!(matches(&l, &doc, "fg").is_empty());
-        assert_eq!(matches(&l, &doc, "ef").len(), 1);
+        let doc = markdown::parse("| ab | cd |\n|---|---|\n| ef | gh |");
+        assert!(matches(&doc, "bc").is_empty());
+        assert!(matches(&doc, "fg").is_empty());
+        assert_eq!(matches(&doc, "ef").len(), 1);
     }
 
     #[test]
     fn no_match_across_a_hard_break() {
-        let (doc, l) = lay("one two\\\nthree");
-        assert!(matches(&l, &doc, "two three").is_empty());
-        assert_eq!(matches(&l, &doc, "three").len(), 1);
+        let doc = markdown::parse("one two\\\nthree");
+        assert!(matches(&doc, "two three").is_empty());
+        assert_eq!(matches(&doc, "three").len(), 1);
     }
 
     #[test]
-    fn marker_runs_stay_out_of_the_text() {
-        let (doc, l) = lay("- item one");
-        let found = matches(&l, &doc, "item");
+    fn markers_stay_out_of_the_text() {
+        let doc = markdown::parse("- item one");
+        let found = matches(&doc, "item");
         assert_eq!(found.len(), 1);
-        let run = found[0].start.run;
-        assert!(l.run_text(&doc, &l.runs[run]).starts_with("item"));
-        assert_eq!(found[0].start.ch, 0);
+        assert_eq!(
+            found[0].start,
+            ModelPos {
+                block: 0,
+                span: 0,
+                byte: 0
+            },
+            "the bullet is not part of the text"
+        );
+    }
+
+    #[test]
+    fn matches_span_code_lines_but_not_line_breaks() {
+        let doc = markdown::parse("```rust\nlet alpha = 1;\nlet beta = 2;\n```");
+        assert_eq!(matches(&doc, "alpha").len(), 1);
+        assert!(matches(&doc, "1;let").is_empty(), "lines never join");
     }
 
     #[test]
     fn successive_matches_do_not_overlap() {
-        let (doc, l) = lay("aaaa");
-        assert_eq!(matches(&l, &doc, "aa").len(), 2);
+        let doc = markdown::parse("aaaa");
+        assert_eq!(matches(&doc, "aa").len(), 2);
     }
 
     #[test]
     fn empty_query_finds_nothing() {
-        let (doc, l) = lay("anything");
-        assert!(matches(&l, &doc, "").is_empty());
+        let doc = markdown::parse("anything");
+        assert!(matches(&doc, "").is_empty());
     }
 
     #[test]

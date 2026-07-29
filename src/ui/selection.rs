@@ -1,33 +1,39 @@
-//! Text selection: caret positions in laid-out runs, hit testing for mouse
-//! drags, highlight geometry, and conversion of the selected range back to
-//! plain text or markdown.
+//! Text selection anchored on the document model: hit testing maps a
+//! click through the laid-out runs to a model position, highlight
+//! geometry maps the model range back onto whatever runs are placed,
+//! and both copies assemble from the model alone, so no operation here
+//! needs a complete layout.
 
 use std::borrow::Cow;
+use std::cmp::Ordering;
 
 use cosmic_text::{Attrs, Buffer, Family, Metrics, Shaping, Style, Weight};
 
 use crate::doc::model::{BlockKind, Document, Span};
-use crate::layout::{metrics, LayoutDoc, TextRun};
+use crate::layout::{metrics, LayoutDoc, TextRef, TextRun};
 use crate::style::fonts::FontStore;
 
-/// Marker runs (bullets, numbers, checkmarks) carry this span sentinel and
-/// take no part in selection or search.
+/// Marker runs (bullets, numbers, checkmarks, alert titles) carry this
+/// span sentinel and take no part in selection or search.
 pub const MARKER_SPAN: usize = usize::MAX;
 
-/// A caret position: index into `LayoutDoc::runs` plus a character offset
-/// within that run's text, from 0 to the run's character count inclusive.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RunPos {
-    pub run: usize,
-    pub ch: usize,
+/// A caret position in the model: block index, the span index inside it
+/// (the line index for code blocks, the flattened cell chain for
+/// tables), and a byte offset into that span's display text, always on
+/// a character boundary. Ordering is document order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ModelPos {
+    pub block: usize,
+    pub span: usize,
+    pub byte: usize,
 }
 
-/// A drag selection between two caret positions, kept in drag order;
+/// A drag selection between two model positions, kept in drag order;
 /// `start` may sit after `end` when the drag went upward.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Selection {
-    pub start: RunPos,
-    pub end: RunPos,
+    pub start: ModelPos,
+    pub end: ModelPos,
 }
 
 impl Selection {
@@ -36,8 +42,8 @@ impl Selection {
     }
 
     /// Endpoints in document order, regardless of drag direction.
-    fn ordered(&self) -> (RunPos, RunPos) {
-        if (self.end.run, self.end.ch) < (self.start.run, self.start.ch) {
+    pub fn ordered(&self) -> (ModelPos, ModelPos) {
+        if self.end < self.start {
             (self.end, self.start)
         } else {
             (self.start, self.end)
@@ -45,130 +51,216 @@ impl Selection {
     }
 }
 
-/// The whole document as a selection, from the first selectable run to the
-/// last. None when the document has no selectable runs.
-pub fn all(lay: &LayoutDoc, doc: &Document) -> Option<Selection> {
-    let first = lay.runs.iter().position(|r| r.span != MARKER_SPAN)?;
-    let last = lay.runs.iter().rposition(|r| r.span != MARKER_SPAN)?;
-    Some(Selection {
-        start: RunPos { run: first, ch: 0 },
-        end: RunPos {
-            run: last,
-            ch: lay.run_text(doc, &lay.runs[last]).chars().count(),
-        },
-    })
+/// One piece of a block's display text: addressed pieces carry the span
+/// (or line, or cell chain) index their bytes belong to; separator
+/// pieces are the display joiners between them, tabs between table
+/// cells, newlines between rows and code lines, the footnote label.
+pub(crate) enum Piece<'a> {
+    Addr { span: usize, text: Cow<'a, str> },
+    Sep(&'static str),
+    Label(String),
 }
 
-/// The caret position nearest to a point in document coordinates.
-/// Snaps vertically to the closest line and horizontally to the closest
-/// character boundary. None only when the document has no runs.
-pub fn pos_at(
-    lay: &LayoutDoc,
-    doc: &Document,
-    fonts: &mut FontStore,
-    x: f32,
-    y: f32,
-) -> Option<RunPos> {
-    let mut best: Option<(f32, f32, usize)> = None;
-    for (i, run) in lay.runs.iter().enumerate() {
-        if run.span == MARKER_SPAN {
-            continue;
+/// A block's display text in order. Empty for blocks with none (rules,
+/// placed images).
+pub(crate) fn block_pieces(doc: &Document, index: usize) -> Vec<Piece<'_>> {
+    let source = &*doc.source;
+    let mut out = Vec::new();
+    match &doc.blocks[index].kind {
+        BlockKind::Heading { spans, .. }
+        | BlockKind::Paragraph { spans }
+        | BlockKind::ListItem { spans, .. } => span_pieces(&mut out, spans, 0, source),
+        BlockKind::FootnoteDef { label, spans } => {
+            out.push(Piece::Label(format!("{label}.\t")));
+            span_pieces(&mut out, spans, 0, source);
         }
-        let bottom = run.y + metrics::LINE_HEIGHT * run.size;
-        let dy = if y < run.y {
-            run.y - y
-        } else if y > bottom {
-            y - bottom
-        } else {
-            0.0
-        };
-        let dx = if x < run.x {
-            run.x - x
-        } else if x > run.x + run.width {
-            x - (run.x + run.width)
-        } else {
-            0.0
-        };
-        let better = match best {
-            Some((bdy, bdx, _)) => (dy, dx) < (bdy, bdx),
-            None => true,
-        };
-        if better {
-            best = Some((dy, dx, i));
+        BlockKind::CodeBlock { lines, .. } => {
+            for i in 0..lines.len() {
+                if i > 0 {
+                    out.push(Piece::Sep("\n"));
+                }
+                out.push(Piece::Addr {
+                    span: i,
+                    text: lines.line(source, i).into(),
+                });
+            }
+        }
+        BlockKind::Table { header, rows } => {
+            let mut chain = 0usize;
+            for (r, row) in std::iter::once(header).chain(rows.iter()).enumerate() {
+                if r > 0 {
+                    out.push(Piece::Sep("\n"));
+                }
+                for (c, cell) in row.iter().enumerate() {
+                    if c > 0 {
+                        out.push(Piece::Sep("\t"));
+                    }
+                    span_pieces(&mut out, cell, chain, source);
+                    chain += cell.len();
+                }
+            }
+        }
+        BlockKind::MathBlock { tex } => {
+            out.push(Piece::Addr {
+                span: 0,
+                text: crate::layout::math_display(tex).into(),
+            });
+        }
+        BlockKind::Frontmatter { entries } => {
+            for (i, (key, value)) in entries.iter().enumerate() {
+                if i > 0 {
+                    out.push(Piece::Sep("\n"));
+                }
+                out.push(Piece::Addr {
+                    span: i,
+                    text: format!("{key}: {value}").into(),
+                });
+            }
+        }
+        BlockKind::Rule | BlockKind::Image { .. } => {}
+    }
+    out
+}
+
+/// Inline spans as addressed pieces. A footnote reference reads with a
+/// space before its label, the separation its raised baseline gives it
+/// on screen.
+fn span_pieces<'a>(out: &mut Vec<Piece<'a>>, spans: &'a [Span], base: usize, source: &'a str) {
+    for (i, span) in spans.iter().enumerate() {
+        let footnote = span
+            .link
+            .as_deref()
+            .is_some_and(|l| l.starts_with("footnote:"));
+        if footnote {
+            out.push(Piece::Sep(" "));
+        }
+        out.push(Piece::Addr {
+            span: base + i,
+            text: span.text(source).into(),
+        });
+    }
+}
+
+/// The whole document as a selection, from its first addressable piece
+/// to its last. None when nothing is selectable.
+pub fn all(doc: &Document) -> Option<Selection> {
+    let mut start: Option<ModelPos> = None;
+    let mut end: Option<ModelPos> = None;
+    for index in 0..doc.blocks.len() {
+        for piece in block_pieces(doc, index) {
+            if let Piece::Addr { span, text } = piece {
+                let here = ModelPos {
+                    block: index,
+                    span,
+                    byte: 0,
+                };
+                if start.is_none() {
+                    start = Some(here);
+                }
+                end = Some(ModelPos {
+                    block: index,
+                    span,
+                    byte: text.len(),
+                });
+            }
         }
     }
-    let (_, _, index) = best?;
-    let run = &lay.runs[index];
-    let text = lay.run_text(doc, run);
-    let family = lay.run_family(run);
-    Some(RunPos {
-        run: index,
-        ch: char_index_at(fonts, run, text, family, x - run.x),
+    Some(Selection {
+        start: start?,
+        end: end?,
     })
 }
 
-/// Highlight boxes for the selection, one `(x, y, width, height)` per
-/// selected run fragment, in document coordinates. Boxes on the same line
-/// share the height of the line's tallest run.
-pub fn rects(
-    sel: &Selection,
-    lay: &LayoutDoc,
-    doc: &Document,
-    fonts: &mut FontStore,
-) -> Vec<(f32, f32, f32, f32)> {
-    rects_cached(sel, lay, doc, fonts, &mut ShapeCache::default())
-}
-
-/// The selected range as unstyled text. Wrapped lines rejoin with a space,
-/// hard breaks and code lines keep their newline, blocks join with a blank
-/// line.
-pub fn plain_text(sel: &Selection, lay: &LayoutDoc, doc: &Document) -> String {
+/// The selected range as unstyled text, assembled from the model:
+/// blocks join with a blank line, and each block's pieces join with the
+/// display separators `block_pieces` defines. Only the endpoint blocks
+/// slice; everything between comes whole.
+pub fn plain_text(sel: &Selection, doc: &Document) -> String {
+    if sel.is_empty() || doc.blocks.is_empty() {
+        return String::new();
+    }
+    let (a, b) = sel.ordered();
     let mut out = String::new();
-    for (index, text) in fragments(sel, lay, doc) {
-        let run = &lay.runs[index];
-        if !out.is_empty() {
-            out.push_str(&separator(
-                doc,
-                &lay.runs[prev_selected(lay, sel, index)],
-                run,
-            ));
+    for index in a.block..=b.block.min(doc.blocks.len() - 1) {
+        let mut block_text = String::new();
+        let mut pending_sep: Option<String> = None;
+        for piece in block_pieces(doc, index) {
+            match piece {
+                Piece::Sep(sep) => {
+                    if !block_text.is_empty() {
+                        pending_sep = Some(match pending_sep {
+                            Some(prev) => prev + sep,
+                            None => sep.to_string(),
+                        });
+                    }
+                }
+                Piece::Label(label) => {
+                    if block_text.is_empty() {
+                        block_text.push_str(&label);
+                    } else {
+                        pending_sep = Some(pending_sep.unwrap_or_default() + &label);
+                    }
+                }
+                Piece::Addr { span, text } => {
+                    let mut from = 0usize;
+                    let mut to = text.len();
+                    if index == a.block {
+                        match span.cmp(&a.span) {
+                            Ordering::Less => continue,
+                            Ordering::Equal => from = a.byte.min(text.len()),
+                            Ordering::Greater => {}
+                        }
+                    }
+                    if index == b.block {
+                        match span.cmp(&b.span) {
+                            Ordering::Greater => continue,
+                            Ordering::Equal => to = b.byte.min(text.len()),
+                            Ordering::Less => {}
+                        }
+                    }
+                    if from >= to {
+                        continue;
+                    }
+                    let slice = &text[floor_boundary(&text, from)..floor_boundary(&text, to)];
+                    if let Some(sep) = pending_sep.take() {
+                        if !block_text.is_empty() {
+                            block_text.push_str(&sep);
+                        }
+                    }
+                    block_text.push_str(slice);
+                }
+            }
         }
-        out.push_str(text);
+        if block_text.is_empty() {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push_str("\n\n");
+        }
+        out.push_str(&block_text);
     }
     out
 }
 
 /// The selected range as markdown: one verbatim slice of the document
-/// source between the two endpoints, so every construct survives exactly
-/// as written. Endpoints are character-precise inside text blocks; an
-/// endpoint at a block edge rounds out to whole source lines so line
-/// markers (`#`, `>`, list bullets) come along, and endpoints inside code
-/// blocks or tables round out to the whole block.
-pub fn markdown(sel: &Selection, lay: &LayoutDoc, doc: &Document) -> String {
-    if sel.is_empty() || lay.runs.is_empty() || doc.source.is_empty() {
+/// source between the two endpoints. Endpoints are character-precise
+/// inside verbatim spans; a position at a block's edge rounds out to
+/// whole source lines so line markers come along, and positions inside
+/// code blocks or tables round out to the whole block. Every block
+/// strictly inside the selection widens the slice to its source lines,
+/// so the notes section laying out last never drops the source tail.
+pub fn markdown(sel: &Selection, doc: &Document) -> String {
+    if sel.is_empty() || doc.blocks.is_empty() || doc.source.is_empty() {
         return String::new();
     }
     let (a, b) = sel.ordered();
-    let mut start = source_pos(doc, lay, &a, Edge::Start);
-    let mut end = source_pos(doc, lay, &b, Edge::End);
-    // Layout order is not source order: footnote definitions place at
-    // the end as the notes section while living mid-document. The
-    // endpoints keep their character precision; every block strictly
-    // inside the selection widens the slice to its whole source lines,
-    // so a selection over reordered blocks never drops the source tail.
-    let lo = a.run.min(lay.runs.len() - 1);
-    let hi = b.run.min(lay.runs.len() - 1);
-    let edge_blocks = (lay.runs[lo].block, lay.runs[hi].block);
-    let mut covered = usize::MAX;
-    for run in &lay.runs[lo..=hi] {
-        if run.span == MARKER_SPAN || run.block == covered {
+    let mut start = source_edge(doc, &a, Edge::Start);
+    let mut end = source_edge(doc, &b, Edge::End);
+    for index in a.block..=b.block.min(doc.blocks.len() - 1) {
+        if index == a.block || index == b.block {
             continue;
         }
-        covered = run.block;
-        if covered == edge_blocks.0 || covered == edge_blocks.1 {
-            continue;
-        }
-        let range = &doc.blocks[covered].range;
+        let range = &doc.blocks[index].range;
         if range.is_empty() {
             continue;
         }
@@ -185,64 +277,41 @@ enum Edge {
     End,
 }
 
-/// Maps a selection endpoint to a byte offset in the document source.
-fn source_pos(doc: &Document, lay: &LayoutDoc, pos: &RunPos, edge: Edge) -> usize {
-    let index = pos.run.min(lay.runs.len() - 1);
-    let run = &lay.runs[index];
-    let block = &doc.blocks[run.block];
-    let Some(spans) = kind_spans(&block.kind) else {
+/// Maps a model position to a byte offset in the document source.
+fn source_edge(doc: &Document, pos: &ModelPos, edge: Edge) -> usize {
+    let Some(block) = doc.blocks.get(pos.block) else {
         return match edge {
-            Edge::Start => line_start(&doc.source, block.range.start),
-            Edge::End => line_end(&doc.source, block.range.end),
+            Edge::Start => 0,
+            Edge::End => doc.source.len(),
         };
     };
-    let run_text = lay.run_text(doc, run);
-    let at_block_edge = match edge {
-        Edge::Start => pos.ch == 0 && first_of_block(lay, index),
-        Edge::End => pos.ch >= run_text.chars().count() && last_of_block(lay, index),
-    };
-    if at_block_edge {
-        return match edge {
-            Edge::Start => line_start(&doc.source, block.range.start),
-            Edge::End => line_end(&doc.source, block.range.end),
-        };
-    }
-    let span = spans.get(run.span).filter(|s| !s.range.is_empty());
-    if let Some(span) = span {
-        // Character precision holds only when the span survived parsing
-        // verbatim and the run's slice locates uniquely inside it.
-        if span.is_verbatim() {
-            let text = span.text(&doc.source);
-            if let Some(offset) = text.find(run_text) {
-                return span.range.start as usize + offset + byte_of_char(run_text, pos.ch);
-            }
-        }
-        return match edge {
-            Edge::Start => span.range.start as usize,
-            Edge::End => span.range.end as usize,
-        };
-    }
-    match edge {
+    let whole = |edge: Edge| match edge {
         Edge::Start => line_start(&doc.source, block.range.start),
         Edge::End => line_end(&doc.source, block.range.end),
+    };
+    let Some(spans) = kind_spans(&block.kind) else {
+        return whole(edge);
+    };
+    let Some(span) = spans.get(pos.span).filter(|s| !s.range.is_empty()) else {
+        return whole(edge);
+    };
+    let text_len = span.text(&doc.source).len();
+    let at_block_edge = match edge {
+        Edge::Start => pos.span == 0 && pos.byte == 0,
+        Edge::End => pos.span + 1 >= spans.len() && pos.byte >= text_len,
+    };
+    if at_block_edge {
+        return whole(edge);
     }
-}
-
-/// True when no earlier non-marker run belongs to the same block.
-fn first_of_block(lay: &LayoutDoc, index: usize) -> bool {
-    lay.runs[..index]
-        .iter()
-        .rev()
-        .find(|r| r.span != MARKER_SPAN)
-        .map_or(true, |r| r.block != lay.runs[index].block)
-}
-
-/// True when no later non-marker run belongs to the same block.
-fn last_of_block(lay: &LayoutDoc, index: usize) -> bool {
-    lay.runs[index + 1..]
-        .iter()
-        .find(|r| r.span != MARKER_SPAN)
-        .map_or(true, |r| r.block != lay.runs[index].block)
+    // Character precision holds only when the span survived parsing
+    // verbatim, so its display bytes are its source bytes.
+    if span.is_verbatim() {
+        return span.range.start as usize + pos.byte.min(text_len);
+    }
+    match edge {
+        Edge::Start => span.range.start as usize,
+        Edge::End => span.range.end as usize,
+    }
 }
 
 /// Start of the source line containing `byte`.
@@ -280,75 +349,6 @@ fn floor_boundary(source: &str, byte: usize) -> usize {
     byte
 }
 
-/// The selected pieces in document order: run index plus the slice of its
-/// text inside the selection. Marker runs and empty slices are dropped.
-fn fragments<'a>(sel: &Selection, lay: &'a LayoutDoc, doc: &'a Document) -> Vec<(usize, &'a str)> {
-    let (a, b) = sel.ordered();
-    if sel.is_empty() || lay.runs.is_empty() {
-        return Vec::new();
-    }
-    let mut out = Vec::new();
-    for index in a.run..=b.run.min(lay.runs.len() - 1) {
-        let run = &lay.runs[index];
-        if run.span == MARKER_SPAN {
-            continue;
-        }
-        let run_text = lay.run_text(doc, run);
-        let from = if index == a.run { a.ch } else { 0 };
-        let to = if index == b.run {
-            b.ch
-        } else {
-            run_text.chars().count()
-        };
-        let text = slice_chars(run_text, from, to);
-        if !text.is_empty() {
-            out.push((index, text));
-        }
-    }
-    out
-}
-
-/// Index of the selected run preceding `index`, skipping markers.
-fn prev_selected(lay: &LayoutDoc, sel: &Selection, index: usize) -> usize {
-    let (a, _) = sel.ordered();
-    let mut i = index - 1;
-    while i > a.run && lay.runs[i].span == MARKER_SPAN {
-        i -= 1;
-    }
-    i
-}
-
-/// Text joining two adjacent selected runs: nothing inside a line, a tab at
-/// table cell boundaries, a space at soft wraps, a newline at hard breaks
-/// and code lines, a blank line between blocks. Blank code lines leave no
-/// run, so their count comes from the vertical distance.
-fn separator(doc: &Document, prev: &TextRun, cur: &TextRun) -> Cow<'static, str> {
-    if cur.block != prev.block {
-        return "\n\n".into();
-    }
-    if cur.y == prev.y {
-        return if cur.span <= prev.span { "\t" } else { "" }.into();
-    }
-    match &doc.blocks[cur.block].kind {
-        BlockKind::CodeBlock { .. } => {
-            let line_height = metrics::LINE_HEIGHT * cur.size;
-            let lines = ((cur.y - prev.y) / line_height).round().max(1.0) as usize;
-            "\n".repeat(lines).into()
-        }
-        BlockKind::Table { .. } => "\n".into(),
-        kind => {
-            let hard_break = kind_spans(kind).is_some_and(|spans| {
-                spans
-                    .get(prev.span + 1..cur.span)
-                    .unwrap_or(&[])
-                    .iter()
-                    .any(|s| s.text(&doc.source) == "\n")
-            });
-            if hard_break { "\n" } else { " " }.into()
-        }
-    }
-}
-
 fn kind_spans(kind: &BlockKind) -> Option<&[Span]> {
     match kind {
         BlockKind::Heading { spans, .. }
@@ -359,19 +359,97 @@ fn kind_spans(kind: &BlockKind) -> Option<&[Span]> {
     }
 }
 
-/// Byte index of a character offset, clamped to the text end.
-fn byte_of_char(text: &str, ch: usize) -> usize {
-    text.char_indices()
-        .nth(ch)
-        .map(|(i, _)| i)
-        .unwrap_or(text.len())
+/// The model interval a run's text covers: exact bytes for a model
+/// reference, the whole span for synthesized text (expanded math), and
+/// nothing for markers.
+pub fn run_interval(run: &TextRun) -> Option<(ModelPos, ModelPos)> {
+    if run.span == MARKER_SPAN {
+        return None;
+    }
+    let pos = |byte: usize| ModelPos {
+        block: run.block,
+        span: run.span,
+        byte,
+    };
+    match run.text {
+        TextRef::Model { start, len } => Some((pos(start as usize), pos((start + len) as usize))),
+        TextRef::Side { .. } => Some((pos(0), pos(usize::MAX))),
+    }
 }
 
-/// Slice by character offsets, clamped.
-fn slice_chars(text: &str, from: usize, to: usize) -> &str {
-    let start = byte_of_char(text, from);
-    let end = byte_of_char(text, to.max(from));
-    &text[start..end]
+/// The model position nearest to a point in document coordinates.
+/// Snaps vertically to the closest line and horizontally to the closest
+/// character boundary. None only when nothing selectable is placed.
+pub fn pos_at(
+    lay: &LayoutDoc,
+    doc: &Document,
+    fonts: &mut FontStore,
+    x: f32,
+    y: f32,
+) -> Option<ModelPos> {
+    let mut best: Option<(f32, f32, usize)> = None;
+    for (i, run) in lay.runs.iter().enumerate() {
+        if run.span == MARKER_SPAN {
+            continue;
+        }
+        let bottom = run.y + metrics::LINE_HEIGHT * run.size;
+        let dy = if y < run.y {
+            run.y - y
+        } else if y > bottom {
+            y - bottom
+        } else {
+            0.0
+        };
+        let dx = if x < run.x {
+            run.x - x
+        } else if x > run.x + run.width {
+            x - (run.x + run.width)
+        } else {
+            0.0
+        };
+        let better = match best {
+            Some((bdy, bdx, _)) => (dy, dx) < (bdy, bdx),
+            None => true,
+        };
+        if better {
+            best = Some((dy, dx, i));
+        }
+    }
+    let (_, _, index) = best?;
+    let run = &lay.runs[index];
+    let (iv_start, iv_end) = run_interval(run)?;
+    match run.text {
+        TextRef::Model { start, .. } => {
+            let text = lay.run_text(doc, run);
+            let family = lay.run_family(run);
+            let ch = char_index_at(fonts, run, text, family, x - run.x);
+            Some(ModelPos {
+                block: run.block,
+                span: run.span,
+                byte: start as usize + byte_of_char(text, ch),
+            })
+        }
+        // Synthesized text anchors at span granularity: before or after.
+        TextRef::Side { .. } => {
+            if x < run.x + run.width / 2.0 {
+                Some(iv_start)
+            } else {
+                Some(iv_end)
+            }
+        }
+    }
+}
+
+/// Highlight boxes for the selection, one `(x, y, width, height)` per
+/// selected run fragment, in document coordinates. Boxes on the same line
+/// share the height of the line's tallest run.
+pub fn rects(
+    sel: &Selection,
+    lay: &LayoutDoc,
+    doc: &Document,
+    fonts: &mut FontStore,
+) -> Vec<(f32, f32, f32, f32)> {
+    rects_cached(sel, lay, doc, fonts, &mut ShapeCache::default())
 }
 
 /// Shaped buffers keyed by run index, reused across the matches of one
@@ -391,9 +469,9 @@ impl ShapeCache {
     }
 }
 
-/// As `rects`, sharing shaped runs through the cache across calls. The
-/// line-height lookup rides the y index, since it only needs the runs
-/// on the fragment's own line.
+/// As `rects`, sharing shaped runs through the cache across calls. Runs
+/// whose model interval overlaps the selection contribute a box, sliced
+/// to character precision where an endpoint lands inside the run.
 pub fn rects_cached(
     sel: &Selection,
     lay: &LayoutDoc,
@@ -401,22 +479,104 @@ pub fn rects_cached(
     fonts: &mut FontStore,
     cache: &mut ShapeCache,
 ) -> Vec<(f32, f32, f32, f32)> {
+    rects_for(sel, lay, doc, fonts, cache, 0..lay.runs.len())
+}
+
+/// As `rects_cached`, but only over the runs the y index answers for a
+/// vertical window, which is what keeps thousands of matches cheap.
+#[allow(clippy::too_many_arguments)]
+pub fn rects_window(
+    sel: &Selection,
+    lay: &LayoutDoc,
+    doc: &Document,
+    fonts: &mut FontStore,
+    cache: &mut ShapeCache,
+    y0: f32,
+    y1: f32,
+) -> Vec<(f32, f32, f32, f32)> {
+    let (head, tail) = lay.runs_in(y0, y1);
+    rects_for(sel, lay, doc, fonts, cache, head.chain(tail))
+}
+
+/// The y position and size of the first placed run overlapping each
+/// match, `f32::MAX` where nothing is placed: one walk over the runs
+/// with a binary search into the sorted matches.
+pub fn match_tops(lay: &LayoutDoc, matches: &[Selection]) -> Vec<f32> {
+    let mut tops = vec![f32::MAX; matches.len()];
+    for run in &lay.runs {
+        let Some((iv_start, iv_end)) = run_interval(run) else {
+            continue;
+        };
+        let first = matches.partition_point(|m| m.ordered().1 <= iv_start);
+        for (i, m) in matches.iter().enumerate().skip(first) {
+            let (a, b) = m.ordered();
+            if a >= iv_end {
+                break;
+            }
+            if b > iv_start {
+                tops[i] = tops[i].min(run.y);
+            }
+        }
+    }
+    tops
+}
+
+/// Where the current match sits: the topmost overlapping run's y and
+/// text size, for scrolling it into view. None while nothing placed
+/// covers it.
+pub fn match_anchor(lay: &LayoutDoc, m: &Selection) -> Option<(f32, f32)> {
+    let (a, b) = m.ordered();
+    let mut best: Option<(f32, f32)> = None;
+    for run in &lay.runs {
+        let Some((s, e)) = run_interval(run) else {
+            continue;
+        };
+        if e <= a || b <= s {
+            continue;
+        }
+        if best.map_or(true, |(y, _)| run.y < y) {
+            best = Some((run.y, run.size));
+        }
+    }
+    best
+}
+
+fn rects_for(
+    sel: &Selection,
+    lay: &LayoutDoc,
+    doc: &Document,
+    fonts: &mut FontStore,
+    cache: &mut ShapeCache,
+    indices: impl Iterator<Item = usize>,
+) -> Vec<(f32, f32, f32, f32)> {
     let (a, b) = sel.ordered();
     let mut out = Vec::new();
-    for index in a.run..=b.run.min(lay.runs.len().saturating_sub(1)) {
+    for index in indices {
         let run = &lay.runs[index];
-        if run.span == MARKER_SPAN {
+        let Some((iv_start, iv_end)) = run_interval(run) else {
+            continue;
+        };
+        if iv_end <= a || b <= iv_start {
             continue;
         }
         let text = lay.run_text(doc, run);
         let family = lay.run_family(run);
-        let x0 = if index == a.run {
-            run.x + prefix_width(cache, fonts, index, run, text, family, a.ch)
+        let run_base = match run.text {
+            TextRef::Model { start, .. } => start as usize,
+            TextRef::Side { .. } => 0,
+        };
+        let precise = matches!(run.text, TextRef::Model { .. });
+        let x0 = if precise && iv_start < a {
+            let byte = a.byte.saturating_sub(run_base).min(text.len());
+            let ch = text[..floor_boundary(text, byte)].chars().count();
+            run.x + prefix_width(cache, fonts, index, run, text, family, ch)
         } else {
             run.x
         };
-        let x1 = if index == b.run {
-            run.x + prefix_width(cache, fonts, index, run, text, family, b.ch)
+        let x1 = if precise && b < iv_end {
+            let byte = b.byte.saturating_sub(run_base).min(text.len());
+            let ch = text[..floor_boundary(text, byte)].chars().count();
+            run.x + prefix_width(cache, fonts, index, run, text, family, ch)
         } else {
             run.x + run.width
         };
@@ -433,6 +593,13 @@ pub fn rects_cached(
         out.push((x0, run.y, x1 - x0, height));
     }
     out
+}
+
+fn byte_of_char(text: &str, ch: usize) -> usize {
+    text.char_indices()
+        .nth(ch)
+        .map(|(i, _)| i)
+        .unwrap_or(text.len())
 }
 
 /// Shapes a run exactly as paint does, single line at its own metrics.
@@ -522,21 +689,33 @@ mod tests {
     use crate::doc::images::MediaCache;
     use crate::doc::markdown;
     use crate::layout::{layout, ViewConfig};
+    use crate::style::theme::Theme;
+    use std::path::PathBuf;
 
-    #[test]
-    fn cached_match_rects_equal_direct_and_share_shapings() {
-        let doc = markdown::parse("the word the word the word here.\n\n".repeat(8).as_str());
+    fn lay_doc(source: &str) -> (Document, LayoutDoc, FontStore) {
+        let doc = markdown::parse(source);
         let mut fonts = FontStore::new();
-        let mut media = MediaCache::new(std::path::PathBuf::from("."));
-        let lay = layout(
+        let mut media = MediaCache::new(PathBuf::from("."));
+        let l = layout(
             &doc,
-            &crate::style::theme::Theme::default_dark(),
+            &Theme::default_dark(),
             &mut fonts,
             &mut media,
             &ViewConfig::default(),
-            500.0,
+            2000.0,
         );
-        let matches = crate::ui::search::matches(&lay, &doc, "word");
+        (doc, l, fonts)
+    }
+
+    fn select_all(doc: &Document) -> Selection {
+        all(doc).expect("document has selectable content")
+    }
+
+    #[test]
+    fn cached_match_rects_equal_direct_and_share_shapings() {
+        let (doc, lay, mut fonts) =
+            lay_doc("the word the word the word here.\n\n".repeat(8).as_str());
+        let matches = crate::ui::search::matches(&doc, "word");
         assert!(matches.len() >= 16, "the fixture is match-dense");
         let mut cache = ShapeCache::default();
         for m in &matches {
@@ -564,98 +743,86 @@ mod tests {
         );
         assert_eq!(line_end("plain\nnext", 1), 5, "clean sources are untouched");
     }
-    use crate::style::theme::Theme;
-    use std::path::PathBuf;
-
-    fn lay_doc(source: &str) -> (Document, LayoutDoc, FontStore) {
-        let doc = markdown::parse(source);
-        let mut fonts = FontStore::new();
-        let mut media = MediaCache::new(PathBuf::from("."));
-        let l = layout(
-            &doc,
-            &Theme::default_dark(),
-            &mut fonts,
-            &mut media,
-            &ViewConfig::default(),
-            2000.0,
-        );
-        (doc, l, fonts)
-    }
-
-    fn select_all(l: &LayoutDoc, doc: &Document) -> Selection {
-        all(l, doc).expect("layout has selectable runs")
-    }
 
     #[test]
     fn markdown_round_trips_styles() {
         let source = "# Title\n\nplain **bold** *italic* ~~gone~~ `code` [link](https://a.tld)";
-        let (doc, l, _) = lay_doc(source);
-        assert_eq!(markdown(&select_all(&l, &doc), &l, &doc), source);
+        let (doc, _, _) = lay_doc(source);
+        assert_eq!(markdown(&select_all(&doc), &doc), source);
     }
 
     #[test]
     fn plain_text_drops_styles() {
-        let source = "# Title\n\nplain **bold** *italic* ~~gone~~ `code` [link](https://a.tld)";
-        let (doc, l, _) = lay_doc(source);
-        assert_eq!(
-            plain_text(&select_all(&l, &doc), &l, &doc),
-            "Title\n\nplain bold italic gone code link"
-        );
+        let (doc, _, _) = lay_doc("plain **bold** `code` [link](https://a.tld)");
+        assert_eq!(plain_text(&select_all(&doc), &doc), "plain bold code link");
     }
 
     #[test]
     fn partial_selection_joins_paragraphs_with_blank_line() {
-        let source = "alpha one\n\nsecond beta";
-        let (doc, l, _) = lay_doc(source);
-        assert_eq!(l.runs.len(), 2, "expected one run per paragraph");
+        let (doc, _, _) = lay_doc("alpha one\n\nsecond beta");
         let sel = Selection {
-            start: RunPos { run: 0, ch: 6 },
-            end: RunPos { run: 1, ch: 6 },
+            start: ModelPos {
+                block: 0,
+                span: 0,
+                byte: 6,
+            },
+            end: ModelPos {
+                block: 1,
+                span: 0,
+                byte: 6,
+            },
         };
-        assert_eq!(plain_text(&sel, &l, &doc), "one\n\nsecond");
+        assert_eq!(plain_text(&sel, &doc), "one\n\nsecond");
     }
 
     #[test]
     fn all_selects_every_run() {
-        let (doc, l, _) = lay_doc("# Title\n\n- item with `code`");
-        let sel = all(&l, &doc).unwrap();
-        assert_eq!(plain_text(&sel, &l, &doc), "Title\n\nitem with code");
-        assert_eq!(markdown(&sel, &l, &doc), "# Title\n\n- item with `code`");
+        let (doc, _, _) = lay_doc("# Title\n\n- item with `code`");
+        let sel = all(&doc).unwrap();
+        assert_eq!(plain_text(&sel, &doc), "Title\n\nitem with code");
+        assert_eq!(markdown(&sel, &doc), "# Title\n\n- item with `code`");
     }
 
     #[test]
-    fn all_of_empty_layout_is_none() {
-        assert!(all(&LayoutDoc::default(), &Document::default()).is_none());
+    fn all_of_empty_document_is_none() {
+        assert!(all(&Document::default()).is_none());
     }
 
     #[test]
     fn markdown_preserves_structure_from_source() {
         let source = "> quoted line\n\n- item one\n- item, with **bold**\n  - nested\n\n1. first\n2. second\n\n- [x] done\n- [ ] todo\n\n---\n\nafter the rule";
-        let (doc, l, _) = lay_doc(source);
-        assert_eq!(markdown(&select_all(&l, &doc), &l, &doc), source);
+        let (doc, _, _) = lay_doc(source);
+        assert_eq!(markdown(&select_all(&doc), &doc), source);
     }
 
     #[test]
     fn markdown_partial_selection_slices_characters() {
         let source = "alpha one\n\nsecond beta";
-        let (doc, l, _) = lay_doc(source);
+        let (doc, _, _) = lay_doc(source);
         let sel = Selection {
-            start: RunPos { run: 0, ch: 6 },
-            end: RunPos { run: 1, ch: 6 },
+            start: ModelPos {
+                block: 0,
+                span: 0,
+                byte: 6,
+            },
+            end: ModelPos {
+                block: 1,
+                span: 0,
+                byte: 6,
+            },
         };
-        assert_eq!(markdown(&sel, &l, &doc), "one\n\nsecond");
+        assert_eq!(markdown(&sel, &doc), "one\n\nsecond");
     }
 
-    // Footnote definitions lay out at the end as the notes section, so a
-    // select-all's last run belongs to a block that sits mid-source; the
-    // slice must still cover every selected block.
+    // Footnote definitions lay out at the end as the notes section, but
+    // the model interval is source-ordered; a select-all must cover the
+    // source tail.
     #[test]
     fn markdown_select_all_covers_blocks_laid_out_of_source_order() {
         let source =
             "body one.\n\nA claim[^n] made here.\n\n[^n]: The note text.\n\nbody two ends here.\n";
-        let (doc, l, _) = lay_doc(source);
-        let sel = all(&l, &doc).expect("the document selects");
-        let md = markdown(&sel, &l, &doc);
+        let (doc, _, _) = lay_doc(source);
+        let md = markdown(&select_all(&doc), &doc);
         assert!(
             md.contains("body two ends here."),
             "the copy covered the source tail, got {md:?}"
@@ -667,49 +834,62 @@ mod tests {
     #[test]
     fn markdown_partial_precision_survives_the_coverage_walk() {
         let source = "alpha one\n\nsecond beta\n\n[^x]: a note\n\nafter[^x] text\n";
-        let (doc, l, _) = lay_doc(source);
-        // A selection inside the first two body blocks stays precise and
-        // never grows over the note or the trailing paragraph.
+        let (doc, _, _) = lay_doc(source);
         let sel = Selection {
-            start: RunPos { run: 0, ch: 6 },
-            end: RunPos { run: 1, ch: 6 },
+            start: ModelPos {
+                block: 0,
+                span: 0,
+                byte: 6,
+            },
+            end: ModelPos {
+                block: 1,
+                span: 0,
+                byte: 6,
+            },
         };
-        assert_eq!(markdown(&sel, &l, &doc), "one\n\nsecond");
+        assert_eq!(markdown(&sel, &doc), "one\n\nsecond");
     }
 
     #[test]
     fn markdown_fences_code_blocks() {
         let source = "intro\n\n```rust\nfn a() {}\n\nfn b() {}\n```\n\noutro";
-        let (doc, l, _) = lay_doc(source);
-        assert_eq!(markdown(&select_all(&l, &doc), &l, &doc), source);
+        let (doc, _, _) = lay_doc(source);
+        assert_eq!(markdown(&select_all(&doc), &doc), source);
     }
 
     #[test]
     fn markdown_fences_unlabeled_code() {
-        let source = "```\nplain fence\n```";
-        let (doc, l, _) = lay_doc(source);
-        assert_eq!(markdown(&select_all(&l, &doc), &l, &doc), source);
+        let source = "```\nplain text\n```";
+        let (doc, _, _) = lay_doc(source);
+        assert_eq!(markdown(&select_all(&doc), &doc), source);
     }
 
     #[test]
     fn blank_code_lines_survive_plain_copy() {
         let source = "```rust\nfn a() {}\n\nfn b() {}\n```";
-        let (doc, l, _) = lay_doc(source);
+        let (doc, _, _) = lay_doc(source);
         assert_eq!(
-            plain_text(&select_all(&l, &doc), &l, &doc),
+            plain_text(&select_all(&doc), &doc),
             "fn a() {}\n\nfn b() {}"
         );
     }
 
     #[test]
     fn upward_drag_normalizes() {
-        let source = "alpha one\n\nsecond beta";
-        let (doc, l, _) = lay_doc(source);
+        let (doc, _, _) = lay_doc("alpha one\n\nsecond beta");
         let sel = Selection {
-            start: RunPos { run: 1, ch: 6 },
-            end: RunPos { run: 0, ch: 6 },
+            start: ModelPos {
+                block: 1,
+                span: 0,
+                byte: 6,
+            },
+            end: ModelPos {
+                block: 0,
+                span: 0,
+                byte: 6,
+            },
         };
-        assert_eq!(plain_text(&sel, &l, &doc), "one\n\nsecond");
+        assert_eq!(plain_text(&sel, &doc), "one\n\nsecond");
     }
 
     #[test]
@@ -717,13 +897,21 @@ mod tests {
         let (doc, l, mut fonts) = lay_doc("hello world");
         let run = &l.runs[0];
         let left = pos_at(&l, &doc, &mut fonts, run.x + 0.5, run.y + 1.0).unwrap();
-        assert_eq!(left, RunPos { run: 0, ch: 0 });
+        assert_eq!(
+            left,
+            ModelPos {
+                block: 0,
+                span: 0,
+                byte: 0
+            }
+        );
         let right = pos_at(&l, &doc, &mut fonts, run.x + run.width + 50.0, run.y + 1.0).unwrap();
         assert_eq!(
             right,
-            RunPos {
-                run: 0,
-                ch: l.run_text(&doc, run).chars().count()
+            ModelPos {
+                block: 0,
+                span: 0,
+                byte: l.run_text(&doc, run).len()
             }
         );
     }
@@ -732,7 +920,7 @@ mod tests {
     fn rects_cover_fully_selected_run() {
         let (doc, l, mut fonts) = lay_doc("hello world");
         let run = &l.runs[0];
-        let sel = select_all(&l, &doc);
+        let sel = select_all(&doc);
         let boxes = rects(&sel, &l, &doc, &mut fonts);
         assert_eq!(boxes.len(), 1);
         let (x, _y, w, h) = boxes[0];

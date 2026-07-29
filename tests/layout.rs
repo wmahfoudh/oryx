@@ -1858,18 +1858,8 @@ fn showcase_select_all_markdown_copy_covers_the_whole_source() {
         source.push_str(&std::fs::read_to_string(path).expect("showcase file"));
     }
     let doc = markdown::parse(source.as_str());
-    let mut fonts = FontStore::new();
-    let mut media = MediaCache::new(PathBuf::from("tests/showcase"));
-    let lay = oryx::layout::layout(
-        &doc,
-        &Theme::default_dark(),
-        &mut fonts,
-        &mut media,
-        &ViewConfig::default(),
-        1200.0,
-    );
-    let sel = oryx::ui::selection::all(&lay, &doc).expect("the document selects");
-    let md = oryx::ui::selection::markdown(&sel, &lay, &doc);
+    let sel = oryx::ui::selection::all(&doc).expect("the document selects");
+    let md = oryx::ui::selection::markdown(&sel, &doc);
     assert!(
         md.len() >= source.trim_end().len(),
         "the copy dropped {} of {} source bytes",
@@ -1992,4 +1982,59 @@ fn recolor_preserves_accessor_texts() {
         .collect::<Vec<_>>()
         .concat();
     assert_eq!(before.concat(), after, "texts survive the rebuild");
+}
+
+/// Task 51 pins: selection and search anchor on the model, so neither
+/// needs the layout. The copy separators are the display rules: blocks
+/// join with a blank line, table cells with a tab, rows and code lines
+/// with newlines, footnote definitions carry their label.
+#[test]
+fn select_all_and_copy_need_no_layout() {
+    let source = "# Title\n\npara one **bold** tail\n\n- item `code`\n\n```rust\nlet a = 1;\n\nlet b = 2;\n```\n\n|h1|h2|\n|-|-|\n|c1|c2|\n\nline one  \nline two\n\n> [!NOTE]\n> alert body\n\nfoot[^n]\n\n[^n]: note text\n";
+    let doc = markdown::parse(source);
+    let sel = oryx::ui::selection::all(&doc).expect("the document selects");
+    let plain = oryx::ui::selection::plain_text(&sel, &doc);
+    assert_eq!(
+        plain,
+        "Title\n\npara one bold tail\n\nitem code\n\nlet a = 1;\n\nlet b = 2;\n\nh1\th2\nc1\tc2\n\nline one\nline two\n\nalert body\n\nfoot n\n\nn.\tnote text"
+    );
+    let md = oryx::ui::selection::markdown(&sel, &doc);
+    assert!(md.starts_with("# Title"), "got {md:?}");
+    assert!(md.ends_with("[^n]: note text"), "got {md:?}");
+}
+
+#[test]
+fn search_matches_need_no_layout() {
+    let source = "one two\n\ntwo three\n\n|ab|cd|\n|-|-|\n|two|x|\n";
+    let doc = markdown::parse(source);
+    let found = oryx::ui::search::matches(&doc, "two");
+    assert_eq!(found.len(), 3);
+    assert!(oryx::ui::search::matches(&doc, "onetwo").is_empty());
+    assert!(
+        oryx::ui::search::matches(&doc, "abcd").is_empty(),
+        "cells never join"
+    );
+}
+
+#[test]
+fn model_selection_survives_recolor_and_relayout() {
+    let mut doc = markdown::parse("intro\n\n```rust\nfn main() {}\n```\n\ntail");
+    let mut fonts = FontStore::new();
+    let sel = oryx::ui::selection::all(&doc).expect("selects");
+    let before = oryx::ui::selection::plain_text(&sel, &doc);
+    highlight_all(&mut doc);
+    let mut lay = lay_doc(&doc, 900.0, &mut fonts);
+    recolor_batch(
+        &mut lay,
+        &doc,
+        &Theme::default_dark(),
+        &mut fonts,
+        &cfg(),
+        &[(1, 0..1)],
+    );
+    assert_eq!(
+        oryx::ui::selection::plain_text(&sel, &doc),
+        before,
+        "the anchor is the model; nothing to remap"
+    );
 }

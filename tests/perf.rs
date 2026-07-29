@@ -297,3 +297,13 @@ fn fold_trickle_measured() {
         }
     }
 }
+
+/// Writes the 8MB markdown fixture to `tests/fixtures/huge.md` for field
+/// testing in the app. Run on demand:
+///   cargo test --test perf dump_huge_fixture -- --ignored
+#[test]
+#[ignore = "writes the fixture on demand"]
+fn dump_huge_fixture() {
+    let source = large_gen::generate(8 * 1024 * 1024);
+    std::fs::write("tests/fixtures/huge.md", source).expect("write huge.md");
+}

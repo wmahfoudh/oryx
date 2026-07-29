@@ -28,7 +28,7 @@ use oryx::ui::help::Help;
 use oryx::ui::overlay::{Action, Overlay, OverlayResult};
 use oryx::ui::scrollbar;
 use oryx::ui::search::{self, SearchState};
-use oryx::ui::selection::{self, RunPos, Selection};
+use oryx::ui::selection::{self, ModelPos, Selection};
 use oryx::ui::settings::{self, Settings};
 use oryx::ui::sidebar::{self, Sidebar};
 use oryx::ui::textfield::{Edit, TextField};
@@ -259,7 +259,7 @@ struct App {
     /// Whether the cursor currently sits over a link, for the pointer icon.
     hover_link: bool,
     /// Selection drag in progress: the caret grabbed at mouse down.
-    sel_anchor: Option<RunPos>,
+    sel_anchor: Option<ModelPos>,
     /// Current selection, kept after the mouse releases.
     selection: Option<Selection>,
     /// Created on first copy and kept alive so the content outlives the
@@ -520,13 +520,10 @@ impl App {
         };
         let scroll = self.scroll_y;
         let state = self.search.as_mut().expect("search open");
-        state.matches = search::matches(lay, &self.document, state.query.text());
+        state.matches = search::matches(&self.document, state.query.text());
         state.stale = false;
-        state.current = state
-            .matches
-            .iter()
-            .position(|m| lay.runs[m.start.run].y >= scroll)
-            .unwrap_or(0);
+        let tops = selection::match_tops(lay, &state.matches);
+        state.current = tops.iter().position(|top| *top >= scroll).unwrap_or(0);
         self.scroll_match_into_view();
         self.refresh_search_rects();
     }
@@ -550,18 +547,22 @@ impl App {
         }
         let mut rects = Vec::new();
         // One shaped buffer per run for the whole pass, however many
-        // matches the run holds.
+        // matches the run holds; geometry only inside the band window.
         let mut shaped = selection::ShapeCache::default();
+        let tops = selection::match_tops(lay, &state.matches);
         for (index, m) in state.matches.iter().enumerate() {
-            let Some(run) = lay.runs.get(m.start.run) else {
-                continue;
-            };
-            if run.y < lo || run.y > hi {
+            if tops[index] < lo || tops[index] > hi {
                 continue;
             }
-            for rect in
-                selection::rects_cached(m, lay, &self.document, &mut self.fonts, &mut shaped)
-            {
+            for rect in selection::rects_window(
+                m,
+                lay,
+                &self.document,
+                &mut self.fonts,
+                &mut shaped,
+                lo,
+                hi,
+            ) {
                 rects.push((index, rect));
             }
         }
@@ -577,9 +578,10 @@ impl App {
         let Some(m) = state.matches.get(state.current) else {
             return;
         };
-        let run = &lay.runs[m.start.run];
-        let line_h = metrics::LINE_HEIGHT * run.size;
-        let top = run.y;
+        let Some((top, size)) = selection::match_anchor(lay, m) else {
+            return;
+        };
+        let line_h = metrics::LINE_HEIGHT * size;
         let vh = self.viewport_h();
         if top < self.scroll_y || top + line_h > self.scroll_y + vh {
             self.scroll_to(top - (vh - line_h) / 2.0);
@@ -786,27 +788,9 @@ impl App {
                 &self.cfg,
                 &patches,
             );
-            if let Some((lo, hi, delta)) = spliced {
-                // Selection endpoints ride the splice instead of dying
-                // with it; only one inside the rebuilt span is lost.
-                let remap = |pos: RunPos| -> Option<RunPos> {
-                    if pos.run < lo {
-                        Some(pos)
-                    } else if pos.run >= hi {
-                        Some(RunPos {
-                            run: pos.run.wrapping_add_signed(delta),
-                            ch: pos.ch,
-                        })
-                    } else {
-                        None
-                    }
-                };
-                self.selection = self.selection.and_then(|sel| {
-                    Some(Selection {
-                        start: remap(sel.start)?,
-                        end: remap(sel.end)?,
-                    })
-                });
+            if spliced.is_some() {
+                // Selection and matches anchor on the model, which the
+                // recolor does not touch; only geometry refreshes.
                 if let Some(state) = self.search.as_mut() {
                     state.stale = true;
                 }
@@ -1340,17 +1324,10 @@ impl App {
     /// selection covers what a copy will read.
     fn select_all(&mut self) {
         // The whole model first: a selection over a prefix would copy a
-        // truncated document. A replace drops the layout, so it may have
-        // to restart before it can complete.
+        // truncated document. The layout is not needed; the selection
+        // anchors on the model.
         self.finish_parse();
-        if self.layout.is_none() && self.layout_width > 0.0 {
-            self.start_pass(self.layout_width);
-        }
-        self.finish_layout();
-        let Some(lay) = self.layout.as_ref() else {
-            return;
-        };
-        let Some(sel) = selection::all(lay, &self.document) else {
+        let Some(sel) = selection::all(&self.document) else {
             return;
         };
         if self.selection != Some(sel) {
@@ -1367,13 +1344,10 @@ impl App {
         let Some(sel) = self.selection else {
             return;
         };
-        let Some(lay) = self.layout.as_ref() else {
-            return;
-        };
         let text = if as_markdown {
-            selection::markdown(&sel, lay, &self.document)
+            selection::markdown(&sel, &self.document)
         } else {
-            selection::plain_text(&sel, lay, &self.document)
+            selection::plain_text(&sel, &self.document)
         };
         if text.is_empty() {
             return;
@@ -1489,10 +1463,8 @@ impl App {
         // The new width obsoletes every resized image buffer.
         self.media.clear_scaled();
         self.pending_band_for = None;
-        // Selection positions index the old layout's runs, and so do
-        // search matches.
-        self.selection = None;
-        self.sel_anchor = None;
+        // The selection anchors on the model and survives the restart;
+        // search matches do too, but their geometry is stale.
         if let Some(state) = self.search.as_mut() {
             state.stale = true;
         }
@@ -1549,35 +1521,6 @@ impl App {
             self.request_redraw();
         }
         self.grow_band(before);
-    }
-
-    /// Runs the pass to the end. Select-all needs the whole document: a
-    /// selection over a partial layout copies a truncated document, which
-    /// no other navigation risks.
-    fn finish_layout(&mut self) {
-        if !self.pass_active() {
-            return;
-        }
-        let before = self.doc_height();
-        {
-            let lay = self.layout.as_mut().expect("a pass has a layout");
-            let pass = self.pass.as_mut().expect("a pass is running");
-            layout_more(
-                &self.document,
-                &self.theme,
-                &mut self.fonts,
-                &mut self.media,
-                &self.cfg,
-                lay,
-                pass,
-                None,
-            );
-        }
-        if let Some(state) = self.search.as_mut() {
-            state.stale = true;
-        }
-        self.grow_band(before);
-        self.request_redraw();
     }
 
     /// Content appended below the painted band leaves its pixels valid,
