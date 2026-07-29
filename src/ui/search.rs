@@ -4,6 +4,7 @@
 
 use std::ops::Range;
 
+use crate::doc::model::Document;
 use crate::layout::{LayoutDoc, TextRun};
 use crate::paint::painter::Painter;
 use crate::style::fonts::{BODY_FAMILY, CODE_FAMILY};
@@ -223,7 +224,7 @@ struct Pos {
 /// Every match in layout order. Runs concatenate per visual line so a
 /// match crosses style boundaries; lines, blocks, table cells, and gaps
 /// left by inline images never join. Empty query, no matches.
-pub fn matches(lay: &LayoutDoc, query: &str) -> Vec<Selection> {
+pub fn matches(lay: &LayoutDoc, doc: &Document, query: &str) -> Vec<Selection> {
     if query.is_empty() {
         return Vec::new();
     }
@@ -233,7 +234,7 @@ pub fn matches(lay: &LayoutDoc, query: &str) -> Vec<Selection> {
     } else {
         query.chars().map(fold).collect()
     };
-    let hay = haystack(lay);
+    let hay = haystack(lay, doc);
     let mut out = Vec::new();
     let mut i = 0;
     while i + needle.len() <= hay.len() {
@@ -265,7 +266,7 @@ pub fn matches(lay: &LayoutDoc, query: &str) -> Vec<Selection> {
 /// between visual lines, at table cell boundaries (span numbering
 /// restarts per cell, mirroring the selection separator rule), and
 /// across horizontal gaps such as inline images.
-fn haystack(lay: &LayoutDoc) -> Vec<Pos> {
+fn haystack(lay: &LayoutDoc, doc: &Document) -> Vec<Pos> {
     let mut out = Vec::new();
     let mut prev: Option<&TextRun> = None;
     for (index, run) in lay.runs.iter().enumerate() {
@@ -283,7 +284,7 @@ fn haystack(lay: &LayoutDoc) -> Vec<Pos> {
                 });
             }
         }
-        for (ch, c) in run.text.chars().enumerate() {
+        for (ch, c) in lay.run_text(doc, run).chars().enumerate() {
             out.push(Pos { run: index, ch, c });
         }
         prev = Some(run);
@@ -314,33 +315,34 @@ mod tests {
     use crate::ui::selection::RunPos;
     use std::path::PathBuf;
 
-    fn lay(source: &str) -> LayoutDoc {
+    fn lay(source: &str) -> (crate::doc::model::Document, LayoutDoc) {
         let doc = markdown::parse(source);
         let mut fonts = FontStore::new();
         let mut media = MediaCache::new(PathBuf::from("."));
-        layout(
+        let l = layout(
             &doc,
             &Theme::default_dark(),
             &mut fonts,
             &mut media,
             &ViewConfig::default(),
             2000.0,
-        )
+        );
+        (doc, l)
     }
 
     #[test]
     fn lowercase_query_matches_any_case() {
         assert!(!smart_case_sensitive("panel"));
         assert!(!smart_case_sensitive("3/17"));
-        let l = lay("Panel PANEL panel");
-        assert_eq!(matches(&l, "panel").len(), 3);
+        let (doc, l) = lay("Panel PANEL panel");
+        assert_eq!(matches(&l, &doc, "panel").len(), 3);
     }
 
     #[test]
     fn capital_query_matches_exactly() {
         assert!(smart_case_sensitive("Panel"));
-        let l = lay("Panel PANEL panel");
-        let found = matches(&l, "Panel");
+        let (doc, l) = lay("Panel PANEL panel");
+        let found = matches(&l, &doc, "Panel");
         assert_eq!(
             found,
             vec![Selection {
@@ -352,9 +354,9 @@ mod tests {
 
     #[test]
     fn match_crosses_a_style_boundary() {
-        let l = lay("**pan**el rest");
+        let (doc, l) = lay("**pan**el rest");
         assert_eq!(l.runs.len(), 2, "bold and plain runs expected");
-        let found = matches(&l, "panel");
+        let found = matches(&l, &doc, "panel");
         assert_eq!(
             found,
             vec![Selection {
@@ -366,46 +368,46 @@ mod tests {
 
     #[test]
     fn no_match_across_blocks() {
-        let l = lay("one\n\ntwo");
-        assert!(matches(&l, "onetwo").is_empty());
-        assert!(matches(&l, "netw").is_empty());
+        let (doc, l) = lay("one\n\ntwo");
+        assert!(matches(&l, &doc, "onetwo").is_empty());
+        assert!(matches(&l, &doc, "netw").is_empty());
     }
 
     #[test]
     fn no_match_across_table_cells() {
-        let l = lay("| ab | cd |\n|---|---|\n| ef | gh |");
-        assert!(matches(&l, "bc").is_empty());
-        assert!(matches(&l, "fg").is_empty());
-        assert_eq!(matches(&l, "ef").len(), 1);
+        let (doc, l) = lay("| ab | cd |\n|---|---|\n| ef | gh |");
+        assert!(matches(&l, &doc, "bc").is_empty());
+        assert!(matches(&l, &doc, "fg").is_empty());
+        assert_eq!(matches(&l, &doc, "ef").len(), 1);
     }
 
     #[test]
     fn no_match_across_a_hard_break() {
-        let l = lay("one two\\\nthree");
-        assert!(matches(&l, "two three").is_empty());
-        assert_eq!(matches(&l, "three").len(), 1);
+        let (doc, l) = lay("one two\\\nthree");
+        assert!(matches(&l, &doc, "two three").is_empty());
+        assert_eq!(matches(&l, &doc, "three").len(), 1);
     }
 
     #[test]
     fn marker_runs_stay_out_of_the_text() {
-        let l = lay("- item one");
-        let found = matches(&l, "item");
+        let (doc, l) = lay("- item one");
+        let found = matches(&l, &doc, "item");
         assert_eq!(found.len(), 1);
         let run = found[0].start.run;
-        assert!(l.runs[run].text.starts_with("item"));
+        assert!(l.run_text(&doc, &l.runs[run]).starts_with("item"));
         assert_eq!(found[0].start.ch, 0);
     }
 
     #[test]
     fn successive_matches_do_not_overlap() {
-        let l = lay("aaaa");
-        assert_eq!(matches(&l, "aa").len(), 2);
+        let (doc, l) = lay("aaaa");
+        assert_eq!(matches(&l, &doc, "aa").len(), 2);
     }
 
     #[test]
     fn empty_query_finds_nothing() {
-        let l = lay("anything");
-        assert!(matches(&l, "").is_empty());
+        let (doc, l) = lay("anything");
+        assert!(matches(&l, &doc, "").is_empty());
     }
 
     #[test]

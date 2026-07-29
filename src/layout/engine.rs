@@ -38,10 +38,22 @@ impl Default for ViewConfig {
     }
 }
 
-/// One styled, positioned run of text on a single visual line.
+/// Where a run's display text lives. A run references text instead of
+/// owning it: a model reference slices its span's display text (or its
+/// code line's), a side reference slices the layout's own buffer of
+/// synthesized text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextRef {
+    Model { start: u32, len: u32 },
+    Side { start: u32, len: u32 },
+}
+
+/// One styled, positioned run of text on a single visual line. Text,
+/// family and link answer through `LayoutDoc::run_text`, `run_family`
+/// and `run_link`; the run itself owns no string.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TextRun {
-    pub text: String,
+    pub text: TextRef,
     pub x: f32,
     /// Top of the line box.
     pub y: f32,
@@ -49,14 +61,45 @@ pub struct TextRun {
     pub baseline: f32,
     pub width: f32,
     pub size: f32,
-    pub family: String,
+    /// Id into `LayoutDoc::families`.
+    pub family: u16,
     pub weight: u16,
     pub italic: bool,
     pub color: Rgba,
-    pub link: Option<String>,
-    /// Source position for selection and copy: block and span index.
+    /// Source position for selection, copy and links: the block index,
+    /// and inside it the span index (the line index for code blocks,
+    /// the flattened header-then-rows cell chain index for tables, the
+    /// marker sentinel for bullets and checkmarks).
     pub block: usize,
     pub span: usize,
+}
+
+/// The model span a run indexes, through the block kind's own span
+/// addressing. None for code lines, markers and synthesized spans.
+fn model_span(doc: &Document, block: usize, span: usize) -> Option<&Span> {
+    match &doc.blocks.get(block)?.kind {
+        BlockKind::Heading { spans, .. }
+        | BlockKind::Paragraph { spans }
+        | BlockKind::ListItem { spans, .. }
+        | BlockKind::FootnoteDef { spans, .. } => spans.get(span),
+        BlockKind::Table { header, rows } => header
+            .iter()
+            .flatten()
+            .chain(rows.iter().flatten().flatten())
+            .nth(span),
+        _ => None,
+    }
+}
+
+/// The display text a model reference slices: the span's text, or the
+/// code line's for code blocks.
+fn model_text(doc: &Document, block: usize, span: usize) -> &str {
+    match &doc.blocks[block].kind {
+        BlockKind::CodeBlock { lines, .. } => lines.line(&doc.source, span),
+        _ => model_span(doc, block, span)
+            .map(|s| s.text(&doc.source))
+            .unwrap_or(""),
+    }
 }
 
 /// A decoration rectangle: panels, bars, strike lines, table grid.
@@ -121,18 +164,98 @@ pub struct LayoutDoc {
     /// Per-line records for code blocks, ordered by block then line;
     /// `recolor_code_lines` re-shapes through them.
     pub code_lines: Vec<CodeLine>,
+    /// The resolved families runs shaped with; runs carry ids.
+    pub families: Vec<String>,
+    /// Synthesized display text with no model home: markers, alert
+    /// titles, frontmatter lines, expanded math, placeholder alts.
+    /// Append-only; side references slice it.
+    pub side: String,
 }
 
 impl LayoutDoc {
+    /// A run's display text. Every consumer reads through this, so the
+    /// run itself is free to reference the model instead of owning a
+    /// copy.
+    pub fn run_text<'a>(&'a self, doc: &'a Document, run: &'a TextRun) -> &'a str {
+        match run.text {
+            TextRef::Side { start, len } => &self.side[start as usize..(start + len) as usize],
+            TextRef::Model { start, len } => {
+                let base = model_text(doc, run.block, run.span);
+                &base[start as usize..(start + len) as usize]
+            }
+        }
+    }
+
+    /// The resolved family a run shaped with.
+    pub fn run_family<'a>(&'a self, run: &'a TextRun) -> &'a str {
+        &self.families[run.family as usize]
+    }
+
+    /// A run's link target, resolved through the model span the run
+    /// indexes; synthesized runs carry none.
+    pub fn run_link<'a>(&'a self, doc: &'a Document, run: &'a TextRun) -> Option<&'a str> {
+        model_span(doc, run.block, run.span)?.link.as_deref()
+    }
+
+    /// The id of a family in this layout's table, interned on first use.
+    /// The resolved families of a document number a handful, so a scan
+    /// beats a map.
+    pub(crate) fn family_id(&mut self, name: &str) -> u16 {
+        if let Some(index) = self.families.iter().position(|f| f == name) {
+            return index as u16;
+        }
+        self.families.push(name.to_string());
+        (self.families.len() - 1) as u16
+    }
+
+    /// Appends synthesized text to the side buffer and answers its
+    /// reference.
+    pub(crate) fn side_ref(&mut self, text: &str) -> TextRef {
+        let start = self.side.len() as u32;
+        self.side.push_str(text);
+        TextRef::Side {
+            start,
+            len: text.len() as u32,
+        }
+    }
+
     /// Drains a step's scratch into the document with every position
     /// dropped by `top` and every carried run index shifted behind the
     /// existing elements. Height stays the caller's: the pass owns the
     /// cursor. The scratch comes back empty for reuse.
+    /// Adopts another layout's side buffer and family table, answering
+    /// the side offset and the id remap its runs need before they join
+    /// this layout's vector.
+    pub(crate) fn merge_refs(&mut self, other: &mut LayoutDoc) -> (u32, Vec<u16>) {
+        let side_base = self.side.len() as u32;
+        let family_map: Vec<u16> = other
+            .families
+            .iter()
+            .map(|name| {
+                if let Some(index) = self.families.iter().position(|f| f == name) {
+                    index as u16
+                } else {
+                    self.families.push(name.clone());
+                    (self.families.len() - 1) as u16
+                }
+            })
+            .collect();
+        self.side.push_str(&other.side);
+        other.side.clear();
+        other.families.clear();
+        (side_base, family_map)
+    }
+
     pub fn splice(&mut self, scratch: &mut LayoutDoc, top: f32) {
         let base_runs = self.runs.len();
+        let (side_base, family_map) = self.merge_refs(scratch);
         self.runs.extend(scratch.runs.drain(..).map(|mut run| {
             run.y += top;
             run.baseline += top;
+            if let TextRef::Side { start, .. } = &mut run.text {
+                *start += side_base;
+            }
+            run.family = family_map[run.family as usize];
             run
         }));
         self.rects.extend(scratch.rects.drain(..).map(|mut rect| {
@@ -293,13 +416,13 @@ impl LayoutDoc {
     /// Link target under a point in document coordinates, if any.
     /// The hit box of a run spans its full line height. The index keeps
     /// this a search; it runs on every mouse move.
-    pub fn link_at(&self, x: f32, y: f32) -> Option<&str> {
+    pub fn link_at<'a>(&'a self, doc: &'a Document, x: f32, y: f32) -> Option<&'a str> {
         let (head, tail) = self.runs_in(y, y);
         let run_hit = self.runs[head]
             .iter()
             .chain(&self.runs[tail])
             .find_map(|r| {
-                let target = r.link.as_deref()?;
+                let target = self.run_link(doc, r)?;
                 let inside = x >= r.x
                     && x <= r.x + r.width
                     && y >= r.y
@@ -823,6 +946,7 @@ fn place_block(
             cfg,
             &doc.source,
             &title,
+            false,
             &base,
             x_base,
             0.0,
@@ -1237,7 +1361,6 @@ struct SpanStyle {
     italic: bool,
     strike: bool,
     color: Rgba,
-    link: Option<String>,
     /// Background pill color for inline code.
     pill: Option<Rgba>,
     /// Baseline shift: positive raises (superscripts), negative lowers.
@@ -1303,7 +1426,6 @@ fn span_style(theme: &Theme, cfg: &ViewConfig, base: &BlockStyle, span: &Span) -
         italic: span.italic || span.math,
         strike: span.strike,
         color,
-        link: span.link.clone(),
         pill: code.then_some(theme.text.inline_code_bg),
         rise,
     }
@@ -1318,6 +1440,7 @@ fn shape_block(
     cfg: &ViewConfig,
     source: &str,
     spans: &[Span],
+    model_spans: bool,
     base: &BlockStyle,
     x0: f32,
     y0: f32,
@@ -1327,10 +1450,12 @@ fn shape_block(
     let line_height = metrics::LINE_HEIGHT * base.size;
     // Math literals expand into script segments at this point only; the
     // model keeps the raw TeX. Each expanded piece remembers its model
-    // span so selection and copy still map to the source.
+    // span so selection and copy still map to the source, but its text
+    // is synthesized and lands in the side buffer.
     let mut shaped: Vec<Span> = Vec::new();
     let mut origins: Vec<usize> = Vec::new();
     let mut styles: Vec<SpanStyle> = Vec::new();
+    let mut model: Vec<bool> = Vec::new();
     for (si, span) in spans.iter().enumerate() {
         if span.math && span.text(source) != "\n" {
             for (text, script) in math_scripts(&tex_symbols(span.text(source))) {
@@ -1347,11 +1472,13 @@ fn shape_block(
                 shaped.push(piece);
                 origins.push(si);
                 styles.push(style);
+                model.push(false);
             }
         } else {
             styles.push(span_style(theme, cfg, base, span));
             shaped.push(span.clone());
             origins.push(si);
+            model.push(model_spans);
         }
     }
 
@@ -1367,6 +1494,7 @@ fn shape_block(
                     cfg,
                     source,
                     &shaped,
+                    &model,
                     &styles,
                     &origins,
                     &segment,
@@ -1395,6 +1523,7 @@ fn shape_segment(
     cfg: &ViewConfig,
     source: &str,
     spans: &[Span],
+    model: &[bool],
     styles: &[SpanStyle],
     origins: &[usize],
     segment: &[usize],
@@ -1434,10 +1563,31 @@ fn shape_segment(
     );
     buffer.shape_until_scroll(&mut fonts.font_system, false);
 
+    // Byte offset of each segment member inside the shaped line, so a
+    // model reference lands in its own span's display text.
+    let mut prefixes: Vec<(usize, u32)> = Vec::with_capacity(segment.len());
+    let mut acc = 0u32;
+    for &si in segment {
+        prefixes.push((si, acc));
+        acc += spans[si].text(source).len() as u32;
+    }
+
+    // A span text may carry embedded newlines; the buffer splits them
+    // into separate lines whose glyph offsets are line-local. Each
+    // line's base offset inside the segment counts the stripped newline
+    // back in, so a model reference lands on the span's own bytes.
+    let mut line_offsets: Vec<u32> = Vec::with_capacity(buffer.lines.len());
+    let mut line_acc = 0u32;
+    for line in &buffer.lines {
+        line_offsets.push(line_acc);
+        line_acc += line.text().len() as u32 + 1;
+    }
+
     let mut height = 0.0_f32;
     for run in buffer.layout_runs() {
         height = height.max(run.line_top + line_height);
         let line_text = buffer.lines[run.line_i].text();
+        let line_base = line_offsets[run.line_i];
         let glyphs = trim_trailing_spaces(run.glyphs, line_text);
         let mut g = 0;
         while g < glyphs.len() {
@@ -1468,18 +1618,31 @@ fn shape_segment(
                     .rounded(radius, radius),
                 );
             }
+            let text = if model[span_index] {
+                let prefix = prefixes
+                    .iter()
+                    .find(|(si, _)| *si == span_index)
+                    .map(|(_, offset)| *offset)
+                    .unwrap_or(0);
+                TextRef::Model {
+                    start: line_base + start_byte as u32 - prefix,
+                    len: (end_byte - start_byte) as u32,
+                }
+            } else {
+                out.side_ref(&line_text[start_byte..end_byte])
+            };
+            let family = out.family_id(&st.family);
             out.runs.push(TextRun {
-                text: line_text[start_byte..end_byte].to_string(),
+                text,
                 x,
                 y,
                 baseline,
                 width,
                 size: st.size,
-                family: st.family.clone(),
+                family,
                 weight: st.weight.0,
                 italic: st.italic,
                 color: st.color,
-                link: st.link.clone(),
                 block: base.block_index,
                 span: origins[span_index],
             });
@@ -1525,12 +1688,12 @@ fn layout_list_item(
 
     match marker {
         Marker::Bullet => {
-            let (runs, width) = shape_marker(fonts, cfg, "\u{2022}", size, theme.text.body);
+            let (runs, width) = shape_marker(fonts, cfg, "\u{2022}", size, theme.text.body, out);
             place_marker(runs, text_x - width - gutter, y0, block_index, out);
         }
         Marker::Number(n) => {
             let text = format!("{n}.");
-            let (runs, width) = shape_marker(fonts, cfg, &text, size, theme.text.body);
+            let (runs, width) = shape_marker(fonts, cfg, &text, size, theme.text.body, out);
             place_marker(runs, text_x - width - gutter, y0, block_index, out);
         }
         Marker::Task { checked } => {
@@ -1542,8 +1705,14 @@ fn layout_list_item(
                 out.rects.push(
                     DecoRect::fill(bx, by, side, side, theme.text.link).rounded(radius, radius),
                 );
-                let (runs, width) =
-                    shape_marker(fonts, cfg, "\u{2713}", 0.7 * size, theme.surface.background);
+                let (runs, width) = shape_marker(
+                    fonts,
+                    cfg,
+                    "\u{2713}",
+                    0.7 * size,
+                    theme.surface.background,
+                    out,
+                );
                 place_marker(runs, bx + (side - width) / 2.0, y0, block_index, out);
             } else {
                 let t = (1.0 * cfg.zoom).max(1.0);
@@ -1606,7 +1775,7 @@ fn layout_table(
             block_index,
         };
         shape_block(
-            fonts, theme, cfg, source, spans, &base, 0.0, 0.0, 100_000.0, &mut tmp,
+            fonts, theme, cfg, source, spans, true, &base, 0.0, 0.0, 100_000.0, &mut tmp,
         );
         tmp.runs.iter().map(|r| r.x + r.width).fold(0.0, f32::max)
     };
@@ -1666,6 +1835,9 @@ fn layout_table(
         .chain(rows.iter().map(|r| (r.as_slice(), false)))
         .collect();
     let mut boundaries = vec![y0];
+    // Runs address table spans through the flattened header-then-rows
+    // cell chain, which this loop visits in exactly that order.
+    let mut span_base = 0usize;
     for (row_index, (cells, is_header)) in all_rows.iter().enumerate() {
         let mut shaped: Vec<LayoutDoc> = Vec::new();
         let mut row_h = line_height;
@@ -1684,12 +1856,19 @@ fn layout_table(
                 cfg,
                 source,
                 spans,
+                true,
                 &base,
                 0.0,
                 0.0,
                 (col_width - 2.0 * pad).max(20.0),
                 &mut tmp,
             );
+            for run in &mut tmp.runs {
+                if run.span != usize::MAX {
+                    run.span += span_base;
+                }
+            }
+            span_base += spans.len();
             row_h = row_h.max(h);
             shaped.push(tmp);
         }
@@ -1719,13 +1898,18 @@ fn layout_table(
             out.rects
                 .push(DecoRect::fill(x0, y, table_w, full_h, color).rounded(top_r, bottom_r));
         }
-        for (c, tmp) in shaped.into_iter().enumerate() {
+        for (c, mut tmp) in shaped.into_iter().enumerate() {
             let dx = col_x[c] + pad;
             let dy = y + vpad;
+            let (side_base, family_map) = out.merge_refs(&mut tmp);
             for mut run in tmp.runs {
                 run.x += dx;
                 run.y += dy;
                 run.baseline += dy;
+                if let TextRef::Side { start, .. } = &mut run.text {
+                    *start += side_base;
+                }
+                run.family = family_map[run.family as usize];
                 out.runs.push(run);
             }
             for mut rect in tmp.rects {
@@ -1813,6 +1997,7 @@ fn layout_image(
         cfg,
         source,
         &alt_span,
+        false,
         &base,
         x0 + pad,
         y0 + pad,
@@ -2049,6 +2234,7 @@ fn layout_frontmatter(
         cfg,
         source,
         &spans,
+        false,
         &base,
         x0 + pad,
         y0 + pad,
@@ -2105,6 +2291,7 @@ fn layout_math_block(
         cfg,
         source,
         &[span],
+        false,
         &base,
         x0 + pad,
         y0 + pad,
@@ -2164,6 +2351,7 @@ fn layout_footnote_def(
         cfg,
         source,
         &marker,
+        false,
         &marker_base,
         x0,
         y0,
@@ -2188,6 +2376,7 @@ fn layout_footnote_def(
         cfg,
         source,
         spans,
+        true,
         &base,
         x0 + indent,
         y0,
@@ -2217,7 +2406,9 @@ fn flow_or_shape(
             fonts, theme, cfg, source, media, spans, base, x0, y0, avail, out,
         )
     } else {
-        shape_block(fonts, theme, cfg, source, spans, base, x0, y0, avail, out)
+        shape_block(
+            fonts, theme, cfg, source, spans, true, base, x0, y0, avail, out,
+        )
     }
 }
 
@@ -2285,7 +2476,9 @@ fn layout_flow(
                 })
                 .collect();
             let runs_mark = out.runs.len();
-            let h = shape_block(fonts, theme, cfg, source, &masked, base, x0, y, avail, out);
+            let h = shape_block(
+                fonts, theme, cfg, source, &masked, true, base, x0, y, avail, out,
+            );
             let last_top = out.runs[runs_mark..].iter().map(|r| r.y).fold(y, f32::max);
             let end_x = out.runs[runs_mark..]
                 .iter()
@@ -2470,6 +2663,7 @@ fn shape_marker(
     text: &str,
     size: f32,
     color: Rgba,
+    out: &mut LayoutDoc,
 ) -> (Vec<TextRun>, f32) {
     let line_height = metrics::LINE_HEIGHT * cfg.body_size * cfg.zoom;
     let mut buffer = Buffer::new(&mut fonts.font_system, Metrics::new(size, line_height));
@@ -2490,18 +2684,19 @@ fn shape_marker(
             continue;
         };
         width = width.max(last.x + last.w);
+        let text = out.side_ref(text);
+        let family = out.family_id(&cfg.body_family);
         runs.push(TextRun {
-            text: text.to_string(),
+            text,
             x: 0.0,
             y: run.line_top,
             baseline: run.line_y,
             width: last.x + last.w,
             size,
-            family: cfg.body_family.clone(),
+            family,
             weight: Weight::NORMAL.0,
             italic: false,
             color,
-            link: None,
             block: 0,
             span: usize::MAX,
         });
@@ -2596,6 +2791,7 @@ pub fn recolor_batch(
                 theme,
                 cfg,
                 line,
+                record.line,
                 segments,
                 record.block,
                 record.x0,
@@ -2608,6 +2804,17 @@ pub fn recolor_batch(
             Some(())
         });
         if reshaped.is_some() {
+            // The scratch interned its families locally; the rebuilt
+            // runs join the layout's table before they join its vector.
+            let family_map: Vec<u16> = scratch
+                .families
+                .iter()
+                .map(|name| lay.family_id(name))
+                .collect();
+            for run in &mut scratch.runs {
+                run.family = family_map[run.family as usize];
+            }
+            scratch.families.clear();
             rebuilt.append(&mut scratch.runs);
         } else {
             rebuilt.extend_from_slice(&lay.runs[copied..record.runs.end]);
@@ -2662,6 +2869,7 @@ pub(crate) fn shape_code_line_step(
         theme,
         cfg,
         line,
+        line_index,
         segments,
         block_index,
         x0,
@@ -2692,6 +2900,7 @@ fn shape_code_line(
     theme: &Theme,
     cfg: &ViewConfig,
     line: &str,
+    line_index: usize,
     segments: &[(Range<usize>, SyntaxRole)],
     block_index: usize,
     x0: f32,
@@ -2745,20 +2954,25 @@ fn shape_code_line(
             let start_byte = glyphs[g..end].iter().map(|gl| gl.start).min().unwrap();
             let end_byte = glyphs[g..end].iter().map(|gl| gl.end).max().unwrap();
             let role = segments[segment_index].1;
+            // The rich pieces cover the line contiguously, so an offset
+            // into their concatenation is an offset into the line.
+            let family = out.family_id(&cfg.code_family);
             out.runs.push(TextRun {
-                text: line_text[start_byte..end_byte].to_string(),
+                text: TextRef::Model {
+                    start: start_byte as u32,
+                    len: (end_byte - start_byte) as u32,
+                },
                 x: x0 + first.x,
                 y: y0 + run.line_top,
                 baseline: y0 + run.line_y,
                 width: last.x + last.w - first.x,
                 size,
-                family: cfg.code_family.clone(),
+                family,
                 weight: Weight::NORMAL.0,
                 italic: false,
                 color: role_color(theme, role),
-                link: None,
                 block: block_index,
-                span: segment_index,
+                span: line_index,
             });
             g = end;
         }

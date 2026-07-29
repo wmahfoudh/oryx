@@ -131,7 +131,7 @@ fn interactive_paths_measured() {
         let mut hits = 0usize;
         let started = Instant::now();
         for y in &probes {
-            if lay.link_at(WIDTH / 2.0, *y).is_some() {
+            if lay.link_at(&doc, WIDTH / 2.0, *y).is_some() {
                 hits += 1;
             }
         }
@@ -139,7 +139,7 @@ fn interactive_paths_measured() {
         let started = Instant::now();
         for y in &probes {
             let linear = lay.runs.iter().find_map(|r| {
-                let target = r.link.as_deref()?;
+                let target = lay.run_link(&doc, r)?;
                 let inside = WIDTH / 2.0 >= r.x
                     && WIDTH / 2.0 <= r.x + r.width
                     && *y >= r.y
@@ -157,6 +157,7 @@ fn interactive_paths_measured() {
             let y = lay.height / (bands + 1) as f32 * (i + 1) as f32;
             let _ = oryx::paint::band(
                 &lay,
+                &doc,
                 &theme,
                 &mut fonts,
                 &mut media,

@@ -5,6 +5,7 @@ use cosmic_text::{Attrs, Buffer, Color, Family, Metrics, Shaping, Style, Weight}
 use tiny_skia::{Pixmap, Rect, Transform};
 
 use crate::doc::images::MediaCache;
+use crate::doc::model::Document;
 use crate::layout::{metrics, DecoRect, LayoutDoc, TextRun};
 use crate::style::fonts::FontStore;
 use crate::style::theme::Theme;
@@ -15,6 +16,7 @@ use crate::style::theme::Theme;
 #[allow(clippy::too_many_arguments)]
 pub fn band(
     layout: &LayoutDoc,
+    doc: &Document,
     theme: &Theme,
     fonts: &mut FontStore,
     media: &mut MediaCache,
@@ -92,7 +94,14 @@ pub fn band(
         if run.y + line_height < y_top || run.y > band_bottom {
             continue;
         }
-        draw_run(&mut pixmap, fonts, run, y_top);
+        draw_run(
+            &mut pixmap,
+            fonts,
+            run,
+            layout.run_text(doc, run),
+            layout.run_family(run),
+            y_top,
+        );
     }
 
     pixmap
@@ -166,19 +175,26 @@ fn rect_path(rect: &crate::layout::DecoRect, y_top: f32) -> Option<tiny_skia::Pa
 
 /// Re-shapes one run single-line and blends its glyphs onto the pixmap.
 /// Shaping inputs match the layout pass exactly, so positions agree.
-fn draw_run(pixmap: &mut Pixmap, fonts: &mut FontStore, run: &TextRun, y_top: f32) {
+fn draw_run(
+    pixmap: &mut Pixmap,
+    fonts: &mut FontStore,
+    run: &TextRun,
+    text: &str,
+    family: &str,
+    y_top: f32,
+) {
     let line_height = metrics::LINE_HEIGHT * run.size;
     let mut buffer = Buffer::new(&mut fonts.font_system, Metrics::new(run.size, line_height));
     buffer.set_size(&mut fonts.font_system, None, None);
     let mut attrs = Attrs::new()
-        .family(Family::Name(&run.family))
+        .family(Family::Name(family))
         .weight(Weight(run.weight));
     if run.italic {
         attrs = attrs.style(Style::Italic);
     }
     buffer.set_text(
         &mut fonts.font_system,
-        &run.text,
+        text,
         &attrs,
         Shaping::Advanced,
         None,

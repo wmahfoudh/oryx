@@ -38,6 +38,21 @@ fn lay(source: &str, width: f32) -> LayoutDoc {
     lay_doc(&markdown::parse(source), width, &mut fonts())
 }
 
+/// As `lay`, keeping the document so tests can read run text, family
+/// and link through the accessors.
+fn lay2(source: &str, width: f32) -> (Document, LayoutDoc) {
+    let doc = markdown::parse(source);
+    let l = lay_doc(&doc, width, &mut fonts());
+    (doc, l)
+}
+
+fn find_text<'a>(l: &'a LayoutDoc, doc: &'a Document, text: &str) -> &'a TextRun {
+    l.runs
+        .iter()
+        .find(|r| l.run_text(doc, r) == text)
+        .unwrap_or_else(|| panic!("no run with text {text:?}"))
+}
+
 /// Folds full highlights into every code block, as the budget pass or
 /// the worker would.
 fn highlight_all(doc: &mut Document) {
@@ -157,19 +172,27 @@ fn anchors_carry_heading_positions() {
 
 #[test]
 fn inline_code_uses_code_font() {
-    let l = lay("body `mono` body", 800.0);
-    let code = l.runs.iter().find(|r| r.family == CODE_FAMILY).unwrap();
-    assert_eq!(code.text, "mono");
+    let (doc, l) = lay2("body `mono` body", 800.0);
+    let code = l
+        .runs
+        .iter()
+        .find(|r| l.run_family(r) == CODE_FAMILY)
+        .unwrap();
+    assert_eq!(l.run_text(&doc, code), "mono");
     assert_eq!(code.size, 20.0);
 }
 
 #[test]
 fn link_color_and_target() {
-    let l = lay("[click](https://a.tld)", 800.0);
+    let (doc, l) = lay2("[click](https://a.tld)", 800.0);
     let t = Theme::default_dark();
-    let link = l.runs.iter().find(|r| r.link.is_some()).unwrap();
+    let link = l
+        .runs
+        .iter()
+        .find(|r| l.run_link(&doc, r).is_some())
+        .unwrap();
     assert_eq!(link.color, t.text.link);
-    assert_eq!(link.link.as_deref(), Some("https://a.tld"));
+    assert_eq!(l.run_link(&doc, link), Some("https://a.tld"));
 }
 
 #[test]
@@ -185,7 +208,7 @@ fn code_block_panel_and_highlighting() {
         .iter()
         .find(|r| r.color == t.syntax.keyword)
         .expect("keyword-colored run");
-    assert_eq!(kw.family, CODE_FAMILY);
+    assert_eq!(l.run_family(kw), CODE_FAMILY);
     assert!(l.runs.iter().any(|r| r.color == t.syntax.string));
     let rows: std::collections::BTreeSet<i64> = l.runs.iter().map(|r| r.y as i64).collect();
     assert!(rows.len() >= 3, "one row per source line, got {rows:?}");
@@ -272,7 +295,7 @@ fn recolor_in_chunks_matches_full_relayout() {
 #[test]
 fn code_lines_wrap_inside_the_panel() {
     let src = "```rust\n// this comment is long enough that it must wrap into more than one visual line at a narrow width\nlet x = 1;\n```";
-    let l = lay(src, 420.0);
+    let (doc, l) = lay2(src, 420.0);
     let t = Theme::default_dark();
     let panel = l
         .rects
@@ -280,11 +303,11 @@ fn code_lines_wrap_inside_the_panel() {
         .find(|r| r.color == t.blocks.code_bg)
         .unwrap();
     let right = panel.x + panel.width;
-    for r in l.runs.iter().filter(|r| r.family == CODE_FAMILY) {
+    for r in l.runs.iter().filter(|r| l.run_family(r) == CODE_FAMILY) {
         assert!(
             r.x + r.width <= right + 0.5,
             "run overflows the panel: {:?}",
-            r.text
+            l.run_text(&doc, r)
         );
     }
     let rows: std::collections::BTreeSet<i64> = l.runs.iter().map(|r| r.y as i64).collect();
@@ -304,7 +327,11 @@ fn code_lines_wrap_inside_the_panel() {
 fn inline_code_gets_pill() {
     let l = lay("with `mono` inside", 800.0);
     let t = Theme::default_dark();
-    let run = l.runs.iter().find(|r| r.family == CODE_FAMILY).unwrap();
+    let run = l
+        .runs
+        .iter()
+        .find(|r| l.run_family(r) == CODE_FAMILY)
+        .unwrap();
     let pill = l
         .rects
         .iter()
@@ -351,18 +378,18 @@ fn task_items_draw_checkboxes() {
 
 #[test]
 fn ordered_markers_number_text() {
-    let l = lay("1. one\n2. two\n3. three", 800.0);
-    assert!(l.runs.iter().any(|r| r.text == "3."));
-    let one = l.runs.iter().find(|r| r.text == "one").unwrap();
-    let marker = l.runs.iter().find(|r| r.text == "1.").unwrap();
+    let (doc, l) = lay2("1. one\n2. two\n3. three", 800.0);
+    assert!(l.runs.iter().any(|r| l.run_text(&doc, r) == "3."));
+    let one = find_text(&l, &doc, "one");
+    let marker = find_text(&l, &doc, "1.");
     assert!(marker.x < one.x);
 }
 
 #[test]
 fn nested_items_indent_deeper() {
-    let l = lay("- outer\n  - inner", 800.0);
-    let outer = l.runs.iter().find(|r| r.text == "outer").unwrap();
-    let inner = l.runs.iter().find(|r| r.text == "inner").unwrap();
+    let (doc, l) = lay2("- outer\n  - inner", 800.0);
+    let outer = find_text(&l, &doc, "outer");
+    let inner = find_text(&l, &doc, "inner");
     assert!(inner.x >= outer.x + 24.0 - 0.5);
 }
 
@@ -380,11 +407,11 @@ fn rule_spans_content_width() {
 
 #[test]
 fn table_columns_header_and_stripes() {
-    let l = lay("|alpha|beta|gamma|\n|-|-|-|\n|a|b|c|\n|d|e|f|", 800.0);
+    let (doc, l) = lay2("|alpha|beta|gamma|\n|-|-|-|\n|a|b|c|\n|d|e|f|", 800.0);
     let t = Theme::default_dark();
-    let alpha = l.runs.iter().find(|r| r.text == "alpha").unwrap();
-    let beta = l.runs.iter().find(|r| r.text == "beta").unwrap();
-    let gamma = l.runs.iter().find(|r| r.text == "gamma").unwrap();
+    let alpha = find_text(&l, &doc, "alpha");
+    let beta = find_text(&l, &doc, "beta");
+    let gamma = find_text(&l, &doc, "gamma");
     assert!(alpha.x < beta.x && beta.x < gamma.x, "columns increase");
     assert_eq!(alpha.weight, 700, "header bold");
     assert!(l.rects.iter().any(|r| r.color == t.blocks.table_header_bg));
@@ -409,14 +436,14 @@ fn table_columns_header_and_stripes() {
         .find(|r| r.color == t.blocks.table_header_bg)
         .unwrap();
     assert!(header_bg.radius_top > 0.0, "header stripe rounds on top");
-    let a = l.runs.iter().find(|r| r.text == "a").unwrap();
+    let a = find_text(&l, &doc, "a");
     assert!(a.y > alpha.y, "body row below header");
     assert!((a.x - alpha.x).abs() < 1.0, "same column aligns");
 }
 
 #[test]
 fn table_cells_wrap_within_capped_columns() {
-    let l = lay(
+    let (doc, l) = lay2(
         "|short|this long cell has quite a lot of text and must wrap|\n|-|-|\n|x|y|",
         500.0,
     );
@@ -424,7 +451,7 @@ fn table_cells_wrap_within_capped_columns() {
         assert!(
             r.x + r.width <= 460.5,
             "run exceeds table bounds: {} {}",
-            r.text,
+            l.run_text(&doc, r),
             r.x + r.width
         );
     }
@@ -518,7 +545,16 @@ fn small_image_keeps_natural_size() {
 fn missing_image_becomes_placeholder() {
     let dir = std::env::temp_dir().join("oryx-laytest-none");
     std::fs::create_dir_all(&dir).unwrap();
-    let l = lay_with_images("![the alt text](gone.png)", 800.0, dir);
+    let doc = markdown::parse("![the alt text](gone.png)");
+    let mut media = MediaCache::new(dir);
+    let l = layout(
+        &doc,
+        &Theme::default_dark(),
+        &mut fonts(),
+        &mut media,
+        &cfg(),
+        800.0,
+    );
     let t = Theme::default_dark();
     assert!(l.images.is_empty());
     assert!(
@@ -528,7 +564,9 @@ fn missing_image_becomes_placeholder() {
         "placeholder outline"
     );
     assert!(
-        l.runs.iter().any(|r| r.text.contains("the alt text")),
+        l.runs
+            .iter()
+            .any(|r| l.run_text(&doc, r).contains("the alt text")),
         "alt text shown"
     );
 }
@@ -547,18 +585,26 @@ fn strike_emits_line_rect() {
 
 #[test]
 fn link_at_returns_target_inside_run() {
-    let l = lay("intro [click here](https://a.tld) outro", 800.0);
-    let link = l.runs.iter().find(|r| r.link.is_some()).unwrap();
-    let hit = l.link_at(link.x + link.width / 2.0, link.y + link.size / 2.0);
+    let (doc, l) = lay2("intro [click here](https://a.tld) outro", 800.0);
+    let link = l
+        .runs
+        .iter()
+        .find(|r| l.run_link(&doc, r).is_some())
+        .unwrap();
+    let hit = l.link_at(&doc, link.x + link.width / 2.0, link.y + link.size / 2.0);
     assert_eq!(hit, Some("https://a.tld"));
 }
 
 #[test]
 fn link_at_returns_none_outside_links() {
-    let l = lay("intro [click here](https://a.tld) outro", 800.0);
-    let plain = l.runs.iter().find(|r| r.link.is_none()).unwrap();
-    assert_eq!(l.link_at(plain.x + 1.0, plain.y + 1.0), None);
-    assert_eq!(l.link_at(-10.0, -10.0), None);
+    let (doc, l) = lay2("intro [click here](https://a.tld) outro", 800.0);
+    let plain = l
+        .runs
+        .iter()
+        .find(|r| l.run_link(&doc, r).is_none())
+        .unwrap();
+    assert_eq!(l.link_at(&doc, plain.x + 1.0, plain.y + 1.0), None);
+    assert_eq!(l.link_at(&doc, -10.0, -10.0), None);
 }
 
 #[test]
@@ -606,11 +652,15 @@ fn badge_row_centers_and_shares_a_line() {
 
 #[test]
 fn inline_badge_joins_the_text_line() {
-    let l = lay(
+    let (doc, l) = lay2(
         "coverage: <img src=\"c.png\" width=\"40\" height=\"20\">",
         800.0,
     );
-    let text = l.runs.iter().find(|r| r.text.contains("coverage")).unwrap();
+    let text = l
+        .runs
+        .iter()
+        .find(|r| l.run_text(&doc, r).contains("coverage"))
+        .unwrap();
     let img = &l.images[0];
     assert!(img.x >= text.x + text.width - 1.0, "badge after the text");
     assert!(
@@ -621,13 +671,13 @@ fn inline_badge_joins_the_text_line() {
 
 #[test]
 fn linked_inline_image_is_clickable() {
-    let l = lay(
+    let (doc, l) = lay2(
         "<p align=\"center\"><a href=\"https://z.tld\"><img src=\"d.png\" width=\"40\" height=\"20\"></a></p>",
         800.0,
     );
     let img = &l.images[0];
     assert_eq!(
-        l.link_at(img.x + 5.0, img.y + 5.0),
+        l.link_at(&doc, img.x + 5.0, img.y + 5.0),
         Some("https://z.tld"),
         "image hit box carries the link"
     );
@@ -637,18 +687,22 @@ fn linked_inline_image_is_clickable() {
 fn footnote_reference_superscript_and_definitions_last() {
     let t = Theme::default_dark();
     // The definition sits mid-document; layout must still render it last.
-    let l = lay("body text[^n]\n\n[^n]: the note itself\n\nmore", 800.0);
+    let (doc, l) = lay2("body text[^n]\n\n[^n]: the note itself\n\nmore", 800.0);
     let reference = l
         .runs
         .iter()
-        .find(|r| r.link.as_deref() == Some("footnote:n"))
+        .find(|r| l.run_link(&doc, r) == Some("footnote:n"))
         .expect("reference run");
     assert!(
         (reference.size - 22.0 * 0.7).abs() < 0.5,
         "superscript size"
     );
     assert_eq!(reference.color, t.text.link);
-    let body = l.runs.iter().find(|r| r.text.contains("body")).unwrap();
+    let body = l
+        .runs
+        .iter()
+        .find(|r| l.run_text(&doc, r).contains("body"))
+        .unwrap();
     assert!(
         reference.baseline < body.baseline - 2.0,
         "reference baseline raised"
@@ -656,9 +710,9 @@ fn footnote_reference_superscript_and_definitions_last() {
     let note = l
         .runs
         .iter()
-        .find(|r| r.text.contains("the note itself"))
+        .find(|r| l.run_text(&doc, r).contains("the note itself"))
         .expect("definition text");
-    let more = l.runs.iter().find(|r| r.text == "more").unwrap();
+    let more = find_text(&l, &doc, "more");
     assert!(note.y > more.y, "definitions collect at the end");
     let anchor = l.anchor_y("footnote:n").expect("footnote anchor");
     assert!((anchor - note.y).abs() < 60.0);
@@ -673,19 +727,19 @@ fn footnote_reference_superscript_and_definitions_last() {
 #[test]
 fn math_spans_style_and_scripts() {
     let t = Theme::default_dark();
-    let l = lay("energy $E=mc^2$ inline", 800.0);
+    let (doc, l) = lay2("energy $E=mc^2$ inline", 800.0);
     let m = l
         .runs
         .iter()
-        .find(|r| r.text.contains("E=mc"))
+        .find(|r| l.run_text(&doc, r).contains("E=mc"))
         .expect("math run");
     assert_eq!(m.color, t.text.math);
-    assert_eq!(m.family, CODE_FAMILY);
+    assert_eq!(l.run_family(m), CODE_FAMILY);
     assert!(m.italic);
     let sup = l
         .runs
         .iter()
-        .find(|r| r.text == "2" && r.size < m.size)
+        .find(|r| l.run_text(&doc, r) == "2" && r.size < m.size)
         .expect("superscript run");
     assert!(sup.baseline < m.baseline - 1.0, "superscript raised");
     assert_eq!(sup.color, t.text.math);
@@ -727,7 +781,7 @@ fn quote_region_paints_without_seam() {
         assert_eq!(panels.len(), 2, "zoom {zoom}");
         let top = panels.iter().map(|r| r.y).fold(f32::MAX, f32::min);
         let bottom = panels.iter().map(|r| r.y + r.height).fold(0.0, f32::max);
-        let pixels = oryx::paint::band(&l, &t, &mut fonts(), &mut media, &[], 0.0, 800, 900);
+        let pixels = oryx::paint::band(&l, &doc, &t, &mut fonts(), &mut media, &[], 0.0, 800, 900);
         let bg = t.surface.background;
         let bgpx = ((bg.r as u32) << 16) | ((bg.g as u32) << 8) | bg.b as u32;
         let x = (0.08 * 800.0) as usize + 30;
@@ -751,18 +805,18 @@ fn alert_titles_bold_and_colored_per_kind() {
         ("WARNING", "Warning", theme.alerts.warning),
         ("CAUTION", "Caution", theme.alerts.caution),
     ] {
-        let l = lay(&format!("> [!{tag}]\n> Body here."), 800.0);
+        let (doc, l) = lay2(&format!("> [!{tag}]\n> Body here."), 800.0);
         let title = l
             .runs
             .iter()
-            .find(|r| r.text == title_text)
+            .find(|r| l.run_text(&doc, r) == title_text)
             .unwrap_or_else(|| panic!("{tag}: no title run"));
         assert_eq!(title.weight, 700, "{tag}");
         assert_eq!(title.color, color, "{tag}");
         let body = l
             .runs
             .iter()
-            .find(|r| r.text.contains("Body here"))
+            .find(|r| l.run_text(&doc, r).contains("Body here"))
             .unwrap();
         assert!(title.y < body.y, "{tag}: title above the body");
         assert!(
@@ -777,7 +831,7 @@ fn alert_titles_bold_and_colored_per_kind() {
 #[test]
 fn frontmatter_panel_precedes_all_blocks() {
     let theme = Theme::default_dark();
-    let l = lay("---\ntitle: Oryx\ntags: docs\n---\n\n# Head\n\nBody", 800.0);
+    let (doc, l) = lay2("---\ntitle: Oryx\ntags: docs\n---\n\n# Head\n\nBody", 800.0);
     let panel = l
         .rects
         .iter()
@@ -786,10 +840,10 @@ fn frontmatter_panel_precedes_all_blocks() {
     let meta = l
         .runs
         .iter()
-        .find(|r| r.text.contains("title: Oryx"))
+        .find(|r| l.run_text(&doc, r).contains("title: Oryx"))
         .expect("no metadata line");
     assert_eq!(meta.color, theme.blocks.frontmatter_fg);
-    let heading = l.runs.iter().find(|r| r.text == "Head").unwrap();
+    let heading = find_text(&l, &doc, "Head");
     assert!(panel.y < heading.y);
     assert!(panel.y + panel.height <= heading.y);
     assert!(meta.y < heading.y);
@@ -1116,17 +1170,13 @@ fn a_table_grants_each_column_more_than_its_text_needs() {
     // shapes it inside the column. Font fallback can resolve differently
     // between the two, so a column granted exactly the measured width wraps
     // its cell in a table with room to spare.
-    let l = lay(
+    let (doc, l) = lay2(
         "| Shortcut | Action | Notes |\n|---|---|---|\n\
          | Ctrl+F | Find in document | Smart case matching |\n",
         1200.0,
     );
     let pad = 8.0;
-    let cell = l
-        .runs
-        .iter()
-        .find(|r| r.text == "Find in document")
-        .expect("cell laid out on one line");
+    let cell = find_text(&l, &doc, "Find in document");
     let next_column = l
         .runs
         .iter()
@@ -1818,7 +1868,7 @@ fn showcase_select_all_markdown_copy_covers_the_whole_source() {
         &ViewConfig::default(),
         1200.0,
     );
-    let sel = oryx::ui::selection::all(&lay).expect("the document selects");
+    let sel = oryx::ui::selection::all(&lay, &doc).expect("the document selects");
     let md = oryx::ui::selection::markdown(&sel, &lay, &doc);
     assert!(
         md.len() >= source.trim_end().len(),
@@ -1826,4 +1876,120 @@ fn showcase_select_all_markdown_copy_covers_the_whole_source() {
         source.len() - md.len(),
         source.len()
     );
+}
+
+/// The accessor pins for runs without text: whatever representation a
+/// run carries, these answers must not move.
+#[test]
+fn run_accessors_answer_text_family_and_link() {
+    let source = "# Head\n\npara with [tied](https://a.example/x) and `pill` here\n\n```rust\nlet a = 1;\n```\n\n- item one\n\nfoot[^n]\n\n[^n]: note body\n";
+    let doc = markdown::parse(source);
+    let mut fonts = FontStore::new();
+    let lay = lay_doc(&doc, 900.0, &mut fonts);
+
+    let texts: Vec<&str> = lay.runs.iter().map(|r| lay.run_text(&doc, r)).collect();
+    let joined = texts.concat();
+    assert!(joined.contains("para with "), "got {joined:?}");
+    assert!(joined.contains("tied"), "got {joined:?}");
+    assert!(joined.contains("let a = 1;"), "got {joined:?}");
+    assert!(joined.contains("item one"), "got {joined:?}");
+
+    let link_run = lay
+        .runs
+        .iter()
+        .find(|r| lay.run_text(&doc, r) == "tied")
+        .expect("the link run exists");
+    assert_eq!(
+        lay.run_link(&doc, link_run),
+        Some("https://a.example/x"),
+        "the link answers through the run"
+    );
+
+    let code_run = lay
+        .runs
+        .iter()
+        .find(|r| lay.run_text(&doc, r).contains("let a"))
+        .expect("the code run exists");
+    assert_eq!(lay.run_family(code_run), CODE_FAMILY);
+
+    let foot_run = lay
+        .runs
+        .iter()
+        .find(|r| lay.run_text(&doc, r) == "n" && lay.run_link(&doc, r).is_some())
+        .expect("the footnote reference run exists");
+    assert_eq!(lay.run_link(&doc, foot_run), Some("footnote:n"));
+
+    let marker = lay
+        .runs
+        .iter()
+        .find(|r| r.span == oryx::ui::selection::MARKER_SPAN)
+        .expect("the list marker run exists");
+    assert!(!lay.run_text(&doc, marker).is_empty(), "markers keep text");
+}
+
+/// Table cells and math expansion have no flat span list; their runs
+/// must still answer text and links through the accessors.
+#[test]
+fn run_accessors_cover_tables_and_math() {
+    let source = "| a | b |\n|---|---|\n| one | [t](https://t.example) |\n\n$$x^2 + y$$\n";
+    let doc = markdown::parse(source);
+    let mut fonts = FontStore::new();
+    let lay = lay_doc(&doc, 900.0, &mut fonts);
+    let joined: String = lay
+        .runs
+        .iter()
+        .map(|r| lay.run_text(&doc, r))
+        .collect::<Vec<_>>()
+        .concat();
+    assert!(joined.contains("one"), "got {joined:?}");
+    let cell_link = lay
+        .runs
+        .iter()
+        .find(|r| lay.run_text(&doc, r) == "t")
+        .expect("the cell link run exists");
+    assert_eq!(lay.run_link(&doc, cell_link), Some("https://t.example"));
+    assert!(
+        joined.contains('x') && joined.contains('y'),
+        "math runs resolve, got {joined:?}"
+    );
+}
+
+/// Recoloring rebuilds code runs; their accessor texts must survive.
+#[test]
+fn recolor_preserves_accessor_texts() {
+    let mut doc = markdown::parse("```rust\nfn main() {}\nlet x = 1;\n```");
+    let mut fonts = FontStore::new();
+    let source = std::sync::Arc::clone(&doc.source);
+    let BlockKind::CodeBlock {
+        language, lines, ..
+    } = &doc.blocks[0].kind
+    else {
+        panic!()
+    };
+    let spans = highlight::spans(&source, lines, language.as_deref());
+    let mut lay = lay_doc(&doc, 900.0, &mut fonts);
+    let before: Vec<String> = lay
+        .runs
+        .iter()
+        .map(|r| lay.run_text(&doc, r).to_string())
+        .collect();
+    let BlockKind::CodeBlock { highlights, .. } = &mut doc.blocks[0].kind else {
+        panic!()
+    };
+    *highlights = spans;
+    recolor_batch(
+        &mut lay,
+        &doc,
+        &Theme::default_dark(),
+        &mut fonts,
+        &cfg(),
+        &[(0, 0..2)],
+    );
+    let after: String = lay
+        .runs
+        .iter()
+        .map(|r| lay.run_text(&doc, r))
+        .collect::<Vec<_>>()
+        .concat();
+    assert_eq!(before.concat(), after, "texts survive the rebuild");
 }

@@ -45,6 +45,7 @@ impl BandCache {
     #[allow(clippy::too_many_arguments)]
     pub fn repaint(
         layout: &LayoutDoc,
+        doc: &crate::doc::model::Document,
         theme: &Theme,
         fonts: &mut FontStore,
         media: &mut MediaCache,
@@ -59,7 +60,9 @@ impl BandCache {
         let y_top = (scroll_y - (2 * viewport_h) as f32)
             .clamp(0.0, max_top)
             .floor();
-        let pixels = super::band(layout, theme, fonts, media, extra, y_top, width, height);
+        let pixels = super::band(
+            layout, doc, theme, fonts, media, extra, y_top, width, height,
+        );
         BandCache {
             pixels,
             y_top,

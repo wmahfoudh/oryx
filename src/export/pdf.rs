@@ -214,6 +214,8 @@ impl Builder {
         for run in &job.layout.runs[page.runs.clone()] {
             self.draw_run(
                 &mut content,
+                job.doc,
+                job.layout,
                 run,
                 page.top,
                 geometry,
@@ -233,7 +235,7 @@ impl Builder {
             );
         }
 
-        let links = collect_links(job.layout, page, geometry);
+        let links = collect_links(job.doc, job.layout, page, geometry);
         let content_id = self.alloc.next();
         self.pdf
             .stream(content_id, &deflate(&content.finish()))
@@ -253,6 +255,8 @@ impl Builder {
     fn draw_run(
         &mut self,
         content: &mut Content,
+        doc: &Document,
+        lay: &LayoutDoc,
         run: &TextRun,
         top: f32,
         geometry: &PageGeometry,
@@ -260,7 +264,7 @@ impl Builder {
         used: &mut Vec<FaceId>,
         images: &mut Vec<(String, Ref)>,
     ) {
-        for segment in shape(fonts, run) {
+        for segment in shape(fonts, doc, lay, run) {
             if self.is_bitmap_face(fonts, segment.face) {
                 self.draw_bitmap_segment(content, &segment, top, geometry, fonts, images);
                 continue;
@@ -416,22 +420,17 @@ impl Builder {
         used: &mut Vec<FaceId>,
         images: &mut Vec<(String, Ref)>,
     ) {
-        let run = TextRun {
-            text: number.to_string(),
-            x: 0.0,
-            y: 0.0,
-            baseline: 0.0,
-            width: 0.0,
-            size: job.settings.code_size,
-            family: job.settings.body_family.clone(),
-            weight: 400,
-            italic: false,
-            color: job.theme.text.body,
-            link: None,
-            block: 0,
-            span: 0,
-        };
-        let mut segments = shape(fonts, &run);
+        let mut segments = shape_text(
+            fonts,
+            &number.to_string(),
+            &job.settings.body_family,
+            400,
+            false,
+            job.settings.code_size,
+            0.0,
+            0.0,
+            job.theme.text.body,
+        );
         let width = segments
             .iter()
             .flat_map(|segment| segment.glyphs.iter())
@@ -549,10 +548,15 @@ impl Builder {
 
 /// Every link on a page, as a box in device space and the target it
 /// carries. Runs and images both qualify.
-fn collect_links(layout: &LayoutDoc, page: &Page, geometry: &PageGeometry) -> Vec<Link> {
+fn collect_links(
+    doc: &Document,
+    layout: &LayoutDoc,
+    page: &Page,
+    geometry: &PageGeometry,
+) -> Vec<Link> {
     let mut links: Vec<Link> = Vec::new();
     for run in &layout.runs[page.runs.clone()] {
-        let Some(target) = run.link.as_deref() else {
+        let Some(target) = layout.run_link(doc, run) else {
             continue;
         };
         let height = crate::layout::metrics::LINE_HEIGHT * run.size;
@@ -848,19 +852,48 @@ fn write_outline(
 /// Shapes a run exactly as the band painter shapes it, then splits the
 /// glyphs by the face the shaper resolved, so a fallback for an emoji
 /// becomes its own segment with no special case.
-fn shape(fonts: &mut FontStore, run: &TextRun) -> Vec<Segment> {
-    let line_height = crate::layout::metrics::LINE_HEIGHT * run.size;
-    let mut buffer = Buffer::new(&mut fonts.font_system, Metrics::new(run.size, line_height));
+fn shape(fonts: &mut FontStore, doc: &Document, lay: &LayoutDoc, run: &TextRun) -> Vec<Segment> {
+    let text = lay.run_text(doc, run).to_string();
+    let family = lay.run_family(run).to_string();
+    shape_text(
+        fonts,
+        &text,
+        &family,
+        run.weight,
+        run.italic,
+        run.size,
+        run.x,
+        run.baseline,
+        run.color,
+    )
+}
+
+/// Shapes free text the way layout shaped it, for runs and for the page
+/// number, which has no run at all.
+#[allow(clippy::too_many_arguments)]
+fn shape_text(
+    fonts: &mut FontStore,
+    text: &str,
+    family: &str,
+    weight: u16,
+    italic: bool,
+    size: f32,
+    x: f32,
+    baseline: f32,
+    color: Rgba,
+) -> Vec<Segment> {
+    let line_height = crate::layout::metrics::LINE_HEIGHT * size;
+    let mut buffer = Buffer::new(&mut fonts.font_system, Metrics::new(size, line_height));
     buffer.set_size(&mut fonts.font_system, None, None);
     let mut attrs = Attrs::new()
-        .family(Family::Name(&run.family))
-        .weight(Weight(run.weight));
-    if run.italic {
+        .family(Family::Name(family))
+        .weight(Weight(weight));
+    if italic {
         attrs = attrs.style(Style::Italic);
     }
     buffer.set_text(
         &mut fonts.font_system,
-        &run.text,
+        text,
         &attrs,
         Shaping::Advanced,
         None,
@@ -875,16 +908,16 @@ fn shape(fonts: &mut FontStore, run: &TextRun) -> Vec<Segment> {
                 segments.push(Segment {
                     face: glyph.font_id,
                     glyphs: Vec::new(),
-                    size: run.size,
-                    color: run.color,
-                    x: run.x + glyph.x,
-                    baseline: run.baseline,
+                    size,
+                    color,
+                    x: x + glyph.x,
+                    baseline,
                 });
             }
             let segment = segments.last_mut().expect("just opened");
             segment.glyphs.push(Glyph {
                 id: glyph.glyph_id,
-                x: run.x + glyph.x,
+                x: x + glyph.x,
                 width: glyph.w,
                 text: line.text[glyph.start..glyph.end].to_string(),
             });

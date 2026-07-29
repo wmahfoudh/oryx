@@ -12,7 +12,7 @@ use crate::style::fonts::FontStore;
 
 /// Marker runs (bullets, numbers, checkmarks) carry this span sentinel and
 /// take no part in selection or search.
-pub(crate) const MARKER_SPAN: usize = usize::MAX;
+pub const MARKER_SPAN: usize = usize::MAX;
 
 /// A caret position: index into `LayoutDoc::runs` plus a character offset
 /// within that run's text, from 0 to the run's character count inclusive.
@@ -47,14 +47,14 @@ impl Selection {
 
 /// The whole document as a selection, from the first selectable run to the
 /// last. None when the document has no selectable runs.
-pub fn all(lay: &LayoutDoc) -> Option<Selection> {
+pub fn all(lay: &LayoutDoc, doc: &Document) -> Option<Selection> {
     let first = lay.runs.iter().position(|r| r.span != MARKER_SPAN)?;
     let last = lay.runs.iter().rposition(|r| r.span != MARKER_SPAN)?;
     Some(Selection {
         start: RunPos { run: first, ch: 0 },
         end: RunPos {
             run: last,
-            ch: lay.runs[last].text.chars().count(),
+            ch: lay.run_text(doc, &lay.runs[last]).chars().count(),
         },
     })
 }
@@ -62,7 +62,13 @@ pub fn all(lay: &LayoutDoc) -> Option<Selection> {
 /// The caret position nearest to a point in document coordinates.
 /// Snaps vertically to the closest line and horizontally to the closest
 /// character boundary. None only when the document has no runs.
-pub fn pos_at(lay: &LayoutDoc, fonts: &mut FontStore, x: f32, y: f32) -> Option<RunPos> {
+pub fn pos_at(
+    lay: &LayoutDoc,
+    doc: &Document,
+    fonts: &mut FontStore,
+    x: f32,
+    y: f32,
+) -> Option<RunPos> {
     let mut best: Option<(f32, f32, usize)> = None;
     for (i, run) in lay.runs.iter().enumerate() {
         if run.span == MARKER_SPAN {
@@ -93,17 +99,24 @@ pub fn pos_at(lay: &LayoutDoc, fonts: &mut FontStore, x: f32, y: f32) -> Option<
     }
     let (_, _, index) = best?;
     let run = &lay.runs[index];
+    let text = lay.run_text(doc, run);
+    let family = lay.run_family(run);
     Some(RunPos {
         run: index,
-        ch: char_index_at(fonts, run, x - run.x),
+        ch: char_index_at(fonts, run, text, family, x - run.x),
     })
 }
 
 /// Highlight boxes for the selection, one `(x, y, width, height)` per
 /// selected run fragment, in document coordinates. Boxes on the same line
 /// share the height of the line's tallest run.
-pub fn rects(sel: &Selection, lay: &LayoutDoc, fonts: &mut FontStore) -> Vec<(f32, f32, f32, f32)> {
-    rects_cached(sel, lay, fonts, &mut ShapeCache::default())
+pub fn rects(
+    sel: &Selection,
+    lay: &LayoutDoc,
+    doc: &Document,
+    fonts: &mut FontStore,
+) -> Vec<(f32, f32, f32, f32)> {
+    rects_cached(sel, lay, doc, fonts, &mut ShapeCache::default())
 }
 
 /// The selected range as unstyled text. Wrapped lines rejoin with a space,
@@ -111,7 +124,7 @@ pub fn rects(sel: &Selection, lay: &LayoutDoc, fonts: &mut FontStore) -> Vec<(f3
 /// line.
 pub fn plain_text(sel: &Selection, lay: &LayoutDoc, doc: &Document) -> String {
     let mut out = String::new();
-    for (index, text) in fragments(sel, lay) {
+    for (index, text) in fragments(sel, lay, doc) {
         let run = &lay.runs[index];
         if !out.is_empty() {
             out.push_str(&separator(
@@ -183,9 +196,10 @@ fn source_pos(doc: &Document, lay: &LayoutDoc, pos: &RunPos, edge: Edge) -> usiz
             Edge::End => line_end(&doc.source, block.range.end),
         };
     };
+    let run_text = lay.run_text(doc, run);
     let at_block_edge = match edge {
         Edge::Start => pos.ch == 0 && first_of_block(lay, index),
-        Edge::End => pos.ch >= run.text.chars().count() && last_of_block(lay, index),
+        Edge::End => pos.ch >= run_text.chars().count() && last_of_block(lay, index),
     };
     if at_block_edge {
         return match edge {
@@ -199,8 +213,8 @@ fn source_pos(doc: &Document, lay: &LayoutDoc, pos: &RunPos, edge: Edge) -> usiz
         // verbatim and the run's slice locates uniquely inside it.
         if span.is_verbatim() {
             let text = span.text(&doc.source);
-            if let Some(offset) = text.find(run.text.as_str()) {
-                return span.range.start as usize + offset + byte_of_char(&run.text, pos.ch);
+            if let Some(offset) = text.find(run_text) {
+                return span.range.start as usize + offset + byte_of_char(run_text, pos.ch);
             }
         }
         return match edge {
@@ -268,7 +282,7 @@ fn floor_boundary(source: &str, byte: usize) -> usize {
 
 /// The selected pieces in document order: run index plus the slice of its
 /// text inside the selection. Marker runs and empty slices are dropped.
-fn fragments<'a>(sel: &Selection, lay: &'a LayoutDoc) -> Vec<(usize, &'a str)> {
+fn fragments<'a>(sel: &Selection, lay: &'a LayoutDoc, doc: &'a Document) -> Vec<(usize, &'a str)> {
     let (a, b) = sel.ordered();
     if sel.is_empty() || lay.runs.is_empty() {
         return Vec::new();
@@ -279,13 +293,14 @@ fn fragments<'a>(sel: &Selection, lay: &'a LayoutDoc) -> Vec<(usize, &'a str)> {
         if run.span == MARKER_SPAN {
             continue;
         }
+        let run_text = lay.run_text(doc, run);
         let from = if index == a.run { a.ch } else { 0 };
         let to = if index == b.run {
             b.ch
         } else {
-            run.text.chars().count()
+            run_text.chars().count()
         };
-        let text = slice_chars(&run.text, from, to);
+        let text = slice_chars(run_text, from, to);
         if !text.is_empty() {
             out.push((index, text));
         }
@@ -382,6 +397,7 @@ impl ShapeCache {
 pub fn rects_cached(
     sel: &Selection,
     lay: &LayoutDoc,
+    doc: &Document,
     fonts: &mut FontStore,
     cache: &mut ShapeCache,
 ) -> Vec<(f32, f32, f32, f32)> {
@@ -392,13 +408,15 @@ pub fn rects_cached(
         if run.span == MARKER_SPAN {
             continue;
         }
+        let text = lay.run_text(doc, run);
+        let family = lay.run_family(run);
         let x0 = if index == a.run {
-            run.x + prefix_width(cache, fonts, index, run, a.ch)
+            run.x + prefix_width(cache, fonts, index, run, text, family, a.ch)
         } else {
             run.x
         };
         let x1 = if index == b.run {
-            run.x + prefix_width(cache, fonts, index, run, b.ch)
+            run.x + prefix_width(cache, fonts, index, run, text, family, b.ch)
         } else {
             run.x + run.width
         };
@@ -418,19 +436,19 @@ pub fn rects_cached(
 }
 
 /// Shapes a run exactly as paint does, single line at its own metrics.
-fn shape_run(fonts: &mut FontStore, run: &TextRun) -> Buffer {
+fn shape_run(fonts: &mut FontStore, run: &TextRun, text: &str, family: &str) -> Buffer {
     let line_height = metrics::LINE_HEIGHT * run.size;
     let mut buffer = Buffer::new(&mut fonts.font_system, Metrics::new(run.size, line_height));
     buffer.set_size(&mut fonts.font_system, None, None);
     let mut attrs = Attrs::new()
-        .family(Family::Name(&run.family))
+        .family(Family::Name(family))
         .weight(Weight(run.weight));
     if run.italic {
         attrs = attrs.style(Style::Italic);
     }
     buffer.set_text(
         &mut fonts.font_system,
-        &run.text,
+        text,
         &attrs,
         Shaping::Advanced,
         None,
@@ -441,44 +459,53 @@ fn shape_run(fonts: &mut FontStore, run: &TextRun) -> Buffer {
 
 /// The character boundary nearest to an x offset inside a run, by glyph
 /// midpoints.
-fn char_index_at(fonts: &mut FontStore, run: &TextRun, x_local: f32) -> usize {
+fn char_index_at(
+    fonts: &mut FontStore,
+    run: &TextRun,
+    text: &str,
+    family: &str,
+    x_local: f32,
+) -> usize {
     if x_local <= 0.0 {
         return 0;
     }
     if x_local >= run.width {
-        return run.text.chars().count();
+        return text.chars().count();
     }
-    let buffer = shape_run(fonts, run);
+    let buffer = shape_run(fonts, run, text, family);
     if let Some(line) = buffer.layout_runs().next() {
         for glyph in line.glyphs {
             if x_local < glyph.x + glyph.w / 2.0 {
-                return run.text[..glyph.start].chars().count();
+                return text[..glyph.start].chars().count();
             }
         }
     }
-    run.text.chars().count()
+    text.chars().count()
 }
 
 /// Advance width of the first `ch` characters of a run, shaping through
 /// the cache so a run shapes once per pass however often it is asked.
+#[allow(clippy::too_many_arguments)]
 fn prefix_width(
     cache: &mut ShapeCache,
     fonts: &mut FontStore,
     index: usize,
     run: &TextRun,
+    text: &str,
+    family: &str,
     ch: usize,
 ) -> f32 {
     if ch == 0 {
         return 0.0;
     }
-    let byte = byte_of_char(&run.text, ch);
-    if byte >= run.text.len() {
+    let byte = byte_of_char(text, ch);
+    if byte >= text.len() {
         return run.width;
     }
     let buffer = cache
         .buffers
         .entry(index)
-        .or_insert_with(|| shape_run(fonts, run));
+        .or_insert_with(|| shape_run(fonts, run, text, family));
     if let Some(line) = buffer.layout_runs().next() {
         for glyph in line.glyphs {
             if glyph.start >= byte {
@@ -509,12 +536,12 @@ mod tests {
             &ViewConfig::default(),
             500.0,
         );
-        let matches = crate::ui::search::matches(&lay, "word");
+        let matches = crate::ui::search::matches(&lay, &doc, "word");
         assert!(matches.len() >= 16, "the fixture is match-dense");
         let mut cache = ShapeCache::default();
         for m in &matches {
-            let direct = rects(m, &lay, &mut fonts);
-            let cached = rects_cached(m, &lay, &mut fonts, &mut cache);
+            let direct = rects(m, &lay, &doc, &mut fonts);
+            let cached = rects_cached(m, &lay, &doc, &mut fonts, &mut cache);
             assert_eq!(direct, cached, "the cache changes nothing visible");
         }
         assert!(!cache.is_empty(), "the cache actually holds shaped runs");
@@ -555,15 +582,15 @@ mod tests {
         (doc, l, fonts)
     }
 
-    fn select_all(l: &LayoutDoc) -> Selection {
-        all(l).expect("layout has selectable runs")
+    fn select_all(l: &LayoutDoc, doc: &Document) -> Selection {
+        all(l, doc).expect("layout has selectable runs")
     }
 
     #[test]
     fn markdown_round_trips_styles() {
         let source = "# Title\n\nplain **bold** *italic* ~~gone~~ `code` [link](https://a.tld)";
         let (doc, l, _) = lay_doc(source);
-        assert_eq!(markdown(&select_all(&l), &l, &doc), source);
+        assert_eq!(markdown(&select_all(&l, &doc), &l, &doc), source);
     }
 
     #[test]
@@ -571,7 +598,7 @@ mod tests {
         let source = "# Title\n\nplain **bold** *italic* ~~gone~~ `code` [link](https://a.tld)";
         let (doc, l, _) = lay_doc(source);
         assert_eq!(
-            plain_text(&select_all(&l), &l, &doc),
+            plain_text(&select_all(&l, &doc), &l, &doc),
             "Title\n\nplain bold italic gone code link"
         );
     }
@@ -591,21 +618,21 @@ mod tests {
     #[test]
     fn all_selects_every_run() {
         let (doc, l, _) = lay_doc("# Title\n\n- item with `code`");
-        let sel = all(&l).unwrap();
+        let sel = all(&l, &doc).unwrap();
         assert_eq!(plain_text(&sel, &l, &doc), "Title\n\nitem with code");
         assert_eq!(markdown(&sel, &l, &doc), "# Title\n\n- item with `code`");
     }
 
     #[test]
     fn all_of_empty_layout_is_none() {
-        assert!(all(&LayoutDoc::default()).is_none());
+        assert!(all(&LayoutDoc::default(), &Document::default()).is_none());
     }
 
     #[test]
     fn markdown_preserves_structure_from_source() {
         let source = "> quoted line\n\n- item one\n- item, with **bold**\n  - nested\n\n1. first\n2. second\n\n- [x] done\n- [ ] todo\n\n---\n\nafter the rule";
         let (doc, l, _) = lay_doc(source);
-        assert_eq!(markdown(&select_all(&l), &l, &doc), source);
+        assert_eq!(markdown(&select_all(&l, &doc), &l, &doc), source);
     }
 
     #[test]
@@ -627,7 +654,7 @@ mod tests {
         let source =
             "body one.\n\nA claim[^n] made here.\n\n[^n]: The note text.\n\nbody two ends here.\n";
         let (doc, l, _) = lay_doc(source);
-        let sel = all(&l).expect("the document selects");
+        let sel = all(&l, &doc).expect("the document selects");
         let md = markdown(&sel, &l, &doc);
         assert!(
             md.contains("body two ends here."),
@@ -654,14 +681,14 @@ mod tests {
     fn markdown_fences_code_blocks() {
         let source = "intro\n\n```rust\nfn a() {}\n\nfn b() {}\n```\n\noutro";
         let (doc, l, _) = lay_doc(source);
-        assert_eq!(markdown(&select_all(&l), &l, &doc), source);
+        assert_eq!(markdown(&select_all(&l, &doc), &l, &doc), source);
     }
 
     #[test]
     fn markdown_fences_unlabeled_code() {
         let source = "```\nplain fence\n```";
         let (doc, l, _) = lay_doc(source);
-        assert_eq!(markdown(&select_all(&l), &l, &doc), source);
+        assert_eq!(markdown(&select_all(&l, &doc), &l, &doc), source);
     }
 
     #[test]
@@ -669,7 +696,7 @@ mod tests {
         let source = "```rust\nfn a() {}\n\nfn b() {}\n```";
         let (doc, l, _) = lay_doc(source);
         assert_eq!(
-            plain_text(&select_all(&l), &l, &doc),
+            plain_text(&select_all(&l, &doc), &l, &doc),
             "fn a() {}\n\nfn b() {}"
         );
     }
@@ -687,26 +714,26 @@ mod tests {
 
     #[test]
     fn pos_at_snaps_to_character_boundaries() {
-        let (_, l, mut fonts) = lay_doc("hello world");
+        let (doc, l, mut fonts) = lay_doc("hello world");
         let run = &l.runs[0];
-        let left = pos_at(&l, &mut fonts, run.x + 0.5, run.y + 1.0).unwrap();
+        let left = pos_at(&l, &doc, &mut fonts, run.x + 0.5, run.y + 1.0).unwrap();
         assert_eq!(left, RunPos { run: 0, ch: 0 });
-        let right = pos_at(&l, &mut fonts, run.x + run.width + 50.0, run.y + 1.0).unwrap();
+        let right = pos_at(&l, &doc, &mut fonts, run.x + run.width + 50.0, run.y + 1.0).unwrap();
         assert_eq!(
             right,
             RunPos {
                 run: 0,
-                ch: run.text.chars().count()
+                ch: l.run_text(&doc, run).chars().count()
             }
         );
     }
 
     #[test]
     fn rects_cover_fully_selected_run() {
-        let (_, l, mut fonts) = lay_doc("hello world");
+        let (doc, l, mut fonts) = lay_doc("hello world");
         let run = &l.runs[0];
-        let sel = select_all(&l);
-        let boxes = rects(&sel, &l, &mut fonts);
+        let sel = select_all(&l, &doc);
+        let boxes = rects(&sel, &l, &doc, &mut fonts);
         assert_eq!(boxes.len(), 1);
         let (x, _y, w, h) = boxes[0];
         assert!((x - run.x).abs() < 0.5);

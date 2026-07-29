@@ -520,7 +520,7 @@ impl App {
         };
         let scroll = self.scroll_y;
         let state = self.search.as_mut().expect("search open");
-        state.matches = search::matches(lay, state.query.text());
+        state.matches = search::matches(lay, &self.document, state.query.text());
         state.stale = false;
         state.current = state
             .matches
@@ -559,7 +559,9 @@ impl App {
             if run.y < lo || run.y > hi {
                 continue;
             }
-            for rect in selection::rects_cached(m, lay, &mut self.fonts, &mut shaped) {
+            for rect in
+                selection::rects_cached(m, lay, &self.document, &mut self.fonts, &mut shaped)
+            {
                 rects.push((index, rect));
             }
         }
@@ -607,7 +609,7 @@ impl App {
         let Some(lay) = self.layout.as_ref() else {
             return;
         };
-        self.sel_anchor = selection::pos_at(lay, &mut self.fonts, x, y);
+        self.sel_anchor = selection::pos_at(lay, &self.document, &mut self.fonts, x, y);
         if self.selection.take().is_some() {
             self.band = None;
             if let Some(gfx) = self.gfx.as_ref() {
@@ -626,7 +628,7 @@ impl App {
         let Some(lay) = self.layout.as_ref() else {
             return;
         };
-        let Some(end) = selection::pos_at(lay, &mut self.fonts, x, y) else {
+        let Some(end) = selection::pos_at(lay, &self.document, &mut self.fonts, x, y) else {
             return;
         };
         let sel = Selection { start, end };
@@ -1348,7 +1350,7 @@ impl App {
         let Some(lay) = self.layout.as_ref() else {
             return;
         };
-        let Some(sel) = selection::all(lay) else {
+        let Some(sel) = selection::all(lay, &self.document) else {
             return;
         };
         if self.selection != Some(sel) {
@@ -1396,7 +1398,7 @@ impl App {
         };
         let x = self.cursor.x as f32 - self.inset();
         let y = self.cursor.y as f32 + self.scroll_y;
-        let Some(target) = lay.link_at(x, y).map(str::to_owned) else {
+        let Some(target) = lay.link_at(&self.document, x, y).map(str::to_owned) else {
             return;
         };
         if let Some(anchor) = lay.anchor_y(&target) {
@@ -1425,7 +1427,7 @@ impl App {
             && self
                 .layout
                 .as_ref()
-                .is_some_and(|l| l.link_at(x, y).is_some());
+                .is_some_and(|l| l.link_at(&self.document, x, y).is_some());
         if hovering != self.hover_link || on_edge != self.hover_edge {
             self.hover_link = hovering;
             self.hover_edge = on_edge;
@@ -1664,7 +1666,7 @@ impl App {
         let lay = self.layout.as_ref().expect("layout exists");
         self.scroll_y = scroll::clamp(self.scroll_y, lay.height, size.height as f32);
         let mut highlight: Vec<DecoRect> = match &self.selection {
-            Some(sel) => selection::rects(sel, lay, &mut self.fonts)
+            Some(sel) => selection::rects(sel, lay, &self.document, &mut self.fonts)
                 .into_iter()
                 .map(|(x, y, w, h)| DecoRect::fill(x, y, w, h, self.theme.ui.selection_bg))
                 .collect(),
@@ -1700,6 +1702,7 @@ impl App {
             if build_now {
                 self.band = Some(BandCache::repaint(
                     lay,
+                    &self.document,
                     &self.theme,
                     &mut self.fonts,
                     &mut self.media,
@@ -1712,6 +1715,7 @@ impl App {
             } else {
                 direct = Some(paint::band(
                     lay,
+                    &self.document,
                     &self.theme,
                     &mut self.fonts,
                     &mut self.media,
