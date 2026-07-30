@@ -406,6 +406,35 @@ fn rule_spans_content_width() {
 }
 
 #[test]
+fn underline_and_mark_emit_their_rects() {
+    let (doc, l) = lay2("plain <u>lined</u> then <mark>lit</mark> end", 800.0);
+    let t = Theme::default_dark();
+    let lined = find_text(&l, &doc, "lined");
+    assert!(
+        l.rects.iter().any(|r| {
+            r.color == lined.color
+                && r.y > lined.baseline
+                && r.y < lined.baseline + 0.3 * lined.size
+                && (r.x - lined.x).abs() < 1.0
+                && (r.width - lined.width).abs() < 2.0
+        }),
+        "an underline rect sits under the baseline"
+    );
+    let lit = find_text(&l, &doc, "lit");
+    assert!(
+        l.rects.iter().any(|r| {
+            r.color == t.ui.search_match_bg && r.x <= lit.x && r.x + r.width >= lit.x + lit.width
+        }),
+        "a mark background covers the run"
+    );
+    let plain = find_text(&l, &doc, "plain ");
+    assert!(
+        (plain.size - lined.size).abs() < 0.01,
+        "underline changes no metrics"
+    );
+}
+
+#[test]
 fn closed_details_fold_and_reopen_exactly() {
     let src_closed = "<details>\n<summary>More</summary>\n\n### Hidden Head\n\n\
                       Hidden body text.\n\n</details>\n\nAfter.";

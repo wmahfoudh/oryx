@@ -226,3 +226,33 @@ An inner section folds independently of its parent.
 
 </details>
 </details>
+
+## HTML Long Tail
+
+<h3>An HTML heading with an anchor</h3>
+
+<blockquote>An HTML blockquote sits on the quote machinery.</blockquote>
+
+<ul>
+<li>an unordered item<ul><li>nested one step</li></ul></li>
+<li>a second item</li>
+</ul>
+
+<ol start="7">
+<li>numbering honors the start attribute</li>
+<li>and counts on</li>
+</ol>
+
+<pre><code class="language-rust">fn html_pre() -> &'static str {
+    "highlighted like a fence"
+}</code></pre>
+
+<dl>
+<dt>Definition term</dt>
+<dd>Its body, indented one step with no marker.</dd>
+</dl>
+
+<p><u>Underlined</u>, <mark>highlighted</mark>, <small>small print</small>,
+<q>quoted</q>, <cite>a citation</cite>, <samp>program output</samp>.</p>
+
+<hr>

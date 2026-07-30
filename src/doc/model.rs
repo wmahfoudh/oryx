@@ -226,7 +226,11 @@ impl CodeBody {
 pub enum Marker {
     Bullet,
     Number(u64),
-    Task { checked: bool },
+    Task {
+        checked: bool,
+    },
+    /// Indented like an item but drawing no marker; definition bodies.
+    None,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -254,6 +258,8 @@ pub enum SpanScript {
     None,
     Sub,
     Sup,
+    /// Reduced size on the unmoved baseline; `<small>`.
+    Small,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -267,6 +273,10 @@ pub struct Span {
     pub bold: bool,
     pub italic: bool,
     pub strike: bool,
+    /// Drawn under the baseline; `<u>` and `<ins>`.
+    pub underline: bool,
+    /// Highlight background behind the run; `<mark>`.
+    pub mark: bool,
     pub code: bool,
     pub math: bool,
     pub script: SpanScript,
@@ -287,6 +297,8 @@ impl Default for Span {
             bold: false,
             italic: false,
             strike: false,
+            underline: false,
+            mark: false,
             code: false,
             math: false,
             script: SpanScript::None,

@@ -88,6 +88,17 @@ struct Builder {
     /// Where each group's content starts in `blocks`, for synthesizing a
     /// missing summary row in front of it.
     details_start: Vec<usize>,
+    /// Open HTML heading level between `<hN>` and its close.
+    html_heading: Option<u8>,
+    /// Verbatim body accumulating between `<pre>` and its close.
+    html_pre: Option<HtmlPre>,
+    /// Set between `<dt>` and its close; the term renders bold.
+    html_dt: bool,
+    /// Open HTML lists, outermost first.
+    html_lists: Vec<HtmlList>,
+    html_underline: u32,
+    html_mark: u32,
+    html_small: u32,
     image: Option<(String, String)>,
     footnote: Option<String>,
     in_metadata: bool,
@@ -131,6 +142,32 @@ struct HtmlTableAcc {
     row_open: bool,
     row_all_th: bool,
     cell_open: bool,
+}
+
+/// One HTML `<pre>` in progress: the language its `<code>` class named
+/// and the verbatim body, entities decoded, tags stripped.
+#[derive(Default)]
+struct HtmlPre {
+    language: Option<String>,
+    text: String,
+}
+
+/// One open HTML list level.
+struct HtmlList {
+    ordered: bool,
+    next: u64,
+    /// An `<li>` is accumulating spans at this level.
+    item_open: bool,
+}
+
+/// The five entities HTML text cannot spell literally. Anything else
+/// passes through untouched.
+fn decode_entities(text: &str) -> String {
+    text.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&amp;", "&")
 }
 
 /// Drops the outer whitespace a cell inherits from source formatting.
@@ -182,6 +219,13 @@ impl Builder {
             details_summarized: Vec::new(),
             in_summary: false,
             details_start: Vec::new(),
+            html_heading: None,
+            html_pre: None,
+            html_dt: false,
+            html_lists: Vec::new(),
+            html_underline: 0,
+            html_mark: 0,
+            html_small: 0,
             image: None,
             footnote: None,
             in_metadata: false,
@@ -380,9 +424,9 @@ impl Builder {
             TagEnd::HtmlBlock => {
                 self.html_block = false;
                 self.html_tail.clear();
-                // A blank line splits one HTML table over several blocks;
-                // the accumulator carries across them, so no flush.
-                if self.html_table.is_none() {
+                // A blank line splits one HTML construct over several
+                // blocks; an open accumulator carries across them.
+                if !self.html_capturing() {
                     self.flush_spans();
                 }
             }
@@ -521,8 +565,13 @@ impl Builder {
         self.html_text(rest);
     }
 
-    /// Text between tags; HTML collapses whitespace runs, newlines included.
+    /// Text between tags; HTML collapses whitespace runs, newlines
+    /// included, except inside `<pre>`, whose body is verbatim.
     fn html_text(&mut self, text: &str) {
+        if let Some(pre) = self.html_pre.as_mut() {
+            pre.text.push_str(&decode_entities(text));
+            return;
+        }
         if text.trim().is_empty() {
             if !text.is_empty() && !self.spans.is_empty() {
                 self.text(" ");
@@ -537,7 +586,7 @@ impl Builder {
         if text.ends_with(char::is_whitespace) {
             collapsed.push(' ');
         }
-        self.text(&collapsed);
+        self.text(&decode_entities(&collapsed));
     }
 
     fn html_tag(&mut self, tag: &str) {
@@ -552,8 +601,9 @@ impl Builder {
         match (name.as_str(), closing) {
             ("br", _) => self.push(Span::plain("\n")),
             ("p" | "div", false) => {
-                // Block tags inside table cells flatten to inline text.
-                if self.html_table.is_some() {
+                // Block tags inside a capturing construct (table cell,
+                // list item, heading, pre, summary) flatten to its text.
+                if self.html_capturing() {
                     return;
                 }
                 self.flush_spans();
@@ -562,7 +612,7 @@ impl Builder {
                 self.html_center.push(centered);
             }
             ("p" | "div", true) => {
-                if self.html_table.is_some() {
+                if self.html_capturing() {
                     return;
                 }
                 self.flush_spans();
@@ -701,15 +751,254 @@ impl Builder {
             }
             ("b" | "strong", false) => self.bold += 1,
             ("b" | "strong", true) => self.bold = self.bold.saturating_sub(1),
-            ("i" | "em", false) => self.italic += 1,
-            ("i" | "em", true) => self.italic = self.italic.saturating_sub(1),
-            ("code" | "kbd", false) => self.html_code += 1,
-            ("code" | "kbd", true) => self.html_code = self.html_code.saturating_sub(1),
+            ("i" | "em" | "cite" | "dfn" | "var", false) => self.italic += 1,
+            ("i" | "em" | "cite" | "dfn" | "var", true) => {
+                self.italic = self.italic.saturating_sub(1)
+            }
+            ("code", false) if self.html_pre.is_some() => {
+                // The fence language rides the GitHub class convention.
+                let pre = self.html_pre.as_mut().expect("pre is open");
+                pre.language = html_attr(attrs, "class")
+                    .and_then(|c| c.strip_prefix("language-").map(str::to_string));
+            }
+            ("code", true) if self.html_pre.is_some() => {}
+            ("code" | "kbd" | "samp" | "tt", false) => self.html_code += 1,
+            ("code" | "kbd" | "samp" | "tt", true) => {
+                self.html_code = self.html_code.saturating_sub(1)
+            }
             ("sub", false) => self.html_sub += 1,
             ("sub", true) => self.html_sub = self.html_sub.saturating_sub(1),
             ("sup", false) => self.html_sup += 1,
             ("sup", true) => self.html_sup = self.html_sup.saturating_sub(1),
+            ("u" | "ins", false) => self.html_underline += 1,
+            ("u" | "ins", true) => self.html_underline = self.html_underline.saturating_sub(1),
+            ("s" | "del" | "strike", false) => self.strike += 1,
+            ("s" | "del" | "strike", true) => self.strike = self.strike.saturating_sub(1),
+            ("mark", false) => self.html_mark += 1,
+            ("mark", true) => self.html_mark = self.html_mark.saturating_sub(1),
+            ("small", false) => self.html_small += 1,
+            ("small", true) => self.html_small = self.html_small.saturating_sub(1),
+            ("q", false) => self.push_quote_glyph("\u{201C}"),
+            ("q", true) => self.push_quote_glyph("\u{201D}"),
+            ("h1" | "h2" | "h3" | "h4" | "h5" | "h6", false) => {
+                if self.html_table.is_some() {
+                    return;
+                }
+                self.flush_spans();
+                self.html_heading = name.as_bytes()[1].checked_sub(b'0');
+            }
+            ("h1" | "h2" | "h3" | "h4" | "h5" | "h6", true) => {
+                if self.html_table.is_some() {
+                    return;
+                }
+                self.html_heading_close();
+            }
+            ("blockquote", false) => {
+                if self.html_table.is_some() {
+                    return;
+                }
+                self.flush_spans();
+                self.quote_depth = self.quote_depth.saturating_add(1);
+            }
+            ("blockquote", true) => {
+                if self.html_table.is_some() {
+                    return;
+                }
+                self.flush_spans();
+                self.quote_depth = self.quote_depth.saturating_sub(1);
+            }
+            ("pre", false) => {
+                if self.html_table.is_some() {
+                    return;
+                }
+                self.flush_spans();
+                self.html_pre = Some(HtmlPre::default());
+            }
+            ("pre", true) => {
+                if self.html_table.is_some() {
+                    return;
+                }
+                self.html_pre_close();
+            }
+            ("hr", false) => {
+                if self.html_table.is_some() {
+                    return;
+                }
+                self.flush_spans();
+                self.emit(BlockKind::Rule);
+            }
+            ("ul" | "ol", false) => {
+                if self.html_table.is_some() {
+                    return;
+                }
+                if self.html_lists.is_empty() {
+                    self.flush_spans();
+                } else {
+                    // A nested list opens inside an item: the item's own
+                    // text emits first, GitHub's rendering order.
+                    self.html_li_close();
+                }
+                let next = (name == "ol")
+                    .then(|| html_attr(attrs, "start").and_then(|s| s.parse().ok()))
+                    .flatten()
+                    .unwrap_or(1);
+                self.html_lists.push(HtmlList {
+                    ordered: name == "ol",
+                    next,
+                    item_open: false,
+                });
+            }
+            ("ul" | "ol", true) => {
+                if self.html_table.is_some() {
+                    return;
+                }
+                self.html_li_close();
+                self.html_lists.pop();
+            }
+            ("li", false) => {
+                if self.html_table.is_some() || self.html_lists.is_empty() {
+                    return;
+                }
+                self.html_li_close();
+                self.spans.clear();
+                let top = self.html_lists.last_mut().expect("a list is open");
+                top.item_open = true;
+            }
+            ("li", true) => {
+                if self.html_table.is_some() {
+                    return;
+                }
+                self.html_li_close();
+            }
+            ("dl", _) => {
+                if self.html_table.is_some() {
+                    return;
+                }
+                self.flush_spans();
+            }
+            ("dt", false) => {
+                if self.html_table.is_some() {
+                    return;
+                }
+                self.flush_spans();
+                self.spans.clear();
+                self.html_dt = true;
+            }
+            ("dt", true) => {
+                if self.html_table.is_some() {
+                    return;
+                }
+                self.html_dt_close();
+            }
+            ("dd", false) => {
+                if self.html_table.is_some() {
+                    return;
+                }
+                self.flush_spans();
+                self.spans.clear();
+            }
+            ("dd", true) => {
+                if self.html_table.is_some() {
+                    return;
+                }
+                let mut spans = std::mem::take(&mut self.spans);
+                trim_cell(&mut spans);
+                if !spans.is_empty() {
+                    self.emit(BlockKind::ListItem {
+                        marker: Marker::None,
+                        depth: 0,
+                        spans,
+                    });
+                }
+            }
             _ => {}
+        }
+    }
+
+    /// A styled quotation glyph for `<q>`; owned text, no source range.
+    fn push_quote_glyph(&mut self, glyph: &str) {
+        let mut span = self.style();
+        span.set_text(glyph);
+        span.range = 0..0;
+        self.push(span);
+    }
+
+    /// Emits the accumulated `<hN>` heading with its GitHub slug anchor.
+    fn html_heading_close(&mut self) {
+        let Some(level) = self.html_heading.take() else {
+            return;
+        };
+        let mut spans = std::mem::take(&mut self.spans);
+        trim_cell(&mut spans);
+        let anchor = slug(&spans);
+        self.emit(BlockKind::Heading {
+            level,
+            spans,
+            anchor,
+        });
+    }
+
+    /// Emits the accumulated `<pre>` body as a code block; highlighting
+    /// arrives from the lazy pipeline like any fence.
+    fn html_pre_close(&mut self) {
+        let Some(pre) = self.html_pre.take() else {
+            return;
+        };
+        let body = pre.text.strip_prefix('\n').unwrap_or(&pre.text);
+        if body.trim().is_empty() {
+            return;
+        }
+        self.emit(BlockKind::CodeBlock {
+            language: pre.language,
+            lines: CodeBody::from_text(body),
+            highlights: Vec::new(),
+        });
+    }
+
+    /// Emits the open `<li>`'s accumulated spans as its item. An item
+    /// that ends empty emits nothing and takes no number.
+    fn html_li_close(&mut self) {
+        let depth = self.html_lists.len().saturating_sub(1) as u8;
+        let Some(top) = self.html_lists.last_mut() else {
+            return;
+        };
+        if !top.item_open {
+            return;
+        }
+        top.item_open = false;
+        let mut spans = std::mem::take(&mut self.spans);
+        trim_cell(&mut spans);
+        if spans.is_empty() {
+            return;
+        }
+        let top = self.html_lists.last_mut().expect("a list is open");
+        let marker = if top.ordered {
+            let n = top.next;
+            top.next += 1;
+            Marker::Number(n)
+        } else {
+            Marker::Bullet
+        };
+        self.emit(BlockKind::ListItem {
+            marker,
+            depth,
+            spans,
+        });
+    }
+
+    /// Emits the accumulated `<dt>` term as a bold paragraph.
+    fn html_dt_close(&mut self) {
+        if !self.html_dt {
+            return;
+        }
+        self.html_dt = false;
+        let mut spans = std::mem::take(&mut self.spans);
+        trim_cell(&mut spans);
+        for span in &mut spans {
+            span.bold = true;
+        }
+        if !spans.is_empty() {
+            self.emit(BlockKind::Paragraph { spans });
         }
     }
 
@@ -797,11 +1086,30 @@ impl Builder {
         );
     }
 
+    /// Whether an HTML construct is accumulating spans of its own, in
+    /// which case nothing between its tags may flush as a paragraph.
+    fn html_capturing(&self) -> bool {
+        self.html_table.is_some()
+            || self.html_pre.is_some()
+            || self.html_heading.is_some()
+            || self.html_dt
+            || self.in_summary
+            || !self.html_lists.is_empty()
+    }
+
     /// Closes what an unclosed document leaves open, so content never
-    /// silently vanishes: tables emit, details groups fail open.
+    /// silently vanishes: tables, headings, pre bodies, list items and
+    /// terms emit, details groups fail open.
     fn finish(&mut self) {
         if self.html_table.is_some() {
             self.html_table_close();
+        }
+        self.html_pre_close();
+        self.html_heading_close();
+        self.html_dt_close();
+        while !self.html_lists.is_empty() {
+            self.html_li_close();
+            self.html_lists.pop();
         }
         self.flush_spans();
         while let Some(id) = self.details_stack.pop() {
@@ -812,14 +1120,18 @@ impl Builder {
 
     fn style(&self) -> Span {
         let mut span = Span::plain("");
-        span.bold = self.bold > 0;
+        span.bold = self.bold > 0 || self.html_dt;
         span.italic = self.italic > 0;
         span.strike = self.strike > 0;
+        span.underline = self.html_underline > 0;
+        span.mark = self.html_mark > 0;
         span.code = self.html_code > 0;
         span.script = if self.html_sub > 0 {
             SpanScript::Sub
         } else if self.html_sup > 0 {
             SpanScript::Sup
+        } else if self.html_small > 0 {
+            SpanScript::Small
         } else {
             SpanScript::None
         };
@@ -839,6 +1151,8 @@ impl Builder {
             let same_style = last.bold == span.bold
                 && last.italic == span.italic
                 && last.strike == span.strike
+                && last.underline == span.underline
+                && last.mark == span.mark
                 && last.code == span.code
                 && last.math == span.math
                 && last.script == span.script
@@ -1383,6 +1697,173 @@ mod tests {
         assert!(first.contains("one") && first.contains("two"));
         let second: String = rows[0][1].iter().map(|s| s.text(&d.source)).collect();
         assert!(second.contains('x') && second.contains('y'));
+    }
+
+    #[test]
+    fn html_headings_map_with_slug_anchors() {
+        let d = parse("<h2>Deep Dive</h2>\n<h4>Sub Part</h4>");
+        let BlockKind::Heading {
+            level,
+            spans,
+            anchor,
+        } = &d.blocks[0].kind
+        else {
+            panic!()
+        };
+        assert_eq!(*level, 2);
+        assert_eq!(spans[0].text(&d.source), "Deep Dive");
+        assert_eq!(anchor, "deep-dive");
+        let BlockKind::Heading { level, .. } = &d.blocks[1].kind else {
+            panic!()
+        };
+        assert_eq!(*level, 4);
+    }
+
+    #[test]
+    fn html_lists_nest_and_number() {
+        let d = parse("<ul><li>a<ul><li>b</li></ul></li><li>c</li></ul>");
+        let items: Vec<(u8, String)> = d
+            .blocks
+            .iter()
+            .map(|b| match &b.kind {
+                BlockKind::ListItem { depth, spans, .. } => {
+                    (*depth, spans.iter().map(|s| s.text(&d.source)).collect())
+                }
+                other => panic!("not a list item: {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            items,
+            vec![
+                (0, "a".to_string()),
+                (1, "b".to_string()),
+                (0, "c".to_string())
+            ]
+        );
+
+        let d = parse("<ol start=\"3\"><li>x</li><li>y</li></ol>");
+        let numbers: Vec<u64> = d
+            .blocks
+            .iter()
+            .map(|b| match &b.kind {
+                BlockKind::ListItem {
+                    marker: Marker::Number(n),
+                    ..
+                } => *n,
+                other => panic!("not a numbered item: {other:?}"),
+            })
+            .collect();
+        assert_eq!(numbers, vec![3, 4]);
+    }
+
+    #[test]
+    fn html_blockquotes_stack_depth() {
+        let d =
+            parse("<blockquote>\n\nouter\n\n<blockquote>\n\ninner\n\n</blockquote>\n</blockquote>");
+        assert_eq!(d.blocks[0].quote_depth, 1);
+        assert_eq!(d.blocks[1].quote_depth, 2);
+    }
+
+    #[test]
+    fn html_pre_code_becomes_a_code_block() {
+        let d =
+            parse("<pre><code class=\"language-rust\">fn main() {}\n&lt;tag&gt;\n</code></pre>");
+        let BlockKind::CodeBlock {
+            language,
+            lines,
+            highlights,
+        } = &d.blocks[0].kind
+        else {
+            panic!()
+        };
+        assert_eq!(language.as_deref(), Some("rust"));
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines.line(&d.source, 0), "fn main() {}");
+        assert_eq!(lines.line(&d.source, 1), "<tag>", "entities decode");
+        assert!(
+            highlights.is_empty(),
+            "colors arrive from the lazy pipeline"
+        );
+    }
+
+    #[test]
+    fn html_hr_is_a_rule() {
+        let d = parse("before\n\n<hr>\n\nafter");
+        assert!(d.blocks.iter().any(|b| matches!(b.kind, BlockKind::Rule)));
+    }
+
+    #[test]
+    fn html_dl_maps_terms_and_definitions() {
+        let d = parse("<dl><dt>Term</dt><dd>Its definition</dd></dl>");
+        let BlockKind::Paragraph { spans } = &d.blocks[0].kind else {
+            panic!()
+        };
+        assert_eq!(spans[0].text(&d.source), "Term");
+        assert!(spans[0].bold, "terms read bold");
+        let BlockKind::ListItem {
+            marker: Marker::None,
+            depth: 0,
+            spans,
+        } = &d.blocks[1].kind
+        else {
+            panic!()
+        };
+        assert_eq!(spans[0].text(&d.source), "Its definition");
+    }
+
+    #[test]
+    fn html_inline_set_maps_to_span_styles() {
+        let d = parse(
+            "<u>under</u> a <ins>inserted</ins> b <s>gone</s> c <mark>lit</mark> \
+             d <small>fine</small> e <q>quoted</q> f <cite>cited</cite> g <var>x</var> \
+             h <samp>out</samp> i <tt>tele</tt>",
+        );
+        let BlockKind::Paragraph { spans } = &d.blocks[0].kind else {
+            panic!()
+        };
+        let by_text = |t: &str| {
+            spans
+                .iter()
+                .find(|s| s.text(&d.source) == t)
+                .unwrap_or_else(|| panic!("no span {t:?}"))
+        };
+        assert!(by_text("under").underline);
+        assert!(by_text("inserted").underline);
+        assert!(by_text("gone").strike);
+        assert!(by_text("lit").mark);
+        assert_eq!(by_text("fine").script, SpanScript::Small);
+        assert!(by_text("cited").italic);
+        assert!(by_text("x").italic);
+        assert!(by_text("out").code);
+        assert!(by_text("tele").code);
+        let joined: String = spans.iter().map(|s| s.text(&d.source)).collect();
+        assert!(
+            joined.contains("\u{201C}quoted\u{201D}"),
+            "q wraps in typographic quotes: {joined:?}"
+        );
+    }
+
+    #[test]
+    fn html_picture_reduces_to_its_img() {
+        let d = parse(
+            "<picture><source srcset=\"x.webp\">\
+             <img src=\"logo.png\" alt=\"logo\"></picture>",
+        );
+        let BlockKind::Image { path, alt } = &d.blocks[0].kind else {
+            panic!("picture yields its image: {:?}", d.blocks[0].kind)
+        };
+        assert_eq!(path, "logo.png");
+        assert_eq!(alt, "logo");
+    }
+
+    #[test]
+    fn html_checkbox_input_degrades_to_text() {
+        let d = parse("<input type=\"checkbox\" disabled> pick me");
+        let BlockKind::Paragraph { spans } = &d.blocks[0].kind else {
+            panic!()
+        };
+        let joined: String = spans.iter().map(|s| s.text(&d.source)).collect();
+        assert_eq!(joined.trim(), "pick me");
     }
 
     #[test]

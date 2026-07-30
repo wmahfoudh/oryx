@@ -2823,8 +2823,9 @@ struct SpanStyle {
     weight: Weight,
     italic: bool,
     strike: bool,
+    underline: bool,
     color: Rgba,
-    /// Background pill color for inline code.
+    /// Background pill color for inline code and mark highlights.
     pill: Option<Rgba>,
     /// Baseline shift: positive raises (superscripts), negative lowers.
     rise: f32,
@@ -2872,6 +2873,7 @@ fn span_style(theme: &Theme, cfg: &ViewConfig, base: &BlockStyle, span: &Span) -
             size *= 0.7;
             rise = -0.12 * base.size;
         }
+        SpanScript::Small => size *= 0.85,
         SpanScript::None => {}
     }
     SpanStyle {
@@ -2888,8 +2890,14 @@ fn span_style(theme: &Theme, cfg: &ViewConfig, base: &BlockStyle, span: &Span) -
         },
         italic: span.italic || span.math,
         strike: span.strike,
+        underline: span.underline,
         color,
-        pill: code.then_some(theme.text.inline_code_bg),
+        // A mark highlight outranks the code pill when both apply.
+        pill: if span.mark {
+            Some(theme.ui.search_match_bg)
+        } else {
+            code.then_some(theme.text.inline_code_bg)
+        },
         rise,
     }
 }
@@ -3118,6 +3126,15 @@ fn shape_segment(
                     st.color,
                 ));
             }
+            if st.underline {
+                out.rects.push(DecoRect::fill(
+                    x,
+                    baseline + 0.1 * st.size,
+                    width,
+                    (0.06 * st.size).max(1.0),
+                    st.color,
+                ));
+            }
             g = end;
         }
     }
@@ -3197,6 +3214,7 @@ fn layout_list_item(
             let (runs, width) = shape_marker(fonts, cfg, &text, size, theme.text.body, out);
             place_marker(runs, text_x - width - gutter, y0, block_index, out);
         }
+        Marker::None => {}
         Marker::Task { checked } => {
             let side = 0.8 * size;
             let bx = text_x - side - gutter;
