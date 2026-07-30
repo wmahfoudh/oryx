@@ -9,11 +9,26 @@ use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
+use std::time::Duration;
+
 use crate::doc::images::MediaCache;
 use crate::doc::model::Document;
-use crate::export::paginate::{paginate, Page};
+use crate::export::paginate::{Page, Paginator};
 use crate::export::pdf::Builder;
-use crate::layout::{layout_begin, layout_more, metrics, LayoutDoc, LayoutPass, ViewConfig};
+use crate::layout::pool::{Job, ShapeCtx, TextJob, Work};
+use crate::layout::{
+    layout_begin, layout_more, metrics, LayoutDoc, LayoutPass, StepKey, ViewConfig,
+};
+
+/// How much layout runs before pagination and emission get their turn
+/// inside one fused slice: small enough that pages flow while layout
+/// streams, large enough that the pass keeps its pooled throughput.
+const LAYOUT_CHUNK: Duration = Duration::from_millis(4);
+
+/// How many queued pages hold seeded shaping at once, enough to keep
+/// the workers ahead of the writer without the job queue ever holding
+/// the whole document's text.
+const SEED_AHEAD: usize = 32;
 use crate::platform::config::Config;
 use crate::style::fonts::FontStore;
 use crate::style::theme::Theme;
@@ -121,13 +136,14 @@ pub fn resolve_theme(dirs: &[PathBuf], wanted: &str, active: &Theme) -> (Theme, 
     }
 }
 
-/// How far a running export has got.
+/// How far a running export has got. Layout, pagination and emission
+/// are one fused phase: a page is written the moment layout passes its
+/// bottom.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
     Highlight,
-    Layout,
-    Paginate,
     Emit,
+    Faces,
     Done,
 }
 
@@ -135,9 +151,8 @@ impl Phase {
     pub fn label(self) -> &'static str {
         match self {
             Phase::Highlight => "Colouring code",
-            Phase::Layout => "Laying out",
-            Phase::Paginate => "Making pages",
             Phase::Emit => "Writing pages",
+            Phase::Faces => "Embedding fonts",
             Phase::Done => "Finishing",
         }
     }
@@ -160,13 +175,26 @@ pub struct ExportPass {
     cfg: ViewConfig,
     geometry: PageGeometry,
     target: PathBuf,
+    /// The sibling temporary file pages flush to; the finish renames it
+    /// onto the target and a dropped pass removes it.
+    part: PathBuf,
     title: String,
     phase: Phase,
     layout: LayoutDoc,
     pass: Option<LayoutPass>,
-    pages: Vec<Page>,
-    next: usize,
-    builder: Builder,
+    paginator: Paginator,
+    /// Pages closed and awaiting writing: the page, its emission key,
+    /// and whether its shaping is seeded.
+    queue: std::collections::VecDeque<(Page, usize, bool)>,
+    /// Emission keys handed out, ascending across the export.
+    seeded: usize,
+    /// The context emission jobs ride, built once per export.
+    ctx: Option<std::sync::Arc<ShapeCtx>>,
+    /// Pages written so far; the total once the pass ends.
+    emitted: usize,
+    /// Created with the `.part` file when emission starts.
+    builder: Option<Builder>,
+    failed: Option<String>,
 }
 
 impl ExportPass {
@@ -176,6 +204,8 @@ impl ExportPass {
             .file_stem()
             .map(|stem| stem.to_string_lossy().to_string())
             .unwrap_or_default();
+        let mut part = target.clone().into_os_string();
+        part.push(".part");
         ExportPass {
             settings: settings.clone(),
             theme,
@@ -188,13 +218,54 @@ impl ExportPass {
             },
             geometry,
             target,
+            part: PathBuf::from(part),
             title,
             phase: Phase::Highlight,
             layout: LayoutDoc::default(),
             pass: None,
-            pages: Vec::new(),
-            next: 0,
-            builder: Builder::new(),
+            paginator: Paginator::new(),
+            queue: std::collections::VecDeque::new(),
+            seeded: 0,
+            ctx: None,
+            emitted: 0,
+            builder: None,
+            failed: None,
+        }
+    }
+
+    /// Seeds pooled shaping for the queue's front pages, a bounded
+    /// window so the job queue never holds the whole document's text;
+    /// without a pool the writer shapes serially.
+    fn seed_window(&mut self, doc: &Document) {
+        let Some((pool, generation)) = self.pass.as_ref().and_then(|pass| pass.pool_state()) else {
+            return;
+        };
+        let Some(ctx) = self.ctx.clone() else {
+            return;
+        };
+        for index in 0..self.queue.len().min(SEED_AHEAD) {
+            if self.queue[index].2 {
+                continue;
+            }
+            let (page, key) = (&self.queue[index].0, self.queue[index].1);
+            let runs = self.layout.runs[page.runs.clone()]
+                .iter()
+                .map(|run| TextJob {
+                    text: self.layout.run_text(doc, run).to_string(),
+                    family: self.layout.run_family(run).to_string(),
+                    weight: run.weight,
+                    italic: run.italic,
+                    size: run.size,
+                    x: run.x,
+                })
+                .collect();
+            pool.submit(Job {
+                generation,
+                key: StepKey::text(key),
+                ctx: std::sync::Arc::clone(&ctx),
+                work: Work::Text { runs },
+            });
+            self.queue[index].2 = true;
         }
     }
 
@@ -204,7 +275,10 @@ impl ExportPass {
 
     /// Advances until the deadline and reports where it stopped. The
     /// highlight phase idles while the worker still has blocks to colour,
-    /// since a PDF cannot wash in after it is written.
+    /// since a PDF cannot wash in after it is written. Past it, layout,
+    /// pagination and emission run fused: layout advances a small chunk,
+    /// every page it finalized is written and its geometry dropped, and
+    /// the loop repeats until the deadline.
     pub fn step(
         &mut self,
         deadline: Instant,
@@ -218,54 +292,129 @@ impl ExportPass {
             if highlighting {
                 return self.progress();
             }
-            self.phase = Phase::Layout;
+            self.phase = Phase::Emit;
         }
-        if self.phase == Phase::Layout {
-            let pass = self.pass.get_or_insert_with(|| {
+        if self.phase == Phase::Emit {
+            if self.builder.is_none() {
+                match Builder::to_file(&self.part) {
+                    Ok(builder) => self.builder = Some(builder),
+                    Err(error) => {
+                        self.failed = Some(error.to_string());
+                        self.phase = Phase::Done;
+                        return self.progress();
+                    }
+                }
+            }
+            if self.pass.is_none() {
                 let (out, mut pass) = layout_begin(doc, &self.cfg, self.geometry.width);
                 if let Some(pool) = pool {
                     pass.attach_pool(std::sync::Arc::clone(pool));
                 }
                 self.layout = out;
-                pass
-            });
-            let complete = layout_more(
-                doc,
-                &self.theme,
-                fonts,
-                media,
-                &self.cfg,
-                &mut self.layout,
-                pass,
-                Some(deadline),
-            );
-            if !complete {
-                return self.progress();
+                self.pass = Some(pass);
+                self.ctx = Some(std::sync::Arc::new(ShapeCtx {
+                    theme: self.theme.clone(),
+                    cfg: self.cfg.clone(),
+                    source: std::sync::Arc::clone(&doc.source),
+                }));
             }
-            self.phase = Phase::Paginate;
-        }
-        if self.phase == Phase::Paginate {
-            self.pages = paginate(doc, &self.layout, &self.geometry);
-            self.phase = Phase::Emit;
-        }
-        if self.phase == Phase::Emit {
-            while self.next < self.pages.len() {
-                let job = crate::export::pdf::Job {
+            loop {
+                let pass = self.pass.as_mut().expect("emission has a pass");
+                let chunk = Instant::now() + LAYOUT_CHUNK;
+                let complete = layout_more(
                     doc,
-                    layout: &self.layout,
-                    theme: &self.theme,
-                    geometry: &self.geometry,
-                    settings: &self.settings,
-                    title: &self.title,
-                };
-                self.builder
-                    .add_page(&job, &self.pages[self.next], fonts, media);
-                self.next += 1;
+                    &self.theme,
+                    fonts,
+                    media,
+                    &self.cfg,
+                    &mut self.layout,
+                    pass,
+                    Some(chunk.min(deadline)),
+                );
+                // Close what the grown layout decides, keep a bounded
+                // window of their shaping seeded, and write what the
+                // workers already got to; the deadline can interrupt
+                // the writing but never a page.
+                let pages = self
+                    .paginator
+                    .advance(doc, &self.layout, &self.geometry, complete);
+                for page in pages {
+                    let key = self.seeded;
+                    self.seeded += 1;
+                    self.queue.push_back((page, key, false));
+                }
+                self.seed_window(doc);
+                let mut out_of_time = false;
+                while let Some((page, key, seeded)) = self.queue.pop_front() {
+                    let shaped = seeded
+                        .then(|| {
+                            self.pass
+                                .as_ref()
+                                .and_then(|pass| pass.pool_state())
+                                .and_then(|(pool, generation)| {
+                                    pool.take(generation, StepKey::text(key))
+                                })
+                                .map(|shaped| shaped.text)
+                        })
+                        .flatten();
+                    let job = crate::export::pdf::Job {
+                        doc,
+                        layout: &self.layout,
+                        theme: &self.theme,
+                        geometry: &self.geometry,
+                        settings: &self.settings,
+                        title: &self.title,
+                    };
+                    let builder = self.builder.as_mut().expect("emission has a builder");
+                    builder.add_page_shaped(&job, &page, fonts, media, shaped);
+                    self.emitted += 1;
+                    self.seed_window(doc);
+                    if Instant::now() >= deadline && !self.queue.is_empty() {
+                        out_of_time = true;
+                        break;
+                    }
+                }
+                // The written pages' geometry goes once nothing queued
+                // still reads it.
+                if self.queue.is_empty() {
+                    let consumed = self.paginator.consume();
+                    if consumed.runs > 0 || consumed.rects > 0 || consumed.images > 0 {
+                        self.layout
+                            .drain_front(consumed.runs, consumed.rects, consumed.images);
+                        self.pass
+                            .as_mut()
+                            .expect("emission has a pass")
+                            .rebase(consumed.rects);
+                    }
+                }
+                if complete && self.queue.is_empty() {
+                    self.phase = Phase::Faces;
+                    break;
+                }
+                if out_of_time || Instant::now() >= deadline {
+                    return self.progress();
+                }
+            }
+        }
+        if self.phase == Phase::Faces {
+            let builder = self.builder.as_mut().expect("the pass emitted");
+            loop {
+                match builder.write_face_step(fonts) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        self.phase = Phase::Done;
+                        break;
+                    }
+                    Err(error) => {
+                        self.failed = Some(error);
+                        self.phase = Phase::Done;
+                        break;
+                    }
+                }
                 if Instant::now() >= deadline {
                     return self.progress();
                 }
             }
-            self.phase = Phase::Done;
         }
         self.progress()
     }
@@ -273,8 +422,12 @@ impl ExportPass {
     pub fn progress(&self) -> Progress {
         Progress {
             phase: self.phase,
-            done: self.next,
-            total: self.pages.len(),
+            done: self.emitted,
+            total: if self.phase == Phase::Done || self.phase == Phase::Faces {
+                self.emitted
+            } else {
+                0
+            },
         }
     }
 
@@ -282,11 +435,19 @@ impl ExportPass {
         self.phase == Phase::Done
     }
 
-    /// Writes the assembled bytes through a sibling temporary file, so a
+    /// Closes the `.part` file and renames it onto the target, so a
     /// full disk or a refused permission leaves the target as it was.
     /// Reports the page count.
-    pub fn finish(self, doc: &Document, fonts: &FontStore) -> std::io::Result<usize> {
-        let pages = self.pages.len();
+    pub fn finish(mut self, doc: &Document, fonts: &FontStore) -> std::io::Result<usize> {
+        if let Some(failed) = self.failed.take() {
+            return Err(std::io::Error::other(failed));
+        }
+        let pages = self.emitted;
+        let builder = match self.builder.take() {
+            Some(builder) => builder,
+            // Nothing ever emitted: an empty document still lands a file.
+            None => Builder::to_file(&self.part)?,
+        };
         let job = crate::export::pdf::Job {
             doc,
             layout: &self.layout,
@@ -295,16 +456,17 @@ impl ExportPass {
             settings: &self.settings,
             title: &self.title,
         };
-        let bytes = self
-            .builder
-            .finish(&job, fonts)
-            .map_err(std::io::Error::other)?;
-        let mut partial = self.target.clone().into_os_string();
-        partial.push(".part");
-        let partial = PathBuf::from(partial);
-        std::fs::write(&partial, &bytes)?;
-        std::fs::rename(&partial, &self.target)?;
+        builder.finish(&job, fonts).map_err(std::io::Error::other)?;
+        std::fs::rename(&self.part, &self.target)?;
         Ok(pages)
+    }
+}
+
+impl Drop for ExportPass {
+    /// A dropped pass is a cancelled or finished one either way: the
+    /// `.part` file has been renamed away or must not survive.
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.part);
     }
 }
 

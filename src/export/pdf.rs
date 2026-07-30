@@ -5,19 +5,18 @@
 use std::collections::HashMap;
 
 use cosmic_text::fontdb::ID as FaceId;
-use cosmic_text::{
-    Attrs, Buffer, CacheKey, CacheKeyFlags, Family, Metrics, Shaping, Style, SwashContent, Weight,
-};
+use cosmic_text::{CacheKey, CacheKeyFlags, SwashContent, Weight};
 use pdf_writer::types::{
     ActionType, AnnotationType, CidFontType, FontFlags, SystemInfo, UnicodeCmap,
 };
-use pdf_writer::{Content, Filter, Finish, Name, Pdf, Rect, Ref, Str, TextStr};
+use pdf_writer::{Chunk, Content, Filter, Finish, Name, Rect, Ref, Str, TextStr};
 use subsetter::GlyphRemapper;
 
 use crate::doc::images::MediaCache;
 use crate::doc::model::{BlockKind, Document};
 use crate::export::paginate::Page;
 use crate::export::{ExportSettings, PageGeometry};
+use crate::layout::pool::{shape_text_data, SegmentData, TextJob};
 use crate::layout::{DecoRect, LayoutDoc, TextRun};
 use crate::style::fonts::FontStore;
 use crate::style::theme::{Rgba, Theme};
@@ -46,6 +45,113 @@ impl Alloc {
     }
 }
 
+/// Where finished objects go: the `.part` file of a streamed export, or
+/// memory for a one-shot build. Objects flush the moment they complete,
+/// each recording its byte offset for the cross-reference table, so no
+/// whole-document buffer ever exists on the file path.
+struct Sink {
+    out: SinkOut,
+    /// (object number, byte offset), in flush order.
+    offsets: Vec<(i32, u64)>,
+    position: u64,
+    error: Option<String>,
+}
+
+enum SinkOut {
+    Memory(Vec<u8>),
+    File(std::io::BufWriter<std::fs::File>),
+}
+
+/// The header every PDF opens with: the version line and a binary
+/// comment so transports treat the file as binary.
+const HEADER: &[u8] = b"%PDF-1.7\n%\xE2\xE3\xCF\xD3\n";
+
+impl Sink {
+    fn memory() -> Sink {
+        let mut sink = Sink {
+            out: SinkOut::Memory(Vec::new()),
+            offsets: Vec::new(),
+            position: 0,
+            error: None,
+        };
+        sink.write(HEADER);
+        sink
+    }
+
+    fn file(path: &std::path::Path) -> std::io::Result<Sink> {
+        let file = std::fs::File::create(path)?;
+        let mut sink = Sink {
+            out: SinkOut::File(std::io::BufWriter::new(file)),
+            offsets: Vec::new(),
+            position: 0,
+            error: None,
+        };
+        sink.write(HEADER);
+        Ok(sink)
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        if self.error.is_some() {
+            return;
+        }
+        match &mut self.out {
+            SinkOut::Memory(buffer) => buffer.extend_from_slice(bytes),
+            SinkOut::File(file) => {
+                if let Err(error) = std::io::Write::write_all(file, bytes) {
+                    self.error = Some(error.to_string());
+                    return;
+                }
+            }
+        }
+        self.position += bytes.len() as u64;
+    }
+
+    /// Flushes a chunk holding exactly one object under `id`.
+    fn object(&mut self, id: Ref, chunk: &Chunk) {
+        self.offsets.push((id.get(), self.position));
+        self.write(chunk.as_bytes());
+    }
+
+    /// The cross-reference table, the trailer and the end marker. The
+    /// allocator hands out consecutive numbers and every one is flushed,
+    /// so the table is one contiguous section.
+    fn close(&mut self, size: i32, catalog: Ref, info: Ref) -> Result<(), String> {
+        self.offsets.sort_unstable();
+        debug_assert!(
+            self.offsets.iter().map(|(id, _)| *id).eq(1..=size),
+            "every allocated object flushed exactly once"
+        );
+        let start = self.position;
+        let mut table = format!("xref\n0 {}\n0000000000 65535 f \n", size + 1);
+        for (_, offset) in &self.offsets {
+            table.push_str(&format!("{offset:010} 00000 n \n"));
+        }
+        table.push_str(&format!(
+            "trailer\n<< /Size {} /Root {} 0 R /Info {} 0 R >>\nstartxref\n{start}\n%%EOF",
+            size + 1,
+            catalog.get(),
+            info.get()
+        ));
+        self.write(table.as_bytes());
+        if let SinkOut::File(file) = &mut self.out {
+            if let Err(error) = std::io::Write::flush(file) {
+                self.error = Some(error.to_string());
+            }
+        }
+        match self.error.take() {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    fn into_bytes(self) -> Option<Vec<u8>> {
+        match self.out {
+            SinkOut::Memory(buffer) => Some(buffer),
+            SinkOut::File(_) => None,
+        }
+    }
+}
+
 /// A face the export needs, the glyphs it must carry, what they say and
 /// how wide they are. The widths come from the shaper rather than from
 /// the face, so the reader's pen lands where the shaper's did.
@@ -58,12 +164,13 @@ struct FaceUse {
 }
 
 /// One shaped glyph: what to draw, where it sits, how far it advances,
-/// and the source text it stands for.
+/// and the byte range of its text inside the run's.
 struct Glyph {
     id: u16,
     x: f32,
     width: f32,
-    text: String,
+    start: usize,
+    end: usize,
 }
 
 /// One run of glyphs from a single face, ready to be shown.
@@ -103,10 +210,11 @@ struct PageContent {
     links: Vec<Link>,
 }
 
-/// Assembles the file one page at a time, so a long document can be
-/// emitted across several slices without holding the pass open.
+/// Assembles the file one page at a time, flushing each object as it
+/// completes, so a long document is emitted across many slices while
+/// only page-scale state stays in memory.
 pub struct Builder {
-    pdf: Pdf,
+    sink: Sink,
     alloc: Alloc,
     catalog_id: Ref,
     tree_id: Ref,
@@ -123,6 +231,9 @@ pub struct Builder {
     /// across pages; None records a glyph that produced no raster.
     glyph_images: HashMap<(FaceId, u16, u32), Option<GlyphImage>>,
     contents: Vec<PageContent>,
+    /// The sliced face writing: first-use order, and how many are out.
+    face_queue: Option<Vec<FaceId>>,
+    faces_written: usize,
 }
 
 /// An embedded bitmap glyph: its object, the raster's pixel geometry,
@@ -148,13 +259,24 @@ impl Default for Builder {
 }
 
 impl Builder {
+    /// A builder assembling in memory, the one-shot `build`'s shape.
     pub fn new() -> Builder {
+        Builder::with_sink(Sink::memory())
+    }
+
+    /// A builder flushing straight to a file, the streamed export's
+    /// shape; the caller renames the finished file into place.
+    pub fn to_file(path: &std::path::Path) -> std::io::Result<Builder> {
+        Ok(Builder::with_sink(Sink::file(path)?))
+    }
+
+    fn with_sink(sink: Sink) -> Builder {
         let mut alloc = Alloc(0);
         let catalog_id = alloc.next();
         let tree_id = alloc.next();
         let info_id = alloc.next();
         Builder {
-            pdf: Pdf::new(),
+            sink,
             alloc,
             catalog_id,
             tree_id,
@@ -164,7 +286,33 @@ impl Builder {
             bitmap: HashMap::new(),
             glyph_images: HashMap::new(),
             contents: Vec::new(),
+            face_queue: None,
+            faces_written: 0,
         }
+    }
+
+    /// Writes one deferred face, the sliced tail of a streamed finish:
+    /// true when one was written, false once none remain. Only callable
+    /// after the last page, since glyph use accumulates until then.
+    pub fn write_face_step(&mut self, fonts: &FontStore) -> Result<bool, String> {
+        if self.face_queue.is_none() {
+            let mut ids: Vec<FaceId> = self.faces.keys().copied().collect();
+            ids.sort_by_key(|face| self.faces[face].index);
+            self.face_queue = Some(ids);
+        }
+        let queue = self.face_queue.as_ref().expect("just built");
+        let Some(face) = queue.get(self.faces_written).copied() else {
+            return Ok(false);
+        };
+        write_face(
+            &mut self.sink,
+            &mut self.alloc,
+            fonts,
+            &self.faces[&face],
+            face,
+        )?;
+        self.faces_written += 1;
+        Ok(true)
     }
 
     /// Draws one page and keeps its content stream. Glyph use accumulates
@@ -176,6 +324,20 @@ impl Builder {
         page: &Page,
         fonts: &mut FontStore,
         media: &mut MediaCache,
+    ) {
+        self.add_page_shaped(job, page, fonts, media, None);
+    }
+
+    /// As `add_page`, consuming pooled shaping for the page's runs when
+    /// a worker got there first; glyph registration stays sequential
+    /// here, which is what keeps subset ids deterministic.
+    pub(crate) fn add_page_shaped(
+        &mut self,
+        job: &Job,
+        page: &Page,
+        fonts: &mut FontStore,
+        media: &mut MediaCache,
+        shaped: Option<Vec<Vec<SegmentData>>>,
     ) {
         let geometry = job.geometry;
         let mut content = Content::new();
@@ -211,12 +373,15 @@ impl Builder {
         }
 
         let mut used: Vec<FaceId> = Vec::new();
+        let mut shaped = shaped.map(Vec::into_iter);
         for run in &job.layout.runs[page.runs.clone()] {
+            let pre = shaped.as_mut().and_then(|it| it.next());
             self.draw_run(
                 &mut content,
                 job.doc,
                 job.layout,
                 run,
+                pre,
                 page.top,
                 geometry,
                 fonts,
@@ -237,9 +402,11 @@ impl Builder {
 
         let links = collect_links(job.doc, job.layout, page, geometry);
         let content_id = self.alloc.next();
-        self.pdf
+        let mut chunk = Chunk::new();
+        chunk
             .stream(content_id, &deflate(&content.finish()))
             .filter(Filter::FlateDecode);
+        self.sink.object(content_id, &chunk);
         self.contents.push(PageContent {
             id: content_id,
             top: page.top,
@@ -258,18 +425,24 @@ impl Builder {
         doc: &Document,
         lay: &LayoutDoc,
         run: &TextRun,
+        shaped: Option<Vec<SegmentData>>,
         top: f32,
         geometry: &PageGeometry,
         fonts: &mut FontStore,
         used: &mut Vec<FaceId>,
         images: &mut Vec<(String, Ref)>,
     ) {
-        for segment in shape(fonts, doc, lay, run) {
+        let segments = match shaped {
+            Some(data) => segments_from(data, run.size, run.color, run.baseline),
+            None => shape(fonts, doc, lay, run),
+        };
+        let text = lay.run_text(doc, run).to_string();
+        for segment in segments {
             if self.is_bitmap_face(fonts, segment.face) {
                 self.draw_bitmap_segment(content, &segment, top, geometry, fonts, images);
                 continue;
             }
-            let ids = self.register(&segment);
+            let ids = self.register(&segment, &text);
             if !used.contains(&segment.face) {
                 used.push(segment.face);
             }
@@ -379,7 +552,8 @@ impl Builder {
             let id = self.alloc.next();
             let mask_id = self.alloc.next();
             let deflated = deflate(&rgb);
-            let mut xobject = self.pdf.image_xobject(id, &deflated);
+            let mut chunk = Chunk::new();
+            let mut xobject = chunk.image_xobject(id, &deflated);
             xobject.width(width as i32);
             xobject.height(height as i32);
             xobject.color_space().device_rgb();
@@ -387,14 +561,17 @@ impl Builder {
             xobject.filter(Filter::FlateDecode);
             xobject.s_mask(mask_id);
             xobject.finish();
+            self.sink.object(id, &chunk);
             let deflated = deflate(&alpha);
-            let mut gray = self.pdf.image_xobject(mask_id, &deflated);
+            let mut chunk = Chunk::new();
+            let mut gray = chunk.image_xobject(mask_id, &deflated);
             gray.width(width as i32);
             gray.height(height as i32);
             gray.color_space().device_gray();
             gray.bits_per_component(8);
             gray.filter(Filter::FlateDecode);
             gray.finish();
+            self.sink.object(mask_id, &chunk);
             GlyphImage {
                 id,
                 width,
@@ -450,7 +627,7 @@ impl Builder {
                 self.draw_bitmap_segment(content, segment, top, job.geometry, fonts, images);
                 continue;
             }
-            let ids = self.register(segment);
+            let ids = self.register(segment, &number.to_string());
             if !used.contains(&segment.face) {
                 used.push(segment.face);
             }
@@ -461,8 +638,9 @@ impl Builder {
 
     /// Records a segment's glyphs against its face and returns the
     /// subset ids to write, so the content stream and the embedded font
-    /// agree on what a code means.
-    fn register(&mut self, segment: &Segment) -> Vec<(u16, f32)> {
+    /// agree on what a code means. `text` is the shaped source the
+    /// glyph byte ranges slice; a cid seen before allocates nothing.
+    fn register(&mut self, segment: &Segment, text: &str) -> Vec<(u16, f32)> {
         let count = self.faces.len();
         let alloc = &mut self.alloc;
         let entry = self.faces.entry(segment.face).or_insert_with(|| FaceUse {
@@ -477,7 +655,10 @@ impl Builder {
             .iter()
             .map(|glyph| {
                 let cid = entry.remapper.remap(glyph.id);
-                entry.text.entry(cid).or_insert_with(|| glyph.text.clone());
+                entry
+                    .text
+                    .entry(cid)
+                    .or_insert_with(|| text[glyph.start..glyph.end].to_string());
                 entry
                     .widths
                     .entry(cid)
@@ -513,7 +694,8 @@ impl Builder {
         let id = self.alloc.next();
         let mask_id = alpha.iter().any(|a| *a != 255).then(|| self.alloc.next());
         let deflated = deflate(&rgb);
-        let mut image = self.pdf.image_xobject(id, &deflated);
+        let mut chunk = Chunk::new();
+        let mut image = chunk.image_xobject(id, &deflated);
         image.width(width as i32);
         image.height(height as i32);
         image.color_space().device_rgb();
@@ -523,25 +705,30 @@ impl Builder {
             image.s_mask(mask);
         }
         image.finish();
+        self.sink.object(id, &chunk);
         if let Some(mask) = mask_id {
             let deflated = deflate(&alpha);
-            let mut gray = self.pdf.image_xobject(mask, &deflated);
+            let mut chunk = Chunk::new();
+            let mut gray = chunk.image_xobject(mask, &deflated);
             gray.width(width as i32);
             gray.height(height as i32);
             gray.color_space().device_gray();
             gray.bits_per_component(8);
             gray.filter(Filter::FlateDecode);
             gray.finish();
+            self.sink.object(mask, &chunk);
         }
         self.images.insert(src.to_string(), id);
         Some(id)
     }
 
-    /// Writes the faces, the page objects and the tree, then the bytes.
-    /// A face that cannot be subset fails the export by name, because
-    /// embedding the whole font under subset numbering would render
-    /// every glyph wrong and still report success.
-    pub fn finish(self, job: &Job, fonts: &FontStore) -> Result<Vec<u8>, String> {
+    /// Writes the faces, the page objects, the tree and the
+    /// cross-reference table. A memory builder answers the file's bytes;
+    /// a file builder has already flushed them and answers None. A face
+    /// that cannot be subset fails the export by name, because embedding
+    /// the whole font under subset numbering would render every glyph
+    /// wrong and still report success.
+    pub fn finish(self, job: &Job, fonts: &FontStore) -> Result<Option<Vec<u8>>, String> {
         finish(self, job, fonts)
     }
 }
@@ -599,12 +786,13 @@ pub fn build(
     for page in pages {
         builder.add_page(job, page, fonts, media);
     }
-    builder.finish(job, fonts)
+    let bytes = builder.finish(job, fonts)?;
+    Ok(bytes.expect("a memory builder answers bytes"))
 }
 
-fn finish(builder: Builder, job: &Job, fonts: &FontStore) -> Result<Vec<u8>, String> {
+fn finish(builder: Builder, job: &Job, fonts: &FontStore) -> Result<Option<Vec<u8>>, String> {
     let Builder {
-        mut pdf,
+        mut sink,
         mut alloc,
         bitmap: _,
         glyph_images: _,
@@ -614,12 +802,21 @@ fn finish(builder: Builder, job: &Job, fonts: &FontStore) -> Result<Vec<u8>, Str
         faces,
         images: _,
         contents,
+        face_queue,
+        faces_written,
     } = builder;
     let geometry = job.geometry;
 
-    let face_ids: Vec<FaceId> = faces.keys().copied().collect();
-    for face in &face_ids {
-        write_face(&mut pdf, &mut alloc, fonts, &faces[face], *face)?;
+    // Faces in first-use order, so the file's bytes come out the same
+    // whatever the map's hashing did; a sliced finish already wrote a
+    // prefix of them.
+    let face_ids = face_queue.unwrap_or_else(|| {
+        let mut ids: Vec<FaceId> = faces.keys().copied().collect();
+        ids.sort_by_key(|face| faces[face].index);
+        ids
+    });
+    for face in face_ids.iter().skip(faces_written) {
+        write_face(&mut sink, &mut alloc, fonts, &faces[face], *face)?;
     }
 
     let page_ids: Vec<Ref> = contents.iter().map(|_| alloc.next()).collect();
@@ -632,7 +829,8 @@ fn finish(builder: Builder, job: &Job, fonts: &FontStore) -> Result<Vec<u8>, Str
         let mut ids = Vec::with_capacity(content.links.len());
         for link in &content.links {
             let id = alloc.next();
-            let mut annotation = pdf.annotation(id);
+            let mut chunk = Chunk::new();
+            let mut annotation = chunk.annotation(id);
             annotation.subtype(AnnotationType::Link);
             annotation.rect(Rect::new(
                 link.rect[0],
@@ -659,13 +857,15 @@ fn finish(builder: Builder, job: &Job, fonts: &FontStore) -> Result<Vec<u8>, Str
                 None => {}
             }
             annotation.finish();
+            sink.object(id, &chunk);
             ids.push(id);
         }
         annotations.push(ids);
     }
 
     for (index, content) in contents.iter().enumerate() {
-        let mut page = pdf.page(page_ids[index]);
+        let mut chunk = Chunk::new();
+        let mut page = chunk.page(page_ids[index]);
         page.parent(tree_id);
         page.media_box(Rect::new(0.0, 0.0, geometry.width, geometry.height));
         page.contents(content.id);
@@ -696,23 +896,38 @@ fn finish(builder: Builder, job: &Job, fonts: &FontStore) -> Result<Vec<u8>, Str
             resources.finish();
         }
         page.finish();
+        sink.object(page_ids[index], &chunk);
     }
 
-    let outline_id = write_outline(&mut pdf, &mut alloc, job, &tops, &page_ids);
+    let outline_id = write_outline(&mut sink, &mut alloc, job, &tops, &page_ids);
 
-    pdf.pages(tree_id)
+    let mut chunk = Chunk::new();
+    chunk
+        .pages(tree_id)
         .kids(page_ids.iter().copied())
         .count(page_ids.len() as i32);
-    let mut catalog = pdf.catalog(catalog_id);
+    sink.object(tree_id, &chunk);
+    let mut chunk = Chunk::new();
+    let mut catalog = chunk
+        .indirect(catalog_id)
+        .start::<pdf_writer::writers::Catalog>();
     catalog.pages(tree_id);
     if let Some(outline_id) = outline_id {
         catalog.outlines(outline_id);
     }
     catalog.finish();
-    pdf.document_info(info_id)
+    sink.object(catalog_id, &chunk);
+    let mut chunk = Chunk::new();
+    chunk
+        .indirect(info_id)
+        .start::<pdf_writer::writers::DocumentInfo>()
         .title(TextStr(job.title))
         .producer(TextStr(concat!("oryx ", env!("CARGO_PKG_VERSION"))));
-    Ok(pdf.finish())
+    sink.object(info_id, &chunk);
+
+    let size = alloc.0;
+    sink.close(size, catalog_id, info_id)?;
+    Ok(sink.into_bytes())
 }
 
 /// Resolves an internal target to a page and a position on it. External
@@ -742,7 +957,7 @@ struct Item {
 /// The heading outline, nested by level. Returns None for a document
 /// with no headings, which then carries no outline at all.
 fn write_outline(
-    pdf: &mut Pdf,
+    sink: &mut Sink,
     alloc: &mut Alloc,
     job: &Job,
     tops: &[f32],
@@ -805,11 +1020,13 @@ fn write_outline(
     }
 
     let outline_id = alloc.next();
-    let mut outline = pdf.outline(outline_id);
+    let mut chunk = Chunk::new();
+    let mut outline = chunk.outline(outline_id);
     outline.first(items[roots[0]].id);
     outline.last(items[*roots.last().expect("a root")].id);
     outline.count(roots.len() as i32);
     outline.finish();
+    sink.object(outline_id, &chunk);
 
     for index in 0..items.len() {
         let siblings: &[usize] = match items[index].parent {
@@ -823,7 +1040,8 @@ fn write_outline(
         let previous = at.checked_sub(1).map(|before| items[siblings[before]].id);
         let following = siblings.get(at + 1).map(|after| items[*after].id);
         let item = &items[index];
-        let mut written = pdf.outline_item(item.id);
+        let mut chunk = Chunk::new();
+        let mut written = chunk.outline_item(item.id);
         written.title(TextStr(&item.title));
         match item.parent {
             Some(parent) => written.parent(items[parent].id),
@@ -845,6 +1063,7 @@ fn write_outline(
             .page(page_ids[item.page])
             .xyz(0.0, item.y, None);
         written.finish();
+        sink.object(item.id, &chunk);
     }
     Some(outline_id)
 }
@@ -868,6 +1087,30 @@ fn shape(fonts: &mut FontStore, doc: &Document, lay: &LayoutDoc, run: &TextRun) 
     )
 }
 
+/// Wraps pooled segment data into segments with the run's paint state.
+fn segments_from(data: Vec<SegmentData>, size: f32, color: Rgba, baseline: f32) -> Vec<Segment> {
+    data.into_iter()
+        .map(|segment| Segment {
+            face: segment.face,
+            x: segment.x,
+            baseline,
+            size,
+            color,
+            glyphs: segment
+                .glyphs
+                .into_iter()
+                .map(|glyph| Glyph {
+                    id: glyph.id,
+                    x: glyph.x,
+                    width: glyph.width,
+                    start: glyph.start,
+                    end: glyph.end,
+                })
+                .collect(),
+        })
+        .collect()
+}
+
 /// Shapes free text the way layout shaped it, for runs and for the page
 /// number, which has no run at all.
 #[allow(clippy::too_many_arguments)]
@@ -882,48 +1125,15 @@ fn shape_text(
     baseline: f32,
     color: Rgba,
 ) -> Vec<Segment> {
-    let line_height = crate::layout::metrics::LINE_HEIGHT * size;
-    let mut buffer = Buffer::new(&mut fonts.font_system, Metrics::new(size, line_height));
-    buffer.set_size(&mut fonts.font_system, None, None);
-    let mut attrs = Attrs::new()
-        .family(Family::Name(family))
-        .weight(Weight(weight));
-    if italic {
-        attrs = attrs.style(Style::Italic);
-    }
-    buffer.set_text(
-        &mut fonts.font_system,
-        text,
-        &attrs,
-        Shaping::Advanced,
-        None,
-    );
-    buffer.shape_until_scroll(&mut fonts.font_system, false);
-
-    let mut segments: Vec<Segment> = Vec::new();
-    for line in buffer.layout_runs() {
-        for glyph in line.glyphs {
-            let open = matches!(segments.last(), Some(s) if s.face == glyph.font_id);
-            if !open {
-                segments.push(Segment {
-                    face: glyph.font_id,
-                    glyphs: Vec::new(),
-                    size,
-                    color,
-                    x: x + glyph.x,
-                    baseline,
-                });
-            }
-            let segment = segments.last_mut().expect("just opened");
-            segment.glyphs.push(Glyph {
-                id: glyph.glyph_id,
-                x: x + glyph.x,
-                width: glyph.w,
-                text: line.text[glyph.start..glyph.end].to_string(),
-            });
-        }
-    }
-    segments
+    let job = TextJob {
+        text: text.to_string(),
+        family: family.to_string(),
+        weight,
+        italic,
+        size,
+        x,
+    };
+    segments_from(shape_text_data(fonts, &job), size, color, baseline)
 }
 
 /// Shows one segment. The glyphs are positioned by their shaped offsets
@@ -1045,17 +1255,12 @@ fn draw_rect(
 /// ride a CIDFontType2 with FontFile2, CFF outlines a CIDFontType0 with
 /// FontFile3, since a reader may reject the wrong pairing.
 fn write_face(
-    pdf: &mut Pdf,
+    sink: &mut Sink,
     alloc: &mut Alloc,
     fonts: &FontStore,
     use_: &FaceUse,
     face: FaceId,
 ) -> Result<(), String> {
-    let cid_id = alloc.next();
-    let descriptor_id = alloc.next();
-    let data_id = alloc.next();
-    let cmap_id = alloc.next();
-
     let system = SystemInfo {
         registry: Str(b"Adobe"),
         ordering: Str(b"Identity"),
@@ -1070,8 +1275,19 @@ fn write_face(
         .with_face_data(face, |data, index| (data.to_vec(), index));
     let (data, index) = match source {
         Some(pair) => pair,
-        None => return Ok(()),
+        None => {
+            // The face's reference was handed out at registration; a
+            // placeholder keeps the cross-reference table whole.
+            let mut chunk = Chunk::new();
+            chunk.indirect(use_.id).dict();
+            sink.object(use_.id, &chunk);
+            return Ok(());
+        }
     };
+    let cid_id = alloc.next();
+    let descriptor_id = alloc.next();
+    let data_id = alloc.next();
+    let cmap_id = alloc.next();
     let subset = subsetter::subset(&data, index, &use_.remapper).map_err(|err| {
         let family = fonts
             .font_system
@@ -1093,13 +1309,17 @@ fn write_face(
         .map(|cid| use_.widths.get(&cid).copied().unwrap_or(0.0))
         .collect();
 
-    pdf.type0_font(use_.id)
+    let mut chunk = Chunk::new();
+    chunk
+        .type0_font(use_.id)
         .base_font(Name(name.as_bytes()))
         .encoding_predefined(Name(b"Identity-H"))
         .descendant_font(cid_id)
         .to_unicode(cmap_id);
+    sink.object(use_.id, &chunk);
 
-    let mut cid = pdf.cid_font(cid_id);
+    let mut chunk = Chunk::new();
+    let mut cid = chunk.cid_font(cid_id);
     cid.subtype(if cff {
         CidFontType::Type0
     } else {
@@ -1115,9 +1335,11 @@ fn write_face(
     }
     cid.widths().consecutive(0, widths.iter().copied());
     cid.finish();
+    sink.object(cid_id, &chunk);
 
     let bbox = parsed.as_ref().map(|f| f.global_bounding_box());
-    let mut descriptor = pdf.font_descriptor(descriptor_id);
+    let mut chunk = Chunk::new();
+    let mut descriptor = chunk.font_descriptor(descriptor_id);
     descriptor
         .name(Name(name.as_bytes()))
         .flags(FontFlags::SYMBOLIC)
@@ -1149,18 +1371,25 @@ fn write_face(
         ));
     }
     descriptor.finish();
+    sink.object(descriptor_id, &chunk);
 
     let deflated = deflate(&subset);
-    let mut stream = pdf.stream(data_id, &deflated);
+    let mut chunk = Chunk::new();
+    let mut stream = chunk.stream(data_id, &deflated);
     stream.filter(Filter::FlateDecode);
     if cff {
         // FontFile3 carrying a whole OpenType file declares itself.
         stream.pair(Name(b"Subtype"), Name(b"OpenType"));
     }
     stream.finish();
+    sink.object(data_id, &chunk);
 
+    // Pairs in cid order, so the cmap's bytes never depend on the map's
+    // hashing.
     let mut cmap = UnicodeCmap::new(Name(b"Custom"), system);
-    for (cid, text) in &use_.text {
+    let mut pairs: Vec<(&u16, &String)> = use_.text.iter().collect();
+    pairs.sort_unstable();
+    for (cid, text) in pairs {
         let mut chars = text.chars();
         match (chars.next(), chars.next()) {
             (Some(one), None) => cmap.pair(*cid, one),
@@ -1168,8 +1397,11 @@ fn write_face(
             _ => {}
         }
     }
-    pdf.stream(cmap_id, &deflate(&cmap.finish()))
+    let mut chunk = Chunk::new();
+    chunk
+        .stream(cmap_id, &deflate(&cmap.finish()))
         .filter(Filter::FlateDecode);
+    sink.object(cmap_id, &chunk);
     Ok(())
 }
 

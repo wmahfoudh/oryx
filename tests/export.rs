@@ -2,15 +2,16 @@
 //! assertions are what a reader sees rather than what we just wrote.
 
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use lopdf::Document as Pdf;
 
 use oryx::doc::images::MediaCache;
 use oryx::doc::markdown;
 use oryx::doc::model::Document;
-use oryx::export::paginate::paginate;
-use oryx::export::{pdf, ExportSettings, PageGeometry, PageSize};
-use oryx::layout::{layout, ViewConfig};
+use oryx::export::paginate::{paginate, Paginator};
+use oryx::export::{pdf, ExportPass, ExportSettings, PageGeometry, PageSize};
+use oryx::layout::{layout, layout_begin, layout_step, ViewConfig};
 use oryx::style::fonts::FontStore;
 use oryx::style::theme::Theme;
 
@@ -384,6 +385,248 @@ fn emoji_exports_without_failing_the_document() {
     let text = pdf.extract_text(&[1]).expect("text extracts");
     assert!(text.contains("before"), "got {text:?}");
     assert!(text.contains("after"), "got {text:?}");
+}
+
+// Task 53: the export stream. Pages flush to the sibling `.part` file
+// as they are written, pagination consumes placed blocks behind the
+// layout cursor, and the assembled file reads back identical to the
+// one-shot builder's.
+
+/// A document that exercises every break rule: headings, split code
+/// panels, a table, a quote region, footnotes, across several pages.
+fn paged_source() -> String {
+    let mut source = String::from("# Title\n\nintro paragraph\n\n");
+    source.push_str("```rust\n");
+    for i in 0..120 {
+        source.push_str(&format!("let value_{i} = compute({i});\n"));
+    }
+    source.push_str("```\n\n");
+    source.push_str("|h1|h2|\n|-|-|\n|a|b|\n|c|d|\n\n");
+    source.push_str("> quoted one\n>\n> quoted two\n\n");
+    for i in 0..160 {
+        source.push_str(&format!("Filler paragraph number {i} with body.\n\n"));
+    }
+    source.push_str("## Late\n\ntail with a note[^n]\n\n[^n]: the note text\n");
+    source
+}
+
+fn geometry_and_cfg() -> (PageGeometry, ViewConfig) {
+    let cfg = ViewConfig {
+        body_size: 11.0,
+        code_size: 9.0,
+        zoom: 1.0,
+        ..ViewConfig::default()
+    };
+    (PageGeometry::new(PageSize::A4, cfg.body_size), cfg)
+}
+
+/// Feeds the paginator a layout grown `stride` steps at a time and
+/// collects what it finalizes along the way.
+fn paginate_in_slices(doc: &Document, stride: usize) -> Vec<oryx::export::paginate::Page> {
+    let (geometry, cfg) = geometry_and_cfg();
+    let mut fonts = FontStore::new();
+    let mut media = MediaCache::new(PathBuf::from("tests/fixtures"));
+    let theme = Theme::default_dark();
+    let (mut lay, mut pass) = layout_begin(doc, &cfg, geometry.width);
+    let mut paginator = Paginator::new();
+    let mut pages = Vec::new();
+    let mut done = false;
+    while !done {
+        for _ in 0..stride {
+            done = layout_step(
+                doc, &theme, &mut fonts, &mut media, &cfg, &mut lay, &mut pass,
+            );
+            if done {
+                break;
+            }
+        }
+        pages.extend(paginator.advance(doc, &lay, &geometry, done));
+    }
+    pages
+}
+
+#[test]
+fn incremental_pagination_matches_the_one_shot_pages() {
+    let doc = markdown::parse(paged_source().as_str());
+    let (geometry, cfg) = geometry_and_cfg();
+    let mut fonts = FontStore::new();
+    let mut media = MediaCache::new(PathBuf::from("tests/fixtures"));
+    let lay = layout(
+        &doc,
+        &Theme::default_dark(),
+        &mut fonts,
+        &mut media,
+        &cfg,
+        geometry.width,
+    );
+    let whole = paginate(&doc, &lay, &geometry);
+    assert!(
+        whole.len() > 3,
+        "the fixture spans pages, got {}",
+        whole.len()
+    );
+    for stride in [1usize, 7, 1000] {
+        let sliced = paginate_in_slices(&doc, stride);
+        assert_eq!(sliced.len(), whole.len(), "page count at stride {stride}");
+        for (index, (a, b)) in sliced.iter().zip(&whole).enumerate() {
+            assert_eq!(a, b, "page {index} at stride {stride}");
+        }
+    }
+}
+
+/// Drives an export pass to completion against a target file.
+fn stream_to(
+    doc: &Document,
+    target: &std::path::Path,
+    pool: Option<&std::sync::Arc<oryx::layout::ShapePool>>,
+) -> (usize, bool) {
+    let settings = ExportSettings {
+        body_size: 11.0,
+        code_size: 9.0,
+        page: PageSize::A4,
+        page_numbers: true,
+        ..ExportSettings::default()
+    };
+    let mut fonts = FontStore::new();
+    let mut media = MediaCache::new(PathBuf::from("tests/fixtures"));
+    let mut pass = ExportPass::new(&settings, Theme::default_dark(), target.to_path_buf());
+    let mut part = target.to_path_buf().into_os_string();
+    part.push(".part");
+    let part = PathBuf::from(part);
+    let mut part_grew = false;
+    let mut last_size = 0u64;
+    while !pass.is_done() {
+        pass.step(
+            Instant::now() + Duration::from_millis(30),
+            doc,
+            &mut fonts,
+            &mut media,
+            false,
+            pool,
+        );
+        if let Ok(meta) = std::fs::metadata(&part) {
+            if meta.len() > last_size {
+                part_grew = true;
+                last_size = meta.len();
+            }
+        }
+    }
+    let pages = pass.finish(doc, &fonts).expect("the export lands");
+    (pages, part_grew)
+}
+
+#[test]
+fn the_streamed_file_reads_back_like_the_one_shot_build() {
+    let source = std::fs::read_to_string("tests/fixtures/tour.md").expect("the tour fixture");
+    let doc = markdown::parse(source.as_str());
+    let target = std::env::temp_dir().join(format!("oryx-stream-{}.pdf", std::process::id()));
+
+    let (pages, part_grew) = stream_to(&doc, &target, None);
+    let streamed = std::fs::read(&target).expect("the streamed file");
+    std::fs::remove_file(&target).ok();
+    assert!(
+        part_grew,
+        "the .part file grows while pages are written, not only at finish"
+    );
+
+    let reference = export_with(&doc, PageSize::A4, true);
+    let streamed = Pdf::load_mem(&streamed).expect("a reader parses the streamed file");
+    let reference = Pdf::load_mem(&reference).expect("a reader parses the reference");
+    assert_eq!(streamed.get_pages().len(), pages);
+    assert_eq!(
+        streamed.get_pages().len(),
+        reference.get_pages().len(),
+        "page count"
+    );
+    let count = reference.get_pages().len() as u32;
+    for page in 1..=count {
+        assert_eq!(
+            streamed.extract_text(&[page]).expect("streamed text"),
+            reference.extract_text(&[page]).expect("reference text"),
+            "text of page {page}"
+        );
+    }
+    assert_eq!(
+        annotation_uris(&streamed),
+        annotation_uris(&reference),
+        "link targets"
+    );
+    assert_eq!(
+        internal_destination_page(&streamed),
+        internal_destination_page(&reference),
+        "internal destinations"
+    );
+    assert_eq!(
+        outline_titles(&streamed),
+        outline_titles(&reference),
+        "the outline"
+    );
+}
+
+#[test]
+fn a_pool_of_one_emits_the_same_bytes_as_a_pool_of_many() {
+    let doc = markdown::parse(paged_source().as_str());
+    let fonts = FontStore::new();
+    let one = std::sync::Arc::new(oryx::layout::ShapePool::new(1, &fonts.seed()));
+    let many = std::sync::Arc::new(oryx::layout::ShapePool::new(4, &fonts.seed()));
+    // The same file name in two directories, since the name becomes the
+    // document title and the bytes must compare whole.
+    let dir_a = std::env::temp_dir().join(format!("oryx-pool1-{}", std::process::id()));
+    let dir_b = std::env::temp_dir().join(format!("oryx-pool4-{}", std::process::id()));
+    std::fs::create_dir_all(&dir_a).expect("a scratch directory");
+    std::fs::create_dir_all(&dir_b).expect("a scratch directory");
+    let target_a = dir_a.join("streamed.pdf");
+    let target_b = dir_b.join("streamed.pdf");
+    stream_to(&doc, &target_a, Some(&one));
+    stream_to(&doc, &target_b, Some(&many));
+    let a = std::fs::read(&target_a).expect("pool-of-one file");
+    let b = std::fs::read(&target_b).expect("pool-of-many file");
+    std::fs::remove_dir_all(&dir_a).ok();
+    std::fs::remove_dir_all(&dir_b).ok();
+    assert!(a == b, "emission is deterministic across pool widths");
+}
+
+#[test]
+fn a_cancelled_export_leaves_the_target_and_no_part_behind() {
+    let doc = markdown::parse(paged_source().as_str());
+    let target = std::env::temp_dir().join(format!("oryx-cancel-{}.pdf", std::process::id()));
+    std::fs::write(&target, b"previous export").expect("the previous file");
+    let mut part = target.clone().into_os_string();
+    part.push(".part");
+    let part = PathBuf::from(part);
+
+    let settings = ExportSettings {
+        body_size: 11.0,
+        code_size: 9.0,
+        page: PageSize::A4,
+        page_numbers: true,
+        ..ExportSettings::default()
+    };
+    let mut fonts = FontStore::new();
+    let mut media = MediaCache::new(PathBuf::from("tests/fixtures"));
+    let mut pass = ExportPass::new(&settings, Theme::default_dark(), target.clone());
+    for _ in 0..50 {
+        if pass.is_done() {
+            break;
+        }
+        pass.step(
+            Instant::now() + Duration::from_millis(10),
+            &doc,
+            &mut fonts,
+            &mut media,
+            false,
+            None,
+        );
+    }
+    assert!(part.exists(), "the run reached the disk before the cancel");
+    drop(pass);
+    assert!(!part.exists(), "the cancel removes the .part file");
+    assert_eq!(
+        std::fs::read(&target).expect("the target survives"),
+        b"previous export",
+        "the target is untouched"
+    );
+    std::fs::remove_file(&target).ok();
 }
 
 /// The showcase collection is the field's export scenario: emoji through

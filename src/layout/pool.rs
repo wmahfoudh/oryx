@@ -16,12 +16,35 @@ use crate::style::fonts::FontSeed;
 use crate::style::highlight::SyntaxRole;
 use crate::style::theme::Theme;
 
-/// One step's identity inside a pass: the order position, and the line
-/// inside an open code block.
+/// One unit's identity inside a pass: the order position and the line
+/// inside an open code block for layout work, the page index for
+/// emission work. The lanes consume independently, each in ascending
+/// order, so one lane's take never purges the other's results.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct StepKey {
     pub position: usize,
     pub line: usize,
+    pub lane: u8,
+}
+
+impl StepKey {
+    /// A layout step: a block's order position, and its line for code.
+    pub fn step(position: usize, line: usize) -> StepKey {
+        StepKey {
+            position,
+            line,
+            lane: 0,
+        }
+    }
+
+    /// An emission batch: one page's runs, keyed by emission order.
+    pub fn text(page: usize) -> StepKey {
+        StepKey {
+            position: page,
+            line: 0,
+            lane: 1,
+        }
+    }
 }
 
 /// What a worker shapes against for one pass generation. The source
@@ -32,8 +55,8 @@ pub struct ShapeCtx {
     pub source: Arc<str>,
 }
 
-/// One claimed unit of shaping: a whole block's kind emission, or one
-/// code line.
+/// One claimed unit of shaping: a whole block's kind emission, one
+/// code line, or one page's worth of export text.
 pub(crate) enum Work {
     Block {
         block: Block,
@@ -53,6 +76,87 @@ pub(crate) enum Work {
         line_height: f32,
         wrap_width: f32,
     },
+    Text {
+        runs: Vec<TextJob>,
+    },
+}
+
+/// One run of free text to shape for emission, self-contained so a
+/// worker touches no layout.
+pub(crate) struct TextJob {
+    pub text: String,
+    pub family: String,
+    pub weight: u16,
+    pub italic: bool,
+    pub size: f32,
+    pub x: f32,
+}
+
+/// One shaped run for emission, split by the face the shaper resolved.
+pub(crate) struct SegmentData {
+    pub face: cosmic_text::fontdb::ID,
+    pub x: f32,
+    pub glyphs: Vec<GlyphData>,
+}
+
+/// One shaped glyph: what to draw, where it sits, how far it advances,
+/// and the byte range of the text it stands for.
+pub(crate) struct GlyphData {
+    pub id: u16,
+    pub x: f32,
+    pub width: f32,
+    pub start: usize,
+    pub end: usize,
+}
+
+/// Shapes one text job the way layout shaped its run, splitting the
+/// glyphs by resolved face: the emission core the pool workers and the
+/// serial fallback share.
+pub(crate) fn shape_text_data(
+    fonts: &mut crate::style::fonts::FontStore,
+    job: &TextJob,
+) -> Vec<SegmentData> {
+    use cosmic_text::{Attrs, Buffer, Family, Metrics, Shaping, Style, Weight};
+    let line_height = crate::layout::metrics::LINE_HEIGHT * job.size;
+    let mut buffer = Buffer::new(&mut fonts.font_system, Metrics::new(job.size, line_height));
+    buffer.set_size(&mut fonts.font_system, None, None);
+    let mut attrs = Attrs::new()
+        .family(Family::Name(&job.family))
+        .weight(Weight(job.weight));
+    if job.italic {
+        attrs = attrs.style(Style::Italic);
+    }
+    buffer.set_text(
+        &mut fonts.font_system,
+        &job.text,
+        &attrs,
+        Shaping::Advanced,
+        None,
+    );
+    buffer.shape_until_scroll(&mut fonts.font_system, false);
+
+    let mut segments: Vec<SegmentData> = Vec::new();
+    for line in buffer.layout_runs() {
+        for glyph in line.glyphs {
+            let open = matches!(segments.last(), Some(s) if s.face == glyph.font_id);
+            if !open {
+                segments.push(SegmentData {
+                    face: glyph.font_id,
+                    x: job.x + glyph.x,
+                    glyphs: Vec::new(),
+                });
+            }
+            let segment = segments.last_mut().expect("just opened");
+            segment.glyphs.push(GlyphData {
+                id: glyph.glyph_id,
+                x: job.x + glyph.x,
+                width: glyph.w,
+                start: glyph.start,
+                end: glyph.end,
+            });
+        }
+    }
+    segments
 }
 
 pub(crate) struct Job {
@@ -62,10 +166,12 @@ pub(crate) struct Job {
     pub work: Work,
 }
 
-/// A shaped step parked for the assembler.
+/// A shaped unit parked for the assembler: a layout step's scratch, or
+/// an emission batch's shaped runs.
 pub(crate) struct Shaped {
     pub scratch: LayoutDoc,
     pub height: f32,
+    pub text: Vec<Vec<SegmentData>>,
 }
 
 struct Shared {
@@ -142,12 +248,12 @@ impl ShapePool {
             + self.shared.ready.lock().expect("pool ready").len()
     }
 
-    /// The shaped step for `key`, if a worker got there first. Entries
-    /// behind `key` are orphans the assembler shaped itself; they drop
-    /// here so the window never silts up.
+    /// The shaped unit for `key`, if a worker got there first. Entries
+    /// behind `key` in its own lane are orphans the assembler shaped
+    /// itself; they drop here so the window never silts up.
     pub(crate) fn take(&self, generation: u64, key: StepKey) -> Option<Shaped> {
         let mut ready = self.shared.ready.lock().expect("pool ready");
-        ready.retain(|(g, k), _| *g == generation && *k >= key);
+        ready.retain(|(g, k), _| *g == generation && (k.lane != key.lane || *k >= key));
         ready.remove(&(generation, key))
     }
 }
@@ -183,6 +289,7 @@ fn worker(shared: Arc<Shared>, mut fonts: crate::style::fonts::FontStore) {
             continue;
         }
         let mut scratch = LayoutDoc::default();
+        let mut text: Vec<Vec<SegmentData>> = Vec::new();
         let height = match &job.work {
             Work::Block {
                 block,
@@ -228,13 +335,23 @@ fn worker(shared: Arc<Shared>, mut fonts: crate::style::fonts::FontStore) {
                 *wrap_width,
                 &mut scratch,
             ),
+            Work::Text { runs } => {
+                text = runs
+                    .iter()
+                    .map(|run| shape_text_data(&mut fonts, run))
+                    .collect();
+                0.0
+            }
         };
         if job.generation == shared.generation.load(Ordering::SeqCst) {
-            shared
-                .ready
-                .lock()
-                .expect("pool ready")
-                .insert((job.generation, job.key), Shaped { scratch, height });
+            shared.ready.lock().expect("pool ready").insert(
+                (job.generation, job.key),
+                Shaped {
+                    scratch,
+                    height,
+                    text,
+                },
+            );
             shared.completed.fetch_add(1, Ordering::SeqCst);
         }
     }

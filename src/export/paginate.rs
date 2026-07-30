@@ -48,7 +48,19 @@ impl Item {
 /// Every run and every image, in document order, grouped into items.
 fn items(layout: &LayoutDoc) -> Vec<Item> {
     let mut out: Vec<Item> = Vec::new();
-    let (mut run, mut image) = (0, 0);
+    group_into(layout, &mut out, &mut 0, &mut 0);
+    out
+}
+
+/// The grouping core, resumable: continues from where the cursors
+/// stopped, growing the last item where new pieces overlap it.
+fn group_into(
+    layout: &LayoutDoc,
+    out: &mut Vec<Item>,
+    run_seen: &mut usize,
+    image_seen: &mut usize,
+) {
+    let (mut run, mut image) = (*run_seen, *image_seen);
     loop {
         let run_top = layout.runs.get(run).map(|r| r.y);
         let image_top = layout.images.get(image).map(|i| i.y);
@@ -94,7 +106,8 @@ fn items(layout: &LayoutDoc) -> Vec<Item> {
             image += 1;
         }
     }
-    out
+    *run_seen = run;
+    *image_seen = image;
 }
 
 /// Grows each item to cover the decoration that belongs to it and hangs
@@ -105,34 +118,42 @@ fn items(layout: &LayoutDoc) -> Vec<Item> {
 /// alone: it can never travel whole, so its lines flow like a
 /// paragraph's instead of dripping one to a page.
 fn extend_items(doc: &Document, layout: &LayoutDoc, content: f32, items: &mut [Item]) {
-    let blocks: Vec<Option<usize>> = items.iter().map(|item| item.block(layout)).collect();
-    for (item, block) in items.iter_mut().zip(blocks) {
-        let row = layout
-            .table_rows
-            .partition_point(|band| band.top <= item.top + SLACK)
-            .saturating_sub(1);
-        if let Some(band) = layout.table_rows.get(row) {
-            let fits = band.bottom - band.top <= content + SLACK;
-            if fits && item.top >= band.top - SLACK && item.top < band.bottom {
-                item.bottom = item.bottom.max(band.bottom);
-            }
-        }
-        // Every code line reserves the panel's closing padding, not just
-        // the block's last: a panel that carries on overleaf closes on
-        // this page too, one padding below whichever line ends it.
-        let code = block
-            .is_some_and(|block| matches!(doc.blocks[block].kind, BlockKind::CodeBlock { .. }));
-        if code {
-            item.bottom += metrics::CODE_PAD;
-        }
-        // A run with an Image block is a placeholder's alt text; the box
-        // closes one padding below it and the fit carries the border too.
-        let placeholder =
-            block.is_some_and(|block| matches!(doc.blocks[block].kind, BlockKind::Image { .. }));
-        if placeholder {
-            item.bottom += metrics::PLACEHOLDER_PAD;
+    for item in items.iter_mut() {
+        item.bottom = extended_bottom(doc, layout, content, item);
+    }
+}
+
+/// One item's extended bottom over its raw shaped one, the value the
+/// fit is measured against.
+fn extended_bottom(doc: &Document, layout: &LayoutDoc, content: f32, item: &Item) -> f32 {
+    let block = item.block(layout);
+    let mut bottom = item.bottom;
+    let row = layout
+        .table_rows
+        .partition_point(|band| band.top <= item.top + SLACK)
+        .saturating_sub(1);
+    if let Some(band) = layout.table_rows.get(row) {
+        let fits = band.bottom - band.top <= content + SLACK;
+        if fits && item.top >= band.top - SLACK && item.top < band.bottom {
+            bottom = bottom.max(band.bottom);
         }
     }
+    // Every code line reserves the panel's closing padding, not just
+    // the block's last: a panel that carries on overleaf closes on
+    // this page too, one padding below whichever line ends it.
+    let code =
+        block.is_some_and(|block| matches!(doc.blocks[block].kind, BlockKind::CodeBlock { .. }));
+    if code {
+        bottom += metrics::CODE_PAD;
+    }
+    // A run with an Image block is a placeholder's alt text; the box
+    // closes one padding below it and the fit carries the border too.
+    let placeholder =
+        block.is_some_and(|block| matches!(doc.blocks[block].kind, BlockKind::Image { .. }));
+    if placeholder {
+        bottom += metrics::PLACEHOLDER_PAD;
+    }
+    bottom
 }
 
 /// Where each block's items begin and end, so the widow rule costs a
@@ -185,8 +206,17 @@ fn rejected(
 /// Where a page starts, given the first item it carries. Decoration that
 /// sits above that item and belongs to it comes too: a continued code
 /// panel keeps its inner padding, and a table row starts at its band so
-/// the stripe is not left behind on the page before.
-fn page_top(doc: &Document, layout: &LayoutDoc, items: &[Item], content: f32, i: usize) -> f32 {
+/// the stripe is not left behind on the page before. `first` marks the
+/// document's own first page, whose top backs up over everything drawn
+/// above its first item.
+fn page_top(
+    doc: &Document,
+    layout: &LayoutDoc,
+    items: &[Item],
+    content: f32,
+    i: usize,
+    first: bool,
+) -> f32 {
     let item = &items[i];
     if let Some(block) = item.block(layout) {
         // A code line starts its page one padding up whether the panel
@@ -215,7 +245,7 @@ fn page_top(doc: &Document, layout: &LayoutDoc, items: &[Item], content: f32, i:
             top = band.top;
         }
     }
-    if i == 0 {
+    if first {
         // Everything above the first item belongs to the first page: a
         // document can open on a panel whose padding sits above its text,
         // and trimming to the item would push it off the sheet.
@@ -241,7 +271,7 @@ pub fn paginate(doc: &Document, layout: &LayoutDoc, geometry: &PageGeometry) -> 
     let mut i = 0;
     let mut cursor = 0;
     while i < items.len() {
-        let top = page_top(doc, layout, &items, content, i);
+        let top = page_top(doc, layout, &items, content, i, i == 0);
         let mut j = i;
         while j < items.len() && items[j].bottom - top <= content + SLACK {
             j += 1;
@@ -296,6 +326,310 @@ pub fn paginate(doc: &Document, layout: &LayoutDoc, geometry: &PageGeometry) -> 
     close_pages(&items, &mut pages);
     place_rects(layout, &mut pages);
     pages
+}
+
+/// Cuts pages incrementally while the layout streams. `advance` reads
+/// the grown layout, closes every page whose break is already decidable
+/// behind the cursor, and answers the pages that became final, in
+/// order; `complete` closes the tail. The pages equal the one-shot
+/// `paginate`'s, whatever the growth cadence: the same grouping, fit,
+/// break and rectangle rules run over the same items, only paced by
+/// what is placed.
+#[derive(Default)]
+pub struct Paginator {
+    /// Items grouped so far; entries before `settled` carry extended
+    /// bottoms and final grouping, the tail past it may still grow.
+    items: Vec<Item>,
+    runs_seen: usize,
+    images_seen: usize,
+    settled: usize,
+    spans: HashMap<usize, (usize, usize)>,
+    /// First item of the open page and the run cursor behind it.
+    next_item: usize,
+    cursor: usize,
+    /// Where the close walk for page bottoms has reached.
+    close_at: usize,
+    /// The rectangle sweep: unswept indices sorted by (y, index), and
+    /// the ones still open across the last page boundary.
+    pending_rects: Vec<usize>,
+    rects_seen: usize,
+    open_rects: Vec<usize>,
+    /// Images carried onto emitted pages, ready to drop.
+    images_done: usize,
+    /// Whether the document's first page has closed, whose top alone
+    /// backs up over everything drawn above its first item.
+    started: bool,
+    emitted: usize,
+}
+
+/// What emitted pages no longer need: the front of each element vector
+/// a fused export may drop once it has drained the paginator.
+pub struct Consumed {
+    pub runs: usize,
+    pub rects: usize,
+    pub images: usize,
+}
+
+impl Paginator {
+    pub fn new() -> Paginator {
+        Paginator::default()
+    }
+
+    pub fn advance(
+        &mut self,
+        doc: &Document,
+        layout: &LayoutDoc,
+        geometry: &PageGeometry,
+        complete: bool,
+    ) -> Vec<Page> {
+        let content = geometry.content_height();
+        group_into(
+            layout,
+            &mut self.items,
+            &mut self.runs_seen,
+            &mut self.images_seen,
+        );
+        self.settle(doc, layout, content, complete);
+        let mut out = Vec::new();
+        while let Some(page) = self.try_close(doc, layout, content, complete) {
+            out.push(page);
+        }
+        if complete && !self.started && self.emitted == 0 && out.is_empty() {
+            let rects = self.assign_rects(layout, 0.0, f32::INFINITY, f32::INFINITY);
+            out.push(Page {
+                top: 0.0,
+                bottom: f32::INFINITY,
+                runs: 0..0,
+                images: Vec::new(),
+                rects,
+            });
+        }
+        self.emitted += out.len();
+        out
+    }
+
+    /// Finalizes items the grouping can no longer touch: extended
+    /// bottoms and the block spans the break rules read.
+    fn settle(&mut self, doc: &Document, layout: &LayoutDoc, content: f32, complete: bool) {
+        let done = if complete {
+            self.items.len()
+        } else {
+            self.items.len().saturating_sub(1)
+        };
+        for index in self.settled..done {
+            let bottom = extended_bottom(doc, layout, content, &self.items[index]);
+            self.items[index].bottom = bottom;
+            if let Some(block) = self.items[index].block(layout) {
+                self.spans
+                    .entry(block)
+                    .and_modify(|span| span.1 = index)
+                    .or_insert((index, index));
+            }
+        }
+        self.settled = done.max(self.settled);
+    }
+
+    /// Whether a page ending before item `j` can be emitted now: its
+    /// break rules and its rectangles need the blocks it touches to be
+    /// behind the pass, or, inside an unquoted code block, one more
+    /// line of lookahead past the break.
+    fn closable(&self, doc: &Document, layout: &LayoutDoc, j: usize, complete: bool) -> bool {
+        if complete {
+            return true;
+        }
+        let Some(block) = self.items[j].block(layout) else {
+            return true;
+        };
+        let behind = layout
+            .block_position(block)
+            .is_some_and(|position| position + 1 < layout.placed_positions());
+        if behind {
+            return true;
+        }
+        let open_code = doc.blocks[block].quote_depth == 0
+            && matches!(doc.blocks[block].kind, BlockKind::CodeBlock { .. });
+        open_code && self.spans.get(&block).is_some_and(|(_, last)| *last > j)
+    }
+
+    /// Closes one page if its break is decidable, mirroring the
+    /// one-shot loop body exactly.
+    fn try_close(
+        &mut self,
+        doc: &Document,
+        layout: &LayoutDoc,
+        content: f32,
+        complete: bool,
+    ) -> Option<Page> {
+        let i = self.next_item;
+        if i >= self.items.len() {
+            return None;
+        }
+        if !complete && i >= self.settled {
+            return None;
+        }
+        let top = page_top(doc, layout, &self.items, content, i, !self.started);
+        let mut j = i;
+        while j < self.settled && self.items[j].bottom - top <= content + SLACK {
+            j += 1;
+        }
+        if j >= self.settled && !complete {
+            // Everything settled still fits; more may join the page.
+            return None;
+        }
+        // An item taller than the whole content box is placed anyway.
+        if j == i {
+            j = i + 1;
+        }
+        if j < self.items.len() {
+            if !self.closable(doc, layout, j, complete) {
+                return None;
+            }
+            let mut candidate = j;
+            loop {
+                if !rejected(doc, layout, &self.items, &self.spans, i, candidate) {
+                    j = candidate;
+                    break;
+                }
+                // Nothing on this page is an acceptable break, so the
+                // natural one stands rather than the page emptying.
+                if candidate <= i + 1 {
+                    break;
+                }
+                candidate -= 1;
+            }
+        }
+        let end = self.items[j - 1].runs.end.max(self.cursor);
+        let images: Vec<ImagePlace> = self.items[i..j]
+            .iter()
+            .flat_map(|item| item.images.iter())
+            .map(|index| scaled(&layout.images[*index], content))
+            .collect();
+        for item in &self.items[i..j] {
+            for &image in &item.images {
+                self.images_done = self.images_done.max(image + 1);
+            }
+        }
+        let (bottom, next_top) = if j < self.items.len() {
+            let next_top = page_top(doc, layout, &self.items, content, j, false);
+            let mut last = self.close_at;
+            while last + 1 < self.items.len() && self.items[last + 1].top < next_top - SLACK {
+                last += 1;
+            }
+            self.close_at = last + 1;
+            (next_top.max(self.items[last].bottom), next_top)
+        } else {
+            self.close_at = self.items.len();
+            (f32::INFINITY, f32::INFINITY)
+        };
+        let rects = self.assign_rects(layout, top, bottom, next_top);
+        self.started = true;
+        let start = self.cursor;
+        self.cursor = end;
+        self.next_item = j;
+        Some(Page {
+            top,
+            bottom,
+            runs: start..end,
+            images,
+            rects,
+        })
+    }
+
+    /// Hands over what the emitted pages no longer need and rebases the
+    /// paginator's indices onto the drained layout: the caller drops
+    /// exactly the answered counts from the front of the element
+    /// vectors before the next advance.
+    pub fn consume(&mut self) -> Consumed {
+        let runs = self.cursor;
+        let images = self.images_done;
+        let rects = self
+            .open_rects
+            .iter()
+            .chain(self.pending_rects.iter())
+            .copied()
+            .min()
+            .unwrap_or(self.rects_seen);
+        let items_done = self.next_item.min(self.close_at);
+        self.items.drain(..items_done);
+        for item in &mut self.items {
+            item.runs = item.runs.start - runs..item.runs.end - runs;
+            for image in &mut item.images {
+                *image -= images;
+            }
+        }
+        self.next_item -= items_done;
+        self.close_at -= items_done;
+        self.settled -= items_done;
+        for span in self.spans.values_mut() {
+            span.0 = span.0.saturating_sub(items_done);
+            span.1 = span.1.saturating_sub(items_done);
+        }
+        self.cursor = 0;
+        self.runs_seen -= runs;
+        self.images_seen -= images;
+        self.images_done = 0;
+        self.rects_seen -= rects;
+        for index in self.open_rects.iter_mut().chain(&mut self.pending_rects) {
+            *index -= rects;
+        }
+        Consumed {
+            runs,
+            rects,
+            images,
+        }
+    }
+
+    /// The rectangle sweep for one closed page, the one-shot
+    /// `place_rects` paced by page: rectangles opening before the next
+    /// page's top join, pieces cut to this page's extent, and whatever
+    /// reaches past the boundary stays open for the next one.
+    fn assign_rects(
+        &mut self,
+        layout: &LayoutDoc,
+        top: f32,
+        bottom: f32,
+        next_top: f32,
+    ) -> Vec<DecoRect> {
+        for index in self.rects_seen..layout.rects.len() {
+            self.pending_rects.push(index);
+        }
+        self.rects_seen = layout.rects.len();
+        self.pending_rects.sort_by(|&a, &b| {
+            layout.rects[a]
+                .y
+                .total_cmp(&layout.rects[b].y)
+                .then(a.cmp(&b))
+        });
+        let opening = self
+            .pending_rects
+            .partition_point(|&index| layout.rects[index].y < next_top);
+        self.open_rects.extend(self.pending_rects.drain(..opening));
+        let mut pieces: Vec<(usize, DecoRect)> = Vec::new();
+        self.open_rects.retain(|&index| {
+            let rect = &layout.rects[index];
+            let rect_bottom = rect.y + rect.height;
+            let y0 = rect.y.max(top);
+            let y1 = rect_bottom.min(bottom);
+            if y1 > y0 {
+                let mut piece = *rect;
+                piece.y = y0;
+                piece.height = y1 - y0;
+                // A cut edge is square, so the panel reads as continuing.
+                if y0 > rect.y {
+                    piece.radius_top = 0.0;
+                }
+                if y1 < rect_bottom {
+                    piece.radius_bottom = 0.0;
+                }
+                pieces.push((index, piece));
+            }
+            rect_bottom > next_top
+        });
+        // Back into layout order: paint order is what stacks a table
+        // stripe under its grid lines.
+        pieces.sort_by_key(|(index, _)| *index);
+        pieces.into_iter().map(|(_, piece)| piece).collect()
+    }
 }
 
 /// An image taller than a whole page cannot be moved anywhere useful, so

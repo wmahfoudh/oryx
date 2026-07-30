@@ -6,15 +6,14 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use oryx::doc::images::MediaCache;
 use oryx::doc::load;
 use oryx::doc::markdown;
 use oryx::doc::model::{BlockKind, Document};
 use oryx::doc::stream::{self, Swap};
-use oryx::export::paginate::paginate;
-use oryx::export::{pdf, ExportSettings, PageGeometry, PageSize};
+use oryx::export::{ExportPass, ExportSettings, PageSize};
 use oryx::layout::{
     layout_begin, layout_more, recolor_batch, LayoutDoc, ShapePool, ViewConfig, OPEN_SLICE,
 };
@@ -137,22 +136,15 @@ pub fn assert_first_frame_is_whole(laid: &Laid, what: &str) {
     );
 }
 
-/// The whole export path a Ctrl+E pays after highlighting settles:
-/// layout at the page width, pagination, and emission to bytes.
+/// The whole export path a Ctrl+E pays after highlighting settles: the
+/// streamed pass the app drives, fused layout, pagination and pooled
+/// emission flushing to a scratch file.
 pub fn measure_export(
     doc: &Document,
     pool: Option<&std::sync::Arc<ShapePool>>,
 ) -> (u128, usize, usize) {
     let mut fonts = FontStore::new();
     let mut media = MediaCache::new(PathBuf::from("."));
-    let theme = Theme::default_dark();
-    let cfg = ViewConfig {
-        body_size: 11.0,
-        code_size: 9.0,
-        zoom: 1.0,
-        ..ViewConfig::default()
-    };
-    let geometry = PageGeometry::new(PageSize::A4, 11.0);
     let settings = ExportSettings {
         body_size: 11.0,
         code_size: 9.0,
@@ -160,26 +152,26 @@ pub fn measure_export(
         page_numbers: true,
         ..ExportSettings::default()
     };
+    let target = std::env::temp_dir().join(format!("oryx-perf-export-{}.pdf", std::process::id()));
     let started = Instant::now();
-    let (mut laid, mut pass) = layout_begin(doc, &cfg, geometry.width);
-    if let Some(pool) = pool {
-        pass.attach_pool(std::sync::Arc::clone(pool));
+    let mut pass = ExportPass::new(&settings, Theme::default_dark(), target.clone());
+    while !pass.is_done() {
+        pass.step(
+            Instant::now() + Duration::from_millis(50),
+            doc,
+            &mut fonts,
+            &mut media,
+            false,
+            pool,
+        );
     }
-    layout_more(
-        doc, &theme, &mut fonts, &mut media, &cfg, &mut laid, &mut pass, None,
-    );
-    let pages = paginate(doc, &laid, &geometry);
-    let count = pages.len();
-    let job = pdf::Job {
-        doc,
-        layout: &laid,
-        theme: &theme,
-        geometry: &geometry,
-        settings: &settings,
-        title: "perf",
-    };
-    let bytes = pdf::build(&job, &pages, &mut fonts, &mut media).expect("the export builds");
-    (started.elapsed().as_millis(), count, bytes.len())
+    let count = pass.finish(doc, &fonts).expect("the export lands");
+    let elapsed = started.elapsed().as_millis();
+    let bytes = std::fs::metadata(&target)
+        .map(|m| m.len() as usize)
+        .unwrap_or(0);
+    std::fs::remove_file(&target).ok();
+    (elapsed, count, bytes)
 }
 
 /// The syntect cost that lazy highlighting moves off the open path:

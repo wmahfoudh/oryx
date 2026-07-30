@@ -69,6 +69,8 @@ impl ExportProgress {
                         progress.done.min(progress.total),
                         progress.total
                     )
+                } else if progress.done > 0 {
+                    format!("{} pages written", progress.done)
                 } else {
                     String::from("Escape cancels")
                 };

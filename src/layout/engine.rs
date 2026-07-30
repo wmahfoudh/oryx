@@ -614,6 +614,18 @@ impl LayoutDoc {
         Some(first.y..last.bottom())
     }
 
+    /// The pass's placement frontier: how many order positions carry an
+    /// entry, the last possibly still filling.
+    pub(crate) fn placed_positions(&self) -> usize {
+        self.table.entries.len()
+    }
+
+    /// A placed block's order position, None before the pass reaches it.
+    pub(crate) fn block_position(&self, block: usize) -> Option<usize> {
+        let position = *self.table.position_of_block.get(block)?;
+        (position != u32::MAX).then_some(position as usize)
+    }
+
     /// The recorded top of a block, and of a line inside a code block,
     /// from the block table: the position of a cold region without its
     /// geometry. None before the pass places the block.
@@ -712,6 +724,24 @@ impl LayoutPass {
     /// band and its margin are measured into the table and dropped.
     pub fn retain_around(&mut self, scroll: f32, viewport_h: f32) {
         self.retain = Some((scroll, viewport_h));
+    }
+
+    /// Shifts the indices the pass holds into the layout's vectors
+    /// after a consumer drained emitted geometry from their front. The
+    /// open code block's panel is never part of what such a consumer
+    /// may drop.
+    pub(crate) fn rebase(&mut self, rects: usize) {
+        if let Some(open) = &mut self.open {
+            open.panel -= rects;
+        }
+    }
+
+    /// The attached pool and the generation this pass last claimed, for
+    /// emission jobs to ride the same claim.
+    pub(crate) fn pool_state(
+        &self,
+    ) -> Option<(std::sync::Arc<crate::layout::pool::ShapePool>, u64)> {
+        self.pool.clone().map(|pool| (pool, self.pool_generation))
     }
 }
 
@@ -1345,10 +1375,7 @@ fn pool_top_up(doc: &Document, pass: &mut LayoutPass) {
             let pad = metrics::CODE_PAD * ctx.cfg.zoom;
             pool.submit(Job {
                 generation: pass.pool_generation,
-                key: StepKey {
-                    position: pass.seed_position,
-                    line: line_index,
-                },
+                key: StepKey::step(pass.seed_position, line_index),
                 ctx: std::sync::Arc::clone(&ctx),
                 work: Work::CodeLine {
                     line: line.to_string(),
@@ -1374,7 +1401,7 @@ fn pool_top_up(doc: &Document, pass: &mut LayoutPass) {
             let (x_base, avail) = block_geometry(block, pass.margin, pass.content_width, &ctx.cfg);
             pool.submit(Job {
                 generation: pass.pool_generation,
-                key: StepKey { position, line: 0 },
+                key: StepKey::step(position, 0),
                 ctx: std::sync::Arc::clone(&ctx),
                 work: Work::Block {
                     block: block.clone(),
@@ -1622,7 +1649,7 @@ fn place_block(
     if let Some(shaped) = pass
         .pool
         .as_ref()
-        .and_then(|pool| pool.take(pass.pool_generation, StepKey { position, line: 0 }))
+        .and_then(|pool| pool.take(pass.pool_generation, StepKey::step(position, 0)))
     {
         pass.scratch = scratch;
         let mut ready = shaped.scratch;
@@ -1993,6 +2020,23 @@ impl LayoutDoc {
         self.code_lines.append(&mut assembly.doc.code_lines);
     }
 
+    /// Drops emitted geometry from the vectors' front: the fused
+    /// export's drain behind its pagination cursor. Code line records
+    /// fully behind the run frontier go with it, the rest shift. The
+    /// caller rebases everything of its own that indexes the vectors.
+    pub(crate) fn drain_front(&mut self, runs: usize, rects: usize, images: usize) {
+        debug_assert!(self.window.is_none(), "the drain and the window exclude");
+        let code = self.code_lines.partition_point(|c| c.runs.end <= runs);
+        self.runs.drain(..runs);
+        self.rects.drain(..rects);
+        self.images.drain(..images);
+        self.code_lines.drain(..code);
+        for record in &mut self.code_lines {
+            record.runs = record.runs.start - runs..record.runs.end - runs;
+        }
+        self.index = YIndex::default();
+    }
+
     /// Rebuilds the side buffer over the live references once evictions
     /// have left it mostly garbage. The threshold keeps the walk off
     /// every frame.
@@ -2079,7 +2123,7 @@ fn seed_plan(
             }
             pool.submit(Job {
                 generation,
-                key: StepKey { position, line },
+                key: StepKey::step(position, line),
                 ctx: std::sync::Arc::clone(ctx),
                 work: Work::CodeLine {
                     line: text.to_string(),
@@ -2123,7 +2167,7 @@ fn seed_plan(
         let (x_base, avail) = block_geometry(block, table.margin, table.content_width, &ctx.cfg);
         pool.submit(Job {
             generation,
-            key: StepKey { position, line: 0 },
+            key: StepKey::step(position, 0),
             ctx: std::sync::Arc::clone(ctx),
             work: Work::Block {
                 block: block.clone(),
@@ -2283,7 +2327,7 @@ fn replay_position(
             out,
         );
     } else {
-        match take(StepKey { position, line: 0 }) {
+        match take(StepKey::step(position, 0)) {
             Some(shaped) => {
                 let mut ready = shaped.scratch;
                 out.splice(&mut ready, entry.content_y);
@@ -2369,7 +2413,7 @@ fn replay_code_lines(
         let top = code_line_y(base, line, entry.line_height, extra);
         let text = source_lines.line(&doc.source, line);
         if !text.is_empty() {
-            match take(StepKey { position, line }) {
+            match take(StepKey::step(position, line)) {
                 Some(shaped) => {
                     let mut ready = shaped.scratch;
                     out.splice(&mut ready, top);
@@ -2623,10 +2667,7 @@ fn place_code_line(
     let code_mark = out.code_lines.len();
     let mut advance = open.line_height;
     if !line.is_empty() {
-        let key = StepKey {
-            position: open.position,
-            line: open.line,
-        };
+        let key = StepKey::step(open.position, open.line);
         let pooled = pass
             .pool
             .as_ref()
