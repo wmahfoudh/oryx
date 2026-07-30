@@ -189,6 +189,25 @@ fn outline_current(
     entry
 }
 
+/// A link target naming a file on disk: resolved against the document's
+/// folder and split from its `#fragment`. Anchors, URLs, schemes, and
+/// paths that do not exist answer None. `%20` decodes, the one escape
+/// README links carry in practice.
+fn file_link_target(target: &str, base: Option<&Path>) -> Option<(PathBuf, Option<String>)> {
+    if target.starts_with('#') || target.contains("://") || target.contains(':') {
+        return None;
+    }
+    let (path_part, fragment) = match target.split_once('#') {
+        Some((p, f)) => (p, Some(f.to_string())),
+        None => (target, None),
+    };
+    if path_part.is_empty() {
+        return None;
+    }
+    let path = base?.join(path_part.replace("%20", " "));
+    path.is_file().then_some((path, fragment))
+}
+
 fn window_title(path: Option<&Path>) -> String {
     match path.and_then(|p| p.file_name()).and_then(|n| n.to_str()) {
         Some(name) => format!("{name} \u{00B7} oryx"),
@@ -1605,6 +1624,20 @@ impl App {
             if let Err(err) = open::that_detached(&target) {
                 eprintln!("oryx: cannot open {target}: {err}");
             }
+        } else if let Some((path, fragment)) =
+            file_link_target(&target, self.path.as_ref().and_then(|p| p.parent()))
+        {
+            // A relative link to a sibling file: displayable files open
+            // in place, anything else goes to the system handler. A
+            // fragment lands once the new document's layout reaches it.
+            if load::is_text_file(&path) {
+                self.open_file(&path, false);
+                if let Some(fragment) = fragment {
+                    self.pending_anchor = Some(format!("#{fragment}"));
+                }
+            } else if let Err(err) = open::that_detached(&path) {
+                eprintln!("oryx: cannot open {}: {err}", path.display());
+            }
         } else if let Some(block) = self.anchor_block(&target) {
             // The heading exists but is not placed: folded away, beyond
             // the pass, or both. Reveal opens the chain and the pending
@@ -2339,6 +2372,52 @@ impl ApplicationHandler for App {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn file_links_resolve_against_the_document_folder() {
+        use std::path::{Path, PathBuf};
+        let dir = std::env::temp_dir().join(format!("oryx-link-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("docs")).unwrap();
+        std::fs::write(dir.join("SYNTAX.md"), "# s").unwrap();
+        std::fs::write(dir.join("docs/deep guide.md"), "# g").unwrap();
+        let base = Some(dir.as_path());
+
+        let (path, fragment) = super::file_link_target("SYNTAX.md", base).expect("a sibling file");
+        assert_eq!(path, dir.join("SYNTAX.md"));
+        assert_eq!(fragment, None);
+
+        let (path, fragment) =
+            super::file_link_target("docs/deep%20guide.md#tables", base).expect("nested, spaced");
+        assert_eq!(path, dir.join("docs/deep guide.md"));
+        assert_eq!(fragment.as_deref(), Some("tables"));
+
+        assert_eq!(
+            super::file_link_target("#anchor", base),
+            None,
+            "anchors pass"
+        );
+        assert_eq!(
+            super::file_link_target("https://example.com/a.md", base),
+            None,
+            "urls pass"
+        );
+        assert_eq!(
+            super::file_link_target("mailto:x@y.z", base),
+            None,
+            "schemes pass"
+        );
+        assert_eq!(
+            super::file_link_target("missing.md", base),
+            None,
+            "a file that is not there stays a dead link"
+        );
+        assert_eq!(
+            super::file_link_target("SYNTAX.md", None::<&Path>.map(PathBuf::from).as_deref()),
+            None,
+            "no document folder, no resolution"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn window_title_carries_the_file_name() {
         use std::path::Path;
