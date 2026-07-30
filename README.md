@@ -4,7 +4,7 @@
 
 **A fast, native viewer for markdown and code.**
 
-*Open it. Read it. Export it. Close it. All in seconds, in one small binary.*
+*Open it. Read it. Export it. Close it.<br> All in seconds, in one small binary.*
 
 ![Platforms](https://img.shields.io/badge/Platforms-Linux%20%7C%20Windows%20%7C%20macOS-blue)
 ![License](https://img.shields.io/badge/License-GPL--3.0-orange)
@@ -18,15 +18,16 @@
 
 <br>
 
-![Oryx rendering a markdown document](screenshots/formatting.png)
+![Oryx rendering a markdown document](screenshots/hero.png)
 
 </div>
 
 ## Why Oryx
 
-Oryx is built mainly for the reading case: the file you want to open fast, enjoy reading, maybe export to PDF and close, without an editor or a browser tab in the way.
+Oryx is built mainly for the reading case: the file you want to open fast, enjoy reading, themed as per your taste, maybe export to PDF and close, without an editor or a browser tab in the way.
 
 - **Instant**: A document is on screen in well under 100 ms from cold, even an 8 MB file.
+- **Light**: Memory stays flat as you scroll, whatever the file size.
 - **Distraction-free**: No panes, no toolbars, no menus. `F1` lists the shortcuts, `Esc` closes whatever is open.
 - **Beautiful**: 31 themes addressing 51 color roles, for reading and for PDF export alike.
 - **Self-contained**: One binary and a folder of themes. No browser engine, no runtime, no GPU requirement.
@@ -56,8 +57,8 @@ All five GitHub alert kinds are styled, each with its own color and title. A YAM
 
 ## Tools
 
-- **Find in document**: `Ctrl+F` searches text. The search is smart about case: `oryx` matches Oryx, ORYX and oryx, while `Oryx` performs an exact match. A match can cross styling, so `fast viewer` is found even when it was written as **fast** *viewer*.
-- **Select and copy**: `Ctrl+C` copies a selection as plain text. `Ctrl+Shift+C` copies the original markdown of the selection.
+- **Find in document**: `Ctrl+F` searches text. The search is smart about case: `oryx` matches Oryx, ORYX and oryx, while `Oryx` performs an exact match. A match can cross styling, so `fast viewer` is found even when it was written as **fast** *viewer*, and it can cross a wrapped line. The whole document is searchable even while a big file is still loading.
+- **Select and copy**: `Ctrl+C` copies a selection as plain text. `Ctrl+Shift+C` copies the original markdown of the selection. Select all is instant at any file size, a selection survives zooming, theme switches and window resizes, and both copies work before a big file has finished loading.
 - **Sidebar**: A folder sidebar on `Ctrl+B` shows the tree around the open file and can be driven entirely from the keyboard.
 - **Open file**: `Ctrl+O` opens the native file dialog.
 - **Live reload**: `F5` reloads a file being edited elsewhere.
@@ -82,7 +83,7 @@ Nine themes are original designs: `oryx-light` and its dark twin `oryx-dark`, `o
 
 `Ctrl+Shift+E` opens the export settings: theme, body font and size, code font and size, page size and page numbers. They are kept apart from the app's own appearance and remembered between runs, so reading in a dark theme at 22 points and exporting in a light one at 11 needs no switching back and forth.
 
-`Ctrl+E` exports the document and asks where to save it. The page carries the document as it looks on screen with the configured export theme. Headings become the outline a PDF viewer navigates by, and the fonts are embedded.
+`Ctrl+E` exports the document and asks where to save it. The page carries the document as it looks on screen with the configured export theme. Headings become the outline a PDF viewer navigates by, and the fonts are embedded. Emoji render in the PDF as images, so a document full of them exports fine.
 
 **Care is taken so that**:
 
@@ -157,18 +158,21 @@ oryx --version          # print the version
 
 ## Performance
 
-For a big markdown file, Oryx parses only its first screens before the first paint and the rest arrives from a background thread. Layout shapes on all CPU cores, so the wash-in below the first screens and every zoom or resize is two to three times faster than the previous release. Painting covers a band around the viewport, a couple of screens either side, and scrolling inside that band is a memory copy, so the cost of a scroll frame does not depend on how long the document is. Syntax highlighting and the layout below follow in the background, a slice at a time, without moving anything already on screen. The event loop wakes only for input, and an idle window uses **no CPU at all**.
+For a big markdown file, Oryx parses only its first screens before the first paint and the rest arrives from a background thread. Layout shapes on all CPU cores, so the wash-in below the first screens and every zoom or resize uses the whole machine. Only the part of the document around the reading position is kept in drawn form; scrolling rebuilds the landing from recorded positions, identically, in about a millisecond, so memory stays flat however long the document is. Painting covers a band around the viewport, a couple of screens either side, and scrolling inside that band is a memory copy, so the cost of a scroll frame does not depend on how long the document is. Syntax highlighting and the layout below follow in the background, a slice at a time, without moving anything already on screen. A PDF export streams pages to disk as they are laid out, so even a five-thousand-page export runs in a few megabytes of working memory. The event loop wakes only for input, and an idle window uses **no CPU at all**.
 
 Measured on a 2019 Linux laptop, release build. First frame is cold launch to first paint; the export column is the export itself, measured after syntax highlighting has settled:
 
 | Document | First frame | PDF export |
 |---|---|---|
-| 1 MB source file | **80 ms** | 1.0 s |
-| 8 MB source file | **85 ms** | 8.2 s |
-| 1 MB markdown | **80 ms** | 1.4 s |
-| 8 MB markdown | **80 ms** | 9.8 s |
+| 1 MB source file | **80 ms** | 1.3 s |
+| 8 MB source file | **85 ms** | 10.2 s |
+| 1 MB markdown | **80 ms** | 1.2 s |
+| 8 MB markdown | **80 ms** | 10.7 s |
 
-The 8 MB markdown export writes a 9219-page file. A performance test in the repository checks the startup, relayout, paint and export timings.
+The 8 MB markdown export writes a 9219-page file. While open, the 8 MB markdown file reads in about 200 MB of memory and the 8 MB source file in about 90 MB. Performance tests in the repository check the startup, relayout, paint and export timings and the memory figures.
+
+> [!NOTE]
+> Oryx is not a markdown-to-PDF converter. Its export reproduces the page you read, pixel for pixel: the theme, every shaped glyph, syntax colors for close to a hundred languages, images, links, the outline and the embedded fonts, at a millisecond or two per finished page whatever the document size. Raw conversion without any of that is far faster, a few milliseconds for a whole small file, and it is a different job.
 
 ## Limits
 
@@ -177,7 +181,6 @@ Oryx is built for everyday documents, and some things are out of scope (for the 
 - It does not edit files.
 - Math is drawn as styled text with real symbols, not fully typeset.
 - On a file several megabytes long, the colors and the layout below the first screens take a moment to catch up. An export waits for syntax highlighting to finish before it writes, so on the 8 MB file the wall time is roughly double the export column.
-- Memory grows with the file. An 8 MB document costs a few hundred megabytes while it is open.
 - The implemented HTML is a deliberate subset. No HTML tables, no collapsible sections.
 - Remote images ride the operating system's TLS stack, which on Linux means it needs the OpenSSL library (normally shipped with every distro). Without it, badges show placeholders but everything else works.
 - macOS compiles but is untested, and there is no packaged build.
@@ -206,6 +209,8 @@ DejaVu Sans and Courier Prime are embedded in the binary. DejaVu is distributed 
 - Flexoki dark and light by Steph Ango ([stephango.com/flexoki](https://stephango.com/flexoki))
 - GitHub Light ([primer/primitives](https://github.com/primer/primitives))
 
+<br>
+    
 </details>
 
 <div align="center">
