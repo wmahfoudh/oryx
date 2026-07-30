@@ -41,7 +41,7 @@ Headings, bold, italic, strikethrough, inline code, links and bare URLs, nested 
 
 ### Code, highlighted
 
-Fenced blocks get a bordered panel and syntax colors for the languages most people write, and a line too long for the panel wraps inside it. Oryx also opens source files directly and renders the whole file as one highlighted document. Close to a hundred extensions carry colors, from Rust and Python through Haskell, LaTeX, Makefiles and diffs. Any other text file opens in the code font, and a binary is announced in one line.
+Fenced blocks get a bordered panel and syntax colors for the languages most people write, and a line too long for the panel wraps inside it. Oryx also opens source files directly and renders the whole file as one highlighted document. Over a hundred extensions carry colors, from Rust and Python through TypeScript, Kotlin, Swift, Terraform and Zig, and a `Dockerfile` or a `Makefile` is recognized by its name alone. Any other text file opens in the code font, and a binary is announced in one line.
 
 ![Oryx rendering highlighted code](screenshots/code.png)
 
@@ -51,15 +51,15 @@ All five GitHub alert kinds are styled, each with its own color and title. A YAM
 
 **Images and badges** render in place: PNG, JPEG, GIF, WebP or SVG. Remote images are fetched in the background and cached on disk, so a README covered in badges comes up immediately the second time it is opened, and keeps working offline. If a path is broken, it gets a placeholder carrying the alt text.
 
-**Basic HTML** is handled too: centered blocks, images at a set width or height, rows of clickable badges, line breaks, and the inline tags down to `sub` and `sup`.
+**Embedded HTML** covers what GitHub renders: tables with or without a header row, collapsible `<details>` sections, HTML headings, lists and quotes, definition lists, centered blocks, images at a set width or height, rows of clickable badges, and the inline tags down to `mark`, `kbd` and `small`. Search sees into a closed section, and jumping to a match unfolds it.
 
 ![Oryx rendering a GitHub style README](screenshots/github.png)
 
 ## Tools
 
 - **Find in document**: `Ctrl+F` searches text. The search is smart about case: `oryx` matches Oryx, ORYX and oryx, while `Oryx` performs an exact match. A match can cross styling, so `fast viewer` is found even when it was written as **fast** *viewer*, and it can cross a wrapped line. The whole document is searchable even while a big file is still loading.
-- **Select and copy**: `Ctrl+C` copies a selection as plain text. `Ctrl+Shift+C` copies the original markdown of the selection. Select all is instant at any file size, a selection survives zooming, theme switches and window resizes, and both copies work before a big file has finished loading.
-- **Sidebar**: A folder sidebar on `Ctrl+B` shows the tree around the open file and can be driven entirely from the keyboard.
+- **Select and copy**: `Ctrl+C` copies a selection as plain text. `Ctrl+Shift+C` copies the original markdown of the selection. A double click selects the word, a triple click the paragraph, the code line or the table cell. Select all is instant at any file size, a selection survives zooming, theme switches and window resizes, and both copies work before a big file has finished loading.
+- **Sidebar**: `Ctrl+B` opens a two-tab panel: the folder tree around the open file, and an outline of the document's headings that tracks the reading position, folds its branches, and jumps on a click. Both tabs drive entirely from the keyboard.
 - **Open file**: `Ctrl+O` opens the native file dialog.
 - **Live reload**: `F5` reloads a file being edited elsewhere.
 - **Zoom**: `Ctrl+Plus` (in) and `Ctrl+Minus` (out).
