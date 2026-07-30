@@ -25,6 +25,7 @@ use oryx::style::highlight::{Highlighter, PendingBlock};
 use oryx::style::theme::{self, Rgba, Theme};
 use oryx::ui::export::{ExportDialog, ExportProgress};
 use oryx::ui::help::Help;
+use oryx::ui::outline::OutlineTree;
 use oryx::ui::overlay::{Action, Overlay, OverlayResult};
 use oryx::ui::scrollbar;
 use oryx::ui::search::{self, SearchState};
@@ -112,6 +113,7 @@ pub fn run(path: Option<PathBuf>, theme_name: Option<String>) -> anyhow::Result<
         .unwrap_or(1)
         .clamp(1, 8);
     let pool = Arc::new(ShapePool::new(pool_width, &fonts.seed()));
+    let outline = OutlineTree::build(&document);
     let mut app = App {
         gfx: None,
         document,
@@ -155,6 +157,7 @@ pub fn run(path: Option<PathBuf>, theme_name: Option<String>) -> anyhow::Result<
         pre_edit: None,
         overlay_canvas: None,
         sidebar: None,
+        outline,
         sidebar_canvas: None,
         search: None,
         search_canvas: None,
@@ -166,6 +169,25 @@ pub fn run(path: Option<PathBuf>, theme_name: Option<String>) -> anyhow::Result<
 }
 
 /// Window title: the open file's name, path stripped.
+/// The outline entry carrying the reading-position highlight, with a
+/// minimal list scroll when the section changes. Free-standing so the
+/// redraw can call it under its buffer borrows.
+fn outline_current(
+    outline: &mut OutlineTree,
+    side: &Sidebar,
+    lay: &LayoutDoc,
+    scroll_y: f32,
+) -> Option<usize> {
+    if side.tab() != sidebar::Tab::Outline {
+        return None;
+    }
+    let entry = outline
+        .current_of(scroll_y, |b| lay.approx_top(b, 0))
+        .map(|e| outline.visible_entry(e));
+    outline.track_current(entry, sidebar::ROW_H, side.list_h());
+    entry
+}
+
 fn window_title(path: Option<&Path>) -> String {
     match path.and_then(|p| p.file_name()).and_then(|n| n.to_str()) {
         Some(name) => format!("{name} \u{00B7} oryx"),
@@ -284,6 +306,9 @@ struct App {
     view_dirty: bool,
     /// Folder sidebar while open; the document lays out beside it.
     sidebar: Option<Sidebar>,
+    /// The document's heading outline, behind the sidebar's second tab.
+    /// Rebuilt with the document, extended as the parse worker delivers.
+    outline: OutlineTree,
     /// Reused sidebar canvas, mirroring the overlay canvas mechanics.
     sidebar_canvas: Option<OverlayCanvas>,
     /// Find session while the search bar is open.
@@ -762,6 +787,7 @@ impl App {
                 // The tail's group ids index the full parse's vector;
                 // toggles already made on prefix groups carry over.
                 self.document.details = stream::adopt_details(&self.document.details, details);
+                self.outline.extend(&self.document);
                 self.pass
                     .as_mut()
                     .is_some_and(|pass| layout_extend(&self.document, pass))
@@ -769,6 +795,7 @@ impl App {
             stream::Swap::Replace(blocks) => {
                 self.document.blocks = blocks;
                 self.document.details = details;
+                self.outline = OutlineTree::build(&self.document);
                 false
             }
         };
@@ -973,6 +1000,67 @@ impl App {
         config::save(&self.config);
     }
 
+    /// Routes a click inside the panel: a tab switch persists, a file
+    /// open runs the browse bookkeeping, an outline jump rides the
+    /// anchor path.
+    fn sidebar_click(&mut self, x: f32, y: f32) {
+        let Some(side) = self.sidebar.as_mut() else {
+            return;
+        };
+        let before = side.root().to_path_buf();
+        let click = side.click(x, y, &mut self.outline);
+        let after = side.root().to_path_buf();
+        let tab = side.tab();
+        if after != before {
+            self.remember_dir(&after);
+        }
+        match click {
+            sidebar::SideClick::Open(path) => self.open_file(&path, false),
+            sidebar::SideClick::Jump(block) => self.jump_to_heading(block),
+            sidebar::SideClick::Tab => {
+                self.config.sidebar_tab = tab;
+                config::save(&self.config);
+            }
+            sidebar::SideClick::None => {}
+        }
+        self.request_redraw();
+    }
+
+    /// Moves the active tab's keyboard selection.
+    fn sidebar_move(&mut self, delta: i32) {
+        let Some(side) = self.sidebar.as_mut() else {
+            return;
+        };
+        match side.tab() {
+            sidebar::Tab::Files => side.move_selection(delta),
+            sidebar::Tab::Outline => {
+                let list_h = side.list_h();
+                self.outline.move_selection(delta, sidebar::ROW_H, list_h);
+            }
+        }
+        self.request_redraw();
+    }
+
+    /// Scrolls to a heading block: a placed anchor jumps now; a folded
+    /// or unplaced one reveals and lands through the pending target.
+    fn jump_to_heading(&mut self, block: usize) {
+        let Some(BlockKind::Heading { anchor, .. }) =
+            self.document.blocks.get(block).map(|b| &b.kind)
+        else {
+            return;
+        };
+        let target = format!("#{anchor}");
+        if let Some(y) = self.layout.as_ref().and_then(|l| l.anchor_y(&target)) {
+            self.scroll_to(y);
+            return;
+        }
+        if self.document.reveal(block) {
+            self.restart_layout();
+        }
+        self.pending_anchor = Some(target);
+        self.request_redraw();
+    }
+
     /// Runs a sidebar action and persists the tree's root when it moved.
     fn sidebar_action(&mut self, act: impl FnOnce(&mut Sidebar) -> Option<PathBuf>) {
         let Some(side) = self.sidebar.as_mut() else {
@@ -1016,6 +1104,7 @@ impl App {
         if open && self.sidebar.is_none() {
             let dir = config::browse_dir([self.document_dir(), self.remembered_dir()]);
             let mut side = Sidebar::new(&dir);
+            side.set_tab(self.config.sidebar_tab);
             if let Some(path) = &self.path {
                 side.set_current(path);
             }
@@ -1067,6 +1156,7 @@ impl App {
                 self.parse_pending = false;
             }
         }
+        self.outline = OutlineTree::build(&self.document);
         self.path = Some(path.to_path_buf());
         let dir = path
             .parent()
@@ -1090,7 +1180,9 @@ impl App {
         self.pending_anchor = None;
         if let Some(side) = self.sidebar.as_mut() {
             if reroot && side.root() != dir {
+                let tab = side.tab();
                 *side = Sidebar::new(&dir);
+                side.set_tab(tab);
             }
             side.set_current(&path);
         }
@@ -1846,6 +1938,7 @@ impl App {
             scrollbar::draw(&mut buffer, size.width, size.height, thumb, color);
         }
         if let Some(side) = self.sidebar.as_mut() {
+            let current = outline_current(&mut self.outline, side, lay, self.scroll_y);
             let fits = self
                 .sidebar_canvas
                 .as_ref()
@@ -1856,7 +1949,7 @@ impl App {
             }
             if let Some((canvas, stale)) = self.sidebar_canvas.as_mut() {
                 let mut painter = Painter::new(canvas, &mut self.fonts, stale.take());
-                side.draw(&mut painter, &self.theme);
+                side.draw(&mut painter, &self.theme, &mut self.outline, current);
                 painter.composite(&mut buffer, size.width);
                 *stale = painter.dirty();
             }
@@ -2029,21 +2122,25 @@ impl ApplicationHandler for App {
                     }
                     _ if self.search_key(&logical_key, ctrl, shift) => {}
                     Some(Command::LineUp) if self.sidebar.is_some() => {
-                        if let Some(side) = self.sidebar.as_mut() {
-                            side.move_selection(-1);
-                        }
-                        self.request_redraw();
+                        self.sidebar_move(-1);
                     }
                     Some(Command::LineDown) if self.sidebar.is_some() => {
-                        if let Some(side) = self.sidebar.as_mut() {
-                            side.move_selection(1);
-                        }
-                        self.request_redraw();
+                        self.sidebar_move(1);
                     }
                     None if self.sidebar.is_some()
                         && matches!(logical_key, Key::Named(NamedKey::Enter)) =>
                     {
-                        self.sidebar_action(|side| side.enter());
+                        let outline_tab = self
+                            .sidebar
+                            .as_ref()
+                            .is_some_and(|s| s.tab() == sidebar::Tab::Outline);
+                        if outline_tab {
+                            if let Some(block) = self.outline.selected_block() {
+                                self.jump_to_heading(block);
+                            }
+                        } else {
+                            self.sidebar_action(|side| side.enter());
+                        }
                     }
                     Some(cmd) => self.run_command(cmd, event_loop),
                     None => {}
@@ -2059,7 +2156,7 @@ impl ApplicationHandler for App {
                     let result = overlay.scroll(lines);
                     self.overlay_result(result);
                 } else if let Some(side) = self.sidebar.as_mut().filter(|_| over_sidebar) {
-                    side.wheel(lines * 3.0);
+                    side.wheel(lines * 3.0, &mut self.outline);
                     self.request_redraw();
                 } else {
                     self.scroll_by(lines * 3.0 * self.line_step());
@@ -2097,7 +2194,7 @@ impl ApplicationHandler for App {
                     } else if self.sidebar_edge_press() {
                     } else if (self.cursor.x as f32) < self.inset() && self.sidebar.is_some() {
                         let (x, y) = (self.cursor.x as f32, self.cursor.y as f32);
-                        self.sidebar_action(|side| side.click(x, y));
+                        self.sidebar_click(x, y);
                     } else {
                         self.scrollbar_press();
                         if self.drag.is_none() {

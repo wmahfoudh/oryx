@@ -27,6 +27,8 @@ pub struct Config {
     /// frame, so a drag does not hammer the disk.
     pub sidebar_open: bool,
     pub sidebar_width: f32,
+    /// The panel tab last active, so the sidebar reopens where it was.
+    pub sidebar_tab: crate::ui::sidebar::Tab,
     /// How the reader last exported; None until the first export, which
     /// seeds it from the fields above. A table, so it follows the plain
     /// values and precedes the window.
@@ -83,6 +85,7 @@ impl Default for Config {
             last_dir: String::new(),
             sidebar_open: false,
             sidebar_width: crate::ui::sidebar::DEFAULT_WIDTH,
+            sidebar_tab: crate::ui::sidebar::Tab::Files,
             export: None,
             window: None,
         }
@@ -187,6 +190,7 @@ mod tests {
             last_dir: "/home/user/notes".to_string(),
             sidebar_open: true,
             sidebar_width: 320.0,
+            sidebar_tab: crate::ui::sidebar::Tab::Outline,
             export: None,
             window: None,
         };
@@ -209,6 +213,11 @@ mod tests {
         assert_eq!(loaded.theme, "nord");
         assert!(!loaded.sidebar_open, "closed until the reader opens it");
         assert_eq!(loaded.sidebar_width, crate::ui::sidebar::DEFAULT_WIDTH);
+        assert_eq!(
+            loaded.sidebar_tab,
+            crate::ui::sidebar::Tab::Files,
+            "a config predating the tab field defaults to Files"
+        );
     }
 
     #[test]

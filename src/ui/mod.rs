@@ -1,5 +1,6 @@
 pub mod export;
 pub mod help;
+pub mod outline;
 pub mod overlay;
 pub mod scrollbar;
 pub mod search;

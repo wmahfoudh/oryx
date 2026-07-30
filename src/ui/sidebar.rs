@@ -5,10 +5,13 @@
 
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
+
 use crate::doc::load::{self, FileKind};
 use crate::paint::painter::Painter;
 use crate::style::fonts::BODY_FAMILY;
 use crate::style::theme::{Rgba, Theme};
+use crate::ui::outline::OutlineTree;
 
 /// Panel width in pixels for a reader who has never dragged the edge.
 pub const DEFAULT_WIDTH: f32 = 260.0;
@@ -21,12 +24,71 @@ const MIN_DOC: f32 = 240.0;
 /// Half-width of the grab zone straddling the right edge.
 pub const GRAB: f32 = 4.0;
 
-const ROW_H: f32 = 30.0;
+pub const ROW_H: f32 = 30.0;
 const PAD: f32 = 10.0;
 const INDENT: f32 = 14.0;
 const TEXT_SIZE: f32 = 15.0;
 /// Room the type icon column takes before a row's name.
 const ICON_W: f32 = 18.0;
+/// Height of the caption row naming the two tabs. Chrome, like the row
+/// metrics: fixed against zoom.
+pub const CAPTION_H: f32 = 34.0;
+/// Dead zone either side of the caption row's middle.
+const CAPTION_GAP: f32 = 3.0;
+
+/// Which panel tab is active; persisted in config.
+#[derive(Debug, PartialEq, Eq, Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Tab {
+    #[default]
+    Files,
+    Outline,
+}
+
+/// What a click inside the panel asks the app to do.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SideClick {
+    None,
+    /// The active tab switched; the app persists it.
+    Tab,
+    /// Open this file in the document area.
+    Open(PathBuf),
+    /// Scroll the document to this heading block.
+    Jump(usize),
+}
+
+/// The tab a click at panel coordinates lands on; None outside the
+/// caption row and in the dead zone between the two captions.
+pub fn caption_hit(width: f32, x: f32, y: f32) -> Option<Tab> {
+    if !(0.0..CAPTION_H).contains(&y) {
+        return None;
+    }
+    let mid = width / 2.0;
+    if x >= PAD && x < mid - CAPTION_GAP {
+        Some(Tab::Files)
+    } else if x >= mid + CAPTION_GAP && x < width - PAD {
+        Some(Tab::Outline)
+    } else {
+        None
+    }
+}
+
+/// Shortens text with a trailing ellipsis to fit `avail`, measured by
+/// the caller's closure so the fitting stays pure and testable.
+pub fn fit(text: &str, avail: f32, mut measure: impl FnMut(&str) -> f32) -> String {
+    if measure(text) <= avail {
+        return text.to_string();
+    }
+    let mut cut = text.to_string();
+    while !cut.is_empty() {
+        cut.pop();
+        let candidate = format!("{cut}\u{2026}");
+        if measure(&candidate) <= avail {
+            return candidate;
+        }
+    }
+    "\u{2026}".to_string()
+}
 
 /// A width the panel may actually take, given the window it sits in. The
 /// window bound wins over `MIN_WIDTH` only when the window is too narrow
@@ -90,6 +152,8 @@ pub struct Entry {
 
 pub struct Sidebar {
     width: f32,
+    /// The active tab; the caption row switches it.
+    tab: Tab,
     root: PathBuf,
     entries: Vec<Entry>,
     selected: usize,
@@ -163,6 +227,7 @@ impl Sidebar {
     pub fn new(root: &Path) -> Sidebar {
         Sidebar {
             width: DEFAULT_WIDTH,
+            tab: Tab::Files,
             root: root.to_path_buf(),
             entries: tree(root),
             selected: 0,
@@ -170,6 +235,19 @@ impl Sidebar {
             scroll: 0.0,
             list_h: 0.0,
         }
+    }
+
+    pub fn tab(&self) -> Tab {
+        self.tab
+    }
+
+    pub fn set_tab(&mut self, tab: Tab) {
+        self.tab = tab;
+    }
+
+    /// Visible list height below the caption row, from the last draw.
+    pub fn list_h(&self) -> f32 {
+        self.list_h
     }
 
     /// Rebuilds the tree one level up, keeping the folder just left
@@ -281,20 +359,67 @@ impl Sidebar {
         }
     }
 
-    /// Row activation from a click inside the panel.
-    pub fn click(&mut self, _x: f32, y: f32) -> Option<PathBuf> {
-        let index = ((y - PAD + self.scroll) / ROW_H).floor();
-        if index < 0.0 || index as usize >= self.entries.len() {
-            return None;
+    /// A click inside the panel: the caption row switches tabs, a file
+    /// row opens or expands, an outline row folds or jumps.
+    pub fn click(&mut self, x: f32, y: f32, outline: &mut OutlineTree) -> SideClick {
+        if let Some(tab) = caption_hit(self.width, x, y) {
+            if tab != self.tab {
+                self.tab = tab;
+                return SideClick::Tab;
+            }
+            return SideClick::None;
         }
-        self.activate(index as usize)
+        match self.tab {
+            Tab::Files => {
+                let index = ((y - PAD - CAPTION_H + self.scroll) / ROW_H).floor();
+                if index < 0.0 || index as usize >= self.entries.len() {
+                    return SideClick::None;
+                }
+                match self.activate(index as usize) {
+                    Some(path) => SideClick::Open(path),
+                    None => SideClick::None,
+                }
+            }
+            Tab::Outline => {
+                let rows = outline.rows();
+                let index = ((y - PAD - CAPTION_H + outline.scroll) / ROW_H).floor();
+                if index < 0.0 || index as usize >= rows.len() {
+                    return SideClick::None;
+                }
+                let index = index as usize;
+                let row = rows[index];
+                outline.selected = index;
+                let chevron_end = PAD + row.depth as f32 * INDENT + 12.0;
+                if row.has_children && x < chevron_end {
+                    outline.toggle_row(index);
+                    return SideClick::None;
+                }
+                SideClick::Jump(outline.entries()[row.entry].block)
+            }
+        }
     }
 
-    pub fn wheel(&mut self, lines: f32) {
-        self.scroll = (self.scroll + lines * ROW_H).clamp(0.0, self.max_scroll());
+    pub fn wheel(&mut self, lines: f32, outline: &mut OutlineTree) {
+        match self.tab {
+            Tab::Files => {
+                self.scroll = (self.scroll + lines * ROW_H).clamp(0.0, self.max_scroll());
+            }
+            Tab::Outline => {
+                let max = (outline.rows().len() as f32 * ROW_H - self.list_h).max(0.0);
+                outline.scroll = (outline.scroll + lines * ROW_H).clamp(0.0, max);
+            }
+        }
     }
 
-    pub fn draw(&mut self, painter: &mut Painter, theme: &Theme) {
+    /// Draws the panel: captions, then the active tab's list. `current`
+    /// is the outline entry carrying the reading-position highlight.
+    pub fn draw(
+        &mut self,
+        painter: &mut Painter,
+        theme: &Theme,
+        outline: &mut OutlineTree,
+        current: Option<usize>,
+    ) {
         let h = painter.height();
         let ui = &theme.ui;
         let width = self.width;
@@ -307,14 +432,144 @@ impl Sidebar {
             1.0,
             theme.blocks.table_border,
         );
-        self.list_h = h - 2.0 * PAD;
+        self.list_h = h - 2.0 * PAD - CAPTION_H;
+        self.draw_captions(painter, theme);
+        match self.tab {
+            Tab::Files => self.draw_files(painter, theme),
+            Tab::Outline => self.draw_outline(painter, theme, outline, current),
+        }
+    }
+
+    /// The two tab captions: a small icon beside a text label, the
+    /// active one in full color over an underline, the other dimmed the
+    /// way dot entries are. Captions truncate; icons never do.
+    fn draw_captions(&self, painter: &mut Painter, theme: &Theme) {
+        let ui = &theme.ui;
+        let mid = self.width / 2.0;
+        let zones = [
+            (Tab::Files, PAD, mid - CAPTION_GAP),
+            (Tab::Outline, mid + CAPTION_GAP, self.width - PAD),
+        ];
+        for (tab, x0, x1) in zones {
+            let active = tab == self.tab;
+            let color = if active {
+                ui.sidebar_fg
+            } else {
+                dim(ui.sidebar_fg)
+            };
+            let iy = (CAPTION_H - 12.0) / 2.0;
+            match tab {
+                Tab::Files => {
+                    // The folder shape the tree rows use.
+                    painter.fill(x0, iy + 1.0, 5.5, 3.0, 1.0, color);
+                    painter.fill(x0, iy + 3.5, 11.0, 8.0, 1.5, color);
+                }
+                Tab::Outline => {
+                    // Indented lines, an outline in miniature.
+                    painter.fill(x0, iy + 1.5, 10.0, 1.6, 0.8, color);
+                    painter.fill(x0 + 3.0, iy + 5.2, 7.0, 1.6, 0.8, color);
+                    painter.fill(x0, iy + 8.9, 10.0, 1.6, 0.8, color);
+                }
+            }
+            let label = match tab {
+                Tab::Files => "Files",
+                Tab::Outline => "Outline",
+            };
+            let weight = if active { 700 } else { 400 };
+            let tx = x0 + ICON_W;
+            let text = truncated(painter, label, x1 - tx, weight);
+            painter.text(tx, 7.0, &text, BODY_FAMILY, TEXT_SIZE, weight, color);
+            if active {
+                painter.fill(x0, CAPTION_H - 3.0, x1 - x0, 2.0, 1.0, color);
+            }
+        }
+    }
+
+    /// The outline tab: one row per visible heading, chevrons on rows
+    /// with children, the current section bold.
+    fn draw_outline(
+        &mut self,
+        painter: &mut Painter,
+        theme: &Theme,
+        outline: &mut OutlineTree,
+        current: Option<usize>,
+    ) {
+        let ui = &theme.ui;
+        let h = painter.height();
+        let rows = outline.rows();
+        if rows.is_empty() {
+            let color = dim(ui.sidebar_fg);
+            painter.text(
+                PAD,
+                CAPTION_H + PAD + 5.0,
+                "No headings",
+                BODY_FAMILY,
+                TEXT_SIZE,
+                400,
+                color,
+            );
+            return;
+        }
+        let max = (rows.len() as f32 * ROW_H - self.list_h).max(0.0);
+        outline.scroll = outline.scroll.clamp(0.0, max);
+        outline.selected = outline.selected.min(rows.len() - 1);
+        let top = PAD + CAPTION_H;
+        let first = (outline.scroll / ROW_H).floor() as usize;
+        let offset = -(outline.scroll - first as f32 * ROW_H);
+        let mut slot = 0usize;
+        loop {
+            let index = first + slot;
+            let ry = top + offset + slot as f32 * ROW_H;
+            if index >= rows.len() || ry > h - PAD {
+                break;
+            }
+            slot += 1;
+            let row = rows[index];
+            if index == outline.selected {
+                painter.fill(
+                    3.0,
+                    ry,
+                    self.width - 8.0,
+                    ROW_H - 2.0,
+                    5.0,
+                    ui.overlay_highlight,
+                );
+            }
+            let x = PAD + row.depth as f32 * INDENT;
+            let color = ui.sidebar_fg;
+            if row.has_children {
+                let cx = x + 3.0;
+                let cy = ry + ROW_H / 2.0;
+                if row.collapsed {
+                    // Right-pointing: fold closed.
+                    painter.line(cx - 1.5, cy - 3.5, cx + 2.5, cy, 1.6, color);
+                    painter.line(cx + 2.5, cy, cx - 1.5, cy + 3.5, 1.6, color);
+                } else {
+                    // Down-pointing: open.
+                    painter.line(cx - 3.5, cy - 1.5, cx, cy + 2.5, 1.6, color);
+                    painter.line(cx, cy + 2.5, cx + 3.5, cy - 1.5, 1.6, color);
+                }
+            }
+            let is_current = current == Some(row.entry);
+            let weight = if is_current { 700 } else { 400 };
+            let tx = x + 12.0;
+            let avail = self.width - tx - PAD;
+            let name = truncated(painter, &outline.entries()[row.entry].text, avail, weight);
+            painter.text(tx, ry + 5.0, &name, BODY_FAMILY, TEXT_SIZE, weight, color);
+        }
+    }
+
+    fn draw_files(&mut self, painter: &mut Painter, theme: &Theme) {
+        let h = painter.height();
+        let ui = &theme.ui;
+        let width = self.width;
         self.scroll = self.scroll.clamp(0.0, self.max_scroll());
         let first = (self.scroll / ROW_H).floor() as usize;
         let offset = -(self.scroll - first as f32 * ROW_H);
         let mut slot = 0usize;
         loop {
             let index = first + slot;
-            let ry = PAD + offset + slot as f32 * ROW_H;
+            let ry = PAD + CAPTION_H + offset + slot as f32 * ROW_H;
             if index >= self.entries.len() || ry > h - PAD {
                 break;
             }
@@ -411,18 +666,9 @@ fn dim(color: Rgba) -> Rgba {
 
 /// Shortens a name with an ellipsis to fit the available width.
 fn truncated(painter: &mut Painter, name: &str, avail: f32, weight: u16) -> String {
-    if painter.measure(name, BODY_FAMILY, TEXT_SIZE, weight) <= avail {
-        return name.to_string();
-    }
-    let mut cut = name.to_string();
-    while !cut.is_empty() {
-        cut.pop();
-        let candidate = format!("{cut}\u{2026}");
-        if painter.measure(&candidate, BODY_FAMILY, TEXT_SIZE, weight) <= avail {
-            return candidate;
-        }
-    }
-    "\u{2026}".to_string()
+    fit(name, avail, |text| {
+        painter.measure(text, BODY_FAMILY, TEXT_SIZE, weight)
+    })
 }
 
 #[cfg(test)]
@@ -454,6 +700,28 @@ mod tests {
 
     fn names(side: &Sidebar) -> Vec<String> {
         side.entries.iter().map(|e| e.name.clone()).collect()
+    }
+
+    #[test]
+    fn caption_hit_answers_each_tab_and_neither_between() {
+        let w = 260.0;
+        assert_eq!(caption_hit(w, 20.0, 10.0), Some(Tab::Files));
+        assert_eq!(caption_hit(w, 200.0, 10.0), Some(Tab::Outline));
+        assert_eq!(caption_hit(w, w / 2.0, 10.0), None, "the dead middle");
+        assert_eq!(caption_hit(w, 2.0, 10.0), None, "left pad");
+        assert_eq!(caption_hit(w, w - 2.0, 10.0), None, "right pad");
+        assert_eq!(caption_hit(w, 20.0, CAPTION_H + 1.0), None, "below the row");
+    }
+
+    #[test]
+    fn fit_keeps_what_fits_and_cuts_with_an_ellipsis() {
+        // A fake measure: ten pixels per character.
+        let measure = |t: &str| t.chars().count() as f32 * 10.0;
+        assert_eq!(fit("short", 100.0, measure), "short");
+        assert_eq!(fit("exactly ten", 110.0, measure), "exactly ten");
+        let cut = fit("far too long a name", 60.0, measure);
+        assert_eq!(cut, "far t\u{2026}", "five chars plus the ellipsis");
+        assert_eq!(fit("abc", 5.0, measure), "\u{2026}", "nothing fits");
     }
 
     #[test]
