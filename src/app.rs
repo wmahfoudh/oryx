@@ -147,6 +147,7 @@ pub fn run(path: Option<PathBuf>, theme_name: Option<String>) -> anyhow::Result<
         hover_edge: false,
         hover_link: false,
         sel_anchor: None,
+        last_click: None,
         selection: None,
         clipboard: None,
         overlay: None,
@@ -282,6 +283,9 @@ struct App {
     hover_link: bool,
     /// Selection drag in progress: the caret grabbed at mouse down.
     sel_anchor: Option<ModelPos>,
+    /// The last document-area press, for the double and triple click
+    /// chain: when, where, and how many clicks it had reached.
+    last_click: Option<(Instant, f32, f32, u8)>,
     /// Current selection, kept after the mouse releases.
     selection: Option<Selection>,
     /// Created on first copy and kept alive so the content outlives the
@@ -678,6 +682,54 @@ impl App {
         let target =
             scrollbar::scroll_for_thumb(cursor_y - grab, thumb_h, vh, self.doc_height(), vh);
         self.scroll_to(target);
+    }
+
+    /// Advances the multi-click chain for a document-area press and
+    /// answers the click count it reached.
+    fn register_click(&mut self) -> u8 {
+        let (x, y) = (self.cursor.x as f32, self.cursor.y as f32);
+        let now = Instant::now();
+        let prev = self.last_click.map(|(t, px, py, count)| {
+            (
+                now.duration_since(t) <= Duration::from_millis(400),
+                px,
+                py,
+                count,
+            )
+        });
+        let count = selection::click_chain(
+            prev.map(|(_, px, py, count)| (count, px, py)),
+            prev.is_some_and(|(within, ..)| within),
+            x,
+            y,
+        );
+        self.last_click = Some((now, x, y, count));
+        count
+    }
+
+    /// Selects the word (double click) or the paragraph, code line, or
+    /// table cell (triple click) under the cursor. No anchor is set, so
+    /// a following cursor move does not re-extend character-wise.
+    fn select_unit(&mut self, paragraph: bool) {
+        let x = self.cursor.x as f32 - self.inset();
+        let y = self.cursor.y as f32 + self.scroll_y;
+        let Some(lay) = self.layout.as_ref() else {
+            return;
+        };
+        let Some(pos) = selection::pos_at(lay, &self.document, &mut self.fonts, x, y) else {
+            return;
+        };
+        self.sel_anchor = None;
+        let sel = if paragraph {
+            selection::paragraph_at(&self.document, pos)
+        } else {
+            selection::word_at(&self.document, pos)
+        };
+        if let Some(sel) = sel {
+            self.selection = Some(sel);
+            self.band = None;
+            self.request_redraw();
+        }
     }
 
     /// Grabs a selection anchor at the cursor and clears any previous
@@ -2198,7 +2250,11 @@ impl ApplicationHandler for App {
                     } else {
                         self.scrollbar_press();
                         if self.drag.is_none() {
-                            self.begin_selection();
+                            match self.register_click() {
+                                2 => self.select_unit(false),
+                                3 => self.select_unit(true),
+                                _ => self.begin_selection(),
+                            }
                         }
                     }
                 }

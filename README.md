@@ -33,6 +33,8 @@ Oryx is built mainly for the reading case: the file you want to open fast, enjoy
 
 ## What it renders
 
+The complete recognized syntax, markdown and embedded HTML, is cataloged construct by construct in [SYNTAX.md](SYNTAX.md).
+
 ### Markdown, the whole everyday set
 
 Headings, bold, italic, strikethrough, inline code, links and bare URLs, nested blockquotes, horizontal rules, smart quotes and dashes, and emoji shortcodes like `:tada:`. Ordered, unordered and task lists nest as deep as needed, and a wrapped line aligns with the text above it, not with the bullet. Tables keep per-column alignment, shade alternating rows and wrap long cells, so a wide table never runs off the page.

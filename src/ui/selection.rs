@@ -382,6 +382,189 @@ pub fn run_interval(run: &TextRun) -> Option<(ModelPos, ModelPos)> {
 /// The model position nearest to a point in document coordinates.
 /// Snaps vertically to the closest line and horizontally to the closest
 /// character boundary. None only when nothing selectable is placed.
+/// Character classes word expansion runs over: letters, digits and
+/// underscores make words, whitespace makes gaps, anything else stands
+/// alone.
+fn word_class(c: char) -> u8 {
+    if c.is_alphanumeric() || c == '_' {
+        0
+    } else if c.is_whitespace() {
+        1
+    } else {
+        2
+    }
+}
+
+/// How many clicks a press reaches: two within the double-click window
+/// and slop, three likewise, and a fourth starts a fresh chain.
+pub fn click_chain(prev: Option<(u8, f32, f32)>, within: bool, x: f32, y: f32) -> u8 {
+    match prev {
+        Some((count, px, py))
+            if within && count < 3 && (x - px).abs() <= 4.0 && (y - py).abs() <= 4.0 =>
+        {
+            count + 1
+        }
+        _ => 1,
+    }
+}
+
+/// The contiguous run of text pieces around a span, with each piece's
+/// span and text length. Separators bound it, so it is one table cell,
+/// one soft segment of prose, or one code line.
+fn piece_window(doc: &Document, block: usize, span: usize) -> Vec<(usize, String)> {
+    let pieces = block_pieces(doc, block);
+    let mut window: Vec<(usize, String)> = Vec::new();
+    let mut found = false;
+    for piece in &pieces {
+        match piece {
+            Piece::Addr { span: s, text } => {
+                if *s == span {
+                    found = true;
+                }
+                window.push((*s, text.to_string()));
+            }
+            _ => {
+                if found {
+                    break;
+                }
+                window.clear();
+            }
+        }
+    }
+    if found {
+        window
+    } else {
+        Vec::new()
+    }
+}
+
+/// The double-click selection: the word around a position, crossing
+/// styled span boundaries but never separators (lines, cells, hard
+/// breaks). Whitespace expands over its run; any other character stands
+/// alone. When the position sits just past a word, the word wins, which
+/// is where a snap on a word's last character lands.
+pub fn word_at(doc: &Document, pos: ModelPos) -> Option<Selection> {
+    let window = piece_window(doc, pos.block, pos.span);
+    let mut flat = String::new();
+    let mut bases = Vec::new();
+    let mut at = None;
+    for (span, text) in &window {
+        bases.push(flat.len());
+        if *span == pos.span {
+            at = Some(flat.len() + pos.byte.min(text.len()));
+        }
+        flat.push_str(text);
+    }
+    let at = at?;
+    let next_c = flat[at..].chars().next();
+    let prev_c = flat[..at].chars().next_back();
+    let anchor = match (next_c, prev_c) {
+        (Some(n), Some(p)) if word_class(n) != 0 && word_class(p) == 0 => p,
+        (Some(n), _) => n,
+        (None, Some(p)) => p,
+        (None, None) => return None,
+    };
+    let class = word_class(anchor);
+    let (mut start, mut end) = (at, at);
+    if class == 2 {
+        if next_c == Some(anchor) {
+            end += anchor.len_utf8();
+        } else {
+            start -= anchor.len_utf8();
+        }
+    } else {
+        while let Some(c) = flat[..start].chars().next_back() {
+            if word_class(c) != class {
+                break;
+            }
+            start -= c.len_utf8();
+        }
+        while let Some(c) = flat[end..].chars().next() {
+            if word_class(c) != class {
+                break;
+            }
+            end += c.len_utf8();
+        }
+    }
+    let locate = |flat_pos: usize| {
+        let mut idx = 0;
+        for (i, base) in bases.iter().enumerate() {
+            if *base <= flat_pos {
+                idx = i;
+            } else {
+                break;
+            }
+        }
+        ModelPos {
+            block: pos.block,
+            span: window[idx].0,
+            byte: flat_pos - bases[idx],
+        }
+    };
+    Some(Selection {
+        start: locate(start),
+        end: locate(end),
+    })
+}
+
+/// The triple-click selection: the whole paragraph, or the unit a
+/// paragraph is to the block's kind, one code line or one table cell.
+pub fn paragraph_at(doc: &Document, pos: ModelPos) -> Option<Selection> {
+    match &doc.blocks[pos.block].kind {
+        BlockKind::CodeBlock { lines, .. } => {
+            if pos.span >= lines.len() {
+                return None;
+            }
+            let len = lines.line(&doc.source, pos.span).len();
+            Some(Selection {
+                start: ModelPos { byte: 0, ..pos },
+                end: ModelPos { byte: len, ..pos },
+            })
+        }
+        BlockKind::Table { .. } => {
+            let window = piece_window(doc, pos.block, pos.span);
+            let (first, _) = *window.first()?;
+            let (last, len) = window.last().map(|(s, t)| (*s, t.len()))?;
+            Some(Selection {
+                start: ModelPos {
+                    block: pos.block,
+                    span: first,
+                    byte: 0,
+                },
+                end: ModelPos {
+                    block: pos.block,
+                    span: last,
+                    byte: len,
+                },
+            })
+        }
+        _ => {
+            let pieces = block_pieces(doc, pos.block);
+            let addrs: Vec<(usize, usize)> = pieces
+                .iter()
+                .filter_map(|p| match p {
+                    Piece::Addr { span, text } => Some((*span, text.len())),
+                    _ => None,
+                })
+                .collect();
+            let (first, _) = *addrs.first()?;
+            let (last, len) = *addrs.last()?;
+            Some(Selection {
+                start: ModelPos {
+                    block: pos.block,
+                    span: first,
+                    byte: 0,
+                },
+                end: ModelPos {
+                    block: pos.block,
+                    span: last,
+                    byte: len,
+                },
+            })
+        }
+    }
+}
+
 pub fn pos_at(
     lay: &LayoutDoc,
     doc: &Document,
@@ -761,6 +944,140 @@ mod tests {
         let source = "# Title\n\nplain **bold** *italic* ~~gone~~ `code` [link](https://a.tld)";
         let (doc, _, _) = lay_doc(source);
         assert_eq!(markdown(&select_all(&doc), &doc), source);
+    }
+
+    #[test]
+    fn double_click_selects_the_word_across_styles() {
+        let doc = markdown::parse("make it **fas**ter now");
+        let pos = ModelPos {
+            block: 0,
+            span: 1,
+            byte: 1,
+        };
+        let sel = word_at(&doc, pos).expect("a word under the cursor");
+        assert_eq!(plain_text(&sel, &doc), "faster", "styling splits no word");
+    }
+
+    #[test]
+    fn double_click_on_space_punctuation_and_word_ends() {
+        let doc = markdown::parse("one   two , three");
+        let sel = word_at(
+            &doc,
+            ModelPos {
+                block: 0,
+                span: 0,
+                byte: 4,
+            },
+        )
+        .expect("the gap");
+        assert_eq!(
+            plain_text(&sel, &doc),
+            "   ",
+            "whitespace runs select whole"
+        );
+        let sel = word_at(
+            &doc,
+            ModelPos {
+                block: 0,
+                span: 0,
+                byte: 10,
+            },
+        )
+        .expect("the comma");
+        assert_eq!(plain_text(&sel, &doc), ",", "punctuation stands alone");
+        let sel = word_at(
+            &doc,
+            ModelPos {
+                block: 0,
+                span: 0,
+                byte: 9,
+            },
+        )
+        .expect("just past a word");
+        assert_eq!(plain_text(&sel, &doc), "two", "the word wins at its end");
+    }
+
+    #[test]
+    fn a_word_never_crosses_a_cell_boundary() {
+        let doc = markdown::parse("|a|b|\n|-|-|\n|end|start|");
+        let cells: Vec<ModelPos> = (0..4)
+            .map(|span| ModelPos {
+                block: 0,
+                span,
+                byte: 0,
+            })
+            .collect();
+        let sel = word_at(&doc, cells[2]).expect("the first body cell");
+        assert_eq!(plain_text(&sel, &doc), "end", "the tab boundary holds");
+    }
+
+    #[test]
+    fn triple_click_selects_paragraph_line_or_cell() {
+        let doc = markdown::parse("A first sentence. A second one.\n\nAnother paragraph.");
+        let sel = paragraph_at(
+            &doc,
+            ModelPos {
+                block: 0,
+                span: 0,
+                byte: 3,
+            },
+        )
+        .expect("the paragraph");
+        assert_eq!(plain_text(&sel, &doc), "A first sentence. A second one.");
+
+        let code = markdown::parse("```\nfirst line\nsecond line\n```");
+        let sel = paragraph_at(
+            &code,
+            ModelPos {
+                block: 0,
+                span: 1,
+                byte: 2,
+            },
+        )
+        .expect("the line");
+        assert_eq!(
+            plain_text(&sel, &code),
+            "second line",
+            "code answers one line"
+        );
+
+        let table = markdown::parse("|a|b|\n|-|-|\n|one two|three|");
+        let sel = paragraph_at(
+            &table,
+            ModelPos {
+                block: 0,
+                span: 2,
+                byte: 0,
+            },
+        )
+        .expect("the cell");
+        assert_eq!(
+            plain_text(&sel, &table),
+            "one two",
+            "a table answers the cell"
+        );
+    }
+
+    #[test]
+    fn click_chain_counts_and_cycles() {
+        assert_eq!(click_chain(None, true, 10.0, 10.0), 1);
+        assert_eq!(click_chain(Some((1, 10.0, 10.0)), true, 12.0, 11.0), 2);
+        assert_eq!(click_chain(Some((2, 10.0, 10.0)), true, 10.0, 10.0), 3);
+        assert_eq!(
+            click_chain(Some((3, 10.0, 10.0)), true, 10.0, 10.0),
+            1,
+            "a fourth click starts over"
+        );
+        assert_eq!(
+            click_chain(Some((1, 10.0, 10.0)), false, 10.0, 10.0),
+            1,
+            "the window closed"
+        );
+        assert_eq!(
+            click_chain(Some((1, 10.0, 10.0)), true, 40.0, 10.0),
+            1,
+            "moved too far"
+        );
     }
 
     #[test]
