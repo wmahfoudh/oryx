@@ -16,8 +16,6 @@
 [Install](#install) •
 [Performance](#performance)
 
-<br>
-
 ![Oryx rendering a markdown document](screenshots/hero.png)
 
 </div>
