@@ -3235,7 +3235,11 @@ fn layout_table(
     }
 
     let mut y = y0;
+    // An HTML table without a header row is headerless: no band, body
+    // rows from the top.
+    let header_rows = usize::from(!header.is_empty());
     let all_rows: Vec<(&[Vec<Span>], bool)> = std::iter::once((header, true))
+        .take(header_rows)
         .chain(rows.iter().map(|r| (r.as_slice(), false)))
         .collect();
     let mut boundaries = vec![y0];
@@ -3284,8 +3288,9 @@ fn layout_table(
         });
         let stripe = if *is_header {
             Some(theme.blocks.table_header_bg)
-        } else if row_index % 2 == 0 {
-            // Header is row 0, so even indices are the 1st, 3rd... body rows.
+        } else if (row_index + 1 - header_rows) % 2 == 0 {
+            // Even-numbered body rows stripe, counted from the first body
+            // row, wherever the header row leaves it.
             Some(theme.blocks.table_row_alt_bg)
         } else {
             None
@@ -3293,7 +3298,7 @@ fn layout_table(
         if let Some(color) = stripe {
             // Stripes at the table's corners round to match the outline.
             let radius = metrics::CORNER_RADIUS * cfg.zoom;
-            let top_r = if *is_header { radius } else { 0.0 };
+            let top_r = if row_index == 0 { radius } else { 0.0 };
             let bottom_r = if row_index + 1 == all_rows.len() {
                 radius
             } else {

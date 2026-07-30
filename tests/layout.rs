@@ -406,6 +406,28 @@ fn rule_spans_content_width() {
 }
 
 #[test]
+fn headerless_html_table_draws_no_header_band() {
+    let (doc, l) = lay2(
+        "<table><tr><td>alpha</td><td>beta</td></tr>\
+         <tr><td>gamma</td><td>delta</td></tr></table>",
+        800.0,
+    );
+    let t = Theme::default_dark();
+    assert!(
+        l.rects.iter().all(|r| r.color != t.blocks.table_header_bg),
+        "no header band"
+    );
+    assert!(
+        l.rects.iter().any(|r| r.color == t.blocks.table_row_alt_bg),
+        "second body row keeps its stripe"
+    );
+    let alpha = find_text(&l, &doc, "alpha");
+    let beta = find_text(&l, &doc, "beta");
+    assert!(alpha.x < beta.x, "columns increase");
+    assert_eq!(alpha.weight, 400, "first row is body, not header");
+}
+
+#[test]
 fn table_columns_header_and_stripes() {
     let (doc, l) = lay2("|alpha|beta|gamma|\n|-|-|-|\n|a|b|c|\n|d|e|f|", 800.0);
     let t = Theme::default_dark();

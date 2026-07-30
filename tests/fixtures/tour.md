@@ -180,3 +180,23 @@ brighter its color.
 ##### Level Five Is Bold At Body Size
 
 ###### Level Six Is The Quietest
+
+## Embedded HTML Tables
+
+A table written in HTML renders through the same grid as a markdown one.
+With a `<thead>`, the header row is bold on its own band:
+
+<table>
+<thead><tr><th>Component</th><th>Role</th></tr></thead>
+<tbody>
+<tr><td>parser</td><td>maps events to blocks</td></tr>
+<tr><td>layout</td><td>places runs and rects</td></tr>
+<tr><td>paint</td><td>rasterizes the band</td></tr>
+</tbody>
+</table>
+
+<table>
+<caption>A headerless table keeps its caption above it</caption>
+<tr><td>no thead</td><td>no th cells</td></tr>
+<tr><td>so no band</td><td>stripes from the top</td></tr>
+</table>

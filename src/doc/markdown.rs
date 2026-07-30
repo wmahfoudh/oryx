@@ -45,6 +45,7 @@ pub fn parse_unless(source: impl Into<Arc<str>>, bail: impl Fn() -> bool) -> Opt
         }
         builder.event(event, range);
     }
+    builder.finish();
     let mut blocks = builder.blocks;
     seal_blocks(&mut blocks, &source);
     Some(Document { blocks, source })
@@ -70,6 +71,7 @@ struct Builder {
     /// check compares the accumulated body against the source there.
     code_start: Option<usize>,
     table: Option<TableAcc>,
+    html_table: Option<HtmlTableAcc>,
     image: Option<(String, String)>,
     footnote: Option<String>,
     in_metadata: bool,
@@ -98,6 +100,52 @@ struct TableAcc {
     row: Vec<Vec<Span>>,
 }
 
+/// Accumulates one embedded HTML table; the tag scanner drives it. The
+/// header is the `<thead>` rows or a leading all-`<th>` row; a table
+/// with neither stays headerless. Nested tables flatten into the open
+/// cell, tracked by `nested`.
+#[derive(Default)]
+struct HtmlTableAcc {
+    header: Vec<Vec<Span>>,
+    rows: Vec<Vec<Vec<Span>>>,
+    row: Vec<Vec<Span>>,
+    caption: Option<Vec<Span>>,
+    nested: u32,
+    in_head: bool,
+    row_open: bool,
+    row_all_th: bool,
+    cell_open: bool,
+}
+
+/// Drops the outer whitespace a cell inherits from source formatting.
+/// Image spans stay whole; their text is the alt.
+fn trim_cell(spans: &mut Vec<Span>) {
+    while let Some(first) = spans.first_mut() {
+        if first.image.is_some() {
+            break;
+        }
+        let trimmed = first.raw_text().trim_start().to_string();
+        if trimmed.is_empty() {
+            spans.remove(0);
+        } else {
+            *first.raw_text_mut() = trimmed;
+            break;
+        }
+    }
+    while let Some(last) = spans.last_mut() {
+        if last.image.is_some() {
+            break;
+        }
+        let trimmed = last.raw_text().trim_end().to_string();
+        if trimmed.is_empty() {
+            spans.pop();
+        } else {
+            *last.raw_text_mut() = trimmed;
+            break;
+        }
+    }
+}
+
 impl Builder {
     fn new(source: Arc<str>) -> Builder {
         Builder {
@@ -112,6 +160,7 @@ impl Builder {
             code: None,
             code_start: None,
             table: None,
+            html_table: None,
             image: None,
             footnote: None,
             in_metadata: false,
@@ -310,7 +359,11 @@ impl Builder {
             TagEnd::HtmlBlock => {
                 self.html_block = false;
                 self.html_tail.clear();
-                self.flush_spans();
+                // A blank line splits one HTML table over several blocks;
+                // the accumulator carries across them, so no flush.
+                if self.html_table.is_none() {
+                    self.flush_spans();
+                }
             }
             _ => {}
         }
@@ -478,14 +531,95 @@ impl Builder {
         match (name.as_str(), closing) {
             ("br", _) => self.push(Span::plain("\n")),
             ("p" | "div", false) => {
+                // Block tags inside table cells flatten to inline text.
+                if self.html_table.is_some() {
+                    return;
+                }
                 self.flush_spans();
                 let centered =
                     html_attr(attrs, "align").is_some_and(|a| a.eq_ignore_ascii_case("center"));
                 self.html_center.push(centered);
             }
             ("p" | "div", true) => {
+                if self.html_table.is_some() {
+                    return;
+                }
                 self.flush_spans();
                 self.html_center.pop();
+            }
+            ("table", false) => {
+                if let Some(t) = self.html_table.as_mut() {
+                    t.nested += 1;
+                    return;
+                }
+                self.flush_spans();
+                self.html_table = Some(HtmlTableAcc::default());
+            }
+            ("table", true) => {
+                let Some(t) = self.html_table.as_mut() else {
+                    return;
+                };
+                if t.nested > 0 {
+                    t.nested -= 1;
+                    return;
+                }
+                self.html_table_close();
+            }
+            ("thead", _) => {
+                if let Some(t) = self.html_table.as_mut() {
+                    if t.nested == 0 {
+                        t.in_head = !closing;
+                    }
+                }
+            }
+            ("tr", false) => {
+                if self.html_table.as_ref().is_some_and(|t| t.nested == 0) {
+                    self.html_row_close();
+                    self.spans.clear();
+                    let t = self.html_table.as_mut().expect("table is open");
+                    t.row_open = true;
+                    t.row_all_th = true;
+                }
+            }
+            ("tr", true) => {
+                if self.html_table.as_ref().is_some_and(|t| t.nested == 0) {
+                    self.html_row_close();
+                }
+            }
+            ("th" | "td", false) => {
+                if self.html_table.as_ref().is_some_and(|t| t.nested == 0) {
+                    self.html_cell_close();
+                    self.spans.clear();
+                    let t = self.html_table.as_mut().expect("table is open");
+                    if !t.row_open {
+                        t.row_open = true;
+                        t.row_all_th = true;
+                    }
+                    if name == "td" {
+                        t.row_all_th = false;
+                    }
+                    t.cell_open = true;
+                }
+            }
+            ("th" | "td", true) => {
+                if self.html_table.as_ref().is_some_and(|t| t.nested == 0) {
+                    self.html_cell_close();
+                }
+            }
+            ("caption", false) => {
+                if self.html_table.as_ref().is_some_and(|t| t.nested == 0) {
+                    self.spans.clear();
+                }
+            }
+            ("caption", true) => {
+                if self.html_table.as_ref().is_some_and(|t| t.nested == 0) {
+                    let mut caption = std::mem::take(&mut self.spans);
+                    trim_cell(&mut caption);
+                    if !caption.is_empty() {
+                        let t = self.html_table.as_mut().expect("table is open");
+                        t.caption = Some(caption);
+                    }
+                }
             }
             ("a", false) => self.link = html_attr(attrs, "href"),
             ("a", true) => self.link = None,
@@ -513,6 +647,74 @@ impl Builder {
             ("sup", false) => self.html_sup += 1,
             ("sup", true) => self.html_sup = self.html_sup.saturating_sub(1),
             _ => {}
+        }
+    }
+
+    /// Closes an open HTML table cell into its row. Text outside any
+    /// cell is discarded, the browser hoisting rule reduced to a drop.
+    fn html_cell_close(&mut self) {
+        let spans = std::mem::take(&mut self.spans);
+        let Some(t) = self.html_table.as_mut() else {
+            return;
+        };
+        if !t.cell_open {
+            return;
+        }
+        let mut cell = spans;
+        trim_cell(&mut cell);
+        t.row.push(cell);
+        t.cell_open = false;
+    }
+
+    /// Closes an open HTML table row. The first row becomes the header
+    /// when it sits in `<thead>` or is all `<th>` cells.
+    fn html_row_close(&mut self) {
+        self.html_cell_close();
+        let Some(t) = self.html_table.as_mut() else {
+            return;
+        };
+        if !t.row_open {
+            return;
+        }
+        t.row_open = false;
+        let row = std::mem::take(&mut t.row);
+        if row.is_empty() {
+            return;
+        }
+        if (t.in_head || t.row_all_th) && t.header.is_empty() && t.rows.is_empty() {
+            t.header = row;
+        } else {
+            t.rows.push(row);
+        }
+    }
+
+    /// Emits the accumulated HTML table, its caption first as a centered
+    /// paragraph. An empty accumulator emits nothing.
+    fn html_table_close(&mut self) {
+        self.html_row_close();
+        self.spans.clear();
+        let Some(t) = self.html_table.take() else {
+            return;
+        };
+        if let Some(caption) = t.caption {
+            self.html_center.push(true);
+            self.emit(BlockKind::Paragraph { spans: caption });
+            self.html_center.pop();
+        }
+        if t.header.is_empty() && t.rows.is_empty() {
+            return;
+        }
+        self.emit(BlockKind::Table {
+            header: t.header,
+            rows: t.rows,
+        });
+    }
+
+    /// Closes what an unclosed document leaves open, so content never
+    /// silently vanishes.
+    fn finish(&mut self) {
+        if self.html_table.is_some() {
+            self.html_table_close();
         }
     }
 
@@ -971,6 +1173,114 @@ mod tests {
         assert_eq!(header[0][0].text(&d.source), "a");
         assert_eq!(rows.len(), 1);
         assert!(rows[0][1][0].bold);
+    }
+
+    #[test]
+    fn html_table_with_thead_maps_header_and_rows() {
+        let d = parse(
+            "<table>\n<thead><tr><th>Name</th><th>Size</th></tr></thead>\n\
+             <tbody><tr><td>alpha</td><td> 12 </td></tr></tbody>\n</table>",
+        );
+        let BlockKind::Table { header, rows } = &d.blocks[0].kind else {
+            panic!()
+        };
+        assert_eq!(header.len(), 2);
+        assert_eq!(header[0][0].text(&d.source), "Name");
+        assert_eq!(header[1][0].text(&d.source), "Size");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][0][0].text(&d.source), "alpha");
+        assert_eq!(rows[0][1][0].text(&d.source), "12", "cells trim padding");
+    }
+
+    #[test]
+    fn html_table_leading_th_row_is_the_header() {
+        let d = parse(
+            "<table><tr><th>K</th><th>V</th></tr>\
+             <tr><td>a</td><td>1</td></tr></table>",
+        );
+        let BlockKind::Table { header, rows } = &d.blocks[0].kind else {
+            panic!()
+        };
+        assert_eq!(header[0][0].text(&d.source), "K");
+        assert_eq!(rows.len(), 1);
+    }
+
+    #[test]
+    fn html_table_without_header_renders_all_rows_as_body() {
+        let d = parse(
+            "<table><tr><td>a</td><td>1</td></tr>\
+             <tr><td>b</td><td>2</td></tr></table>",
+        );
+        let BlockKind::Table { header, rows } = &d.blocks[0].kind else {
+            panic!()
+        };
+        assert!(header.is_empty());
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[1][0][0].text(&d.source), "b");
+    }
+
+    #[test]
+    fn html_table_cell_carries_an_inline_image() {
+        let d = parse(
+            "<table><tr><td>\
+             <img src=\"badge.svg\" alt=\"ci\" width=\"90\">\
+             </td></tr></table>",
+        );
+        let BlockKind::Table { rows, .. } = &d.blocks[0].kind else {
+            panic!()
+        };
+        let image = rows[0][0]
+            .iter()
+            .find_map(|s| s.image.as_ref())
+            .expect("cell keeps its image span");
+        assert_eq!(image.src, "badge.svg");
+        assert_eq!(image.width, Some(90));
+    }
+
+    #[test]
+    fn html_table_caption_precedes_as_centered_paragraph() {
+        let d = parse("<table><caption>Release sizes</caption><tr><td>a</td></tr></table>");
+        let BlockKind::Paragraph { spans } = &d.blocks[0].kind else {
+            panic!()
+        };
+        assert_eq!(spans[0].text(&d.source), "Release sizes");
+        assert!(d.blocks[0].centered);
+        assert!(matches!(d.blocks[1].kind, BlockKind::Table { .. }));
+    }
+
+    #[test]
+    fn html_table_colspan_occupies_one_slot() {
+        let d = parse("<table><tr><td colspan=\"2\">wide</td><td>x</td></tr></table>");
+        let BlockKind::Table { rows, .. } = &d.blocks[0].kind else {
+            panic!()
+        };
+        assert_eq!(rows[0].len(), 2);
+    }
+
+    #[test]
+    fn html_block_tags_inside_cells_flatten_to_text() {
+        let d = parse(
+            "<table><tr><td><ul><li>one</li><li>two</li></ul></td>\
+             <td><p>x</p>y</td></tr></table>",
+        );
+        assert_eq!(d.blocks.len(), 1, "nothing escapes the table");
+        let BlockKind::Table { rows, .. } = &d.blocks[0].kind else {
+            panic!()
+        };
+        let first: String = rows[0][0].iter().map(|s| s.text(&d.source)).collect();
+        assert!(first.contains("one") && first.contains("two"));
+        let second: String = rows[0][1].iter().map(|s| s.text(&d.source)).collect();
+        assert!(second.contains('x') && second.contains('y'));
+    }
+
+    #[test]
+    fn an_unclosed_html_table_still_emits() {
+        let d = parse("<table><tr><td>alpha</td>");
+        let BlockKind::Table { header, rows } = &d.blocks[0].kind else {
+            panic!()
+        };
+        assert!(header.is_empty());
+        assert_eq!(rows[0][0][0].text(&d.source), "alpha");
     }
 
     #[test]
