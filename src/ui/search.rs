@@ -42,6 +42,9 @@ pub struct SearchState {
     pub rects_scroll: f32,
     pub current: usize,
     pub stale: bool,
+    /// The current match landed on its recorded block top because its
+    /// region was cold; the exact anchor still owes a centering.
+    pub settle: bool,
 }
 
 /// The floating pill over the document's top-right corner: query on the

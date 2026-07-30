@@ -10,7 +10,7 @@ use std::time::Instant;
 
 use oryx::doc::images::MediaCache;
 use oryx::doc::model::BlockKind;
-use oryx::layout::{layout, layout_begin, layout_more, recolor_batch, ViewConfig};
+use oryx::layout::{layout, layout_begin, layout_more, recolor_batch, window_to, ViewConfig};
 use oryx::style::fonts::FontStore;
 use oryx::style::highlight;
 use oryx::style::theme::Theme;
@@ -293,6 +293,63 @@ fn fold_trickle_measured() {
                 chunk,
                 lay.runs.len(),
                 started.elapsed().as_millis()
+            );
+        }
+    }
+}
+
+/// The window costs behind a scroll: the cold band fill a scrollbar
+/// jump pays before its first frame, the per-frame slide of a normal
+/// scroll, and the return to a region already visited once. Runs over
+/// the settled windowed layout, the state the app scrolls in.
+#[test]
+#[ignore = "measurement only"]
+fn window_reentry_measured() {
+    let pool = pool();
+    for (name, bytes) in &TIERS[2..] {
+        for (kind, ext) in [("md", "md"), ("code", "rs")] {
+            let source = if kind == "md" {
+                large_gen::generate(*bytes)
+            } else {
+                large_gen::generate_code(*bytes)
+            };
+            let (_, _, mut doc) = measure_open(&source, ext);
+            let mut fonts = FontStore::new();
+            let mut media = MediaCache::new(PathBuf::from("."));
+            let theme = Theme::default_dark();
+            let cfg = ViewConfig::default();
+            let (mut lay, mut pass) = layout_begin(&doc, &cfg, WIDTH);
+            pass.attach_pool(std::sync::Arc::clone(&pool));
+            pass.retain_around(0.0, VIEWPORT_H);
+            layout_more(
+                &doc, &theme, &mut fonts, &mut media, &cfg, &mut lay, &mut pass, None,
+            );
+            measure_highlight(&mut doc);
+            settle_recolor(&doc, &mut lay, &mut fonts);
+            let mut jump = |scroll: f32, lay: &mut oryx::layout::LayoutDoc| {
+                let started = Instant::now();
+                window_to(
+                    &doc,
+                    &theme,
+                    &mut fonts,
+                    &mut media,
+                    &cfg,
+                    lay,
+                    Some(&pool),
+                    scroll,
+                    VIEWPORT_H,
+                    true,
+                );
+                started.elapsed().as_millis()
+            };
+            let mid = lay.height / 2.0;
+            let cold_ms = jump(mid, &mut lay);
+            let slide_ms = jump(mid + VIEWPORT_H, &mut lay);
+            let back_ms = jump(0.0, &mut lay);
+            println!(
+                "reentry {kind:<4} {name:>6}: cold {cold_ms:>4}ms, slide {slide_ms:>4}ms, \
+                 back {back_ms:>4}ms, runs {:>6}",
+                lay.runs.len()
             );
         }
     }

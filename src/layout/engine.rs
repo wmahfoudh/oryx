@@ -170,6 +170,158 @@ pub struct LayoutDoc {
     /// titles, frontmatter lines, expanded math, placeholder alts.
     /// Append-only; side references slice it.
     pub side: String,
+    /// Every placed block's recorded position, whether or not its
+    /// geometry is retained.
+    table: BlockTable,
+    /// Materialized-window bookkeeping while retention is bounded.
+    window: Option<WindowState>,
+}
+
+/// Recorded placement of one order position: where the block sits and
+/// how tall it is, enough to re-shape it at its recorded y or to skip
+/// over it without geometry.
+#[derive(Debug, Clone)]
+struct BlockEntry {
+    /// Model block index.
+    block: u32,
+    /// Region top: where the block's output begins, alert title included.
+    y: f32,
+    /// Where the block's own emission splices, past any alert title; a
+    /// code block's panel top.
+    content_y: f32,
+    /// Emission height: the shaped kind's, or the code panel's.
+    height: f32,
+    /// Quote decoration top; NaN when the block paints no quote panel.
+    deco_top: f32,
+    /// Code blocks: the line height every unwrapped line advances by,
+    /// and the panel padding above the first line.
+    line_height: f32,
+    pad: f32,
+    flags: u8,
+}
+
+/// The block emitted nothing: `block_metrics` answered None.
+const ENTRY_SILENT: u8 = 1;
+const ENTRY_CODE: u8 = 2;
+/// The block opened its alert region and carries the bold title line.
+const ENTRY_ALERT_TITLE: u8 = 4;
+
+impl BlockEntry {
+    /// The bottom of the block's own emission, decorations included.
+    fn bottom(&self) -> f32 {
+        self.content_y + self.height
+    }
+}
+
+/// The pass's record of every placed block: y and height per order
+/// position, the inverse block map, and the code lines that wrapped
+/// taller than their block's shared line height. Heights are shaped,
+/// never estimated, so the table stays exact wherever the window sits.
+#[derive(Debug, Default)]
+pub(crate) struct BlockTable {
+    entries: Vec<BlockEntry>,
+    /// Order position of each model block; u32::MAX until placed.
+    position_of_block: Vec<u32>,
+    /// `(position, line, height)` for code lines taller than the shared
+    /// line height, in placement order: the exceptions that keep every
+    /// line's y exact.
+    tall: Vec<(u32, u32, f32)>,
+    /// The footnote rule's order position and y, once placed.
+    notes_rule: Option<(usize, f32)>,
+    /// The pass geometry blocks were placed against, for re-shaping.
+    margin: f32,
+    content_width: f32,
+}
+
+impl BlockTable {
+    fn push(&mut self, block: usize, entry: BlockEntry) {
+        if self.position_of_block.len() <= block {
+            self.position_of_block.resize(block + 1, u32::MAX);
+        }
+        self.position_of_block[block] = self.entries.len() as u32;
+        self.entries.push(entry);
+    }
+
+    /// Backfills what only the block's tail knows: its shaped height
+    /// and, when quoted, its decoration top.
+    fn finish(&mut self, height: f32, deco_top: f32) {
+        let entry = self.entries.last_mut().expect("a block was placed");
+        entry.height = height;
+        entry.deco_top = deco_top;
+    }
+
+    /// This position's slice of the tall-line exceptions.
+    fn tall_of(&self, position: usize) -> &[(u32, u32, f32)] {
+        let position = position as u32;
+        let lo = self.tall.partition_point(|&(p, _, _)| p < position);
+        let hi = self.tall.partition_point(|&(p, _, _)| p <= position);
+        &self.tall[lo..hi]
+    }
+
+    /// The recorded top of line `line`, reproducing the placement
+    /// arithmetic bit for bit: the shared advance in closed form, plus
+    /// the wrapped lines' extra heights accumulated in order.
+    fn code_line_top(&self, position: usize, line: usize) -> f32 {
+        let entry = &self.entries[position];
+        let mut extra = 0.0_f32;
+        for &(_, l, height) in self.tall_of(position) {
+            if l as usize >= line {
+                break;
+            }
+            extra += height - entry.line_height;
+        }
+        code_line_y(entry.content_y + entry.pad, line, entry.line_height, extra)
+    }
+}
+
+/// A code line's top from the panel's first-line base: one shared
+/// expression, so placement, the table and re-entry agree bit for bit.
+fn code_line_y(base: f32, line: usize, line_height: f32, extra: f32) -> f32 {
+    base + line as f32 * line_height + extra
+}
+
+/// Materialized positions while retention is bounded: a contiguous
+/// range from `start`, with cumulative element ends per position.
+#[derive(Debug, Default)]
+struct WindowState {
+    start: usize,
+    marks: std::collections::VecDeque<PosMarks>,
+}
+
+/// One materialized position's cumulative element ends in the layout's
+/// vectors and, for a code block, the materialized line range.
+#[derive(Debug, Clone)]
+struct PosMarks {
+    runs: usize,
+    rects: usize,
+    images: usize,
+    rows: usize,
+    code: usize,
+    lines: Range<usize>,
+}
+
+impl PosMarks {
+    fn of(lay: &LayoutDoc, lines: Range<usize>) -> PosMarks {
+        PosMarks {
+            runs: lay.runs.len(),
+            rects: lay.rects.len(),
+            images: lay.images.len(),
+            rows: lay.table_rows.len(),
+            code: lay.code_lines.len(),
+            lines,
+        }
+    }
+
+    fn zero() -> PosMarks {
+        PosMarks {
+            runs: 0,
+            rects: 0,
+            images: 0,
+            rows: 0,
+            code: 0,
+            lines: 0..0,
+        }
+    }
 }
 
 impl LayoutDoc {
@@ -450,6 +602,32 @@ impl LayoutDoc {
             .find(|(s, _)| s == slug)
             .map(|(_, y)| *y)
     }
+
+    /// The y span of materialized geometry, None under full retention.
+    pub fn window_span(&self) -> Option<Range<f32>> {
+        let window = self.window.as_ref()?;
+        if window.marks.is_empty() {
+            return Some(0.0..0.0);
+        }
+        let first = &self.table.entries[window.start];
+        let last = &self.table.entries[window.start + window.marks.len() - 1];
+        Some(first.y..last.bottom())
+    }
+
+    /// The recorded top of a block, and of a line inside a code block,
+    /// from the block table: the position of a cold region without its
+    /// geometry. None before the pass places the block.
+    pub fn approx_top(&self, block: usize, span: usize) -> Option<f32> {
+        let position = *self.table.position_of_block.get(block)?;
+        if position == u32::MAX {
+            return None;
+        }
+        let entry = &self.table.entries[position as usize];
+        if entry.flags & ENTRY_CODE != 0 {
+            return Some(self.table.code_line_top(position as usize, span));
+        }
+        Some(entry.y)
+    }
 }
 
 /// One image scaled and positioned in the document.
@@ -505,6 +683,9 @@ pub struct LayoutPass {
     /// block, the next line to claim.
     seed_position: usize,
     seed_line: usize,
+    /// Retention bound: scroll position and viewport height. None keeps
+    /// every placed block, the export's and the tests' full layout.
+    retain: Option<(f32, f32)>,
 }
 
 impl LayoutPass {
@@ -525,6 +706,411 @@ impl LayoutPass {
         if let Some(pool) = &self.pool {
             pool.begin();
         }
+    }
+
+    /// Bounds retention around a scroll position: blocks outside the
+    /// band and its margin are measured into the table and dropped.
+    pub fn retain_around(&mut self, scroll: f32, viewport_h: f32) {
+        self.retain = Some((scroll, viewport_h));
+    }
+}
+
+/// The y range retention keeps materialized around a scroll position:
+/// wide enough to cover the paint band wherever its clamping puts it,
+/// with a viewport of margin so a small scroll re-shapes nothing.
+pub fn retain_range(scroll: f32, viewport_h: f32) -> Range<f32> {
+    scroll - 5.0 * viewport_h..scroll + 6.0 * viewport_h
+}
+
+/// Element counts at a block's start: the truncation point when the
+/// block places outside the retention bound. Truncation only ever cuts
+/// what the block just appended, so the anchors and the table survive.
+struct ElementCounts {
+    runs: usize,
+    rects: usize,
+    images: usize,
+    rows: usize,
+    code: usize,
+    side: usize,
+    families: usize,
+}
+
+impl ElementCounts {
+    fn of(out: &LayoutDoc) -> ElementCounts {
+        ElementCounts {
+            runs: out.runs.len(),
+            rects: out.rects.len(),
+            images: out.images.len(),
+            rows: out.table_rows.len(),
+            code: out.code_lines.len(),
+            side: out.side.len(),
+            families: out.families.len(),
+        }
+    }
+
+    fn truncate(&self, out: &mut LayoutDoc) {
+        out.runs.truncate(self.runs);
+        out.rects.truncate(self.rects);
+        out.images.truncate(self.images);
+        out.table_rows.truncate(self.rows);
+        out.code_lines.truncate(self.code);
+        out.side.truncate(self.side);
+        out.families.truncate(self.families);
+        // A truncation below an index watermark would leave bucket spans
+        // pointing past the vectors; those buckets restart.
+        if out.index.runs.indexed > self.runs {
+            out.index.runs.clear();
+        }
+        if out.index.rects.indexed > self.rects {
+            out.index.rects.clear();
+        }
+        if out.index.images.indexed > self.images {
+            out.index.images.clear();
+        }
+    }
+}
+
+/// Settles the block just placed against the retention bound: outside
+/// it the geometry drops back to `counts`, inside it the materialized
+/// window extends over the position. `lines` is the retained line
+/// range, meaningful for code blocks.
+fn settle_retention(
+    out: &mut LayoutDoc,
+    pass: &LayoutPass,
+    counts: &ElementCounts,
+    lines: Range<usize>,
+) {
+    let Some((scroll, viewport_h)) = pass.retain else {
+        return;
+    };
+    let range = retain_range(scroll, viewport_h);
+    let position = out.table.entries.len() - 1;
+    let entry = &out.table.entries[position];
+    let retained = entry.y <= range.end && entry.bottom().max(entry.y) >= range.start;
+    if !retained {
+        counts.truncate(out);
+        return;
+    }
+    let marks = PosMarks::of(out, lines);
+    match out.window.as_mut() {
+        Some(window) => {
+            debug_assert_eq!(window.start + window.marks.len(), position);
+            window.marks.push_back(marks);
+        }
+        None => {
+            out.window = Some(WindowState {
+                start: position,
+                marks: [marks].into(),
+            });
+        }
+    }
+}
+
+/// The placed positions whose emission overlaps `range`.
+fn positions_over(table: &BlockTable, range: &Range<f32>) -> Range<usize> {
+    let start = table.entries.partition_point(|e| e.bottom() < range.start);
+    let end = table.entries.partition_point(|e| e.y <= range.end);
+    start..end.max(start)
+}
+
+/// First index in `0..n` where `pred` turns false; `pred` is monotone.
+fn partition(n: usize, pred: impl Fn(usize) -> bool) -> usize {
+    let (mut lo, mut hi) = (0, n);
+    while lo < hi {
+        let mid = (lo + hi) / 2;
+        if pred(mid) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    lo
+}
+
+impl BlockTable {
+    /// Lines of code position `position` overlapping `range`, out of
+    /// `total` lines. A line's bottom is the next line's top, since the
+    /// lines tile the panel.
+    fn lines_over(&self, position: usize, total: usize, range: &Range<f32>) -> Range<usize> {
+        let start = partition(total, |l| self.code_line_top(position, l + 1) < range.start);
+        let end = partition(total, |l| self.code_line_top(position, l) <= range.end);
+        start..end.max(start)
+    }
+}
+
+/// A code block's line count; zero for anything else.
+fn code_line_count(doc: &Document, block: usize) -> usize {
+    match &doc.blocks[block].kind {
+        BlockKind::CodeBlock { lines, .. } => lines.len(),
+        _ => 0,
+    }
+}
+
+/// One side of a window fill: whole positions to replay and, at the
+/// seam with the surviving window, the line extension of a code block
+/// already materialized, shaped without its panel. `fill` is the y
+/// range boundary code positions clip their lines to.
+#[derive(Debug, Clone)]
+struct FillPlan {
+    positions: Range<usize>,
+    extend: Option<(usize, Range<usize>)>,
+    fill: Range<f32>,
+}
+
+impl FillPlan {
+    fn is_empty(&self) -> bool {
+        self.positions.is_empty() && self.extend.as_ref().map_or(true, |(_, l)| l.is_empty())
+    }
+}
+
+/// One replayed region: elements in document order, absolutely
+/// positioned, plus the cumulative marks of each whole position. When
+/// the seam extension replays first, `seam` holds its element counts,
+/// which the existing seam position's marks absorb.
+#[derive(Default)]
+struct Assembly {
+    doc: LayoutDoc,
+    marks: Vec<PosMarks>,
+    seam: Option<PosMarks>,
+}
+
+/// Slides the materialized window to cover the band at `scroll`,
+/// evicting what fell behind and re-shaping missing blocks at their
+/// recorded positions, through the pool when one is given. With
+/// `fill_band` false only the viewport is filled, the interactive
+/// path's cheaper frame; eviction still holds the band's bounds.
+/// Answers whether the materialized window changed.
+#[allow(clippy::too_many_arguments)]
+pub fn window_to(
+    doc: &Document,
+    theme: &Theme,
+    fonts: &mut FontStore,
+    media: &mut MediaCache,
+    cfg: &ViewConfig,
+    lay: &mut LayoutDoc,
+    pool: Option<&std::sync::Arc<crate::layout::pool::ShapePool>>,
+    scroll: f32,
+    viewport_h: f32,
+    fill_band: bool,
+) -> bool {
+    if lay.window.is_none() || lay.table.entries.is_empty() {
+        return false;
+    }
+    // Elements beyond the marks belong to the pass's open code block;
+    // moving them would break the indices the pass holds, so the slide
+    // waits for the block to close.
+    {
+        let window = lay.window.as_ref().expect("windowed layout");
+        let ends = window.marks.back().cloned().unwrap_or_else(PosMarks::zero);
+        if lay.runs.len() > ends.runs
+            || lay.rects.len() > ends.rects
+            || lay.images.len() > ends.images
+            || lay.table_rows.len() > ends.rows
+            || lay.code_lines.len() > ends.code
+        {
+            return false;
+        }
+    }
+    let range = retain_range(scroll, viewport_h);
+    let fill = if fill_band {
+        range.clone()
+    } else {
+        scroll..scroll + viewport_h
+    };
+    let keep = positions_over(&lay.table, &range);
+    let target = positions_over(&lay.table, &fill);
+    let window = lay.window.as_ref().expect("windowed layout");
+    let current = window.start..window.start + window.marks.len();
+
+    // What survives eviction. A target beyond the survivors, with a gap
+    // of positions between, starts the window over instead of bridging;
+    // a far jump inside a boundary code block is the same case at line
+    // granularity, since a position's lines stay one contiguous range.
+    let kept = current.start.max(keep.start)..current.end.min(keep.end);
+    let fresh = kept.is_empty()
+        || target.end < kept.start
+        || target.start > kept.end
+        || line_jump(doc, lay, &kept, &target, &range, &fill);
+
+    if fresh {
+        if target.is_empty() && current.is_empty() {
+            return false;
+        }
+        let plan = FillPlan {
+            positions: target.clone(),
+            extend: None,
+            fill,
+        };
+        let take = seed_fills(doc, theme, cfg, &lay.table, pool, &plan, None);
+        lay.window_clear(target.start);
+        let assembly = replay_fill(doc, theme, fonts, media, cfg, &lay.table, &plan, &take);
+        lay.window_append(assembly, plan.extend.clone());
+        lay.compact_side();
+        return true;
+    }
+
+    // Boundary code lines, planned against the pre-eviction marks: what
+    // the range no longer covers goes, what the fill adds comes back.
+    let (evict_lines_front, evict_lines_back) = plan_line_evictions(doc, lay, &kept, &range);
+    let front = plan_fill_front(doc, lay, &kept, &target, &fill);
+    let back = plan_fill_back(doc, lay, &kept, &target, &fill);
+
+    let evict_front = kept.start - current.start;
+    let evict_back = current.end - kept.end;
+    let changed = evict_front > 0
+        || evict_back > 0
+        || evict_lines_front.is_some()
+        || evict_lines_back.is_some()
+        || !front.is_empty()
+        || !back.is_empty();
+    if !changed {
+        return false;
+    }
+
+    let take = seed_fills(doc, theme, cfg, &lay.table, pool, &front, Some(&back));
+    if evict_front > 0 {
+        lay.window_drop_front(evict_front);
+    }
+    if evict_back > 0 {
+        lay.window_drop_back(evict_back);
+    }
+    if let Some(upto) = evict_lines_front {
+        lay.window_evict_code_front(upto);
+    }
+    if let Some(from) = evict_lines_back {
+        lay.window_evict_code_back(from);
+    }
+    if !front.is_empty() {
+        let assembly = replay_fill(doc, theme, fonts, media, cfg, &lay.table, &front, &take);
+        lay.window_prepend(assembly, front.positions.start, front.extend.clone());
+    }
+    if !back.is_empty() {
+        let assembly = replay_fill(doc, theme, fonts, media, cfg, &lay.table, &back, &take);
+        lay.window_append(assembly, back.extend.clone());
+    }
+    lay.compact_side();
+    true
+}
+
+/// Whether the fill needs lines of a kept boundary code position with
+/// a gap to what stays materialized there. Extending would shape every
+/// line across the gap, so the caller starts the window over instead.
+fn line_jump(
+    doc: &Document,
+    lay: &LayoutDoc,
+    kept: &Range<usize>,
+    target: &Range<usize>,
+    range: &Range<f32>,
+    fill: &Range<f32>,
+) -> bool {
+    let window = lay.window.as_ref().expect("windowed layout");
+    let jump = |position: usize| {
+        let entry = &lay.table.entries[position];
+        if entry.flags & ENTRY_CODE == 0 || !target.contains(&position) {
+            return false;
+        }
+        let total = code_line_count(doc, entry.block as usize);
+        let allowed = lay.table.lines_over(position, total, range);
+        let lines = &window.marks[position - window.start].lines;
+        // The segment line eviction will leave, including its collapse
+        // point when the range misses every materialized line.
+        let start = allowed.start.clamp(lines.start, lines.end);
+        let end = allowed.end.clamp(start, lines.end);
+        let need = lay.table.lines_over(position, total, fill);
+        need.end < start || need.start > end
+    };
+    jump(kept.start) || jump(kept.end - 1)
+}
+
+/// The planned evictions of boundary code lines outside the retention
+/// range: the first kept position's new line start, the last one's new
+/// line end, None where nothing goes.
+fn plan_line_evictions(
+    doc: &Document,
+    lay: &LayoutDoc,
+    kept: &Range<usize>,
+    range: &Range<f32>,
+) -> (Option<usize>, Option<usize>) {
+    let window = lay.window.as_ref().expect("windowed layout");
+    let mark_of = |position: usize| &window.marks[position - window.start];
+    let mut front = None;
+    let mut back = None;
+    let first = &lay.table.entries[kept.start];
+    if first.flags & ENTRY_CODE != 0 {
+        let total = code_line_count(doc, first.block as usize);
+        let allowed = lay.table.lines_over(kept.start, total, range);
+        let lines = &mark_of(kept.start).lines;
+        if lines.start < allowed.start {
+            front = Some(allowed.start.min(lines.end));
+        }
+    }
+    let last_pos = kept.end - 1;
+    let last = &lay.table.entries[last_pos];
+    if last.flags & ENTRY_CODE != 0 {
+        let total = code_line_count(doc, last.block as usize);
+        let allowed = lay.table.lines_over(last_pos, total, range);
+        let lines = &mark_of(last_pos).lines;
+        if lines.end > allowed.end {
+            back = Some(allowed.end.max(lines.start));
+        }
+    }
+    (front, back)
+}
+
+/// The front fill: positions ahead of the surviving window and, at the
+/// seam, the first kept code block's upward line extension.
+fn plan_fill_front(
+    doc: &Document,
+    lay: &LayoutDoc,
+    kept: &Range<usize>,
+    target: &Range<usize>,
+    fill: &Range<f32>,
+) -> FillPlan {
+    let positions = target.start..kept.start.min(target.end).max(target.start);
+    let mut extend = None;
+    let first = &lay.table.entries[kept.start];
+    if first.flags & ENTRY_CODE != 0 && target.contains(&kept.start) {
+        let window = lay.window.as_ref().expect("windowed layout");
+        let lines = &window.marks[kept.start - window.start].lines;
+        let total = code_line_count(doc, first.block as usize);
+        let need = lay.table.lines_over(kept.start, total, fill);
+        if need.start < lines.start {
+            extend = Some((kept.start, need.start..lines.start));
+        }
+    }
+    FillPlan {
+        positions,
+        extend,
+        fill: fill.clone(),
+    }
+}
+
+/// The back fill: the last kept code block's downward line extension
+/// and the positions behind the surviving window.
+fn plan_fill_back(
+    doc: &Document,
+    lay: &LayoutDoc,
+    kept: &Range<usize>,
+    target: &Range<usize>,
+    fill: &Range<f32>,
+) -> FillPlan {
+    let positions = kept.end.max(target.start)..target.end.max(kept.end);
+    let mut extend = None;
+    let last_pos = kept.end - 1;
+    let last = &lay.table.entries[last_pos];
+    if last.flags & ENTRY_CODE != 0 && target.contains(&last_pos) {
+        let window = lay.window.as_ref().expect("windowed layout");
+        let lines = &window.marks[last_pos - window.start].lines;
+        let total = code_line_count(doc, last.block as usize);
+        let need = lay.table.lines_over(last_pos, total, fill);
+        if need.end > lines.end {
+            extend = Some((last_pos, lines.end..need.end));
+        }
+    }
+    FillPlan {
+        positions,
+        extend,
+        fill: fill.clone(),
     }
 }
 
@@ -550,7 +1136,9 @@ struct Frame {
 }
 
 /// A code block placed over several steps. Its panel is pushed on entry
-/// and grows as lines land, which moves no index.
+/// and grows as lines land, which moves no index. Line positions are
+/// closed-form over the line index, with wrapped lines' extra heights
+/// accumulated in order, the same arithmetic the block table replays.
 struct OpenCode {
     block: usize,
     /// The block's order position, the key its line steps pool under.
@@ -559,12 +1147,24 @@ struct OpenCode {
     /// Panel background rect; the border rect follows it.
     panel: usize,
     y0: f32,
-    y: f32,
     pad: f32,
     size: f32,
     line_height: f32,
     wrap_width: f32,
     line: usize,
+    /// Height beyond the shared line height accumulated by wrapped lines.
+    extra: f32,
+    /// Lines inside the retention bound so far.
+    kept: Option<Range<usize>>,
+    /// Element state at the block's start, for dropping it whole.
+    counts: ElementCounts,
+}
+
+impl OpenCode {
+    /// The top of the next line to place: the bottom of what is placed.
+    fn line_top(&self) -> f32 {
+        code_line_y(self.y0 + self.pad, self.line, self.line_height, self.extra)
+    }
 }
 
 pub fn layout(
@@ -621,8 +1221,12 @@ pub fn layout_begin(
         ctx: None,
         seed_position: 0,
         seed_line: 0,
+        retain: None,
     };
-    (LayoutDoc::default(), pass)
+    let mut out = LayoutDoc::default();
+    out.table.margin = margin;
+    out.table.content_width = content_width;
+    (out, pass)
 }
 
 /// Extends a pass over a document that grew by appending blocks, the
@@ -670,6 +1274,11 @@ pub fn layout_more(
         }
         pool_top_up(doc, pass);
         layout_step(doc, theme, fonts, media, cfg, out, pass);
+    }
+    // A bounded pass dropped most blocks but their side text stayed
+    // behind; one compaction at the end settles it.
+    if pass.retain.is_some() {
+        out.compact_side();
     }
     true
 }
@@ -869,7 +1478,7 @@ fn placed_height(pass: &LayoutPass) -> f32 {
         return 0.0;
     }
     match &pass.open {
-        Some(open) => open.y + open.pad + pass.vertical_margin,
+        Some(open) => open.line_top() + open.pad + pass.vertical_margin,
         None => pass.cursor + pass.vertical_margin,
     }
 }
@@ -887,6 +1496,7 @@ fn place_block(
     let block_index = pass.order[position];
     pass.position += 1;
     let block = &doc.blocks[block_index];
+    let counts = ElementCounts::of(out);
 
     if pass.has_notes && position == pass.notes_start && !pass.first {
         let size = cfg.body_size * cfg.zoom;
@@ -898,9 +1508,24 @@ fn place_block(
             (1.0 * cfg.zoom).max(1.0),
             theme.blocks.rule,
         ));
+        out.table.notes_rule = Some((position, pass.cursor));
         pass.cursor += (1.0 * cfg.zoom).max(1.0);
     }
     let Some((heading, is_list, base_size)) = block_metrics(block, cfg) else {
+        out.table.push(
+            block_index,
+            BlockEntry {
+                block: block_index as u32,
+                y: pass.cursor,
+                content_y: pass.cursor,
+                height: 0.0,
+                deco_top: f32::NAN,
+                line_height: 0.0,
+                pad: 0.0,
+                flags: ENTRY_SILENT,
+            },
+        );
+        settle_retention(out, pass, &counts, 0..0);
         return;
     };
     let mut gap = 0.0;
@@ -933,31 +1558,17 @@ fn place_block(
     let mut scratch = std::mem::take(&mut pass.scratch);
     if alert_start {
         let kind = block.alert.expect("alert start has a kind");
-        let title = [Span::plain(alert_title(kind))];
-        let base = BlockStyle {
-            size: cfg.body_size * cfg.zoom,
-            color: alert_color(theme, kind),
-            bold: true,
-            block_index,
-        };
-        let title_h = shape_block(
+        let title_h = shape_alert_title(
             fonts,
             theme,
             cfg,
             &doc.source,
-            &title,
-            false,
-            &base,
+            kind,
+            block_index,
             x_base,
-            0.0,
             avail,
             &mut scratch,
         );
-        // The title is a decoration with no model home; it takes no
-        // part in selection or search.
-        for run in &mut scratch.runs {
-            run.span = usize::MAX;
-        }
         out.splice(&mut scratch, pass.cursor);
         pass.cursor += title_h + 0.25 * base_size;
     }
@@ -972,11 +1583,36 @@ fn place_block(
         is_list,
     };
 
+    let is_code = matches!(block.kind, BlockKind::CodeBlock { .. });
+    let size = cfg.code_size * cfg.zoom;
+    out.table.push(
+        block_index,
+        BlockEntry {
+            block: block_index as u32,
+            y: region_top,
+            content_y: pass.cursor,
+            height: 0.0,
+            deco_top: f32::NAN,
+            line_height: if is_code {
+                metrics::LINE_HEIGHT * size
+            } else {
+                0.0
+            },
+            pad: if is_code {
+                metrics::CODE_PAD * cfg.zoom
+            } else {
+                0.0
+            },
+            flags: if is_code { ENTRY_CODE } else { 0 }
+                | if alert_start { ENTRY_ALERT_TITLE } else { 0 },
+        },
+    );
+
     // A code file is one block, so it is opened and its lines land
     // over as many steps as the slice budget allows.
-    if matches!(block.kind, BlockKind::CodeBlock { .. }) {
+    if is_code {
         pass.scratch = scratch;
-        let open = open_code(theme, cfg, block_index, frame, out, pass);
+        let open = open_code(theme, cfg, block_index, frame, counts, out, pass);
         place_code_line(doc, theme, fonts, cfg, open, out, pass);
         return;
     }
@@ -992,6 +1628,7 @@ fn place_block(
         let mut ready = shaped.scratch;
         out.splice(&mut ready, pass.cursor);
         finish_block(theme, cfg, block, frame, shaped.height, out, pass);
+        settle_retention(out, pass, &counts, 0..0);
         return;
     }
     let height = shape_kind(
@@ -1011,6 +1648,7 @@ fn place_block(
     out.splice(&mut scratch, pass.cursor);
     pass.scratch = scratch;
     finish_block(theme, cfg, block, frame, height, out, pass);
+    settle_retention(out, pass, &counts, 0..0);
 }
 
 /// Shapes one block's own emission into the scratch from zero: the kind
@@ -1146,6 +1784,623 @@ pub(crate) fn shape_kind(
     }
 }
 
+impl LayoutDoc {
+    /// Empties every element vector; the window starts over at `start`.
+    fn window_clear(&mut self, start: usize) {
+        self.runs.clear();
+        self.rects.clear();
+        self.images.clear();
+        self.table_rows.clear();
+        self.code_lines.clear();
+        let window = self.window.as_mut().expect("windowed layout");
+        window.marks.clear();
+        window.start = start;
+        self.index = YIndex::default();
+    }
+
+    /// Drops the first `count` materialized positions' elements.
+    fn window_drop_front(&mut self, count: usize) {
+        if count == 0 {
+            return;
+        }
+        let window = self.window.as_mut().expect("windowed layout");
+        let base = window.marks[count - 1].clone();
+        window.marks.drain(..count);
+        for mark in window.marks.iter_mut() {
+            mark.runs -= base.runs;
+            mark.rects -= base.rects;
+            mark.images -= base.images;
+            mark.rows -= base.rows;
+            mark.code -= base.code;
+        }
+        window.start += count;
+        self.runs.drain(..base.runs);
+        self.rects.drain(..base.rects);
+        self.images.drain(..base.images);
+        self.table_rows.drain(..base.rows);
+        self.code_lines.drain(..base.code);
+        for record in &mut self.code_lines {
+            record.runs = record.runs.start - base.runs..record.runs.end - base.runs;
+        }
+        self.index = YIndex::default();
+    }
+
+    /// Drops the last `count` materialized positions' elements.
+    fn window_drop_back(&mut self, count: usize) {
+        if count == 0 {
+            return;
+        }
+        let window = self.window.as_mut().expect("windowed layout");
+        let len = window.marks.len();
+        let keep = if len > count {
+            window.marks[len - count - 1].clone()
+        } else {
+            PosMarks::zero()
+        };
+        window.marks.truncate(len - count);
+        self.runs.truncate(keep.runs);
+        self.rects.truncate(keep.rects);
+        self.images.truncate(keep.images);
+        self.table_rows.truncate(keep.rows);
+        self.code_lines.truncate(keep.code);
+        self.index = YIndex::default();
+    }
+
+    /// Drops the first position's code lines before `upto`. Records of
+    /// the first position are the first `marks[0].code` records, and a
+    /// code position's runs are exactly its line runs, so the drained
+    /// spans come straight from the records.
+    fn window_evict_code_front(&mut self, upto: usize) {
+        let window = self.window.as_mut().expect("windowed layout");
+        let mark0 = window.marks.front().expect("a first position").clone();
+        let upto = upto.clamp(mark0.lines.start, mark0.lines.end);
+        let cut = self.code_lines[..mark0.code].partition_point(|c| c.line < upto);
+        if cut > 0 {
+            let lo = self.code_lines[0].runs.start;
+            let hi = self.code_lines[cut - 1].runs.end;
+            self.runs.drain(lo..hi);
+            self.code_lines.drain(..cut);
+            for record in &mut self.code_lines {
+                if record.runs.start >= hi {
+                    record.runs = record.runs.start - (hi - lo)..record.runs.end - (hi - lo);
+                }
+            }
+            for mark in window.marks.iter_mut() {
+                mark.runs -= hi - lo;
+                mark.code -= cut;
+            }
+        }
+        window
+            .marks
+            .front_mut()
+            .expect("a first position")
+            .lines
+            .start = upto;
+        self.index = YIndex::default();
+    }
+
+    /// Drops the last position's code lines from `from` on.
+    fn window_evict_code_back(&mut self, from: usize) {
+        let window = self.window.as_mut().expect("windowed layout");
+        let len = window.marks.len();
+        let last = window.marks.back().expect("a last position").clone();
+        let from = from.clamp(last.lines.start, last.lines.end);
+        let prev_code = if len >= 2 {
+            window.marks[len - 2].code
+        } else {
+            0
+        };
+        let records = &self.code_lines[prev_code..last.code];
+        let cut = prev_code + records.partition_point(|c| c.line < from);
+        if cut < last.code {
+            let lo = self.code_lines[cut].runs.start;
+            self.runs.truncate(lo);
+            self.code_lines.truncate(cut);
+            let mark = window.marks.back_mut().expect("a last position");
+            mark.runs = lo;
+            mark.code = cut;
+        }
+        window.marks.back_mut().expect("a last position").lines.end = from;
+        self.index = YIndex::default();
+    }
+
+    /// Splices a replayed assembly in front of the window: whole
+    /// positions from `new_start`, then the seam extension of the first
+    /// surviving position.
+    fn window_prepend(
+        &mut self,
+        mut assembly: Assembly,
+        new_start: usize,
+        extend: Option<(usize, Range<usize>)>,
+    ) {
+        let (side_base, family_map) = self.merge_refs(&mut assembly.doc);
+        for run in &mut assembly.doc.runs {
+            if let TextRef::Side { start, .. } = &mut run.text {
+                *start += side_base;
+            }
+            run.family = family_map[run.family as usize];
+        }
+        let added = PosMarks::of(&assembly.doc, 0..0);
+        for record in &mut self.code_lines {
+            record.runs = record.runs.start + added.runs..record.runs.end + added.runs;
+        }
+        let window = self.window.as_mut().expect("windowed layout");
+        for mark in window.marks.iter_mut() {
+            mark.runs += added.runs;
+            mark.rects += added.rects;
+            mark.images += added.images;
+            mark.rows += added.rows;
+            mark.code += added.code;
+        }
+        if let Some((_, lines)) = extend {
+            let mark0 = window.marks.front_mut().expect("a seam position");
+            mark0.lines.start = lines.start;
+        }
+        for mark in assembly.marks.drain(..).rev() {
+            window.marks.push_front(mark);
+        }
+        window.start = new_start;
+        self.runs.splice(0..0, assembly.doc.runs.drain(..));
+        self.rects.splice(0..0, assembly.doc.rects.drain(..));
+        self.images.splice(0..0, assembly.doc.images.drain(..));
+        self.table_rows
+            .splice(0..0, assembly.doc.table_rows.drain(..));
+        self.code_lines
+            .splice(0..0, assembly.doc.code_lines.drain(..));
+        self.index = YIndex::default();
+    }
+
+    /// Appends a replayed assembly behind the window: the seam
+    /// extension of the last surviving position, then whole positions.
+    fn window_append(&mut self, mut assembly: Assembly, extend: Option<(usize, Range<usize>)>) {
+        let (side_base, family_map) = self.merge_refs(&mut assembly.doc);
+        for run in &mut assembly.doc.runs {
+            if let TextRef::Side { start, .. } = &mut run.text {
+                *start += side_base;
+            }
+            run.family = family_map[run.family as usize];
+        }
+        let base = PosMarks::of(self, 0..0);
+        for record in &mut assembly.doc.code_lines {
+            record.runs = record.runs.start + base.runs..record.runs.end + base.runs;
+        }
+        let window = self.window.as_mut().expect("windowed layout");
+        if let Some(seam) = assembly.seam.take() {
+            let last = window.marks.back_mut().expect("a seam position");
+            last.runs += seam.runs;
+            last.rects += seam.rects;
+            last.images += seam.images;
+            last.rows += seam.rows;
+            last.code += seam.code;
+            if let Some((_, lines)) = &extend {
+                last.lines.end = lines.end;
+            }
+        }
+        for mark in assembly.marks.drain(..) {
+            window.marks.push_back(PosMarks {
+                runs: base.runs + mark.runs,
+                rects: base.rects + mark.rects,
+                images: base.images + mark.images,
+                rows: base.rows + mark.rows,
+                code: base.code + mark.code,
+                lines: mark.lines,
+            });
+        }
+        self.runs.append(&mut assembly.doc.runs);
+        self.rects.append(&mut assembly.doc.rects);
+        self.images.append(&mut assembly.doc.images);
+        self.table_rows.append(&mut assembly.doc.table_rows);
+        self.code_lines.append(&mut assembly.doc.code_lines);
+    }
+
+    /// Rebuilds the side buffer over the live references once evictions
+    /// have left it mostly garbage. The threshold keeps the walk off
+    /// every frame.
+    fn compact_side(&mut self) {
+        let live: usize = self
+            .runs
+            .iter()
+            .filter_map(|r| match r.text {
+                TextRef::Side { len, .. } => Some(len as usize),
+                TextRef::Model { .. } => None,
+            })
+            .sum();
+        if self.side.len() < 64 * 1024 || self.side.len() < live * 2 {
+            return;
+        }
+        let mut side = String::with_capacity(live);
+        for run in &mut self.runs {
+            if let TextRef::Side { start, len } = &mut run.text {
+                let text = &self.side[*start as usize..(*start + *len) as usize];
+                *start = side.len() as u32;
+                side.push_str(text);
+            }
+        }
+        self.side = side;
+    }
+}
+
+/// Seeds every fill's shaping through the pool in ascending key order
+/// and answers the taker the assemblies consume with. Without a pool
+/// the taker answers nothing and the replay shapes serially.
+fn seed_fills(
+    doc: &Document,
+    theme: &Theme,
+    cfg: &ViewConfig,
+    table: &BlockTable,
+    pool: Option<&std::sync::Arc<crate::layout::pool::ShapePool>>,
+    first: &FillPlan,
+    second: Option<&FillPlan>,
+) -> impl Fn(StepKey) -> Option<crate::layout::pool::Shaped> {
+    let claimed = pool.map(|pool| {
+        let generation = pool.begin();
+        let ctx = std::sync::Arc::new(ShapeCtx {
+            theme: theme.clone(),
+            cfg: cfg.clone(),
+            source: std::sync::Arc::clone(&doc.source),
+        });
+        seed_plan(doc, table, pool, generation, &ctx, first);
+        if let Some(second) = second {
+            seed_plan(doc, table, pool, generation, &ctx, second);
+        }
+        (std::sync::Arc::clone(pool), generation)
+    });
+    move |key| {
+        claimed
+            .as_ref()
+            .and_then(|(pool, generation)| pool.take(*generation, key))
+    }
+}
+
+fn seed_plan(
+    doc: &Document,
+    table: &BlockTable,
+    pool: &crate::layout::pool::ShapePool,
+    generation: u64,
+    ctx: &std::sync::Arc<ShapeCtx>,
+    plan: &FillPlan,
+) {
+    let seed_lines = |position: usize, lines: Range<usize>| {
+        let entry = &table.entries[position];
+        let block = &doc.blocks[entry.block as usize];
+        let BlockKind::CodeBlock {
+            lines: source_lines,
+            highlights,
+            ..
+        } = &block.kind
+        else {
+            return;
+        };
+        let (x_base, avail) = block_geometry(block, table.margin, table.content_width, &ctx.cfg);
+        for line in lines {
+            let text = source_lines.line(&doc.source, line);
+            if text.is_empty() {
+                continue;
+            }
+            pool.submit(Job {
+                generation,
+                key: StepKey { position, line },
+                ctx: std::sync::Arc::clone(ctx),
+                work: Work::CodeLine {
+                    line: text.to_string(),
+                    segments: highlights.get(line).cloned().unwrap_or_default(),
+                    block_index: entry.block as usize,
+                    line_index: line,
+                    x0: x_base + entry.pad,
+                    size: ctx.cfg.code_size * ctx.cfg.zoom,
+                    line_height: entry.line_height,
+                    wrap_width: (avail - 2.0 * entry.pad).max(40.0),
+                },
+            });
+        }
+    };
+    let seam_first = plan
+        .extend
+        .as_ref()
+        .is_some_and(|(p, _)| *p < plan.positions.start);
+    if seam_first {
+        if let Some((position, lines)) = &plan.extend {
+            seed_lines(*position, lines.clone());
+        }
+    }
+    for position in plan.positions.clone() {
+        let entry = &table.entries[position];
+        if entry.flags & ENTRY_SILENT != 0 {
+            continue;
+        }
+        let block = &doc.blocks[entry.block as usize];
+        if entry.flags & ENTRY_CODE != 0 {
+            let total = code_line_count(doc, entry.block as usize);
+            seed_lines(position, table.lines_over(position, total, &plan.fill));
+            continue;
+        }
+        if !poolable(block) {
+            continue;
+        }
+        let Some((heading, _, base_size)) = block_metrics(block, &ctx.cfg) else {
+            continue;
+        };
+        let (x_base, avail) = block_geometry(block, table.margin, table.content_width, &ctx.cfg);
+        pool.submit(Job {
+            generation,
+            key: StepKey { position, line: 0 },
+            ctx: std::sync::Arc::clone(ctx),
+            work: Work::Block {
+                block: block.clone(),
+                block_index: entry.block as usize,
+                heading,
+                base_size,
+                x_base,
+                avail,
+            },
+        });
+    }
+    if !seam_first {
+        if let Some((position, lines)) = &plan.extend {
+            seed_lines(*position, lines.clone());
+        }
+    }
+}
+
+/// Replays a fill plan into an assembly, whole positions and the seam
+/// extension in document order.
+#[allow(clippy::too_many_arguments)]
+fn replay_fill(
+    doc: &Document,
+    theme: &Theme,
+    fonts: &mut FontStore,
+    media: &mut MediaCache,
+    cfg: &ViewConfig,
+    table: &BlockTable,
+    plan: &FillPlan,
+    take: &impl Fn(StepKey) -> Option<crate::layout::pool::Shaped>,
+) -> Assembly {
+    let mut assembly = Assembly::default();
+    let seam_first = plan
+        .extend
+        .as_ref()
+        .is_some_and(|(p, _)| *p < plan.positions.start);
+    if seam_first {
+        if let Some((position, lines)) = &plan.extend {
+            replay_code_lines(
+                doc,
+                theme,
+                fonts,
+                cfg,
+                table,
+                *position,
+                lines.clone(),
+                take,
+                &mut assembly.doc,
+            );
+            assembly.seam = Some(PosMarks::of(&assembly.doc, 0..0));
+        }
+    }
+    for position in plan.positions.clone() {
+        let lines = replay_position(
+            doc,
+            theme,
+            fonts,
+            media,
+            cfg,
+            table,
+            position,
+            &plan.fill,
+            take,
+            &mut assembly.doc,
+        );
+        assembly.marks.push(PosMarks::of(&assembly.doc, lines));
+    }
+    if !seam_first {
+        if let Some((position, lines)) = &plan.extend {
+            replay_code_lines(
+                doc,
+                theme,
+                fonts,
+                cfg,
+                table,
+                *position,
+                lines.clone(),
+                take,
+                &mut assembly.doc,
+            );
+        }
+    }
+    assembly
+}
+
+/// Re-emits one recorded position at its recorded y: the notes rule,
+/// the alert title, the kind emission, centering and the quote
+/// decoration, exactly as the pass placed them. Answers the line range
+/// materialized for a code block.
+#[allow(clippy::too_many_arguments)]
+fn replay_position(
+    doc: &Document,
+    theme: &Theme,
+    fonts: &mut FontStore,
+    media: &mut MediaCache,
+    cfg: &ViewConfig,
+    table: &BlockTable,
+    position: usize,
+    fill: &Range<f32>,
+    take: &impl Fn(StepKey) -> Option<crate::layout::pool::Shaped>,
+    out: &mut LayoutDoc,
+) -> Range<usize> {
+    let entry = &table.entries[position];
+    if let Some((rule_position, y)) = table.notes_rule {
+        if rule_position == position {
+            out.rects.push(DecoRect::fill(
+                table.margin,
+                y,
+                table.content_width,
+                (1.0 * cfg.zoom).max(1.0),
+                theme.blocks.rule,
+            ));
+        }
+    }
+    if entry.flags & ENTRY_SILENT != 0 {
+        return 0..0;
+    }
+    let block = &doc.blocks[entry.block as usize];
+    let (heading, _, base_size) =
+        block_metrics(block, cfg).expect("a non-silent entry has metrics");
+    let (x_base, avail) = block_geometry(block, table.margin, table.content_width, cfg);
+    let run_mark = out.runs.len();
+    let rect_mark = out.rects.len();
+    let image_mark = out.images.len();
+    let mut scratch = LayoutDoc::default();
+    if entry.flags & ENTRY_ALERT_TITLE != 0 {
+        let kind = block.alert.expect("an alert title has a kind");
+        shape_alert_title(
+            fonts,
+            theme,
+            cfg,
+            &doc.source,
+            kind,
+            entry.block as usize,
+            x_base,
+            avail,
+            &mut scratch,
+        );
+        out.splice(&mut scratch, entry.y);
+    }
+    let mut lines = 0..0;
+    if entry.flags & ENTRY_CODE != 0 {
+        for rect in code_panel_rects(theme, cfg, x_base, avail, entry.content_y, entry.height) {
+            out.rects.push(rect);
+        }
+        let total = code_line_count(doc, entry.block as usize);
+        lines = table.lines_over(position, total, fill);
+        replay_code_lines(
+            doc,
+            theme,
+            fonts,
+            cfg,
+            table,
+            position,
+            lines.clone(),
+            take,
+            out,
+        );
+    } else {
+        match take(StepKey { position, line: 0 }) {
+            Some(shaped) => {
+                let mut ready = shaped.scratch;
+                out.splice(&mut ready, entry.content_y);
+            }
+            None => {
+                shape_kind(
+                    fonts,
+                    theme,
+                    cfg,
+                    &doc.source,
+                    media,
+                    block,
+                    entry.block as usize,
+                    heading,
+                    base_size,
+                    x_base,
+                    avail,
+                    &mut scratch,
+                );
+                out.splice(&mut scratch, entry.content_y);
+            }
+        }
+    }
+    if block.centered {
+        center_lines(out, run_mark, rect_mark, image_mark, x_base, avail);
+    }
+    if entry.deco_top.is_finite() {
+        let decoration = quote_decoration(
+            theme,
+            cfg,
+            block,
+            table.margin,
+            table.content_width,
+            entry.deco_top,
+            entry.bottom(),
+        );
+        out.rects.splice(rect_mark..rect_mark, decoration);
+    }
+    lines
+}
+
+/// Re-shapes a recorded code block's lines at their recorded tops.
+#[allow(clippy::too_many_arguments)]
+fn replay_code_lines(
+    doc: &Document,
+    theme: &Theme,
+    fonts: &mut FontStore,
+    cfg: &ViewConfig,
+    table: &BlockTable,
+    position: usize,
+    lines: Range<usize>,
+    take: &impl Fn(StepKey) -> Option<crate::layout::pool::Shaped>,
+    out: &mut LayoutDoc,
+) {
+    if lines.is_empty() {
+        return;
+    }
+    let entry = &table.entries[position];
+    let block = &doc.blocks[entry.block as usize];
+    let BlockKind::CodeBlock {
+        lines: source_lines,
+        highlights,
+        ..
+    } = &block.kind
+    else {
+        return;
+    };
+    let (x_base, avail) = block_geometry(block, table.margin, table.content_width, cfg);
+    let x0 = x_base + entry.pad;
+    let wrap_width = (avail - 2.0 * entry.pad).max(40.0);
+    let size = cfg.code_size * cfg.zoom;
+    let base = entry.content_y + entry.pad;
+    let tall = table.tall_of(position);
+    let mut next_tall = 0;
+    let mut extra = 0.0_f32;
+    while next_tall < tall.len() && (tall[next_tall].1 as usize) < lines.start {
+        extra += tall[next_tall].2 - entry.line_height;
+        next_tall += 1;
+    }
+    let empty: Vec<(Range<usize>, SyntaxRole)> = Vec::new();
+    let mut scratch = LayoutDoc::default();
+    for line in lines {
+        let top = code_line_y(base, line, entry.line_height, extra);
+        let text = source_lines.line(&doc.source, line);
+        if !text.is_empty() {
+            match take(StepKey { position, line }) {
+                Some(shaped) => {
+                    let mut ready = shaped.scratch;
+                    out.splice(&mut ready, top);
+                }
+                None => {
+                    let segments = highlights.get(line).unwrap_or(&empty);
+                    shape_code_line_step(
+                        fonts,
+                        theme,
+                        cfg,
+                        text,
+                        segments,
+                        entry.block as usize,
+                        line,
+                        x0,
+                        size,
+                        entry.line_height,
+                        wrap_width,
+                        &mut scratch,
+                    );
+                    out.splice(&mut scratch, top);
+                }
+            }
+        }
+        if next_tall < tall.len() && tall[next_tall].1 as usize == line {
+            extra += tall[next_tall].2 - entry.line_height;
+            next_tall += 1;
+        }
+    }
+}
+
 /// The tail every block runs once its height is known: centering, the
 /// quote decoration, and the advance of the carried state.
 fn finish_block(
@@ -1172,6 +2427,7 @@ fn finish_block(
     // previous block continues the same region (quote or alert), so
     // consecutive quoted blocks read as one. Inserted at the block's rect
     // mark to paint under the block's own rects (pills, strikes, panels).
+    let mut deco_top = f32::NAN;
     if block.quote_depth > 0 {
         let continues = pass.prev_quote_depth > 0 && pass.prev_alert == block.alert;
         // The previous block's trailing space belongs to the region
@@ -1183,36 +2439,95 @@ fn finish_block(
         } else {
             frame.region_top
         };
-        let panel_h = pass.cursor + height - top;
-        let mut decoration = vec![DecoRect::fill(
+        deco_top = top;
+        let decoration = quote_decoration(
+            theme,
+            cfg,
+            block,
             pass.margin,
-            top,
             pass.content_width,
-            panel_h,
-            theme.blocks.quote_bg,
-        )];
-        for level in 0..block.quote_depth {
-            let bar = match block.alert {
-                Some(kind) if level == 0 => alert_color(theme, kind),
-                _ => theme.blocks.quote_bar,
-            };
-            decoration.push(DecoRect::fill(
-                pass.margin + level as f32 * metrics::INDENT * cfg.zoom,
-                top,
-                3.0 * cfg.zoom,
-                panel_h,
-                bar,
-            ));
-        }
+            top,
+            pass.cursor + height,
+        );
         out.rects
             .splice(frame.marks.rects..frame.marks.rects, decoration);
     }
+    out.table.finish(height, deco_top);
 
     pass.cursor += height + metrics::space_below(frame.base_size);
     pass.prev_quote_depth = block.quote_depth;
     pass.prev_alert = block.alert;
     pass.prev_is_list = frame.is_list;
     pass.prev_space_below = metrics::space_below(frame.base_size);
+}
+
+/// Shapes an alert region's bold title line into the scratch; the runs
+/// carry the marker span, decoration outside selection and search.
+/// Shared by the pass and the window replay.
+#[allow(clippy::too_many_arguments)]
+fn shape_alert_title(
+    fonts: &mut FontStore,
+    theme: &Theme,
+    cfg: &ViewConfig,
+    source: &str,
+    kind: AlertKind,
+    block_index: usize,
+    x_base: f32,
+    avail: f32,
+    scratch: &mut LayoutDoc,
+) -> f32 {
+    let title = [Span::plain(alert_title(kind))];
+    let base = BlockStyle {
+        size: cfg.body_size * cfg.zoom,
+        color: alert_color(theme, kind),
+        bold: true,
+        block_index,
+    };
+    let title_h = shape_block(
+        fonts, theme, cfg, source, &title, false, &base, x_base, 0.0, avail, scratch,
+    );
+    // The title is a decoration with no model home; it takes no part in
+    // selection or search.
+    for run in &mut scratch.runs {
+        run.span = usize::MAX;
+    }
+    title_h
+}
+
+/// The quote region's panel and bars wrapping a block from `top` to
+/// `bottom`, in paint order: shared by the pass's tail and the window
+/// replay so both produce the same rectangles.
+fn quote_decoration(
+    theme: &Theme,
+    cfg: &ViewConfig,
+    block: &Block,
+    margin: f32,
+    content_width: f32,
+    top: f32,
+    bottom: f32,
+) -> Vec<DecoRect> {
+    let panel_h = bottom - top;
+    let mut decoration = vec![DecoRect::fill(
+        margin,
+        top,
+        content_width,
+        panel_h,
+        theme.blocks.quote_bg,
+    )];
+    for level in 0..block.quote_depth {
+        let bar = match block.alert {
+            Some(kind) if level == 0 => alert_color(theme, kind),
+            _ => theme.blocks.quote_bar,
+        };
+        decoration.push(DecoRect::fill(
+            margin + level as f32 * metrics::INDENT * cfg.zoom,
+            top,
+            3.0 * cfg.zoom,
+            panel_h,
+            bar,
+        ));
+    }
+    decoration
 }
 
 /// Opens a code block: the panel and border take their final index with a
@@ -1222,6 +2537,7 @@ fn open_code(
     cfg: &ViewConfig,
     block_index: usize,
     frame: Frame,
+    counts: ElementCounts,
     out: &mut LayoutDoc,
     pass: &LayoutPass,
 ) -> OpenCode {
@@ -1233,18 +2549,10 @@ fn open_code(
     let wrap_width = (frame.avail - 2.0 * pad).max(40.0);
     let y0 = pass.cursor;
     let panel = out.rects.len();
-    let radius = metrics::CORNER_RADIUS * cfg.zoom;
-    let blocks = &theme.blocks;
     let height = 2.0 * pad;
-    out.rects.push(
-        DecoRect::fill(frame.x_base, y0, frame.avail, height, blocks.code_bg)
-            .rounded(radius, radius),
-    );
-    out.rects.push(
-        DecoRect::fill(frame.x_base, y0, frame.avail, height, blocks.code_border)
-            .rounded(radius, radius)
-            .stroked((1.0 * cfg.zoom).max(1.0)),
-    );
+    for rect in code_panel_rects(theme, cfg, frame.x_base, frame.avail, y0, height) {
+        out.rects.push(rect);
+    }
     OpenCode {
         block: block_index,
         // place_block advanced past this block one line above.
@@ -1252,13 +2560,35 @@ fn open_code(
         frame,
         panel,
         y0,
-        y: y0 + pad,
         pad,
         size,
         line_height,
         wrap_width,
         line: 0,
+        extra: 0.0,
+        kept: None,
+        counts,
     }
+}
+
+/// A code panel's background and border, shared by the pass's open and
+/// the window replay.
+fn code_panel_rects(
+    theme: &Theme,
+    cfg: &ViewConfig,
+    x_base: f32,
+    avail: f32,
+    y0: f32,
+    height: f32,
+) -> [DecoRect; 2] {
+    let radius = metrics::CORNER_RADIUS * cfg.zoom;
+    let blocks = &theme.blocks;
+    [
+        DecoRect::fill(x_base, y0, avail, height, blocks.code_bg).rounded(radius, radius),
+        DecoRect::fill(x_base, y0, avail, height, blocks.code_border)
+            .rounded(radius, radius)
+            .stroked((1.0 * cfg.zoom).max(1.0)),
+    ]
 }
 
 /// Places one line of the open code block and grows its panel, or closes
@@ -1280,22 +2610,19 @@ fn place_code_line(
         return;
     };
     if open.line >= lines.len() {
-        finish_block(
-            theme,
-            cfg,
-            block,
-            open.frame,
-            open.y - open.y0 + open.pad,
-            out,
-            pass,
-        );
+        let height = open.line_top() - open.y0 + open.pad;
+        finish_block(theme, cfg, block, open.frame, height, out, pass);
+        let kept = open.kept.unwrap_or(0..0);
+        settle_retention(out, pass, &open.counts, kept);
         return;
     }
 
+    let top = open.line_top();
     let line = lines.line(&doc.source, open.line);
-    if line.is_empty() {
-        open.y += open.line_height;
-    } else {
+    let runs_mark = out.runs.len();
+    let code_mark = out.code_lines.len();
+    let mut advance = open.line_height;
+    if !line.is_empty() {
         let key = StepKey {
             position: open.position,
             line: open.line,
@@ -1304,7 +2631,7 @@ fn place_code_line(
             .pool
             .as_ref()
             .and_then(|pool| pool.take(pass.pool_generation, key));
-        let (advance, mut scratch) = match pooled {
+        let (shaped, mut scratch) = match pooled {
             Some(shaped) => (shaped.height, shaped.scratch),
             None => {
                 let empty: Vec<(Range<usize>, SyntaxRole)> = Vec::new();
@@ -1328,13 +2655,44 @@ fn place_code_line(
                 (advance, scratch)
             }
         };
-        out.splice(&mut scratch, open.y);
+        out.splice(&mut scratch, top);
         pass.scratch = scratch;
-        open.y += advance;
+        advance = shaped;
+        if advance != open.line_height {
+            out.table
+                .tall
+                .push((open.position as u32, open.line as u32, advance));
+        }
+    }
+    // A line outside the retention bound was measured and drops; one
+    // that would leave a gap in the kept segment drops too, and the
+    // slide materializes it later.
+    if let Some((scroll, viewport_h)) = pass.retain {
+        let range = retain_range(scroll, viewport_h);
+        let inside = top <= range.end && top + advance >= range.start;
+        let contiguous = open
+            .kept
+            .as_ref()
+            .map_or(true, |kept| kept.end == open.line);
+        if inside && contiguous {
+            match &mut open.kept {
+                Some(kept) => kept.end = open.line + 1,
+                None => open.kept = Some(open.line..open.line + 1),
+            }
+        } else {
+            out.runs.truncate(runs_mark);
+            out.code_lines.truncate(code_mark);
+            if out.index.runs.indexed > runs_mark {
+                out.index.runs.clear();
+            }
+        }
+    }
+    if advance != open.line_height {
+        open.extra += advance - open.line_height;
     }
     open.line += 1;
 
-    let height = open.y - open.y0 + open.pad;
+    let height = open.line_top() - open.y0 + open.pad;
     out.rects[open.panel].height = height;
     out.rects[open.panel + 1].height = height;
     pass.open = Some(open);
@@ -2849,6 +4207,21 @@ pub fn recolor_batch(
     // The rebuild moves every later run index, which the bucket spans
     // hold; queries fall back to the linear tail until reindexed.
     lay.index.runs.clear();
+    // Window marks follow the moved run ends. A mark inside the rebuilt
+    // span belongs to a code position whose records were just updated;
+    // its end is its last record's.
+    if let Some(window) = lay.window.as_mut() {
+        for mark in window.marks.iter_mut() {
+            if mark.runs <= run_lo {
+                continue;
+            }
+            if mark.runs >= run_hi {
+                mark.runs = mark.runs.wrapping_add_signed(delta);
+            } else {
+                mark.runs = lay.code_lines[mark.code - 1].runs.end;
+            }
+        }
+    }
     Some((run_lo, run_hi, delta))
 }
 

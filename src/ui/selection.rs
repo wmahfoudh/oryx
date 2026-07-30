@@ -499,8 +499,10 @@ pub fn rects_window(
 }
 
 /// The y position and size of the first placed run overlapping each
-/// match, `f32::MAX` where nothing is placed: one walk over the runs
-/// with a binary search into the sorted matches.
+/// match: one walk over the runs with a binary search into the sorted
+/// matches. A match with no placed run answers with its recorded block
+/// top from the layout's table, so a windowed layout still positions
+/// every match; `f32::MAX` only where nothing was ever placed.
 pub fn match_tops(lay: &LayoutDoc, matches: &[Selection]) -> Vec<f32> {
     let mut tops = vec![f32::MAX; matches.len()];
     for run in &lay.runs {
@@ -515,6 +517,14 @@ pub fn match_tops(lay: &LayoutDoc, matches: &[Selection]) -> Vec<f32> {
             }
             if b > iv_start {
                 tops[i] = tops[i].min(run.y);
+            }
+        }
+    }
+    for (top, m) in tops.iter_mut().zip(matches) {
+        if *top == f32::MAX {
+            let pos = m.ordered().0;
+            if let Some(y) = lay.approx_top(pos.block, pos.span) {
+                *top = y;
             }
         }
     }

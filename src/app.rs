@@ -13,8 +13,8 @@ use oryx::input::{
     keymap::{self, Command},
 };
 use oryx::layout::{
-    layout_begin, layout_extend, layout_more, metrics, recolor_batch, DecoRect, LayoutDoc,
-    LayoutPass, ShapePool, ViewConfig, OPEN_SLICE, SLICE,
+    layout_begin, layout_extend, layout_more, metrics, recolor_batch, window_to, DecoRect,
+    LayoutDoc, LayoutPass, ShapePool, ViewConfig, OPEN_SLICE, SLICE,
 };
 use oryx::paint;
 use oryx::paint::painter::Painter;
@@ -415,6 +415,7 @@ impl App {
             rects_scroll: 0.0,
             current: 0,
             stale: true,
+            settle: false,
         });
         self.band = None;
         self.request_redraw();
@@ -570,7 +571,9 @@ impl App {
         state.rects_scroll = scroll;
     }
 
-    /// Centers the current match vertically when it sits off screen.
+    /// Centers the current match vertically when it sits off screen. A
+    /// cold match scrolls to its recorded top from the block table and
+    /// settles on the exact anchor once the slide materializes it.
     fn scroll_match_into_view(&mut self) {
         let (Some(lay), Some(state)) = (self.layout.as_ref(), self.search.as_ref()) else {
             return;
@@ -578,9 +581,47 @@ impl App {
         let Some(m) = state.matches.get(state.current) else {
             return;
         };
+        let anchor = selection::match_anchor(lay, m);
+        let (top, size) = match anchor {
+            Some(exact) => exact,
+            None => {
+                let pos = m.ordered().0;
+                match lay.approx_top(pos.block, pos.span) {
+                    Some(top) => (top, self.cfg.body_size * self.cfg.zoom),
+                    None => return,
+                }
+            }
+        };
+        if anchor.is_none() {
+            if let Some(state) = self.search.as_mut() {
+                state.settle = true;
+            }
+        }
+        let line_h = metrics::LINE_HEIGHT * size;
+        let vh = self.viewport_h();
+        if top < self.scroll_y || top + line_h > self.scroll_y + vh {
+            self.scroll_to(top - (vh - line_h) / 2.0);
+        }
+    }
+
+    /// Finishes a cold match's landing: once the slide materializes the
+    /// region, the exact anchor centers it and the settle flag clears.
+    fn settle_search_anchor(&mut self) {
+        if !self.search.as_ref().is_some_and(|s| s.settle && !s.stale) {
+            return;
+        }
+        let Some(lay) = self.layout.as_ref() else {
+            return;
+        };
+        let state = self.search.as_ref().expect("search open");
+        let Some(m) = state.matches.get(state.current) else {
+            self.search.as_mut().expect("search open").settle = false;
+            return;
+        };
         let Some((top, size)) = selection::match_anchor(lay, m) else {
             return;
         };
+        self.search.as_mut().expect("search open").settle = false;
         let line_h = metrics::LINE_HEIGHT * size;
         let vh = self.viewport_h();
         if top < self.scroll_y || top + line_h > self.scroll_y + vh {
@@ -1495,9 +1536,11 @@ impl App {
         }
         let before = self.doc_height();
         let started = Instant::now();
+        let viewport_h = self.viewport_h();
         let done = {
             let lay = self.layout.as_mut().expect("a pass has a layout");
             let pass = self.pass.as_mut().expect("a pass is running");
+            pass.retain_around(self.scroll_y, viewport_h);
             layout_more(
                 &self.document,
                 &self.theme,
@@ -1570,11 +1613,6 @@ impl App {
     }
 
     fn redraw(&mut self) {
-        // Anything the pass or a recolor appended since the last frame
-        // joins the y index before this frame queries it.
-        if let Some(lay) = self.layout.as_mut() {
-            lay.index_more();
-        }
         let inset = self.inset() as u32;
         let Some(size) = self.gfx.as_ref().map(|g| g.window.inner_size()) else {
             return;
@@ -1599,7 +1637,58 @@ impl App {
             self.slice(budget);
         }
         self.resolve_pending();
+        // An open search counts as interactive: every keystroke edits the
+        // highlights, so frames paint direct and the expensive band
+        // rebuild waits until the bar closes.
+        let interactive = self.drag.is_some()
+            || self.sel_anchor.is_some()
+            || self.overlay_mouse
+            || self.search.is_some();
+        // The materialized window slides to the scroll position before
+        // anything reads geometry: the full band when settled, only the
+        // viewport under a live gesture.
+        if let Some(lay) = self.layout.as_mut() {
+            self.scroll_y = scroll::clamp(self.scroll_y, lay.height, size.height as f32);
+            window_to(
+                &self.document,
+                &self.theme,
+                &mut self.fonts,
+                &mut self.media,
+                &self.cfg,
+                lay,
+                Some(&self.pool),
+                self.scroll_y,
+                size.height as f32,
+                !interactive,
+            );
+            // Anything the slide, the pass or a recolor left unindexed
+            // joins the y index before this frame queries it.
+            lay.index_more();
+        }
+        let before_search = self.scroll_y;
         self.sync_search();
+        self.settle_search_anchor();
+        // A search step that scrolled re-slides the window so this
+        // frame paints the landing, not a cold viewport; the match
+        // rects recompute over what just materialized.
+        if self.scroll_y != before_search {
+            if let Some(lay) = self.layout.as_mut() {
+                window_to(
+                    &self.document,
+                    &self.theme,
+                    &mut self.fonts,
+                    &mut self.media,
+                    &self.cfg,
+                    lay,
+                    Some(&self.pool),
+                    self.scroll_y,
+                    size.height as f32,
+                    !interactive,
+                );
+                lay.index_more();
+            }
+            self.refresh_search_rects();
+        }
         let drifted = self.search.as_ref().is_some_and(|state| {
             !state.stale && (self.scroll_y - state.rects_scroll).abs() > self.viewport_h()
         });
@@ -1607,7 +1696,6 @@ impl App {
             self.refresh_search_rects();
         }
         let lay = self.layout.as_ref().expect("layout exists");
-        self.scroll_y = scroll::clamp(self.scroll_y, lay.height, size.height as f32);
         let mut highlight: Vec<DecoRect> = match &self.selection {
             Some(sel) => selection::rects(sel, lay, &self.document, &mut self.fonts)
                 .into_iter()
@@ -1632,13 +1720,6 @@ impl App {
                 && !b.needs_repaint(self.scroll_y, size.height as f32)
         });
         let size_tag = (size.width, size.height);
-        // An open search counts as interactive: every keystroke edits the
-        // highlights, so frames paint direct and the expensive band
-        // rebuild waits until the bar closes.
-        let interactive = self.drag.is_some()
-            || self.sel_anchor.is_some()
-            || self.overlay_mouse
-            || self.search.is_some();
         let mut direct: Option<Vec<u32>> = None;
         if !band_usable {
             let build_now = !interactive && self.pending_band_for == Some(size_tag);

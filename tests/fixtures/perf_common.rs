@@ -96,6 +96,9 @@ pub fn measure_layout(
     if let Some(pool) = pool {
         pass.attach_pool(std::sync::Arc::clone(pool));
     }
+    // The app's retention: the pass measures everything but keeps only
+    // the window around the reading position, here the top.
+    pass.retain_around(0.0, VIEWPORT_H);
     let done = layout_more(
         doc,
         &theme,

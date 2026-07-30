@@ -8,7 +8,7 @@ use oryx::doc::model::{BlockKind, Document};
 use oryx::doc::stream::{self, Swap};
 use oryx::layout::{
     layout, layout_begin, layout_extend, layout_more, layout_step, metrics, recolor_batch,
-    recolor_code_lines, LayoutDoc, ShapePool, TextRun, ViewConfig,
+    recolor_code_lines, window_to, LayoutDoc, ShapePool, TextRun, ViewConfig,
 };
 use oryx::style::fonts::{FontStore, CODE_FAMILY};
 use oryx::style::highlight::{self, Arrival};
@@ -2013,6 +2013,554 @@ fn search_matches_need_no_layout() {
     assert!(
         oryx::ui::search::matches(&doc, "abcd").is_empty(),
         "cells never join"
+    );
+}
+
+// Task 52: the layout window. The pass measures the whole document but
+// retains geometry only for a band around the scroll position; a block
+// table records y and height for everything else, and re-entering a
+// cold region re-shapes it at the recorded positions bit for bit.
+
+/// The paint band at a scroll position: the viewport plus two viewport
+/// heights each side, clamped the way the band cache clamps it.
+fn band_at(scroll: f32, vh: f32, height: f32) -> (f32, f32) {
+    let band_h = 5.0 * vh;
+    let top = (scroll - 2.0 * vh).clamp(0.0, (height - band_h).max(0.0));
+    (top, (top + band_h).min(height))
+}
+
+/// A complete pass with retention bounded around `scroll`.
+fn windowed_doc(
+    doc: &Document,
+    width: f32,
+    fonts: &mut FontStore,
+    scroll: f32,
+    vh: f32,
+) -> LayoutDoc {
+    let mut media = MediaCache::new(PathBuf::from("."));
+    let (mut out, mut pass) = layout_begin(doc, &cfg(), width);
+    pass.retain_around(scroll, vh);
+    layout_more(
+        doc,
+        &theme(),
+        fonts,
+        &mut media,
+        &cfg(),
+        &mut out,
+        &mut pass,
+        None,
+    );
+    out
+}
+
+fn slide_to(doc: &Document, fonts: &mut FontStore, lay: &mut LayoutDoc, scroll: f32, vh: f32) {
+    let mut media = MediaCache::new(PathBuf::from("."));
+    window_to(
+        doc,
+        &theme(),
+        fonts,
+        &mut media,
+        &cfg(),
+        lay,
+        None,
+        scroll,
+        vh,
+        true,
+    );
+}
+
+/// Every field of a run with its references resolved, so two layouts
+/// compare across their private side buffers and family tables.
+type RunKey = (
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u16,
+    bool,
+    (u8, u8, u8, u8),
+    usize,
+    usize,
+    String,
+    String,
+);
+
+fn run_keys_in(lay: &LayoutDoc, doc: &Document, y0: f32, y1: f32) -> Vec<RunKey> {
+    let mut keys: Vec<RunKey> = lay
+        .runs
+        .iter()
+        .filter(|r| r.y >= y0 && r.y <= y1)
+        .map(|r| {
+            (
+                r.y.to_bits(),
+                r.x.to_bits(),
+                r.width.to_bits(),
+                r.baseline.to_bits(),
+                r.size.to_bits(),
+                r.weight,
+                r.italic,
+                (r.color.r, r.color.g, r.color.b, r.color.a),
+                r.block,
+                r.span,
+                lay.run_text(doc, r).to_string(),
+                lay.run_family(r).to_string(),
+            )
+        })
+        .collect();
+    keys.sort();
+    keys
+}
+
+type RectKey = (u32, u32, u32, u32, (u8, u8, u8, u8), u32, u32, u32);
+
+fn rect_keys_in(lay: &LayoutDoc, y0: f32, y1: f32) -> Vec<RectKey> {
+    let mut keys: Vec<RectKey> = lay
+        .rects
+        .iter()
+        .filter(|r| r.y < y1 && r.y + r.height > y0)
+        .map(|r| {
+            (
+                r.y.to_bits(),
+                r.x.to_bits(),
+                r.width.to_bits(),
+                r.height.to_bits(),
+                (r.color.r, r.color.g, r.color.b, r.color.a),
+                r.radius_top.to_bits(),
+                r.radius_bottom.to_bits(),
+                r.stroke.to_bits(),
+            )
+        })
+        .collect();
+    keys.sort();
+    keys
+}
+
+fn image_keys_in(lay: &LayoutDoc, y0: f32, y1: f32) -> Vec<(String, u32, u32, u32, u32)> {
+    let mut keys: Vec<(String, u32, u32, u32, u32)> = lay
+        .images
+        .iter()
+        .filter(|i| i.y < y1 && i.y + i.height > y0)
+        .map(|i| {
+            (
+                i.src.clone(),
+                i.x.to_bits(),
+                i.y.to_bits(),
+                i.width.to_bits(),
+                i.height.to_bits(),
+            )
+        })
+        .collect();
+    keys.sort();
+    keys
+}
+
+/// The windowed layout holds exactly the full layout's elements over the
+/// band at `scroll`, bit for bit.
+fn assert_band_covered(
+    windowed: &LayoutDoc,
+    full: &LayoutDoc,
+    doc: &Document,
+    scroll: f32,
+    vh: f32,
+    what: &str,
+) {
+    let (y0, y1) = band_at(scroll, vh, full.height);
+    let got = run_keys_in(windowed, doc, y0, y1);
+    let want = run_keys_in(full, doc, y0, y1);
+    assert_eq!(
+        got.len(),
+        want.len(),
+        "{what}: {} runs over the band, the full layout has {}",
+        got.len(),
+        want.len()
+    );
+    assert_eq!(got, want, "{what}: runs over the band");
+    let got = rect_keys_in(windowed, y0, y1);
+    let want = rect_keys_in(full, y0, y1);
+    assert_eq!(got, want, "{what}: rects over the band");
+    let got = image_keys_in(windowed, y0, y1);
+    let want = image_keys_in(full, y0, y1);
+    assert_eq!(got, want, "{what}: images over the band");
+}
+
+fn tour_doc() -> Document {
+    let source = std::fs::read_to_string("tests/fixtures/tour.md").expect("the tour fixture");
+    markdown::parse(source)
+}
+
+#[test]
+fn a_windowed_pass_covers_the_band_bit_for_bit() {
+    let doc = tour_doc();
+    let mut fonts = fonts();
+    let full = lay_doc(&doc, 800.0, &mut fonts);
+    let vh = full.height / 30.0;
+    for frac in [0.0_f32, 0.4, 0.8] {
+        let scroll = (full.height * frac).min(full.height - vh);
+        let windowed = windowed_doc(&doc, 800.0, &mut fonts, scroll, vh);
+        assert_eq!(
+            windowed.height, full.height,
+            "height with the window at {frac}"
+        );
+        assert_eq!(
+            windowed.anchors, full.anchors,
+            "anchors with the window at {frac}"
+        );
+        assert!(
+            windowed.window_span().is_some(),
+            "retention is bounded at {frac}"
+        );
+        assert!(
+            windowed.runs.len() * 2 < full.runs.len(),
+            "at {frac} the window keeps {} of {} runs",
+            windowed.runs.len(),
+            full.runs.len()
+        );
+        assert_band_covered(
+            &windowed,
+            &full,
+            &doc,
+            scroll,
+            vh,
+            &format!("window at {frac}"),
+        );
+    }
+}
+
+#[test]
+fn sliding_the_window_reproduces_evicted_geometry() {
+    let doc = tour_doc();
+    let mut fonts = fonts();
+    let full = lay_doc(&doc, 800.0, &mut fonts);
+    let vh = full.height / 30.0;
+    let mut windowed = windowed_doc(&doc, 800.0, &mut fonts, 0.0, vh);
+    let (top0, top1) = band_at(0.0, vh, full.height);
+    let before = run_keys_in(&windowed, &doc, top0, top1);
+    assert!(!before.is_empty(), "the top band is materialized");
+
+    let bottom = full.height - vh;
+    slide_to(&doc, &mut fonts, &mut windowed, bottom, vh);
+    assert_band_covered(&windowed, &full, &doc, bottom, vh, "after the slide down");
+    assert!(
+        run_keys_in(&windowed, &doc, top0, top1).is_empty(),
+        "the top band evicted"
+    );
+
+    slide_to(&doc, &mut fonts, &mut windowed, 0.0, vh);
+    assert_eq!(
+        run_keys_in(&windowed, &doc, top0, top1),
+        before,
+        "re-entry reproduces the evicted geometry"
+    );
+    assert_band_covered(&windowed, &full, &doc, 0.0, vh, "after the return");
+}
+
+#[test]
+fn height_and_anchors_hold_wherever_the_window_sits() {
+    let doc = tour_doc();
+    let mut fonts = fonts();
+    let full = lay_doc(&doc, 800.0, &mut fonts);
+    let vh = full.height / 30.0;
+    let mut windowed = windowed_doc(&doc, 800.0, &mut fonts, 0.0, vh);
+    for frac in [0.15_f32, 0.35, 0.55, 0.75, 0.95] {
+        let scroll = (full.height * frac).min(full.height - vh);
+        slide_to(&doc, &mut fonts, &mut windowed, scroll, vh);
+        assert_eq!(
+            windowed.height, full.height,
+            "height with the window at {frac}"
+        );
+        assert_eq!(
+            windowed.anchors, full.anchors,
+            "anchors with the window at {frac}"
+        );
+    }
+}
+
+#[test]
+fn select_all_and_copies_ignore_the_window() {
+    let doc = tour_doc();
+    let sel = oryx::ui::selection::all(&doc).expect("the tour selects");
+    let plain = oryx::ui::selection::plain_text(&sel, &doc);
+    let md = oryx::ui::selection::markdown(&sel, &doc);
+
+    let mut fonts = fonts();
+    let mut windowed = windowed_doc(&doc, 800.0, &mut fonts, 0.0, 300.0);
+    let deep = windowed.height - 300.0;
+    slide_to(&doc, &mut fonts, &mut windowed, deep, 300.0);
+    assert_eq!(
+        oryx::ui::selection::plain_text(&sel, &doc),
+        plain,
+        "plain copy is indifferent to the window"
+    );
+    assert_eq!(
+        oryx::ui::selection::markdown(&sel, &doc),
+        md,
+        "markdown copy is indifferent to the window"
+    );
+}
+
+#[test]
+fn a_code_file_windows_by_line_range() {
+    let mut source = String::from("```rust\n");
+    for i in 0..400 {
+        source.push_str(&format!("let value_{i} = compute({i}); // line {i}\n"));
+    }
+    source.push_str("```\n");
+    let doc = markdown::parse(source.as_str());
+    let mut fonts = fonts();
+    let full = lay_doc(&doc, 700.0, &mut fonts);
+    let vh = full.height / 30.0;
+    let scroll = full.height * 0.5;
+    let windowed = windowed_doc(&doc, 700.0, &mut fonts, scroll, vh);
+    assert_eq!(
+        windowed.height, full.height,
+        "height of the windowed code file"
+    );
+    assert!(
+        windowed.code_lines.len() * 2 < full.code_lines.len(),
+        "the window keeps {} of {} line records",
+        windowed.code_lines.len(),
+        full.code_lines.len()
+    );
+    let lines: Vec<usize> = windowed.code_lines.iter().map(|c| c.line).collect();
+    assert!(
+        lines.windows(2).all(|w| w[1] == w[0] + 1),
+        "the materialized lines are one contiguous range"
+    );
+    assert_band_covered(&windowed, &full, &doc, scroll, vh, "the code band");
+
+    // A far jump inside the one block re-materializes only the landing,
+    // never the lines between the old window and the new.
+    let mut sliding = windowed_doc(&doc, 700.0, &mut fonts, 0.0, vh);
+    for frac in [0.5_f32, 1.0, 0.25] {
+        let stop = (full.height * frac).clamp(0.0, full.height - vh);
+        slide_to(&doc, &mut fonts, &mut sliding, stop, vh);
+        assert!(
+            sliding.code_lines.len() * 2 < full.code_lines.len(),
+            "after the jump to {frac} the window keeps {} of {} line records",
+            sliding.code_lines.len(),
+            full.code_lines.len()
+        );
+        assert_band_covered(
+            &sliding,
+            &full,
+            &doc,
+            stop,
+            vh,
+            &format!("the jump to {frac}"),
+        );
+    }
+}
+
+#[test]
+fn a_cold_highlight_arrival_is_a_model_only_no_op() {
+    let mut source = String::new();
+    for i in 0..80 {
+        source.push_str(&format!(
+            "Filler paragraph number {i} with several words to give it body.\n\n"
+        ));
+    }
+    source.push_str(
+        "```rust\nfn main() {\n    let s = \"hi\";\n}\nlet tail = 9;\n```\n\nclosing paragraph\n",
+    );
+    let mut doc = markdown::parse(source.as_str());
+    let code_block = doc
+        .blocks
+        .iter()
+        .position(|b| matches!(b.kind, BlockKind::CodeBlock { .. }))
+        .expect("the fixture holds code");
+    let mut fonts = fonts();
+    let vh = 300.0;
+    let mut windowed = windowed_doc(&doc, 800.0, &mut fonts, 0.0, vh);
+    assert!(
+        windowed.code_lines.is_empty(),
+        "the code block is cold under the top window"
+    );
+    let runs_before = windowed.runs.len();
+
+    highlight_all(&mut doc);
+    let spliced = recolor_code_lines(
+        &mut windowed,
+        &doc,
+        &theme(),
+        &mut fonts,
+        &cfg(),
+        code_block,
+        0..4,
+    );
+    assert!(spliced.is_none(), "a cold arrival touches no records");
+    assert_eq!(windowed.runs.len(), runs_before, "the layout is untouched");
+
+    let full = lay_doc(&doc, 800.0, &mut fonts);
+    let code_top = full
+        .runs
+        .iter()
+        .filter(|r| r.block == code_block)
+        .map(|r| r.y)
+        .fold(f32::MAX, f32::min);
+    let scroll = code_top.clamp(0.0, full.height - vh);
+    slide_to(&doc, &mut fonts, &mut windowed, scroll, vh);
+    assert_band_covered(
+        &windowed,
+        &full,
+        &doc,
+        scroll,
+        vh,
+        "a later entry shapes colored",
+    );
+}
+
+#[test]
+fn a_pooled_slide_matches_the_serial_window() {
+    let doc = tour_doc();
+    let mut fonts = fonts();
+    let full = lay_doc(&doc, 800.0, &mut fonts);
+    let vh = full.height / 30.0;
+    let pool = std::sync::Arc::new(ShapePool::new(3, &fonts.seed()));
+    let mut media = MediaCache::new(PathBuf::from("."));
+    let (mut windowed, mut pass) = layout_begin(&doc, &cfg(), 800.0);
+    pass.attach_pool(std::sync::Arc::clone(&pool));
+    pass.retain_around(0.0, vh);
+    layout_more(
+        &doc,
+        &theme(),
+        &mut fonts,
+        &mut media,
+        &cfg(),
+        &mut windowed,
+        &mut pass,
+        None,
+    );
+    let before = pool.completed();
+    let mid = full.height * 0.5;
+    // The interactive hop fills only the viewport, through the pool.
+    window_to(
+        &doc,
+        &theme(),
+        &mut fonts,
+        &mut media,
+        &cfg(),
+        &mut windowed,
+        Some(&pool),
+        mid,
+        vh,
+        false,
+    );
+    let viewport = run_keys_in(&windowed, &doc, mid, mid + vh);
+    assert_eq!(
+        viewport,
+        run_keys_in(&full, &doc, mid, mid + vh),
+        "the viewport fill"
+    );
+    assert!(!viewport.is_empty(), "the viewport holds runs");
+    // The release fills the band around the same scroll.
+    window_to(
+        &doc,
+        &theme(),
+        &mut fonts,
+        &mut media,
+        &cfg(),
+        &mut windowed,
+        Some(&pool),
+        mid,
+        vh,
+        true,
+    );
+    assert_band_covered(&windowed, &full, &doc, mid, vh, "the band fill on release");
+    // Seeded jobs drain even past the calls; the pool provably worked.
+    let waited = Instant::now();
+    while pool.completed() == before && waited.elapsed() < Duration::from_secs(2) {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(pool.completed() > before, "the pool shaped window fills");
+}
+
+#[test]
+fn zoom_rebuilds_the_table() {
+    let doc = tour_doc();
+    let mut fonts = fonts();
+    let mut media = MediaCache::new(PathBuf::from("."));
+    let z2 = ViewConfig {
+        zoom: 2.0,
+        ..ViewConfig::default()
+    };
+    let full2 = layout(&doc, &theme(), &mut fonts, &mut media, &z2, 800.0);
+    let vh = full2.height / 30.0;
+    let (mut windowed2, mut pass) = layout_begin(&doc, &z2, 800.0);
+    pass.retain_around(0.0, vh);
+    layout_more(
+        &doc,
+        &theme(),
+        &mut fonts,
+        &mut media,
+        &z2,
+        &mut windowed2,
+        &mut pass,
+        None,
+    );
+    assert_eq!(
+        windowed2.height, full2.height,
+        "zoomed height from the zoomed table"
+    );
+    assert_band_covered(&windowed2, &full2, &doc, 0.0, vh, "the zoomed window");
+
+    let windowed1 = windowed_doc(&doc, 800.0, &mut fonts, 0.0, vh);
+    let deep = doc.blocks.len() / 2;
+    let top1 = windowed1.approx_top(deep, 0).expect("the table answers");
+    let top2 = windowed2
+        .approx_top(deep, 0)
+        .expect("the zoomed table answers");
+    assert!(
+        top2 > 1.5 * top1,
+        "a deep block's recorded position scales with zoom: {top1} to {top2}"
+    );
+}
+
+#[test]
+fn approx_top_answers_cold_positions() {
+    let doc = tour_doc();
+    let mut fonts = fonts();
+    let full = lay_doc(&doc, 800.0, &mut fonts);
+    let vh = full.height / 30.0;
+    let windowed = windowed_doc(&doc, 800.0, &mut fonts, 0.0, vh);
+    let deep_run = full
+        .runs
+        .iter()
+        .filter(|r| r.y > 0.7 * full.height && r.span != oryx::ui::selection::MARKER_SPAN)
+        .min_by(|a, b| a.y.total_cmp(&b.y))
+        .expect("the tour has deep runs");
+    let block_top = full
+        .runs
+        .iter()
+        .filter(|r| r.block == deep_run.block)
+        .map(|r| r.y)
+        .fold(f32::MAX, f32::min);
+    let approx = windowed
+        .approx_top(deep_run.block, 0)
+        .expect("the table answers a cold block");
+    assert!(
+        approx <= block_top + 0.5 && block_top - approx < 60.0,
+        "the recorded top {approx} sits at the block top {block_top}"
+    );
+
+    let mut source = String::from("```rust\n");
+    for i in 0..400 {
+        source.push_str(&format!("let value_{i} = compute({i}); // line {i}\n"));
+    }
+    source.push_str("```\n");
+    let code = markdown::parse(source.as_str());
+    let code_full = lay_doc(&code, 700.0, &mut fonts);
+    let code_windowed = windowed_doc(&code, 700.0, &mut fonts, 0.0, code_full.height / 30.0);
+    let line_top = code_full
+        .runs
+        .iter()
+        .filter(|r| r.span == 300)
+        .map(|r| r.y)
+        .fold(f32::MAX, f32::min);
+    assert_eq!(
+        code_windowed.approx_top(0, 300),
+        Some(line_top),
+        "a cold code line's recorded top is exact"
     );
 }
 
