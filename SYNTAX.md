@@ -102,6 +102,8 @@ files directly and renders the whole file highlighted.
 ```markdown
 [a link](https://example.com)
 [a section link](#headings)
+[a file link](README.md)
+[a file link to a section](docs/guide.md#tables)
 Bare URLs autolink: https://example.com
 [a reference link][ref]
 

@@ -170,6 +170,10 @@ Anchor links jump inside the document: back to [Text Styles](#text-styles),
 or down to [Heading Levels](#heading-levels). The cursor turns into a
 pointer over any link.
 
+A link to another file opens it in place:
+[the outline sample](samples/sample-outline.md), or straight to
+[a section of it](samples/sample-outline.md#behavior).
+
 ### Heading Levels
 
 The copper ramp encodes hierarchy: the larger the heading, the warmer and
