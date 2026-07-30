@@ -1,0 +1,16 @@
+// Release feed wire format.
+syntax = "proto3";
+
+package oryx.feed.v1;
+
+message Release {
+  string version = 1;
+  int64 published_at = 2;
+  repeated Asset assets = 3;
+}
+
+message Asset {
+  string name = 1;
+  uint64 size_bytes = 2;
+  bool prerelease = 3;
+}

@@ -239,38 +239,32 @@ impl Parser {
     }
 }
 
+/// The default set plus the grammars bundled from `assets/syntaxes/`,
+/// compiled into one dump by `build.rs` and embedded here.
 fn syntax_set() -> &'static SyntaxSet {
     static SET: OnceLock<SyntaxSet> = OnceLock::new();
-    SET.get_or_init(SyntaxSet::load_defaults_newlines)
+    SET.get_or_init(|| {
+        syntect::dumps::from_binary(include_bytes!(concat!(
+            env!("OUT_DIR"),
+            "/syntaxes.packdump"
+        )))
+    })
 }
 
-/// Tokens the bundled set does not answer directly, for two reasons.
-///
-/// A lookup matches a syntax name or one of its extensions, so a syntax
-/// whose name carries punctuation is reachable only through an extension:
-/// that is `batch` and `graphviz`, which are named "Batch File" and
-/// "Graphviz (DOT)".
-///
-/// The rest have no grammar at all and take the closest one that does. The
-/// substitute is chosen per language against real files, and the rule is
-/// that under-coloring beats mis-coloring: a grammar that leaves a
-/// construct plain is preferred to one that paints ordinary identifiers as
-/// types. TOML takes JSON, whose typed literals match its values, while
-/// INI takes Java Properties, whose bare `key=value` lines match its own;
-/// the two formats look alike but their values do not. Kotlin and Swift
-/// take Java, which covers their types, calls, strings and comments
-/// without mis-reading anything, at the cost of leaving `fun`, `val`,
-/// `func` and `let` uncolored.
+/// Tokens the set does not answer directly. A lookup matches a syntax
+/// name or one of its extensions, so a syntax whose name carries
+/// punctuation is reachable only through an extension: that is `batch`
+/// and `graphviz`, named "Batch File" and "Graphviz (DOT)". The rest
+/// bridge a language token to a grammar shipped under another name:
+/// Docker's grammar is named Containerfile and lists only capitalized
+/// file names, and HCL's grammar ships under the Terraform product name.
 const ALIASES: &[(&str, &str)] = &[
     ("batch", "bat"),
     ("csharp", "cs"),
+    ("docker", "containerfile"),
+    ("dockerfile", "containerfile"),
     ("graphviz", "dot"),
-    ("ini", "properties"),
-    ("kotlin", "java"),
-    ("swift", "java"),
-    ("toml", "json"),
-    ("tsx", "js"),
-    ("typescript", "js"),
+    ("hcl", "terraform"),
 ];
 
 /// The bundled grammar a language token resolves to, by its syntax name,
@@ -414,11 +408,21 @@ mod tests {
         assert_eq!(grammar_of("batch"), Some("Batch File"));
         assert_eq!(grammar_of("graphviz"), Some("Graphviz (DOT)"));
         assert_eq!(grammar_of("csharp"), Some("C#"));
-        assert_eq!(grammar_of("typescript"), Some("JavaScript"));
-        assert_eq!(grammar_of("toml"), Some("JSON"));
-        assert_eq!(grammar_of("ini"), Some("Java Properties"));
-        assert_eq!(grammar_of("kotlin"), Some("Java"));
-        assert_eq!(grammar_of("swift"), Some("Java"));
+        assert_eq!(grammar_of("typescript"), Some("TypeScript"));
+        assert_eq!(grammar_of("ts"), Some("TypeScript"));
+        assert_eq!(grammar_of("tsx"), Some("TypeScriptReact"));
+        assert_eq!(grammar_of("toml"), Some("TOML"));
+        assert_eq!(grammar_of("ini"), Some("INI"));
+        assert_eq!(grammar_of("kotlin"), Some("Kotlin"));
+        assert_eq!(grammar_of("swift"), Some("Swift"));
+        assert_eq!(grammar_of("zig"), Some("Zig"));
+        assert_eq!(grammar_of("dockerfile"), Some("Containerfile"));
+        assert_eq!(grammar_of("docker"), Some("Containerfile"));
+        assert_eq!(grammar_of("terraform"), Some("Terraform"));
+        assert_eq!(grammar_of("hcl"), Some("Terraform"));
+        assert_eq!(grammar_of("graphql"), Some("GraphQL"));
+        assert_eq!(grammar_of("protobuf"), Some("Protocol Buffer"));
+        assert_eq!(grammar_of("proto"), Some("Protocol Buffer"));
     }
 
     #[test]
@@ -427,20 +431,27 @@ mod tests {
     }
 
     #[test]
-    fn toml_values_take_their_role_from_the_json_grammar() {
-        let src = lines(&["version = \"0.7.0\"", "lto = true", "opt-level = 3"]);
+    fn toml_comments_and_values_carry_their_roles() {
+        let src = lines(&[
+            "# build profile",
+            "version = \"0.7.0\"",
+            "lto = true",
+            "opt-level = 3",
+        ]);
         let h = spans("", &src, Some("toml"));
-        assert_eq!(role_at(&h[0], 12), SyntaxRole::String, "quoted value");
-        assert_eq!(role_at(&h[1], 6), SyntaxRole::Keyword, "boolean");
-        assert_eq!(role_at(&h[2], 12), SyntaxRole::Number, "number");
+        assert_eq!(role_at(&h[0], 3), SyntaxRole::Comment, "comment body");
+        assert_eq!(role_at(&h[1], 12), SyntaxRole::String, "quoted value");
+        assert_eq!(role_at(&h[2], 6), SyntaxRole::Keyword, "boolean");
+        assert_eq!(role_at(&h[3], 12), SyntaxRole::Number, "number");
     }
 
     #[test]
-    fn ini_keys_and_hash_comments_take_their_role_from_properties() {
+    fn ini_keys_and_hash_comments_carry_their_roles() {
         let src = lines(&["# a note", "Fullscreen=true"]);
         let h = spans("", &src, Some("ini"));
         assert_eq!(role_at(&h[0], 3), SyntaxRole::Comment, "comment body");
-        assert_eq!(role_at(&h[1], 0), SyntaxRole::Keyword, "key");
+        assert_eq!(role_at(&h[1], 0), SyntaxRole::String, "key");
+        assert_eq!(role_at(&h[1], 11), SyntaxRole::Keyword, "boolean");
     }
 
     #[test]

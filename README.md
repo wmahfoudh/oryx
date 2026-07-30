@@ -211,6 +211,27 @@ DejaVu Sans and Courier Prime are embedded in the binary. DejaVu is distributed 
     
 </details>
 
+<details>
+<summary><b>Bundled grammars</b> (beyond syntect's defaults, with thanks to their authors)</summary>
+<br>
+
+- TOML ([sublimehq/Packages](https://github.com/sublimehq/Packages))
+- INI ([jwortmann/ini-syntax](https://github.com/jwortmann/ini-syntax), MIT)
+- Kotlin ([guille/sublime-kotlin](https://github.com/guille/sublime-kotlin), public domain)
+- Swift ([aerobounce/Swift-Next](https://github.com/aerobounce/Swift-Next), MIT)
+- TypeScript and TSX, Microsoft's grammars (Apache-2.0) as converted by [bat](https://github.com/sharkdp/bat)
+- Dockerfile ([keith-hall/Containerfile-sublime-syntax](https://github.com/keith-hall/Containerfile-sublime-syntax), MIT)
+- Zig ([ziglang/sublime-zig-language](https://github.com/ziglang/sublime-zig-language), MIT)
+- Terraform and HCL ([alexlouden/Terraform.tmLanguage](https://github.com/alexlouden/Terraform.tmLanguage), MIT)
+- GraphQL ([dncrews/GraphQL-SublimeText3](https://github.com/dncrews/GraphQL-SublimeText3), MIT)
+- Protocol Buffers ([VcamX/protobuf-syntax-highlighting](https://github.com/VcamX/protobuf-syntax-highlighting), MIT)
+
+Each grammar ships with its license text beside the source under `assets/syntaxes/`.
+
+<br>
+
+</details>
+
 <div align="center">
 
 Oryx is free software, released under the [GNU General Public License v3.0](LICENSE).

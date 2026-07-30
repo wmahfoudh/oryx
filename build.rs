@@ -3,6 +3,10 @@
 //! the ICO and a version block naming the app as the executable's
 //! resources when a resource compiler is available; its absence only
 //! skips the resources, never the build.
+//!
+//! Grammar pipeline: compiles the `.sublime-syntax` sources under
+//! `assets/syntaxes/` together with syntect's default set into one
+//! serialized dump in OUT_DIR, which the highlighter embeds.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -51,6 +55,34 @@ fn main() {
 
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         embed_exe_resources(&out, &ico_path);
+    }
+
+    build_syntax_dump(&out);
+}
+
+/// One dump holds the default set plus the bundled grammar sources, so
+/// the highlighter loads everything in a single deserialization.
+fn build_syntax_dump(out: &Path) {
+    watch_tree(Path::new("assets/syntaxes"));
+    let mut builder = syntect::parsing::SyntaxSet::load_defaults_newlines().into_builder();
+    builder
+        .add_from_folder("assets/syntaxes", true)
+        .expect("bundled grammars compile");
+    syntect::dumps::dump_to_file(&builder.build(), out.join("syntaxes.packdump"))
+        .expect("write syntax dump");
+}
+
+/// Cargo tracks a directory's own mtime only, so every file below the
+/// grammar tree is named individually.
+fn watch_tree(dir: &Path) {
+    println!("cargo:rerun-if-changed={}", dir.display());
+    for entry in std::fs::read_dir(dir).expect("readable syntax dir") {
+        let path = entry.expect("syntax dir entry").path();
+        if path.is_dir() {
+            watch_tree(&path);
+        } else {
+            println!("cargo:rerun-if-changed={}", path.display());
+        }
     }
 }
 

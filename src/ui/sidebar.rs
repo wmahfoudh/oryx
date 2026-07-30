@@ -57,7 +57,15 @@ enum Icon {
 /// languages belong here is a presentation judgment, not a fact about
 /// parsing, so the list sits beside the drawing instead of beside the
 /// extension table.
-const DATA_TOKENS: &[&str] = &["ini", "json", "properties", "toml", "xml", "yaml"];
+const DATA_TOKENS: &[&str] = &[
+    "ini",
+    "json",
+    "properties",
+    "terraform",
+    "toml",
+    "xml",
+    "yaml",
+];
 
 fn icon_for(path: &Path) -> Icon {
     match load::detect(path) {
@@ -460,7 +468,7 @@ mod tests {
             ("app.ini", Icon::Config),
             ("data.json", Icon::Config),
             ("notes.txt", Icon::Text),
-            ("Makefile", Icon::Unknown),
+            ("Makefile", Icon::Code),
             (".gitignore", Icon::Unknown),
         ] {
             assert_eq!(icon_for(Path::new(name)), icon, "{name}");
@@ -471,6 +479,7 @@ mod tests {
     fn a_config_language_reads_as_configuration_not_as_source() {
         // Both are FileKind::Code; only the token separates them.
         assert_eq!(icon_for(Path::new("a.toml")), Icon::Config);
+        assert_eq!(icon_for(Path::new("a.tf")), Icon::Config);
         assert_eq!(icon_for(Path::new("a.rs")), Icon::Code);
     }
 

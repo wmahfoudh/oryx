@@ -1,0 +1,16 @@
+# Release feed schema.
+type Release {
+  version: String!
+  publishedAt: String!
+  assets: [Asset!]!
+}
+
+type Asset {
+  name: String!
+  sizeBytes: Int!
+}
+
+type Query {
+  latest(channel: String = "stable"): Release
+  history(limit: Int = 10): [Release!]!
+}

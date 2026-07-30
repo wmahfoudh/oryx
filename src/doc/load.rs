@@ -28,6 +28,11 @@ pub enum FileKind {
 }
 
 pub fn detect(path: &Path) -> FileKind {
+    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+        if let Ok(i) = WELL_KNOWN_NAMES.binary_search_by_key(&name, |(k, _)| k) {
+            return FileKind::Code(WELL_KNOWN_NAMES[i].1);
+        }
+    }
     let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
         return FileKind::Unknown;
     };
@@ -288,7 +293,20 @@ fn flush_plain(blocks: &mut Vec<Block>, spans: &mut Vec<Span>) {
 /// `.tpl` and `.build` are dropped for the same reason.
 ///
 /// Every token here reaches a grammar, some through `highlight::ALIASES`
-/// where the bundled set has none of its own.
+/// where the grammar ships under another name.
+/// Extensionless file names with a known language, matched exactly
+/// against the file name. `detect` consults it before anything else, so
+/// a `Dockerfile` or a `Makefile` opens colored instead of falling
+/// through to the content sniff. A suffixed variant (`Dockerfile.dev`)
+/// stays unknown and still opens as plain code through the sniff.
+static WELL_KNOWN_NAMES: &[(&str, &str)] = &[
+    ("Containerfile", "dockerfile"),
+    ("Dockerfile", "dockerfile"),
+    ("GNUmakefile", "makefile"),
+    ("Makefile", "makefile"),
+    ("makefile", "makefile"),
+];
+
 static CODE_EXTENSIONS: &[(&str, &str)] = &[
     ("applescript", "applescript"),
     ("as", "actionscript"),
@@ -312,17 +330,21 @@ static CODE_EXTENSIONS: &[(&str, &str)] = &[
     ("di", "d"),
     ("diff", "diff"),
     ("dml", "sql"),
+    ("dockerfile", "dockerfile"),
     ("dot", "graphviz"),
     ("dpr", "pascal"),
     ("el", "lisp"),
     ("erl", "erlang"),
     ("fish", "bash"),
     ("go", "go"),
+    ("gql", "graphql"),
     ("gradle", "groovy"),
+    ("graphql", "graphql"),
     ("groovy", "groovy"),
     ("gv", "graphviz"),
     ("gvy", "groovy"),
     ("h", "c"),
+    ("hcl", "terraform"),
     ("hh", "cpp"),
     ("hpp", "cpp"),
     ("hrl", "erlang"),
@@ -337,6 +359,7 @@ static CODE_EXTENSIONS: &[(&str, &str)] = &[
     ("jsp", "jsp"),
     ("jsx", "javascript"),
     ("kt", "kotlin"),
+    ("kts", "kotlin"),
     ("lhs", "literate haskell"),
     ("lisp", "lisp"),
     ("ltx", "latex"),
@@ -357,6 +380,7 @@ static CODE_EXTENSIONS: &[(&str, &str)] = &[
     ("pm", "perl"),
     ("pod", "perl"),
     ("properties", "properties"),
+    ("proto", "protobuf"),
     ("py", "python"),
     ("pyi", "python"),
     ("pyw", "python"),
@@ -376,15 +400,18 @@ static CODE_EXTENSIONS: &[(&str, &str)] = &[
     ("tcl", "tcl"),
     ("tex", "latex"),
     ("textile", "textile"),
+    ("tf", "terraform"),
     ("toml", "toml"),
     ("ts", "typescript"),
-    ("tsx", "typescript"),
+    ("tsx", "tsx"),
     ("xhtml", "html"),
     ("xml", "xml"),
     ("xsd", "xml"),
     ("xslt", "xml"),
     ("yaml", "yaml"),
     ("yml", "yaml"),
+    ("zig", "zig"),
+    ("zon", "zig"),
     ("zsh", "bash"),
 ];
 
@@ -441,6 +468,16 @@ mod tests {
             ("m.html", "html"),
             ("m.css", "css"),
             ("m.sql", "sql"),
+            ("m.kts", "kotlin"),
+            ("m.tsx", "tsx"),
+            ("m.zig", "zig"),
+            ("m.zon", "zig"),
+            ("m.tf", "terraform"),
+            ("m.hcl", "terraform"),
+            ("m.graphql", "graphql"),
+            ("m.gql", "graphql"),
+            ("m.proto", "protobuf"),
+            ("m.dockerfile", "dockerfile"),
         ] {
             assert_eq!(detect_ext(name), FileKind::Code(token), "{name}");
         }
@@ -450,13 +487,32 @@ mod tests {
     fn unknown_and_missing_extensions_are_unknown() {
         assert_eq!(detect_ext("notes.xyz"), FileKind::Unknown);
         assert_eq!(detect_ext("README"), FileKind::Unknown);
-        assert_eq!(detect_ext("Makefile"), FileKind::Unknown);
+        assert_eq!(detect_ext("LICENSE"), FileKind::Unknown);
         assert_eq!(detect_ext("archive.txt"), FileKind::Text);
+    }
+
+    #[test]
+    fn well_known_names_map_to_tokens() {
+        for (name, token) in [
+            ("Dockerfile", "dockerfile"),
+            ("Containerfile", "dockerfile"),
+            ("Makefile", "makefile"),
+            ("makefile", "makefile"),
+            ("GNUmakefile", "makefile"),
+        ] {
+            assert_eq!(detect_ext(name), FileKind::Code(token), "{name}");
+        }
+        let nested = PathBuf::from("dir/Makefile");
+        assert_eq!(detect(&nested), FileKind::Code("makefile"));
+        assert_eq!(detect_ext("Dockerfile.dev"), FileKind::Unknown);
     }
 
     #[test]
     fn the_extension_table_is_sorted_and_free_of_duplicates() {
         for pair in CODE_EXTENSIONS.windows(2) {
+            assert!(pair[0].0 < pair[1].0, "{} before {}", pair[0].0, pair[1].0);
+        }
+        for pair in WELL_KNOWN_NAMES.windows(2) {
             assert!(pair[0].0 < pair[1].0, "{} before {}", pair[0].0, pair[1].0);
         }
     }
@@ -467,6 +523,12 @@ mod tests {
             assert!(
                 highlight::grammar_of(token).is_some(),
                 ".{ext} maps to {token}, which no grammar answers"
+            );
+        }
+        for (name, token) in WELL_KNOWN_NAMES {
+            assert!(
+                highlight::grammar_of(token).is_some(),
+                "{name} maps to {token}, which no grammar answers"
             );
         }
     }
@@ -496,11 +558,22 @@ mod tests {
             ("a.htm", "HTML"),
             ("a.cxx", "C++"),
             ("a.pyw", "Python"),
-            ("a.toml", "JSON"),
-            ("a.ini", "Java Properties"),
-            ("a.cfg", "Java Properties"),
-            ("a.kt", "Java"),
-            ("a.swift", "Java"),
+            ("a.toml", "TOML"),
+            ("a.ini", "INI"),
+            ("a.cfg", "INI"),
+            ("a.kt", "Kotlin"),
+            ("a.kts", "Kotlin"),
+            ("a.swift", "Swift"),
+            ("a.ts", "TypeScript"),
+            ("a.tsx", "TypeScriptReact"),
+            ("a.zig", "Zig"),
+            ("a.tf", "Terraform"),
+            ("a.hcl", "Terraform"),
+            ("a.graphql", "GraphQL"),
+            ("a.proto", "Protocol Buffer"),
+            ("a.dockerfile", "Containerfile"),
+            ("Dockerfile", "Containerfile"),
+            ("Makefile", "Makefile"),
         ] {
             let FileKind::Code(token) = detect_ext(name) else {
                 panic!("{name} is not code")

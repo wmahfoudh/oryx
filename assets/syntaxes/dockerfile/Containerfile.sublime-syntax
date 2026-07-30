@@ -1,0 +1,366 @@
+%YAML 1.2
+---
+# http://www.sublimetext.com/docs/syntax.html
+name: Containerfile
+file_extensions:
+  - Dockerfile
+  - Containerfile
+first_line_match: (?i)^from[ ][^:]+:[^:]+
+scope: source.containerfile
+version: 2
+
+variables:
+  identifier: '[[:alnum:]]+'
+  onbuild_instruction: (?i:add|arg|env|copy|expose|healthcheck|label|run|shell|stopsignal|user|volume|workdir)
+  non_onbuild_instruction: (?i:maintainer)
+  shell_instruction: (?i:run|cmd|entrypoint|shell)
+  escape_character: \\
+
+contexts:
+  main:
+    - include: statements
+
+  statements:
+    - include: parser-directives
+    - include: comments
+    - match: (?i)^\s*(?=ARG|FROM)\b
+      push: expect-arg-or-from-instructions
+
+###[ PARSER DIRECTIVES AND COMMENTS ]##############################################################
+
+  parser-directives:
+    - match: (?i)^\s*(#)(?=\s*escape\s*=\s*`$)
+      captures:
+        1: comment.line.containerfile meta.annotation.containerfile punctuation.definition.annotation.containerfile
+      set:
+        - scope:source.containerfile.backtick#statements
+        - parser-directive-body
+    - match: '^\s*(#)(?=\s*\w+\s*=)'
+      captures:
+        1: comment.line.containerfile meta.annotation.containerfile punctuation.definition.annotation.containerfile
+      push: parser-directive-body
+
+  parser-directive-body:
+    - meta_content_scope: comment.line.containerfile meta.annotation.identifier.containerfile
+    - match: \w+
+      scope: variable.language.containerfile
+    - match: =
+      scope: keyword.operator.assignment.containerfile
+      set: parser-directive-value
+
+  parser-directive-value:
+    - meta_scope: comment.line.containerfile meta.annotation.parameters.containerfile
+    - meta_content_scope: string.unquoted.containerfile
+    - match: (\w+)(=)
+      captures:
+        1: variable.parameter.containerfile
+        2: keyword.operator.assignment.containerfile
+    - match: ','
+      scope: punctuation.separator.sequence.containerfile
+    - match: $\n?
+      pop: true
+
+  comments:
+    - match: ^\s*(#)
+      captures:
+        1: punctuation.definition.comment.containerfile
+      push: comment-body
+
+  comment-body:
+    - meta_scope: comment.line.number-sign.containerfile
+    - match: $\n?
+      pop: true
+
+  comment-body-eat-line-ending:
+    - meta_scope: comment.line.number-sign.containerfile
+    - match: ^
+      pop: true
+
+  line-continuation:
+    - match: '{{escape_character}}$\n?'
+      push: inside-line-continuation
+
+  inside-line-continuation:
+    - meta_scope: punctuation.separator.continuation.line.containerfile
+    - match: ^
+      pop: true
+
+####[ FROM INSTRUCTION ]###########################################################################
+
+  from-expect-name:
+    - match: $\n?
+      scope: invalid.illegal.missing-identifier.containerfile
+      pop: 2
+    - match: \s*(?=:@)
+      scope: invalid.illegal.missing-identifier.containerfile
+      set: from-optional-tag
+    - match: ''
+      pop: true
+
+  from-name-inside:
+    - meta_content_scope: support.module.containerfile
+    - include: variable-reference
+    - match: (?=[\s:@])
+      set: from-optional-tag
+    - match: $\n?
+      pop: true
+
+  from-name:
+    # so the meta_scope doesn't apply to the context when it isn't top most on the stack
+    - match: ''
+      set: from-name-inside
+
+  variable-reference:
+    # - match: (\$)(\{)(\w+)(\})
+    #   captures:
+    #     0: meta.interpolation.parameter.containerfile
+    #     1: punctuation.definition.variable.containerfile
+    #     2: punctuation.section.interpolation.begin.containerfile
+    #     3: variable.parameter.containerfile
+    #     4: punctuation.section.interpolation.end.containerfile
+    - include: scope:source.shell.bash#variable-expansions
+
+  from-optional-tag:
+    - match: '[:@]'
+      scope: punctuation.separator.key-value.containerfile
+      set: [container-tag, expect-container-tag]
+    - match: (?=\S)|$
+      pop: true
+
+  from-optional-as:
+    - match: (?i)\b(as)\s+([-\w]+)
+      captures:
+        1: keyword.context.containerfile
+        2: entity.name.label.containerfile
+      pop: true
+    - match: $
+      pop: true
+
+  expect-container-tag:
+    - match: $\n?
+      scope: invalid.illegal.missing-tag-or-digest.containerfile
+      pop: 2
+    - match: ''
+      pop: true
+
+  container-tag:
+    # so the meta_scope doesn't apply to the context when it isn't top most on the stack
+    - match: ''
+      set: container-tag-inside
+
+  container-tag-inside:
+    - meta_content_scope: support.constant.containerfile
+    - include: variable-reference
+    - match: (?=\s)|$
+      pop: true
+
+  from-line-meta-scope:
+    - meta_scope: meta.namespace.containerfile
+    - match: $\n?
+      pop: true
+
+####[ INSTRUCTION ARGS ]###########################################################################
+
+  optional-instruction-args:
+    - match: (--)\w+(?:-[-\w]*)?
+      scope: variable.parameter.containerfile
+      captures:
+        1: punctuation.definition.parameter.containerfile
+      push: expect-optional-arg-assignment
+    - include: line-continuation
+    - match: (?=\S|$)
+      pop: true
+
+  expect-optional-arg-assignment:
+    - match: '='
+      scope: keyword.operator.assignment.containerfile
+      set: expect-optional-arg-value
+    - match: (?=\S|$)
+      pop: true
+
+  expect-optional-arg-value:
+    - match: (?=\w+=)
+      set: expect-instruction-arg-additional-key
+    - include: variable-reference
+    - match: '[^\s,]+'
+      scope: string.unquoted.containerfile
+      set: possible-instruction-arg-value-additional-arguments
+    - match: (?=\s|$)
+      pop: true
+
+  possible-instruction-arg-value-additional-arguments:
+    - match: ','
+      scope: punctuation.separator.sequence.containerfile
+      set: expect-instruction-arg-additional-key
+    - match: ''
+      pop: true
+
+  expect-instruction-arg-additional-key:
+    - match: \w+\b
+      scope: variable.parameter.inner.containerfile
+      set: expect-optional-arg-assignment
+
+###[ INSTRUCTIONS ]################################################################################
+
+  expect-arg-or-from-instructions:
+    - match: (?i)ARG\b
+      scope: keyword.context.containerfile
+      push: arg-expect-name
+    - match: (?i)FROM\b
+      scope: keyword.import.from.containerfile
+      set:
+        - expect-instructions
+        - from-line-meta-scope
+        - from-optional-as
+        - from-name
+        - from-expect-name
+        - optional-instruction-args
+    - include: comments
+
+  expect-instructions:
+    - include: comments
+    - include: expect-arg-or-from-instructions
+    - match: (?i)^\s*(onbuild)\s+(?={{onbuild_instruction}}\s)
+      captures:
+        1: storage.modifier.containerfile
+      push: instruction
+    - match: ^\s*(?=(?:{{onbuild_instruction}}|{{non_onbuild_instruction}})\b)
+      push: instruction
+    - match: ^\s*(?={{shell_instruction}}\b)
+      push: shell-instruction
+
+  instruction:
+    - match: (?i)(ENV)\s(\w+)([ ])
+      captures:
+        1: keyword.context.containerfile
+        2: variable.other.readwrite.shell
+        3: invalid.deprecated.missing-equals.containerfile
+      set:
+        - match: $
+          pop: true
+        - include: scope:source.shell.bash#literal-array-value
+    - match: (?i)(ENV)\b
+      captures:
+        1: keyword.context.containerfile
+      set:
+        - scope:source.shell.bash#cmd-export-args
+    - match: (?i)(LABEL)\b
+      captures:
+        1: keyword.other.containerfile
+      set:
+        - arg-expect-name
+    - include: shell-instruction
+    - match: (?i)HEALTHCHECK\s+NONE\b
+      scope: keyword.other.containerfile
+      pop: 1
+    - match: (?i)HEALTHCHECK\b
+      scope: keyword.other.containerfile
+      set:
+        - scope:source.shell.bash#cmd-args-meta
+        - scope:source.shell.bash#cmd-args
+        - optional-cmd
+        - optional-instruction-args
+    - match: '{{onbuild_instruction}}(?=\s)'
+      scope: keyword.other.containerfile
+      set:
+        - scope:source.shell.bash#cmd-args-meta
+        - scope:source.shell.bash#cmd-args # TODO: set optional-instruction-args first?
+    - match: '{{non_onbuild_instruction}}(?=\s)'
+      scope: keyword.other.containerfile
+      set:
+        - scope:source.shell.bash#cmd-args-meta
+        - scope:source.shell.bash#cmd-args
+
+  shell-instruction:
+    - match: '{{shell_instruction}}\b'
+      scope: keyword.other.containerfile
+      set:
+        - shell-instruction-args
+        - optional-instruction-args
+
+####[ SHELL INSTRUCTION ]##########################################################################
+
+  shell-instruction-args:
+    - match: \s*(\[)
+      captures:
+        1: punctuation.section.sequence.begin.containerfile
+      set: inside-shell-json-array-of-strings
+    - match: '[ \t]*(?!{{escape_character}}$)(?=\S)'
+      set: embedded_shell
+    - match: $\n?
+      scope: invalid.illegal.missing-shell-instruction.containerfile
+      pop: 1
+
+  inside-shell-json-array-of-strings:
+    - meta_scope: meta.sequence.containerfile
+    - match: \]
+      scope: invalid.illegal.expected-string.json
+    - match: \"
+      scope: punctuation.definition.string.begin.json
+      push:
+        - shell-json-expect-comma-or-end-of-array
+        - inside-json-string
+    - include: shell-json-common
+
+  shell-json-common:
+    - include: line-continuation
+    - include: comments
+    - match: $\n
+      scope: invalid.illegal.line-end.containerfile
+      pop: true
+
+  inside-json-string:
+    - meta_scope: string.quoted.double.json
+    - match: \"
+      scope: punctuation.definition.string.end.json
+      pop: 1
+    - include: scope:source.json#string-escapes
+    - match: $\n
+      scope: invalid.illegal.unclosed-string.json
+      pop: 1
+
+  shell-json-expect-comma-or-end-of-array:
+    - include: shell-json-common
+    - match: \]
+      scope: punctuation.section.sequence.end.json
+      pop: 2
+    - match: ','
+      scope: punctuation.separator.sequence.json
+      pop: true
+    - match: '[^\s\]]'
+      scope: invalid.illegal.expected-sequence-separator.json
+      pop: true
+
+  embedded_shell:
+    - meta_scope: source.shell.bash.embedded.containerfile
+    - include: line-continuation
+    - include: eat-bare-comments
+    - match: $
+      pop: true
+    - include: scope:source.shell.bash.containerfile#statements
+
+  eat-bare-comments:
+    - match: ^\s*(#)
+      captures:
+        1: punctuation.definition.comment.containerfile
+      push: comment-body-eat-line-ending
+
+  optional-cmd:
+    - include: line-continuation
+    - match: (?i)CMD\b
+      scope: keyword.other.containerfile
+      set: shell-instruction-args
+    - match: ''
+      pop: true
+
+####[ ARG INSTRUCTION ]############################################################################
+
+  arg-expect-name:
+    - meta_content_scope: variable.parameter.containerfile
+    - match: $
+      pop: true
+    - match: =
+      scope: keyword.operator.assignment.bash
+      set:
+        - scope:source.shell.bash#assignment-value-meta
+        - scope:source.shell.bash#literal-array-value
