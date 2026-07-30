@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use oryx::doc::images::MediaCache;
 use oryx::doc::load;
 use oryx::doc::markdown;
-use oryx::doc::model::{BlockKind, Document};
+use oryx::doc::model::{BlockKind, Document, SpanScript};
 use oryx::doc::stream::{self, Swap};
 use oryx::layout::{
     layout, layout_begin, layout_extend, layout_more, layout_step, metrics, recolor_batch,
@@ -403,6 +403,41 @@ fn rule_spans_content_width() {
         .find(|r| r.color == t.blocks.rule)
         .expect("rule rect");
     assert!((rule.width - 672.0).abs() < 1.0);
+}
+
+#[test]
+fn closed_details_fold_and_reopen_exactly() {
+    let src_closed = "<details>\n<summary>More</summary>\n\n### Hidden Head\n\n\
+                      Hidden body text.\n\n</details>\n\nAfter.";
+    let mut doc = markdown::parse(src_closed);
+    let mut fs = fonts();
+    let closed = lay_doc(&doc, 800.0, &mut fs);
+    let all: String = closed
+        .runs
+        .iter()
+        .map(|r| closed.run_text(&doc, r))
+        .collect();
+    assert!(all.contains("More") && all.contains("After."));
+    assert!(!all.contains("Hidden"), "closed content emits nothing");
+    find_text(&closed, &doc, "\u{25B8}");
+    assert!(
+        closed.anchors.iter().all(|(a, _)| a != "hidden-head"),
+        "a folded heading records no anchor"
+    );
+
+    doc.toggle_details(0);
+    let reopened = lay_doc(&doc, 800.0, &mut fs);
+    let twin = markdown::parse(&*src_closed.replace("<details>", "<details open>"));
+    let open = lay_doc(&twin, 800.0, &mut fs);
+    assert_eq!(reopened.runs.len(), open.runs.len());
+    assert_eq!(reopened.rects.len(), open.rects.len());
+    assert!((reopened.height - open.height).abs() < 0.5);
+    assert!(reopened.height > closed.height);
+    find_text(&reopened, &doc, "\u{25BE}");
+    assert!(
+        reopened.anchors.iter().any(|(a, _)| a == "hidden-head"),
+        "reopening places the anchor"
+    );
 }
 
 #[test]
@@ -2551,10 +2586,21 @@ fn approx_top_answers_cold_positions() {
         .filter(|r| r.y > 0.7 * full.height && r.span != oryx::ui::selection::MARKER_SPAN)
         .min_by(|a, b| a.y.total_cmp(&b.y))
         .expect("the tour has deep runs");
+    // Raised scripts (footnote references, superscripts) sit above their
+    // line's top, so they are excluded from the block-top estimate.
+    let spans = match &doc.blocks[deep_run.block].kind {
+        BlockKind::Paragraph { spans } | BlockKind::Heading { spans, .. } => spans.as_slice(),
+        _ => &[],
+    };
     let block_top = full
         .runs
         .iter()
         .filter(|r| r.block == deep_run.block)
+        .filter(|r| {
+            !spans
+                .get(r.span)
+                .is_some_and(|s| s.script != SpanScript::None)
+        })
         .map(|r| r.y)
         .fold(f32::MAX, f32::min);
     let approx = windowed

@@ -189,7 +189,6 @@ DejaVu Sans and Courier Prime are embedded in the binary. DejaVu is distributed 
 
 <details>
 <summary><b>Adapted theme palettes</b> (all MIT, with thanks to their authors)</summary>
-<br>
 
 - Dracula ([draculatheme.com](https://draculatheme.com))
 - Nord ([nordtheme.com](https://www.nordtheme.com))
@@ -206,14 +205,11 @@ DejaVu Sans and Courier Prime are embedded in the binary. DejaVu is distributed 
 - Horizon ([jolaleye/horizon-theme-vscode](https://github.com/jolaleye/horizon-theme-vscode))
 - Flexoki dark and light by Steph Ango ([stephango.com/flexoki](https://stephango.com/flexoki))
 - GitHub Light ([primer/primitives](https://github.com/primer/primitives))
-
-<br>
     
 </details>
 
 <details>
 <summary><b>Bundled grammars</b> (beyond syntect's defaults, with thanks to their authors)</summary>
-<br>
 
 - TOML ([sublimehq/Packages](https://github.com/sublimehq/Packages))
 - INI ([jwortmann/ini-syntax](https://github.com/jwortmann/ini-syntax), MIT)
@@ -227,8 +223,6 @@ DejaVu Sans and Courier Prime are embedded in the binary. DejaVu is distributed 
 - Protocol Buffers ([VcamX/protobuf-syntax-highlighting](https://github.com/VcamX/protobuf-syntax-highlighting), MIT)
 
 Each grammar ships with its license text beside the source under `assets/syntaxes/`.
-
-<br>
 
 </details>
 

@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
-use crate::doc::model::{Block, BlockKind};
+use crate::doc::model::{Block, BlockKind, DetailsGroup};
 
 /// Prefix size the first frame parses; files at or under it take the
 /// sync path.
@@ -102,6 +102,7 @@ fn block_matches(kept: &Block, incoming: &Block) -> bool {
         || kept.alert != incoming.alert
         || kept.range != incoming.range
         || kept.centered != incoming.centered
+        || kept.details != incoming.details
     {
         return false;
     }
@@ -120,8 +121,19 @@ fn block_matches(kept: &Block, incoming: &Block) -> bool {
     }
 }
 
-/// A parked delivery: the generation that produced it and its blocks.
-type Delivery = (u64, Vec<Block>);
+/// Adopts the full parse's details groups after a splice, carrying the
+/// fold toggles the reader already made on the prefix's groups. Ids
+/// align because the prefix matched block for block.
+pub fn adopt_details(current: &[DetailsGroup], mut full: Vec<DetailsGroup>) -> Vec<DetailsGroup> {
+    for (kept, incoming) in current.iter().zip(full.iter_mut()) {
+        incoming.open = kept.open;
+    }
+    full
+}
+
+/// A parked delivery: the generation that produced it, its blocks, and
+/// its details groups.
+type Delivery = (u64, Vec<Block>, Vec<DetailsGroup>);
 
 /// Owns the background full parse. One generation is live at a time:
 /// starting again or cancelling bumps it, the running worker bails at its
@@ -166,7 +178,7 @@ impl ParseWorker {
                 if current.load(Ordering::SeqCst) != generation {
                     return;
                 }
-                *slot = Some((generation, document.blocks));
+                *slot = Some((generation, document.blocks, document.details));
             }
             waker();
         }));
@@ -181,18 +193,18 @@ impl ParseWorker {
     }
 
     /// The current generation's delivery, once, when it has arrived.
-    pub fn drain(&mut self) -> Option<Vec<Block>> {
+    pub fn drain(&mut self) -> Option<(Vec<Block>, Vec<DetailsGroup>)> {
         let mut slot = self.slot.lock().expect("parse slot");
         let current = self.generation.load(Ordering::SeqCst);
         match slot.take() {
-            Some((generation, blocks)) if generation == current => Some(blocks),
+            Some((generation, blocks, details)) if generation == current => Some((blocks, details)),
             _ => None,
         }
     }
 
     /// Blocks until the running worker finishes and hands over its
     /// delivery; None when nothing current is owed.
-    pub fn finish(&mut self) -> Option<Vec<Block>> {
+    pub fn finish(&mut self) -> Option<(Vec<Block>, Vec<DetailsGroup>)> {
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
@@ -206,10 +218,10 @@ mod tests {
     use std::sync::atomic::AtomicBool;
     use std::time::Duration;
 
-    fn drain_within(worker: &mut ParseWorker, ms: u64) -> Option<Vec<Block>> {
+    fn drain_within(worker: &mut ParseWorker, ms: u64) -> Option<(Vec<Block>, Vec<DetailsGroup>)> {
         for _ in 0..ms {
-            if let Some(blocks) = worker.drain() {
-                return Some(blocks);
+            if let Some(delivery) = worker.drain() {
+                return Some(delivery);
             }
             std::thread::sleep(Duration::from_millis(1));
         }
@@ -223,7 +235,7 @@ mod tests {
         let woke = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&woke);
         worker.start(source.clone(), move || flag.store(true, Ordering::SeqCst));
-        let blocks = drain_within(&mut worker, 2000).expect("a delivery arrives");
+        let (blocks, _) = drain_within(&mut worker, 2000).expect("a delivery arrives");
         assert_eq!(blocks, crate::doc::markdown::parse(source.as_str()).blocks);
         assert!(woke.load(Ordering::SeqCst), "the waker ran");
         assert!(worker.drain().is_none(), "a delivery drains once");
@@ -236,8 +248,40 @@ mod tests {
         let mut worker = ParseWorker::new();
         worker.start(first, || {});
         worker.start(second.clone(), || {});
-        let blocks = drain_within(&mut worker, 2000).expect("the live delivery arrives");
+        let (blocks, _) = drain_within(&mut worker, 2000).expect("the live delivery arrives");
         assert_eq!(blocks, crate::doc::markdown::parse(second.as_str()).blocks);
+    }
+
+    #[test]
+    fn a_spliced_delivery_carries_prefix_toggles() {
+        let current = vec![
+            DetailsGroup {
+                parent: None,
+                open: true,
+            },
+            DetailsGroup {
+                parent: None,
+                open: false,
+            },
+        ];
+        let full = vec![
+            DetailsGroup {
+                parent: None,
+                open: false,
+            },
+            DetailsGroup {
+                parent: None,
+                open: false,
+            },
+            DetailsGroup {
+                parent: Some(1),
+                open: true,
+            },
+        ];
+        let adopted = adopt_details(&current, full);
+        assert!(adopted[0].open, "the reader's toggle survives the splice");
+        assert!(!adopted[1].open);
+        assert!(adopted[2].open, "a tail group keeps its parsed state");
     }
 
     #[test]
@@ -309,7 +353,7 @@ mod tests {
         let mut worker = ParseWorker::new();
         assert!(worker.finish().is_none(), "nothing owed before a start");
         worker.start(source.clone(), || {});
-        let blocks = worker.finish().expect("finish waits for the blocks");
+        let (blocks, _) = worker.finish().expect("finish waits for the blocks");
         assert_eq!(blocks, crate::doc::markdown::parse(source.as_str()).blocks);
         assert!(worker.finish().is_none(), "a delivery is owed once");
     }

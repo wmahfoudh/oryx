@@ -343,6 +343,15 @@ mod tests {
     use crate::ui::selection::ModelPos;
 
     #[test]
+    fn matches_reach_inside_closed_details() {
+        let doc = markdown::parse(
+            "<details>\n<summary>S</summary>\n\nthe needle hides here\n\n</details>",
+        );
+        assert!(!doc.block_visible(1), "the paragraph is folded away");
+        assert_eq!(matches(&doc, "needle").len(), 1);
+    }
+
+    #[test]
     fn lowercase_query_matches_any_case() {
         assert!(!smart_case_sensitive("panel"));
         assert!(!smart_case_sensitive("3/17"));

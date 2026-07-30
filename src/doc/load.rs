@@ -238,6 +238,7 @@ fn code_document(token: Option<&str>, text: &str) -> Document {
     Document {
         blocks: vec![block],
         source: Arc::from(text),
+        details: Vec::new(),
     }
 }
 
@@ -266,6 +267,7 @@ fn plain_document(text: &str) -> Document {
     Document {
         blocks,
         source: Arc::from(text),
+        details: Vec::new(),
     }
 }
 

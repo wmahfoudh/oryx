@@ -12,6 +12,8 @@ pub struct Document {
     /// into it. Markdown copy slices it directly. Shared with the parse
     /// and highlight workers, which clone the `Arc`, never the text.
     pub source: Arc<str>,
+    /// The `<details>` regions, indexed by the group id blocks carry.
+    pub details: Vec<DetailsGroup>,
 }
 
 impl Default for Document {
@@ -19,7 +21,56 @@ impl Default for Document {
         Document {
             blocks: Vec::new(),
             source: Arc::from(""),
+            details: Vec::new(),
         }
+    }
+}
+
+/// One `<details>` region. Blocks name their innermost group; nesting
+/// nests through `parent`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DetailsGroup {
+    pub parent: Option<u16>,
+    pub open: bool,
+}
+
+impl Document {
+    /// Whether layout shows this block: every enclosing details group
+    /// open. A summary row carries its enclosing group, not its own, so
+    /// the toggle of a closed group stays visible.
+    pub fn block_visible(&self, index: usize) -> bool {
+        let mut chain = self.blocks[index].details;
+        while let Some(g) = chain {
+            let group = &self.details[g as usize];
+            if !group.open {
+                return false;
+            }
+            chain = group.parent;
+        }
+        true
+    }
+
+    /// Flips one group's fold state.
+    pub fn toggle_details(&mut self, group: u16) {
+        let g = &mut self.details[group as usize];
+        g.open = !g.open;
+    }
+
+    /// Opens every closed group enclosing a block, answering whether
+    /// anything changed. Navigation into a folded region calls this
+    /// before scrolling there.
+    pub fn reveal(&mut self, block: usize) -> bool {
+        let mut chain = self.blocks[block].details;
+        let mut changed = false;
+        while let Some(g) = chain {
+            let group = &mut self.details[g as usize];
+            if !group.open {
+                group.open = true;
+                changed = true;
+            }
+            chain = group.parent;
+        }
+        changed
     }
 }
 
@@ -47,6 +98,9 @@ pub struct Block {
     pub range: Range<usize>,
     /// Set inside `<p align="center">` or `<div align="center">`.
     pub centered: bool,
+    /// Innermost enclosing `<details>` group; a summary row carries the
+    /// group enclosing its own, being the toggle.
+    pub details: Option<u16>,
     pub kind: BlockKind,
 }
 
@@ -57,6 +111,7 @@ impl Block {
             alert: None,
             range: 0..0,
             centered: false,
+            details: None,
             kind,
         }
     }
@@ -101,6 +156,11 @@ pub enum BlockKind {
     },
     Frontmatter {
         entries: Vec<(String, String)>,
+    },
+    /// The visible toggle row of a `<details>` region.
+    Summary {
+        spans: Vec<Span>,
+        group: u16,
     },
 }
 
@@ -299,7 +359,8 @@ pub(crate) fn seal_blocks(blocks: &mut [Block], source: &str) {
             BlockKind::Heading { spans, .. }
             | BlockKind::Paragraph { spans }
             | BlockKind::ListItem { spans, .. }
-            | BlockKind::FootnoteDef { spans, .. } => {
+            | BlockKind::FootnoteDef { spans, .. }
+            | BlockKind::Summary { spans, .. } => {
                 for span in spans {
                     span.seal(source);
                 }

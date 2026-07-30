@@ -200,3 +200,29 @@ With a `<thead>`, the header row is bold on its own band:
 <tr><td>no thead</td><td>no th cells</td></tr>
 <tr><td>so no band</td><td>stripes from the top</td></tr>
 </table>
+
+## Details and Summary
+
+<details>
+<summary>Click to expand this section</summary>
+
+Hidden content renders only while the section is open. Markdown works
+inside: **bold**, `code`, and lists.
+
+- one
+- two
+
+</details>
+
+<details open>
+<summary>This one starts open</summary>
+
+The `open` attribute in the source sets the initial state.
+
+<details>
+<summary>Sections nest</summary>
+
+An inner section folds independently of its parent.
+
+</details>
+</details>

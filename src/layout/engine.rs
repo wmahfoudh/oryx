@@ -81,7 +81,8 @@ fn model_span(doc: &Document, block: usize, span: usize) -> Option<&Span> {
         BlockKind::Heading { spans, .. }
         | BlockKind::Paragraph { spans }
         | BlockKind::ListItem { spans, .. }
-        | BlockKind::FootnoteDef { spans, .. } => spans.get(span),
+        | BlockKind::FootnoteDef { spans, .. }
+        | BlockKind::Summary { spans, .. } => spans.get(span),
         BlockKind::Table { header, rows } => header
             .iter()
             .flatten()
@@ -594,6 +595,26 @@ impl LayoutDoc {
         })
     }
 
+    /// The details group of the summary row under `y`, when `x` sits at
+    /// or right of the content column's start. The whole row toggles,
+    /// the disclosure convention, so only the vertical band is tested.
+    pub fn summary_at(&self, doc: &Document, x: f32, y: f32) -> Option<u16> {
+        if x < 0.0 {
+            return None;
+        }
+        let (head, tail) = self.runs_in(y, y);
+        self.runs[head]
+            .iter()
+            .chain(&self.runs[tail])
+            .find_map(|r| {
+                let BlockKind::Summary { group, .. } = &doc.blocks[r.block].kind else {
+                    return None;
+                };
+                let inside = y >= r.y && y <= r.y + metrics::LINE_HEIGHT * r.size;
+                inside.then_some(*group)
+            })
+    }
+
     /// Y position of a `#anchor` link target or a `footnote:` reference.
     pub fn anchor_y(&self, target: &str) -> Option<f32> {
         let slug = target.strip_prefix('#').unwrap_or(target);
@@ -667,6 +688,9 @@ pub const SLICE: Duration = Duration::from_millis(16);
 pub struct LayoutPass {
     order: Vec<usize>,
     position: usize,
+    /// Model blocks considered so far; above the order's length when
+    /// folded blocks were skipped.
+    covered: usize,
     notes_start: usize,
     has_notes: bool,
     cursor: f32,
@@ -1222,8 +1246,11 @@ pub fn layout_begin(
 
     // Footnote definitions collect at the document end under a rule,
     // wherever the source declared them. Model indices stay untouched so
-    // selection and copy keep their mapping.
+    // selection and copy keep their mapping. Blocks folded inside a
+    // closed details group never enter the order; a toggle restarts the
+    // pass, so visibility is fixed for its lifetime.
     let (body_order, note_order): (Vec<usize>, Vec<usize>) = (0..doc.blocks.len())
+        .filter(|&i| doc.block_visible(i))
         .partition(|&i| !matches!(doc.blocks[i].kind, BlockKind::FootnoteDef { .. }));
     let notes_start = body_order.len();
     let has_notes = !note_order.is_empty();
@@ -1232,6 +1259,7 @@ pub fn layout_begin(
     let pass = LayoutPass {
         order,
         position: 0,
+        covered: doc.blocks.len(),
         notes_start,
         has_notes,
         cursor: 0.0,
@@ -1267,12 +1295,16 @@ pub fn layout_extend(doc: &Document, pass: &mut LayoutPass) -> bool {
     if pass.has_notes {
         return false;
     }
-    let covered = pass.order.len();
+    // Folded blocks never enter the order, so coverage is tracked as a
+    // model high-water mark rather than the order's length.
+    let covered = pass.covered;
     if doc.blocks.len() <= covered {
         return true;
     }
     let (body, notes): (Vec<usize>, Vec<usize>) = (covered..doc.blocks.len())
+        .filter(|&i| doc.block_visible(i))
         .partition(|&i| !matches!(doc.blocks[i].kind, BlockKind::FootnoteDef { .. }));
+    pass.covered = doc.blocks.len();
     pass.order.extend(body);
     pass.notes_start = pass.order.len();
     pass.has_notes = !notes.is_empty();
@@ -1417,10 +1449,11 @@ fn pool_top_up(doc: &Document, pass: &mut LayoutPass) {
 }
 
 /// Whether the pool may shape this block's kind. Image bearers need the
-/// media cache the assembler owns; code blocks pool per line instead.
+/// media cache the assembler owns; code blocks pool per line instead;
+/// summary rows read the fold state only the assembler's document has.
 fn poolable(block: &Block) -> bool {
     match &block.kind {
-        BlockKind::Image { .. } | BlockKind::CodeBlock { .. } => false,
+        BlockKind::Image { .. } | BlockKind::CodeBlock { .. } | BlockKind::Summary { .. } => false,
         BlockKind::Heading { spans, .. }
         | BlockKind::Paragraph { spans }
         | BlockKind::ListItem { spans, .. } => !spans.iter().any(|s| s.image.is_some()),
@@ -1445,6 +1478,8 @@ fn block_metrics(block: &Block, cfg: &ViewConfig) -> Option<(Option<u8>, bool, f
             }
             cfg.body_size * heading.map(metrics::heading_scale).unwrap_or(1.0) * cfg.zoom
         }
+        // A summary row renders its chevron even with no text.
+        BlockKind::Summary { .. } => cfg.body_size * cfg.zoom,
         BlockKind::CodeBlock { .. } => cfg.code_size * cfg.zoom,
         BlockKind::Rule
         | BlockKind::Table { .. }
@@ -1658,6 +1693,10 @@ fn place_block(
         settle_retention(out, pass, &counts, 0..0);
         return;
     }
+    let summary_open = match &block.kind {
+        BlockKind::Summary { group, .. } => doc.details[*group as usize].open,
+        _ => false,
+    };
     let height = shape_kind(
         fonts,
         theme,
@@ -1670,6 +1709,7 @@ fn place_block(
         base_size,
         x_base,
         avail,
+        summary_open,
         &mut scratch,
     );
     out.splice(&mut scratch, pass.cursor);
@@ -1695,9 +1735,23 @@ pub(crate) fn shape_kind(
     base_size: f32,
     x_base: f32,
     avail: f32,
+    summary_open: bool,
     scratch: &mut LayoutDoc,
 ) -> f32 {
     match &block.kind {
+        BlockKind::Summary { spans, .. } => layout_summary(
+            fonts,
+            theme,
+            cfg,
+            source,
+            media,
+            spans,
+            summary_open,
+            block_index,
+            x_base,
+            avail,
+            scratch,
+        ),
         BlockKind::Heading { spans, .. } | BlockKind::Paragraph { spans } => {
             let base = BlockStyle {
                 size: base_size,
@@ -2333,6 +2387,10 @@ fn replay_position(
                 out.splice(&mut ready, entry.content_y);
             }
             None => {
+                let summary_open = match &block.kind {
+                    BlockKind::Summary { group, .. } => doc.details[*group as usize].open,
+                    _ => false,
+                };
                 shape_kind(
                     fonts,
                     theme,
@@ -2345,6 +2403,7 @@ fn replay_position(
                     base_size,
                     x_base,
                     avail,
+                    summary_open,
                     &mut scratch,
                 );
                 out.splice(&mut scratch, entry.content_y);
@@ -3063,6 +3122,44 @@ fn shape_segment(
         }
     }
     height
+}
+
+/// Lays out a summary row: the fold chevron in the gutter, text
+/// indented one step, the list item pattern at depth zero. The chevron
+/// points right closed and down open.
+#[allow(clippy::too_many_arguments)]
+fn layout_summary(
+    fonts: &mut FontStore,
+    theme: &Theme,
+    cfg: &ViewConfig,
+    source: &str,
+    media: &mut MediaCache,
+    spans: &[Span],
+    open: bool,
+    block_index: usize,
+    x0: f32,
+    avail: f32,
+    scratch: &mut LayoutDoc,
+) -> f32 {
+    let size = cfg.body_size * cfg.zoom;
+    let line_height = metrics::LINE_HEIGHT * size;
+    let indent = metrics::INDENT * cfg.zoom;
+    let text_x = x0 + indent;
+    let text_w = (avail - indent).max(40.0);
+    let gutter = 10.0 * cfg.zoom;
+    let glyph = if open { "\u{25BE}" } else { "\u{25B8}" };
+    let (runs, width) = shape_marker(fonts, cfg, glyph, size, theme.text.body, scratch);
+    place_marker(runs, text_x - width - gutter, 0.0, block_index, scratch);
+    let base = BlockStyle {
+        size,
+        color: theme.text.body,
+        bold: false,
+        block_index,
+    };
+    let h = flow_or_shape(
+        fonts, theme, cfg, source, media, spans, &base, text_x, 0.0, text_w, scratch,
+    );
+    h.max(line_height)
 }
 
 /// Lays out one list item: marker (bullet, number, or checkbox) in the

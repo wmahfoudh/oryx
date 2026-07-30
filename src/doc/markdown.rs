@@ -10,8 +10,8 @@ use pulldown_cmark::{
 };
 
 use crate::doc::model::{
-    seal_blocks, AlertKind, Block, BlockKind, CodeBody, Document, Marker, Span, SpanImage,
-    SpanScript,
+    seal_blocks, AlertKind, Block, BlockKind, CodeBody, DetailsGroup, Document, Marker, Span,
+    SpanImage, SpanScript,
 };
 
 pub fn parse(source: impl Into<Arc<str>>) -> Document {
@@ -48,7 +48,11 @@ pub fn parse_unless(source: impl Into<Arc<str>>, bail: impl Fn() -> bool) -> Opt
     builder.finish();
     let mut blocks = builder.blocks;
     seal_blocks(&mut blocks, &source);
-    Some(Document { blocks, source })
+    Some(Document {
+        blocks,
+        source,
+        details: builder.details,
+    })
 }
 
 /// Inline containers the builder can be inside. Paragraphs inside list items
@@ -72,6 +76,18 @@ struct Builder {
     code_start: Option<usize>,
     table: Option<TableAcc>,
     html_table: Option<HtmlTableAcc>,
+    /// The `<details>` groups seen so far; mirrors `Document::details`.
+    details: Vec<DetailsGroup>,
+    /// Open `<details>` group ids, innermost last.
+    details_stack: Vec<u16>,
+    /// Whether each group has emitted its summary row yet; a group whose
+    /// content arrives first gets one synthesized.
+    details_summarized: Vec<bool>,
+    /// Set between `<summary>` and its close; spans accumulate for the row.
+    in_summary: bool,
+    /// Where each group's content starts in `blocks`, for synthesizing a
+    /// missing summary row in front of it.
+    details_start: Vec<usize>,
     image: Option<(String, String)>,
     footnote: Option<String>,
     in_metadata: bool,
@@ -161,6 +177,11 @@ impl Builder {
             code_start: None,
             table: None,
             html_table: None,
+            details: Vec::new(),
+            details_stack: Vec::new(),
+            details_summarized: Vec::new(),
+            in_summary: false,
+            details_start: Vec::new(),
             image: None,
             footnote: None,
             in_metadata: false,
@@ -621,6 +642,48 @@ impl Builder {
                     }
                 }
             }
+            ("details", false) => {
+                if self.html_table.is_some() {
+                    return;
+                }
+                self.flush_spans();
+                let id = self.details.len() as u16;
+                self.details.push(DetailsGroup {
+                    parent: self.details_stack.last().copied(),
+                    open: html_flag(attrs, "open"),
+                });
+                self.details_summarized.push(false);
+                self.details_start.push(self.blocks.len());
+                self.details_stack.push(id);
+            }
+            ("details", true) => {
+                if self.html_table.is_some() {
+                    return;
+                }
+                self.flush_spans();
+                if let Some(id) = self.details_stack.pop() {
+                    self.summarize(id);
+                }
+            }
+            ("summary", false) => {
+                if self.html_table.is_some() || self.details_stack.is_empty() {
+                    return;
+                }
+                self.flush_spans();
+                self.in_summary = true;
+            }
+            ("summary", true) => {
+                if self.html_table.is_some() || !self.in_summary {
+                    return;
+                }
+                self.in_summary = false;
+                let mut spans = std::mem::take(&mut self.spans);
+                trim_cell(&mut spans);
+                if let Some(&id) = self.details_stack.last() {
+                    self.emit(BlockKind::Summary { spans, group: id });
+                    self.details_summarized[id as usize] = true;
+                }
+            }
             ("a", false) => self.link = html_attr(attrs, "href"),
             ("a", true) => self.link = None,
             ("img", false) => {
@@ -710,11 +773,40 @@ impl Builder {
         });
     }
 
+    /// A group whose close arrives without a summary row gets one reading
+    /// "Details", GitHub's fallback, inserted before the group's content.
+    fn summarize(&mut self, id: u16) {
+        if self.details_summarized[id as usize] {
+            return;
+        }
+        self.details_summarized[id as usize] = true;
+        let at = self.details_start[id as usize].min(self.blocks.len());
+        self.blocks.insert(
+            at,
+            Block {
+                quote_depth: 0,
+                alert: None,
+                range: 0..0,
+                centered: false,
+                details: self.details[id as usize].parent,
+                kind: BlockKind::Summary {
+                    spans: vec![Span::plain("Details")],
+                    group: id,
+                },
+            },
+        );
+    }
+
     /// Closes what an unclosed document leaves open, so content never
-    /// silently vanishes.
+    /// silently vanishes: tables emit, details groups fail open.
     fn finish(&mut self) {
         if self.html_table.is_some() {
             self.html_table_close();
+        }
+        self.flush_spans();
+        while let Some(id) = self.details_stack.pop() {
+            self.details[id as usize].open = true;
+            self.summarize(id);
         }
     }
 
@@ -823,7 +915,8 @@ impl Builder {
             BlockKind::Heading { spans, .. }
             | BlockKind::Paragraph { spans }
             | BlockKind::ListItem { spans, .. }
-            | BlockKind::FootnoteDef { spans, .. } => extent(spans.iter()),
+            | BlockKind::FootnoteDef { spans, .. }
+            | BlockKind::Summary { spans, .. } => extent(spans.iter()),
             BlockKind::Table { header, rows } => extent(
                 header
                     .iter()
@@ -835,14 +928,33 @@ impl Builder {
     }
 
     fn emit(&mut self, kind: BlockKind) {
+        // A summary row belongs to the group enclosing its own; it is
+        // the toggle, visible while its group is closed.
+        let details = match &kind {
+            BlockKind::Summary { group, .. } => self.details[*group as usize].parent,
+            _ => self.details_stack.last().copied(),
+        };
         self.blocks.push(Block {
             quote_depth: self.quote_depth,
             alert: self.alerts.iter().rev().find_map(|a| *a),
             range: self.block_range(&kind),
             centered: self.html_center.iter().any(|&c| c),
+            details,
             kind,
         });
     }
+}
+
+/// Whether an attribute is present at all, valued or bare: `open`,
+/// `open=""`, `open="open"`.
+fn html_flag(attrs: &str, name: &str) -> bool {
+    if html_attr(attrs, name).is_some() {
+        return true;
+    }
+    attrs
+        .to_ascii_lowercase()
+        .split_whitespace()
+        .any(|word| word == name)
 }
 
 /// One attribute's value from a tag's attribute text: `name="v"`, `name='v'`,
@@ -1271,6 +1383,91 @@ mod tests {
         assert!(first.contains("one") && first.contains("two"));
         let second: String = rows[0][1].iter().map(|s| s.text(&d.source)).collect();
         assert!(second.contains('x') && second.contains('y'));
+    }
+
+    #[test]
+    fn details_groups_nest_and_stamp_their_blocks() {
+        let d = parse(
+            "<details>\n<summary>Outer</summary>\n\nText inside.\n\n\
+             <details open>\n<summary>Inner</summary>\n\nDeep text.\n\n</details>\n</details>",
+        );
+        assert_eq!(d.details.len(), 2);
+        assert_eq!(d.details[0].parent, None);
+        assert!(!d.details[0].open, "closed without the open attribute");
+        assert_eq!(d.details[1].parent, Some(0));
+        assert!(d.details[1].open);
+        let BlockKind::Summary { spans, group } = &d.blocks[0].kind else {
+            panic!()
+        };
+        assert_eq!(spans[0].text(&d.source), "Outer");
+        assert_eq!(*group, 0);
+        assert_eq!(
+            d.blocks[0].details, None,
+            "a summary sits outside its own group"
+        );
+        assert_eq!(d.blocks[1].details, Some(0));
+        let BlockKind::Summary { group, .. } = &d.blocks[2].kind else {
+            panic!()
+        };
+        assert_eq!(*group, 1);
+        assert_eq!(d.blocks[2].details, Some(0));
+        assert_eq!(d.blocks[3].details, Some(1));
+    }
+
+    #[test]
+    fn a_details_without_summary_synthesizes_one() {
+        let d = parse("<details>\n\nHidden prose.\n\n</details>");
+        let BlockKind::Summary { spans, group } = &d.blocks[0].kind else {
+            panic!()
+        };
+        assert_eq!(spans[0].text(&d.source), "Details");
+        assert_eq!(*group, 0);
+        assert_eq!(d.blocks[1].details, Some(0));
+    }
+
+    #[test]
+    fn an_unclosed_details_stays_open() {
+        let d = parse("<details>\n<summary>Broken</summary>\n\nStill visible.");
+        assert!(d.details[0].open, "a broken document fails visible");
+        assert!(d.block_visible(1));
+    }
+
+    #[test]
+    fn block_visibility_walks_the_details_chain() {
+        let d = parse(
+            "<details>\n<summary>Outer</summary>\n\nBody.\n\n\
+             <details open>\n<summary>Inner</summary>\n\nDeep.\n\n</details>\n</details>",
+        );
+        assert!(d.block_visible(0), "the toggle row of a closed group shows");
+        assert!(!d.block_visible(1));
+        assert!(
+            !d.block_visible(2),
+            "an inner summary hides with its parent"
+        );
+        assert!(
+            !d.block_visible(3),
+            "an open inner group inside a closed outer stays hidden"
+        );
+        let mut open = d;
+        open.toggle_details(0);
+        assert!(open.block_visible(1) && open.block_visible(3));
+    }
+
+    #[test]
+    fn reveal_chain_opens_every_closed_ancestor() {
+        let mut d = parse(
+            "<details>\n<summary>Outer</summary>\n\n\
+             <details>\n<summary>Inner</summary>\n\nDeep.\n\n</details>\n</details>",
+        );
+        let deep = d
+            .blocks
+            .iter()
+            .position(|b| b.details == Some(1))
+            .expect("the deep paragraph");
+        assert!(d.reveal(deep));
+        assert!(d.details[0].open && d.details[1].open);
+        assert!(d.block_visible(deep));
+        assert!(!d.reveal(deep), "already visible changes nothing");
     }
 
     #[test]

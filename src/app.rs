@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use oryx::doc::images::{MediaCache, Waker};
 use oryx::doc::load;
-use oryx::doc::model::{Block, Document};
+use oryx::doc::model::{Block, BlockKind, DetailsGroup, Document};
 use oryx::doc::stream::{self, ParseWorker};
 use oryx::export::{self, ExportPass, ExportSettings};
 use oryx::input::{
@@ -440,8 +440,19 @@ impl App {
             return;
         }
         state.current = search::step(state.current, state.matches.len(), forward);
+        let block = state.matches[state.current].ordered().0.block;
         self.band = None;
-        self.scroll_match_into_view();
+        if self.document.reveal(block) {
+            // The match sits inside a folded details group: open the
+            // chain, restart the pass, and let the settle path center it
+            // once the region is placed.
+            if let Some(state) = self.search.as_mut() {
+                state.settle = true;
+            }
+            self.restart_layout();
+        } else {
+            self.scroll_match_into_view();
+        }
         self.request_redraw();
     }
 
@@ -722,16 +733,16 @@ impl App {
         if self.sel_anchor.is_some() || self.drag.is_some() {
             return;
         }
-        if let Some(blocks) = self.parser.drain() {
-            self.land_parse(blocks);
+        if let Some((blocks, details)) = self.parser.drain() {
+            self.land_parse(blocks, details);
         }
     }
 
     /// Joins the parse worker and lands its document now, for the
     /// completions that need the whole model.
     fn finish_parse(&mut self) {
-        if let Some(blocks) = self.parser.finish() {
-            self.land_parse(blocks);
+        if let Some((blocks, details)) = self.parser.finish() {
+            self.land_parse(blocks, details);
         }
     }
 
@@ -740,7 +751,7 @@ impl App {
     /// replace swaps the model and relayouts from scratch with the scroll
     /// held. Either way the highlight worker restarts over the whole
     /// document.
-    fn land_parse(&mut self, blocks: Vec<Block>) {
+    fn land_parse(&mut self, blocks: Vec<Block>, details: Vec<DetailsGroup>) {
         // Owed recolors index the pre-swap model; they apply while every
         // index is still valid.
         self.flush_recolor();
@@ -748,12 +759,16 @@ impl App {
         let spliced = match stream::swap(&self.document.blocks, blocks) {
             stream::Swap::Splice(tail) => {
                 self.document.blocks.extend(tail);
+                // The tail's group ids index the full parse's vector;
+                // toggles already made on prefix groups carry over.
+                self.document.details = stream::adopt_details(&self.document.details, details);
                 self.pass
                     .as_mut()
                     .is_some_and(|pass| layout_extend(&self.document, pass))
             }
             stream::Swap::Replace(blocks) => {
                 self.document.blocks = blocks;
+                self.document.details = details;
                 false
             }
         };
@@ -1405,8 +1420,28 @@ impl App {
         }
     }
 
+    /// Restarts the streaming layout in place: the scroll position holds
+    /// and the pass rebuilds behind it, the zoom contract. Fold toggles
+    /// and reveals come through here.
+    fn restart_layout(&mut self) {
+        self.layout = None;
+        self.band = None;
+        self.request_redraw();
+    }
+
+    /// The block a `#anchor` target names, wherever it sits in the model,
+    /// placed or not.
+    fn anchor_block(&self, target: &str) -> Option<usize> {
+        let slug = target.strip_prefix('#')?;
+        self.document
+            .blocks
+            .iter()
+            .position(|b| matches!(&b.kind, BlockKind::Heading { anchor, .. } if anchor == slug))
+    }
+
     /// Follow the link under the cursor: anchors scroll, http links open
-    /// in the system browser.
+    /// in the system browser. A click on a summary row with no link under
+    /// it toggles the row's details group.
     fn link_press(&mut self) {
         let Some(lay) = self.layout.as_ref() else {
             return;
@@ -1414,6 +1449,10 @@ impl App {
         let x = self.cursor.x as f32 - self.inset();
         let y = self.cursor.y as f32 + self.scroll_y;
         let Some(target) = lay.link_at(&self.document, x, y).map(str::to_owned) else {
+            if let Some(group) = lay.summary_at(&self.document, x, y) {
+                self.document.toggle_details(group);
+                self.restart_layout();
+            }
             return;
         };
         if let Some(anchor) = lay.anchor_y(&target) {
@@ -1422,9 +1461,18 @@ impl App {
             if let Err(err) = open::that_detached(&target) {
                 eprintln!("oryx: cannot open {target}: {err}");
             }
+        } else if let Some(block) = self.anchor_block(&target) {
+            // The heading exists but is not placed: folded away, beyond
+            // the pass, or both. Reveal opens the chain and the pending
+            // target lands once the pass places it.
+            if self.document.reveal(block) {
+                self.restart_layout();
+            }
+            self.pending_anchor = Some(target);
+            self.request_redraw();
         } else if self.layout_pending() {
-            // The heading sits further down than the pass has reached, so
-            // the jump waits for it instead of doing nothing.
+            // Not in the model yet either; the parse may still deliver
+            // it, so the jump waits instead of doing nothing.
             self.pending_anchor = Some(target);
         }
     }
@@ -1439,10 +1487,10 @@ impl App {
         let x = self.cursor.x as f32 - self.inset();
         let y = self.cursor.y as f32 + self.scroll_y;
         let hovering = !on_edge
-            && self
-                .layout
-                .as_ref()
-                .is_some_and(|l| l.link_at(&self.document, x, y).is_some());
+            && self.layout.as_ref().is_some_and(|l| {
+                l.link_at(&self.document, x, y).is_some()
+                    || l.summary_at(&self.document, x, y).is_some()
+            });
         if hovering != self.hover_link || on_edge != self.hover_edge {
             self.hover_link = hovering;
             self.hover_edge = on_edge;

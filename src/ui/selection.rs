@@ -69,7 +69,8 @@ pub(crate) fn block_pieces(doc: &Document, index: usize) -> Vec<Piece<'_>> {
     match &doc.blocks[index].kind {
         BlockKind::Heading { spans, .. }
         | BlockKind::Paragraph { spans }
-        | BlockKind::ListItem { spans, .. } => span_pieces(&mut out, spans, 0, source),
+        | BlockKind::ListItem { spans, .. }
+        | BlockKind::Summary { spans, .. } => span_pieces(&mut out, spans, 0, source),
         BlockKind::FootnoteDef { label, spans } => {
             out.push(Piece::Label(format!("{label}.\t")));
             span_pieces(&mut out, spans, 0, source);
@@ -354,7 +355,8 @@ fn kind_spans(kind: &BlockKind) -> Option<&[Span]> {
         BlockKind::Heading { spans, .. }
         | BlockKind::Paragraph { spans }
         | BlockKind::ListItem { spans, .. }
-        | BlockKind::FootnoteDef { spans, .. } => Some(spans),
+        | BlockKind::FootnoteDef { spans, .. }
+        | BlockKind::Summary { spans, .. } => Some(spans),
         _ => None,
     }
 }
@@ -759,6 +761,17 @@ mod tests {
         let source = "# Title\n\nplain **bold** *italic* ~~gone~~ `code` [link](https://a.tld)";
         let (doc, _, _) = lay_doc(source);
         assert_eq!(markdown(&select_all(&doc), &doc), source);
+    }
+
+    #[test]
+    fn copies_cover_closed_details_content() {
+        let doc = markdown::parse(
+            "Before.\n\n<details>\n<summary>S</summary>\n\nthe needle hides here\n\n</details>\n\nAfter.",
+        );
+        let sel = all(&doc).expect("a selection over the document");
+        let text = plain_text(&sel, &doc);
+        assert!(text.contains("needle"), "fold state never truncates a copy");
+        assert!(text.contains("Before.") && text.contains("After."));
     }
 
     #[test]

@@ -310,6 +310,8 @@ fn worker(shared: Arc<Shared>, mut fonts: crate::style::fonts::FontStore) {
                 *base_size,
                 *x_base,
                 *avail,
+                // Summary rows never pool; the flag is inert here.
+                false,
                 &mut scratch,
             ),
             Work::CodeLine {
