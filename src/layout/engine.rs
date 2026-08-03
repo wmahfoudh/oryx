@@ -4008,11 +4008,43 @@ fn layout_math_block(
 ) -> f32 {
     let font = OryxMathFont::new();
     let size = cfg.body_size * cfg.zoom;
-    let m = noad::layout::layout(tex.trim(), noad::layout::MathStyle::Display, size, &font);
+    let mut m = noad::layout::layout(tex.trim(), noad::layout::MathStyle::Display, size, &font);
+    // A display equation wider than the column shrinks uniformly to fit,
+    // down to the half-size floor; past the floor it overflows and the
+    // surface edge clips it.
+    if m.width > avail {
+        let s = (avail / m.width).max(0.5);
+        scale_math_layout(&mut m, s);
+    }
     let x = x0 + ((avail - m.width) / 2.0).max(0.0);
     let baseline = y0 + m.ascent;
     emit_math_layout(fonts, theme, cfg, &m, x, baseline, block_index, out);
     (m.ascent + m.descent).max(metrics::LINE_HEIGHT * size)
+}
+
+/// Scales flat math geometry uniformly. Layout is linear in the em size,
+/// so scaling the output equals laying out at the scaled size.
+fn scale_math_layout(m: &mut noad::layout::MathLayout, s: f32) {
+    for g in &mut m.glyphs {
+        g.x *= s;
+        g.y *= s;
+        g.size *= s;
+    }
+    for r in &mut m.rules {
+        r.x *= s;
+        r.y *= s;
+        r.width *= s;
+        r.height *= s;
+    }
+    for lit in &mut m.literals {
+        lit.x *= s;
+        lit.y *= s;
+        lit.size *= s;
+        lit.width *= s;
+    }
+    m.width *= s;
+    m.ascent *= s;
+    m.descent *= s;
 }
 
 /// One footnote definition: the label as a small raised marker in link

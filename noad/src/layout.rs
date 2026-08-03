@@ -171,6 +171,13 @@ impl Ctx<'_> {
         let mut prev: Option<AtomClass> = None;
         for noad in &list.0 {
             let Noad::Atom(atom) = noad;
+            // An explicit kern is TeX's kern item, not an atom: it moves
+            // the pen and breaks the adjacency the spacing matrix reads.
+            if let Field::Kern(ems) = atom.nucleus {
+                cursor += ems * self.em(style);
+                prev = None;
+                continue;
+            }
             if let Some(p) = prev {
                 cursor += self.space(p, atom.class, style);
             }
@@ -223,6 +230,17 @@ impl Ctx<'_> {
                 italic: 0.0,
             },
             Field::Literal(text) => self.literal_box(text, atom, style),
+            Field::Text(text) => self.text_box(text, atom, style),
+            Field::Accent {
+                accent,
+                stretch,
+                base,
+            } => self.accent_box(atom, *accent, *stretch, base, style),
+            // Kerns are consumed by `hlist` before boxes are asked for.
+            Field::Kern(_) => LaidBox {
+                geom: MathLayout::default(),
+                italic: 0.0,
+            },
             Field::Fraction {
                 numerator,
                 denominator,
@@ -332,6 +350,100 @@ impl Ctx<'_> {
             }
         }
         None
+    }
+
+    /// Upright text: `\text{...}` and operator names, each character its
+    /// own glyph with no italic remap, spaces taking the font's space
+    /// advance. A character the font cannot draw degrades the whole run
+    /// to a literal.
+    fn text_box(&self, text: &str, atom: &Atom, style: MathStyle) -> LaidBox {
+        let u = self.unit(style);
+        let mut geom = MathLayout::default();
+        let mut x = 0.0;
+        let mut italic = 0.0;
+        for c in text.chars() {
+            if c == ' ' {
+                x += match self.font.glyph(' ') {
+                    Some(g) => self.font.advance(g) * u,
+                    None => 0.25 * self.em(style),
+                };
+                continue;
+            }
+            let Some(glyph) = self.font.glyph(c) else {
+                return self.literal_box(text, atom, style);
+            };
+            self.push_glyph(&mut geom, glyph, x, 0.0, style, Some(c), &atom.nucleus_span);
+            x += self.font.advance(glyph) * u;
+            italic = self.font.italic_correction(glyph) * u;
+        }
+        geom.width = x;
+        LaidBox { geom, italic }
+    }
+
+    /// Rule 12 with the MATH table's attachment points: the base sets
+    /// cramped, the accent rides at `AccentBaseHeight` raised by the
+    /// base's excess over it, and wide forms climb the horizontal ladder
+    /// until they cover the base. Attachment abscissae align the accent
+    /// with a single-glyph base; a longer base centers it.
+    fn accent_box(
+        &self,
+        atom: &Atom,
+        accent: char,
+        stretch: bool,
+        base_list: &MathList,
+        style: MathStyle,
+    ) -> LaidBox {
+        let c = self.font.constants();
+        let u = self.unit(style);
+        let base = self.hlist(base_list, style, true);
+        let Some(mut glyph) = self.font.glyph(accent) else {
+            return self.literal_box(&accent.to_string(), atom, style);
+        };
+        let ink_w = |g: crate::font::GlyphId| {
+            let b = self.font.bounds(g);
+            (b.x_max - b.x_min) * u
+        };
+        if stretch && ink_w(glyph) < base.width {
+            for v in self.font.horizontal_variants(glyph) {
+                glyph = v.glyph;
+                if ink_w(v.glyph) >= base.width {
+                    break;
+                }
+            }
+        }
+        let base_attach = match base.glyphs.as_slice() {
+            [g] => {
+                let gu = g.size / self.font.units_per_em();
+                g.x + self
+                    .font
+                    .top_accent(g.glyph)
+                    .unwrap_or(self.font.advance(g.glyph) / 2.0)
+                    * gu
+            }
+            _ => base.width / 2.0,
+        };
+        let acc_attach = self
+            .font
+            .top_accent(glyph)
+            .map(|v| v * u)
+            .unwrap_or_else(|| {
+                let b = self.font.bounds(glyph);
+                (b.x_min + b.x_max) / 2.0 * u
+            });
+        let rise = base.ascent - base.ascent.min(c.accent_base_height * u);
+        let width = base.width;
+        let mut geom = base;
+        self.push_glyph(
+            &mut geom,
+            glyph,
+            base_attach - acc_attach,
+            -rise,
+            style,
+            Some(accent),
+            &atom.nucleus_span,
+        );
+        geom.width = width;
+        LaidBox { geom, italic: 0.0 }
     }
 
     /// Appendix G's radical: the argument cramped in its own style, the
@@ -1495,5 +1607,136 @@ mod tests {
         let open = open_column(&l);
         assert!(open.len() > 1, "the deep nest forces an assembly");
         assert!(open.iter().all(|g| g.ch.is_none()));
+    }
+
+    #[test]
+    fn explicit_kerns_move_the_pen_exactly() {
+        let plain = lay("ab");
+        let thin = lay("a\\,b");
+        let dx = thin.glyphs[1].x - plain.glyphs[1].x;
+        assert!((dx - 3.0 / 18.0 * SIZE).abs() < EPS, "thin space, got {dx}");
+        let quad = lay("a\\quad b");
+        let dx = quad.glyphs[1].x - plain.glyphs[1].x;
+        assert!((dx - SIZE).abs() < EPS, "quad is one em, got {dx}");
+        let neg = lay("a\\!b");
+        let dx = neg.glyphs[1].x - plain.glyphs[1].x;
+        assert!(
+            (dx + 3.0 / 18.0 * SIZE).abs() < EPS,
+            "negative thin, got {dx}"
+        );
+    }
+
+    #[test]
+    fn text_renders_upright_with_its_space_kept() {
+        let l = lay("\\text{if }");
+        let chars: Vec<Option<char>> = l.glyphs.iter().map(|g| g.ch).collect();
+        assert_eq!(
+            chars,
+            vec![Some('i'), Some('f')],
+            "upright letters, no italic remap"
+        );
+        let bare = lay("\\text{if}");
+        assert!(
+            l.width > bare.width + 1.0,
+            "the trailing space keeps its advance: {} vs {}",
+            l.width,
+            bare.width
+        );
+    }
+
+    #[test]
+    fn operator_names_set_upright_with_op_spacing() {
+        use crate::MathFont as _;
+        let l = lay("\\sin x");
+        assert_eq!(l.glyphs[0].ch, Some('s'));
+        assert_eq!(l.glyphs[1].ch, Some('i'));
+        assert_eq!(l.glyphs[2].ch, Some('n'));
+        let x = l
+            .glyphs
+            .iter()
+            .find(|g| g.ch == Some('\u{1D465}'))
+            .expect("the argument renders italic");
+        let n = &l.glyphs[2];
+        let n_end = n.x + font().advance(glyph_of('n')) * scale();
+        let thin = 3.0 / 18.0 * SIZE;
+        assert!(
+            (x.x - (n_end + thin)).abs() < EPS,
+            "Op spacing before the argument, gap {}",
+            x.x - n_end
+        );
+    }
+
+    #[test]
+    fn accents_place_at_the_accent_height() {
+        use crate::MathFont as _;
+        let f = font();
+        let c = f.constants();
+        let l = lay("\\hat x");
+        let hat = l
+            .glyphs
+            .iter()
+            .find(|g| g.ch == Some('\u{0302}'))
+            .expect("the accent glyph renders");
+        let base_h = f.bounds(glyph_of('\u{1D465}')).y_max * scale();
+        let expected = -(base_h - base_h.min(c.accent_base_height * scale()));
+        assert!(
+            (hat.y - expected).abs() < EPS,
+            "hat y {} vs {}",
+            hat.y,
+            expected
+        );
+        // A tall base lifts its accent by the excess over the height.
+        let tall = lay("\\hat A");
+        let hat_tall = tall
+            .glyphs
+            .iter()
+            .find(|g| g.ch == Some('\u{0302}'))
+            .expect("accent");
+        assert!(hat_tall.y < hat.y - 1.0, "a capital lifts its accent");
+    }
+
+    #[test]
+    fn wide_accents_stretch_over_their_base() {
+        use crate::MathFont as _;
+        let f = font();
+        let hat_of = |l: &MathLayout| {
+            l.glyphs
+                .iter()
+                .find(|g| g.ch == Some('\u{0302}'))
+                .cloned()
+                .expect("accent glyph")
+        };
+        let narrow = hat_of(&lay("\\widehat{a}"));
+        let wide = hat_of(&lay("\\widehat{abc}"));
+        let ink = |g: &PositionedGlyph| {
+            let b = f.bounds(g.glyph);
+            (b.x_max - b.x_min) * scale()
+        };
+        assert!(
+            ink(&wide) > ink(&narrow) + 1.0,
+            "a wider base takes a wider hat: {} vs {}",
+            ink(&wide),
+            ink(&narrow)
+        );
+        assert_ne!(wide.glyph, narrow.glyph, "a ladder variant serves");
+        let l = lay("\\vec v");
+        assert!(
+            l.glyphs.iter().any(|g| g.ch == Some('\u{20D7}')),
+            "the vector arrow renders"
+        );
+        let l = lay("\\bar y");
+        let bar = l
+            .glyphs
+            .iter()
+            .find(|g| g.ch == Some('\u{0304}'))
+            .expect("the macron renders");
+        let y_top = f.bounds(glyph_of('\u{1D466}')).y_max * scale();
+        let bar_bottom = bar.y - f.bounds(bar.glyph).y_min * scale();
+        assert!(
+            bar_bottom <= -y_top + 1.0,
+            "the bar sits above the base ink: bottom {} vs top {}",
+            bar_bottom,
+            -y_top
+        );
     }
 }

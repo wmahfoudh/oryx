@@ -866,6 +866,48 @@ fn math_block_typesets_centered_without_a_panel() {
 }
 
 #[test]
+fn wide_display_math_scales_to_fit_and_floors_at_half() {
+    let base = cfg().body_size;
+    let avail = 800.0 - 2.0 * 0.08 * 800.0;
+    let extent = |l: &LayoutDoc| {
+        let min_x = l.math_glyphs.iter().map(|g| g.x).fold(f32::MAX, f32::min);
+        let max_x = l.math_glyphs.iter().map(|g| g.x).fold(0.0, f32::max);
+        (min_x, max_x)
+    };
+    // Wide enough to need a shrink, not enough to hit the floor.
+    let eq = vec!["ab"; 20].join("+");
+    let l = lay(&format!("$${eq}$$"), 800.0);
+    assert!(!l.math_glyphs.is_empty(), "the equation typesets");
+    let size = l.math_glyphs[0].size;
+    assert!(size < base - 0.5, "the equation shrank, size={size}");
+    assert!(size > base * 0.5 + 0.5, "above the half floor, size={size}");
+    assert!(
+        l.math_glyphs.iter().all(|g| (g.size - size).abs() < 0.01),
+        "one uniform scale over every glyph"
+    );
+    let (min_x, max_x) = extent(&l);
+    assert!(max_x - min_x <= avail + 1.0, "fits the column");
+    assert!(max_x - min_x >= avail - 40.0, "shrunk to fit, not further");
+    // Past the floor the equation keeps half size and clips.
+    let eq = vec!["ab"; 90].join("+");
+    let l = lay(&format!("$${eq}$$"), 800.0);
+    let size = l.math_glyphs[0].size;
+    assert!(
+        (size - base * 0.5).abs() < 0.01,
+        "the half-size floor holds, size={size}"
+    );
+    let (min_x, max_x) = extent(&l);
+    assert!(
+        max_x - min_x > avail + 1.0,
+        "below the floor the width overflows and clips"
+    );
+    assert!(
+        min_x >= 0.08 * 800.0 - 1.0,
+        "the left edge holds the margin"
+    );
+}
+
+#[test]
 fn math_glyphs_reach_the_pixels() {
     let t = Theme::default_dark();
     let doc = markdown::parse("$$E=mc^2$$");

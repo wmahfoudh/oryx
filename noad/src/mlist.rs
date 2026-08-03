@@ -49,6 +49,19 @@ pub enum Field {
         close: Option<char>,
         body: MathList,
     },
+    /// An accented base: the combining accent character, whether wide
+    /// forms may stretch horizontally, and the accented list.
+    Accent {
+        accent: char,
+        stretch: bool,
+        base: MathList,
+    },
+    /// Upright text: `\text{...}` verbatim, and operator names like
+    /// `\sin`, rendered without the italic remap.
+    Text(String),
+    /// An explicit space in ems of the current style, the `\,` family.
+    /// Transparent to spacing and demotion, TeX's kern item.
+    Kern(f32),
     /// TeX the engine does not understand, carried verbatim for the host to
     /// render as a literal. The quiet fallback.
     Literal(String),

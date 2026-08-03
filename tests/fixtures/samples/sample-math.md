@@ -50,6 +50,28 @@ $$\left( \frac{1}{1 + \frac{1}{x}} \right)^2$$
 Inline, the same machinery stays text-sized: $\frac{a+b}{2}$,
 $\sqrt{2}$, and $\sum_i x_i$ sit in the sentence.
 
+## Accents, alphabets, text
+
+Accents place by the font's attachment points: $\hat x$, $\vec v$,
+$\bar y$, $\tilde q$, $\dot r$, and the wide forms stretch over their
+argument: $\widehat{abc}$, $\widetilde{xyz}$. Operator names set
+upright and space as operators, so a trigonometry identity reads as a
+book sets it:
+
+$$\sin^2 \theta + \cos^2 \theta = 1$$
+
+$$\lim_{n \to \infty} \left( 1 + \frac{1}{n} \right)^n = e$$
+
+The letter styles map into the mathematical alphabets: $\mathbb{R}$,
+$\mathbb{N}$, $\mathbf{v}$, $\mathcal{L}$, $\mathfrak{g}$,
+$\mathsf{T}$, $\mathtt{x}$. Words join equations upright through
+`\text`: $f(x) = 1 \text{ if } x > 0$. The spacing commands nudge the
+pen: $a\,b$, $a\;b$, $a\quad b$, and $a\!b$ tightens.
+
+A deliberately wide equation shrinks uniformly to fit its column:
+
+$$(a+b)^{10} = a^{10} + 10a^9b + 45a^8b^2 + 120a^7b^3 + 210a^6b^4 + 252a^5b^5 + 210a^4b^6 + 120a^3b^7 + 45a^2b^8 + 10ab^9 + b^{10}$$
+
 ## The gate
 
 Prices never become equations: $5-$10, US$100 vs CA$120, and

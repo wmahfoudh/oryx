@@ -165,6 +165,12 @@ stretched, limits stacked in display:
 
 $$x = \frac{-b \pm \sqrt{b^2 - 4ac}}{2a}$$
 
+Accents, upright operator names and the letter alphabets round the
+coverage out: $\hat x$, $\vec v$, $\mathbb{R}$, $\text{and}$ identities
+read as a book sets them:
+
+$$\sin^2 \theta + \cos^2 \theta = 1$$
+
 [^1]: The first footnote definition, written mid-document.
 [^note]: The second definition, with the label rendered as its marker.
 

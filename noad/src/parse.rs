@@ -81,6 +81,7 @@ pub fn parse(tex: &str) -> MathList {
     let mut parser = Parser {
         tokens: crate::token::tokenize(tex),
         pos: 0,
+        src: tex,
     };
     parser.list(true)
 }
@@ -109,6 +110,190 @@ fn vocabulary_lookup(name: &str) -> Option<(char, AtomClass)> {
         .binary_search_by(|row| row.0.cmp(name))
         .ok()
         .map(|i| (VOCABULARY[i].1, VOCABULARY[i].2))
+}
+
+/// Accent commands: the combining character and whether wide forms may
+/// stretch horizontally. Sorted for binary search.
+const ACCENTS: &[(&str, char, bool)] = &[
+    ("acute", '\u{0301}', false),
+    ("bar", '\u{0304}', false),
+    ("breve", '\u{0306}', false),
+    ("check", '\u{030C}', false),
+    ("ddot", '\u{0308}', false),
+    ("dot", '\u{0307}', false),
+    ("grave", '\u{0300}', false),
+    ("hat", '\u{0302}', false),
+    ("mathring", '\u{030A}', false),
+    ("tilde", '\u{0303}', false),
+    ("vec", '\u{20D7}', false),
+    ("widehat", '\u{0302}', true),
+    ("widetilde", '\u{0303}', true),
+];
+
+/// Operator names: upright Op atoms, flagged when TeX stacks their
+/// limits in display style. Sorted for binary search.
+const OP_NAMES: &[(&str, bool)] = &[
+    ("Pr", true),
+    ("arccos", false),
+    ("arcsin", false),
+    ("arctan", false),
+    ("arg", false),
+    ("cos", false),
+    ("cosh", false),
+    ("cot", false),
+    ("coth", false),
+    ("csc", false),
+    ("deg", false),
+    ("det", true),
+    ("dim", false),
+    ("exp", false),
+    ("gcd", true),
+    ("hom", false),
+    ("inf", true),
+    ("ker", false),
+    ("lg", false),
+    ("lim", true),
+    ("liminf", true),
+    ("limsup", true),
+    ("ln", false),
+    ("log", false),
+    ("max", true),
+    ("min", true),
+    ("sec", false),
+    ("sin", false),
+    ("sinh", false),
+    ("sup", true),
+    ("tan", false),
+    ("tanh", false),
+];
+
+/// The explicit spacing commands, in ems of the current style.
+fn spacing_ems(name: &str) -> Option<f32> {
+    Some(match name {
+        "," => 3.0 / 18.0,
+        ":" => 4.0 / 18.0,
+        ";" => 5.0 / 18.0,
+        "!" => -3.0 / 18.0,
+        " " => 0.25,
+        "quad" => 1.0,
+        "qquad" => 2.0,
+        _ => return None,
+    })
+}
+
+/// One letter-style command's codepoint remap into the Mathematical
+/// Alphanumeric block, Letterlike Symbols holes included. A character
+/// outside the command's alphabet stays itself.
+fn map_alphabet(name: &str, c: char) -> char {
+    let a = c as u32;
+    let mapped = match name {
+        "mathbb" => match c {
+            'C' => 0x2102,
+            'H' => 0x210D,
+            'N' => 0x2115,
+            'P' => 0x2119,
+            'Q' => 0x211A,
+            'R' => 0x211D,
+            'Z' => 0x2124,
+            'A'..='Z' => 0x1D538 + (a - 'A' as u32),
+            'a'..='z' => 0x1D552 + (a - 'a' as u32),
+            '0'..='9' => 0x1D7D8 + (a - '0' as u32),
+            _ => a,
+        },
+        "mathbf" => match c {
+            'A'..='Z' => 0x1D400 + (a - 'A' as u32),
+            'a'..='z' => 0x1D41A + (a - 'a' as u32),
+            '0'..='9' => 0x1D7CE + (a - '0' as u32),
+            '\u{0391}'..='\u{03A9}' => 0x1D6A8 + (a - 0x0391),
+            '\u{03B1}'..='\u{03C9}' => 0x1D6C2 + (a - 0x03B1),
+            _ => a,
+        },
+        "mathit" => match c {
+            'h' => 0x210E,
+            'A'..='Z' => 0x1D434 + (a - 'A' as u32),
+            'a'..='z' => 0x1D44E + (a - 'a' as u32),
+            _ => a,
+        },
+        "mathcal" => match c {
+            'B' => 0x212C,
+            'E' => 0x2130,
+            'F' => 0x2131,
+            'H' => 0x210B,
+            'I' => 0x2110,
+            'L' => 0x2112,
+            'M' => 0x2133,
+            'R' => 0x211B,
+            'e' => 0x212F,
+            'g' => 0x210A,
+            'o' => 0x2134,
+            'A'..='Z' => 0x1D49C + (a - 'A' as u32),
+            'a'..='z' => 0x1D4B6 + (a - 'a' as u32),
+            _ => a,
+        },
+        "mathfrak" => match c {
+            'C' => 0x212D,
+            'H' => 0x210C,
+            'I' => 0x2111,
+            'R' => 0x211C,
+            'Z' => 0x2128,
+            'A'..='Z' => 0x1D504 + (a - 'A' as u32),
+            'a'..='z' => 0x1D51E + (a - 'a' as u32),
+            _ => a,
+        },
+        "mathsf" => match c {
+            'A'..='Z' => 0x1D5A0 + (a - 'A' as u32),
+            'a'..='z' => 0x1D5BA + (a - 'a' as u32),
+            '0'..='9' => 0x1D7E2 + (a - '0' as u32),
+            _ => a,
+        },
+        "mathtt" => match c {
+            'A'..='Z' => 0x1D670 + (a - 'A' as u32),
+            'a'..='z' => 0x1D68A + (a - 'a' as u32),
+            '0'..='9' => 0x1D7F6 + (a - '0' as u32),
+            _ => a,
+        },
+        _ => a,
+    };
+    char::from_u32(mapped).unwrap_or(c)
+}
+
+/// Applies a letter-style remap through a list: symbols map, every
+/// nested field recurses, literals and text stay themselves.
+fn restyle(list: &mut MathList, name: &str) {
+    for noad in &mut list.0 {
+        let Noad::Atom(atom) = noad;
+        restyle_field(&mut atom.nucleus, name);
+        if let Some(s) = &mut atom.sup {
+            restyle(s, name);
+        }
+        if let Some(s) = &mut atom.sub {
+            restyle(s, name);
+        }
+    }
+}
+
+fn restyle_field(field: &mut Field, name: &str) {
+    match field {
+        Field::Symbol(c) => *c = map_alphabet(name, *c),
+        Field::List(inner) => restyle(inner, name),
+        Field::Fraction {
+            numerator,
+            denominator,
+            ..
+        } => {
+            restyle(numerator, name);
+            restyle(denominator, name);
+        }
+        Field::Radical { radicand, degree } => {
+            restyle(radicand, name);
+            if let Some(deg) = degree {
+                restyle(deg, name);
+            }
+        }
+        Field::LeftRight { body, .. } => restyle(body, name),
+        Field::Accent { base, .. } => restyle(base, name),
+        Field::Text(_) | Field::Literal(_) | Field::Kern(_) | Field::Empty => {}
+    }
 }
 
 fn classify_char(c: char) -> AtomClass {
@@ -141,6 +326,10 @@ fn demote_bins(items: &mut [Noad]) {
     let mut prev: Option<AtomClass> = None;
     for noad in items.iter_mut() {
         let Noad::Atom(atom) = noad;
+        // Kerns are not atoms: demotion reads through them.
+        if matches!(atom.nucleus, Field::Kern(_)) {
+            continue;
+        }
         if atom.class == AtomClass::Bin
             && !matches!(
                 prev,
@@ -153,12 +342,13 @@ fn demote_bins(items: &mut [Noad]) {
     }
 }
 
-struct Parser {
+struct Parser<'a> {
     tokens: Vec<crate::token::Token>,
     pos: usize,
+    src: &'a str,
 }
 
-impl Parser {
+impl Parser<'_> {
     fn peek(&self) -> Option<&crate::token::Token> {
         self.tokens.get(self.pos)
     }
@@ -244,18 +434,54 @@ impl Parser {
                     let _ = self.delimiter();
                     literal_atom("\\right", tok.span)
                 }
-                _ => match vocabulary_lookup(&name) {
-                    Some((ch, class)) => Atom {
-                        class,
-                        nucleus: Field::Symbol(ch),
-                        sup: None,
-                        sub: None,
-                        limits: Limits::default(),
-                        span: tok.span.clone(),
-                        nucleus_span: tok.span,
-                    },
-                    None => literal_atom(format!("\\{name}"), tok.span),
-                },
+                "text" => self.text(tok.span),
+                "mathbb" | "mathbf" | "mathcal" | "mathfrak" | "mathit" | "mathsf" | "mathtt" => {
+                    self.styled(tok.span, &name)
+                }
+                _ => {
+                    if let Some(ems) = spacing_ems(&name) {
+                        Atom {
+                            class: AtomClass::Ord,
+                            nucleus: Field::Kern(ems),
+                            sup: None,
+                            sub: None,
+                            limits: Limits::default(),
+                            span: tok.span.clone(),
+                            nucleus_span: tok.span,
+                        }
+                    } else if let Ok(i) = ACCENTS.binary_search_by(|row| row.0.cmp(name.as_str())) {
+                        let (_, accent, stretch) = ACCENTS[i];
+                        self.accent(tok.span, accent, stretch)
+                    } else if let Ok(i) = OP_NAMES.binary_search_by(|row| row.0.cmp(name.as_str()))
+                    {
+                        Atom {
+                            class: AtomClass::Op,
+                            nucleus: Field::Text(name.clone()),
+                            sup: None,
+                            sub: None,
+                            limits: if OP_NAMES[i].1 {
+                                Limits::Default
+                            } else {
+                                Limits::NoLimits
+                            },
+                            span: tok.span.clone(),
+                            nucleus_span: tok.span,
+                        }
+                    } else {
+                        match vocabulary_lookup(&name) {
+                            Some((ch, class)) => Atom {
+                                class,
+                                nucleus: Field::Symbol(ch),
+                                sup: None,
+                                sub: None,
+                                limits: Limits::default(),
+                                span: tok.span.clone(),
+                                nucleus_span: tok.span,
+                            },
+                            None => literal_atom(format!("\\{name}"), tok.span),
+                        }
+                    }
+                }
             }),
             K::BeginGroup => {
                 let inner = self.list(false);
@@ -345,6 +571,76 @@ impl Parser {
             span: span.clone(),
             nucleus_span: span,
         }
+    }
+
+    /// A letter-style command: the operand parses normally, then its
+    /// symbols remap into the command's alphabet. A single restyled atom
+    /// keeps its own class; a longer operand wraps as a group.
+    fn styled(&mut self, start: std::ops::Range<usize>, name: &str) -> Atom {
+        let mut operand = self.script_operand();
+        restyle(&mut operand, name);
+        let end = self.consumed_end(start.end);
+        let span = start.start..end;
+        if operand.0.len() == 1 {
+            let Noad::Atom(mut atom) = operand.0.pop().expect("one noad");
+            atom.span = span.clone();
+            atom.nucleus_span = span;
+            atom
+        } else {
+            Atom {
+                class: AtomClass::Ord,
+                nucleus: Field::List(operand),
+                sup: None,
+                sub: None,
+                limits: Limits::default(),
+                span: span.clone(),
+                nucleus_span: span,
+            }
+        }
+    }
+
+    /// An accent command over its operand.
+    fn accent(&mut self, start: std::ops::Range<usize>, accent: char, stretch: bool) -> Atom {
+        let base = self.script_operand();
+        self.construct(
+            start,
+            Field::Accent {
+                accent,
+                stretch,
+                base,
+            },
+            AtomClass::Ord,
+        )
+    }
+
+    /// `\text{...}`: the braced source verbatim, spaces and nested braces
+    /// included, which the tokenizer's spans recover from the source.
+    /// Without a group the command degrades to a literal.
+    fn text(&mut self, start: std::ops::Range<usize>) -> Atom {
+        use crate::token::TokenKind as K;
+        if !matches!(self.peek().map(|t| &t.kind), Some(K::BeginGroup)) {
+            return literal_atom("\\text", start);
+        }
+        let open = self.next().expect("peeked");
+        let content_start = open.span.end;
+        let mut content_end = content_start;
+        let mut depth = 1usize;
+        while let Some(tok) = self.next() {
+            match tok.kind {
+                K::BeginGroup => depth += 1,
+                K::EndGroup => {
+                    depth -= 1;
+                    if depth == 0 {
+                        content_end = tok.span.start;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            content_end = tok.span.end;
+        }
+        let text = self.src.get(content_start..content_end).unwrap_or("");
+        self.construct(start, Field::Text(text.to_string()), AtomClass::Ord)
     }
 
     /// `\sqrt{x}` with the optional `[degree]`.
@@ -787,5 +1083,122 @@ mod tests {
         // On a non-operator the modifier is a quiet literal.
         let a = atoms("x\\limits");
         assert_eq!(a[1].nucleus, Field::Literal("\\limits".into()));
+    }
+
+    #[test]
+    fn spacing_commands_become_kerns() {
+        let a = atoms("a\\,b");
+        assert_eq!(a.len(), 3);
+        assert_eq!(a[1].nucleus, Field::Kern(3.0 / 18.0));
+        let a = atoms("\\:");
+        assert_eq!(a[0].nucleus, Field::Kern(4.0 / 18.0));
+        let a = atoms("\\;");
+        assert_eq!(a[0].nucleus, Field::Kern(5.0 / 18.0));
+        let a = atoms("\\!");
+        assert_eq!(a[0].nucleus, Field::Kern(-3.0 / 18.0));
+        let a = atoms("\\quad");
+        assert_eq!(a[0].nucleus, Field::Kern(1.0));
+        let a = atoms("\\qquad");
+        assert_eq!(a[0].nucleus, Field::Kern(2.0));
+    }
+
+    #[test]
+    fn kerns_are_transparent_to_demotion() {
+        // The kern hides nothing: + still has its left operand.
+        let a = atoms("a\\,+b");
+        assert_eq!(a[2].class, AtomClass::Bin);
+        // A leading kern provides no operand.
+        let a = atoms("\\,+b");
+        assert_eq!(a[1].class, AtomClass::Ord);
+    }
+
+    #[test]
+    fn alphabet_commands_remap_codepoints() {
+        for (tex, mapped) in [
+            ("\\mathbb{R}", '\u{211D}'),
+            ("\\mathbb{A}", '\u{1D538}'),
+            ("\\mathbf{A}", '\u{1D400}'),
+            ("\\mathit{A}", '\u{1D434}'),
+            ("\\mathcal{L}", '\u{2112}'),
+            ("\\mathfrak{g}", '\u{1D524}'),
+            ("\\mathsf{x}", '\u{1D5D1}'),
+            ("\\mathtt{0}", '\u{1D7F6}'),
+        ] {
+            let a = atoms(tex);
+            assert_eq!(a[0].nucleus, Field::Symbol(mapped), "{tex}");
+        }
+    }
+
+    #[test]
+    fn alphabet_commands_reach_nested_groups() {
+        let a = atoms("\\mathbf{ab}");
+        let Field::List(inner) = &a[0].nucleus else {
+            panic!("expected group nucleus, got {:?}", a[0].nucleus)
+        };
+        let mapped: Vec<Field> = inner.atoms().map(|at| at.nucleus.clone()).collect();
+        assert_eq!(
+            mapped,
+            vec![Field::Symbol('\u{1D41A}'), Field::Symbol('\u{1D41B}')]
+        );
+    }
+
+    #[test]
+    fn text_keeps_its_source_verbatim() {
+        let a = atoms("\\text{if }x");
+        assert_eq!(a[0].nucleus, Field::Text("if ".into()));
+        assert_eq!(a[0].class, AtomClass::Ord);
+        assert_eq!(a[1].nucleus, Field::Symbol('x'));
+        // Nested braces stay inside.
+        let a = atoms("\\text{a{b}c}");
+        assert_eq!(a[0].nucleus, Field::Text("a{b}c".into()));
+        // No group degrades quietly.
+        let a = atoms("\\text x");
+        assert_eq!(a[0].nucleus, Field::Literal("\\text".into()));
+    }
+
+    #[test]
+    fn operator_names_are_upright_op_atoms() {
+        let a = atoms("\\sin x");
+        assert_eq!(a[0].nucleus, Field::Text("sin".into()));
+        assert_eq!(a[0].class, AtomClass::Op);
+        assert_eq!(a[0].limits, Limits::NoLimits);
+        let a = atoms("\\lim_n x");
+        assert_eq!(a[0].nucleus, Field::Text("lim".into()));
+        assert_eq!(
+            a[0].limits,
+            Limits::Default,
+            "lim stacks its limits in display"
+        );
+    }
+
+    #[test]
+    fn accents_parse_with_their_stretch_flag() {
+        let a = atoms("\\hat x");
+        let Field::Accent {
+            accent,
+            stretch,
+            base,
+        } = &a[0].nucleus
+        else {
+            panic!("expected accent, got {:?}", a[0].nucleus)
+        };
+        assert_eq!((*accent, *stretch), ('\u{0302}', false));
+        assert_eq!(base.atoms().next().unwrap().nucleus, Field::Symbol('x'));
+        let a = atoms("\\widehat{abc}");
+        let Field::Accent { stretch, base, .. } = &a[0].nucleus else {
+            panic!("expected accent, got {:?}", a[0].nucleus)
+        };
+        assert!(stretch);
+        assert_eq!(base.atoms().count(), 3);
+        let a = atoms("\\vec v");
+        let Field::Accent { accent, .. } = &a[0].nucleus else {
+            panic!("expected accent, got {:?}", a[0].nucleus)
+        };
+        assert_eq!(*accent, '\u{20D7}');
+        let a = atoms("\\bar y");
+        let Field::Accent { accent, .. } = &a[0].nucleus else {
+            panic!("expected accent, got {:?}", a[0].nucleus)
+        };
+        assert_eq!(*accent, '\u{0304}');
     }
 }
