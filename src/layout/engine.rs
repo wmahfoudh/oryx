@@ -154,6 +154,9 @@ pub struct LayoutDoc {
     pub rects: Vec<DecoRect>,
     /// Placed images, blitted by paint from the media cache.
     pub images: Vec<ImagePlace>,
+    /// Typeset math glyphs in the math face, painted from the raster
+    /// cache by glyph id; noad positions them, shaping never sees them.
+    pub math_glyphs: Vec<MathGlyph>,
     /// Coarse y buckets over runs, rects and images, so the band
     /// painter and hit testing search instead of scanning.
     index: YIndex,
@@ -296,6 +299,7 @@ struct PosMarks {
     runs: usize,
     rects: usize,
     images: usize,
+    math: usize,
     rows: usize,
     code: usize,
     lines: Range<usize>,
@@ -307,6 +311,7 @@ impl PosMarks {
             runs: lay.runs.len(),
             rects: lay.rects.len(),
             images: lay.images.len(),
+            math: lay.math_glyphs.len(),
             rows: lay.table_rows.len(),
             code: lay.code_lines.len(),
             lines,
@@ -318,6 +323,7 @@ impl PosMarks {
             runs: 0,
             rects: 0,
             images: 0,
+            math: 0,
             rows: 0,
             code: 0,
             lines: 0..0,
@@ -420,6 +426,11 @@ impl LayoutDoc {
                 image.y += top;
                 image
             }));
+        self.math_glyphs
+            .extend(scratch.math_glyphs.drain(..).map(|mut g| {
+                g.y += top;
+                g
+            }));
         self.anchors
             .extend(scratch.anchors.drain(..).map(|mut anchor| {
                 anchor.1 += top;
@@ -439,6 +450,19 @@ impl LayoutDoc {
             }));
         scratch.height = 0.0;
     }
+}
+
+/// One typeset math glyph: the math face at an absolute position. `y` is
+/// the glyph's baseline in document coordinates; paint rasterizes by
+/// glyph id through the swash cache.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MathGlyph {
+    pub glyph: u16,
+    pub x: f32,
+    pub y: f32,
+    pub size: f32,
+    pub color: crate::style::theme::Rgba,
+    pub block: usize,
 }
 
 /// One table row's vertical band, stripe and padding included.
@@ -477,6 +501,7 @@ pub struct YIndex {
     runs: Buckets,
     rects: Buckets,
     images: Buckets,
+    math: Buckets,
 }
 
 /// Per bucket, the first and last element index touching it, and the
@@ -548,6 +573,11 @@ impl LayoutDoc {
             index.images.note(i, image.y, image.y + image.height);
         }
         index.images.indexed = self.images.len();
+        for (i, g) in self.math_glyphs.iter().enumerate().skip(index.math.indexed) {
+            // Conservative extent around the baseline; buckets tolerate slack.
+            index.math.note(i, g.y - 1.2 * g.size, g.y + 0.6 * g.size);
+        }
+        index.math.indexed = self.math_glyphs.len();
     }
 
     /// Index ranges whose union holds every run touching `[y0, y1]`:
@@ -564,6 +594,11 @@ impl LayoutDoc {
     /// As `runs_in`, over the placed images.
     pub fn images_in(&self, y0: f32, y1: f32) -> (Range<usize>, Range<usize>) {
         self.index.images.query(y0, y1, self.images.len())
+    }
+
+    /// As `runs_in`, over the typeset math glyphs.
+    pub fn math_in(&self, y0: f32, y1: f32) -> (Range<usize>, Range<usize>) {
+        self.index.math.query(y0, y1, self.math_glyphs.len())
     }
 
     /// Link target under a point in document coordinates, if any.
@@ -783,6 +818,7 @@ struct ElementCounts {
     runs: usize,
     rects: usize,
     images: usize,
+    math: usize,
     rows: usize,
     code: usize,
     side: usize,
@@ -795,6 +831,7 @@ impl ElementCounts {
             runs: out.runs.len(),
             rects: out.rects.len(),
             images: out.images.len(),
+            math: out.math_glyphs.len(),
             rows: out.table_rows.len(),
             code: out.code_lines.len(),
             side: out.side.len(),
@@ -806,6 +843,7 @@ impl ElementCounts {
         out.runs.truncate(self.runs);
         out.rects.truncate(self.rects);
         out.images.truncate(self.images);
+        out.math_glyphs.truncate(self.math);
         out.table_rows.truncate(self.rows);
         out.code_lines.truncate(self.code);
         out.side.truncate(self.side);
@@ -820,6 +858,9 @@ impl ElementCounts {
         }
         if out.index.images.indexed > self.images {
             out.index.images.clear();
+        }
+        if out.index.math.indexed > self.math {
+            out.index.math.clear();
         }
     }
 }
@@ -959,6 +1000,7 @@ pub fn window_to(
         if lay.runs.len() > ends.runs
             || lay.rects.len() > ends.rects
             || lay.images.len() > ends.images
+            || lay.math_glyphs.len() > ends.math
             || lay.table_rows.len() > ends.rows
             || lay.code_lines.len() > ends.code
         {
@@ -1840,7 +1882,6 @@ pub(crate) fn shape_kind(
             fonts,
             theme,
             cfg,
-            source,
             tex,
             block_index,
             x_base,
@@ -1871,6 +1912,7 @@ impl LayoutDoc {
         self.runs.clear();
         self.rects.clear();
         self.images.clear();
+        self.math_glyphs.clear();
         self.table_rows.clear();
         self.code_lines.clear();
         let window = self.window.as_mut().expect("windowed layout");
@@ -1891,6 +1933,7 @@ impl LayoutDoc {
             mark.runs -= base.runs;
             mark.rects -= base.rects;
             mark.images -= base.images;
+            mark.math -= base.math;
             mark.rows -= base.rows;
             mark.code -= base.code;
         }
@@ -1898,6 +1941,7 @@ impl LayoutDoc {
         self.runs.drain(..base.runs);
         self.rects.drain(..base.rects);
         self.images.drain(..base.images);
+        self.math_glyphs.drain(..base.math);
         self.table_rows.drain(..base.rows);
         self.code_lines.drain(..base.code);
         for record in &mut self.code_lines {
@@ -1922,6 +1966,7 @@ impl LayoutDoc {
         self.runs.truncate(keep.runs);
         self.rects.truncate(keep.rects);
         self.images.truncate(keep.images);
+        self.math_glyphs.truncate(keep.math);
         self.table_rows.truncate(keep.rows);
         self.code_lines.truncate(keep.code);
         self.index = YIndex::default();
@@ -2010,6 +2055,7 @@ impl LayoutDoc {
             mark.runs += added.runs;
             mark.rects += added.rects;
             mark.images += added.images;
+            mark.math += added.math;
             mark.rows += added.rows;
             mark.code += added.code;
         }
@@ -2024,6 +2070,8 @@ impl LayoutDoc {
         self.runs.splice(0..0, assembly.doc.runs.drain(..));
         self.rects.splice(0..0, assembly.doc.rects.drain(..));
         self.images.splice(0..0, assembly.doc.images.drain(..));
+        self.math_glyphs
+            .splice(0..0, assembly.doc.math_glyphs.drain(..));
         self.table_rows
             .splice(0..0, assembly.doc.table_rows.drain(..));
         self.code_lines
@@ -2051,6 +2099,7 @@ impl LayoutDoc {
             last.runs += seam.runs;
             last.rects += seam.rects;
             last.images += seam.images;
+            last.math += seam.math;
             last.rows += seam.rows;
             last.code += seam.code;
             if let Some((_, lines)) = &extend {
@@ -2062,6 +2111,7 @@ impl LayoutDoc {
                 runs: base.runs + mark.runs,
                 rects: base.rects + mark.rects,
                 images: base.images + mark.images,
+                math: base.math + mark.math,
                 rows: base.rows + mark.rows,
                 code: base.code + mark.code,
                 lines: mark.lines,
@@ -2070,6 +2120,7 @@ impl LayoutDoc {
         self.runs.append(&mut assembly.doc.runs);
         self.rects.append(&mut assembly.doc.rects);
         self.images.append(&mut assembly.doc.images);
+        self.math_glyphs.append(&mut assembly.doc.math_glyphs);
         self.table_rows.append(&mut assembly.doc.table_rows);
         self.code_lines.append(&mut assembly.doc.code_lines);
     }
@@ -3797,11 +3848,136 @@ fn layout_frontmatter(
 /// Block math: the literal centered in a flush panel on the code
 /// background, scripts rendered like inline math.
 #[allow(clippy::too_many_arguments)]
+/// noad's font handle: the embedded STIX face answers every metric and
+/// glyph question, and the code face's fixed advance measures the literal
+/// boxes the engine renders itself as fallback runs.
+struct OryxMathFont {
+    stix: noad::font::TtfMathFont<'static>,
+    /// The code face's advance as a fraction of its em; Courier Prime is
+    /// monospace, so one number measures any literal.
+    literal_em: f32,
+}
+
+impl OryxMathFont {
+    fn new() -> OryxMathFont {
+        let stix = noad::font::TtfMathFont::from_bytes(crate::style::fonts::MATH_FONT)
+            .expect("the embedded math face parses and carries MATH");
+        let face = ttf_parser::Face::parse(crate::style::fonts::CODE_REGULAR, 0)
+            .expect("the embedded code face parses");
+        let advance = face
+            .glyph_index('x')
+            .and_then(|g| face.glyph_hor_advance(g))
+            .unwrap_or(600);
+        OryxMathFont {
+            stix,
+            literal_em: f32::from(advance) / f32::from(face.units_per_em()),
+        }
+    }
+}
+
+impl noad::MathFont for OryxMathFont {
+    fn units_per_em(&self) -> f32 {
+        self.stix.units_per_em()
+    }
+    fn glyph(&self, c: char) -> Option<noad::font::GlyphId> {
+        self.stix.glyph(c)
+    }
+    fn advance(&self, glyph: noad::font::GlyphId) -> f32 {
+        self.stix.advance(glyph)
+    }
+    fn bounds(&self, glyph: noad::font::GlyphId) -> noad::font::Bounds {
+        self.stix.bounds(glyph)
+    }
+    fn italic_correction(&self, glyph: noad::font::GlyphId) -> f32 {
+        self.stix.italic_correction(glyph)
+    }
+    fn top_accent(&self, glyph: noad::font::GlyphId) -> Option<f32> {
+        self.stix.top_accent(glyph)
+    }
+    fn constants(&self) -> noad::font::MathConstants {
+        self.stix.constants()
+    }
+    fn vertical_variants(&self, glyph: noad::font::GlyphId) -> Vec<noad::font::Variant> {
+        self.stix.vertical_variants(glyph)
+    }
+    fn horizontal_variants(&self, glyph: noad::font::GlyphId) -> Vec<noad::font::Variant> {
+        self.stix.horizontal_variants(glyph)
+    }
+    fn vertical_assembly(&self, glyph: noad::font::GlyphId) -> Option<noad::font::Assembly> {
+        self.stix.vertical_assembly(glyph)
+    }
+    fn horizontal_assembly(&self, glyph: noad::font::GlyphId) -> Option<noad::font::Assembly> {
+        self.stix.horizontal_assembly(glyph)
+    }
+    fn kern(&self, glyph: noad::font::GlyphId, corner: noad::font::Corner, height: f32) -> f32 {
+        self.stix.kern(glyph, corner, height)
+    }
+    fn measure_literal(&self, text: &str, size: f32) -> f32 {
+        text.chars().count() as f32 * self.literal_em * size
+    }
+}
+
+/// Emits a laid-out equation into the document at `x` with its baseline at
+/// `baseline`: glyphs into the math vector in the foreground ink, rules as
+/// filled rects, and literal fallbacks as code-family runs in the theme's
+/// math color, which is that role's job under rendered math.
+#[allow(clippy::too_many_arguments)]
+fn emit_math_layout(
+    fonts: &mut FontStore,
+    theme: &Theme,
+    cfg: &ViewConfig,
+    m: &noad::layout::MathLayout,
+    x: f32,
+    baseline: f32,
+    block_index: usize,
+    out: &mut LayoutDoc,
+) {
+    let ink = theme.surface.foreground;
+    for g in &m.glyphs {
+        out.math_glyphs.push(MathGlyph {
+            glyph: g.glyph.0,
+            x: x + g.x,
+            y: baseline + g.y,
+            size: g.size,
+            color: ink,
+            block: block_index,
+        });
+    }
+    for r in &m.rules {
+        out.rects.push(DecoRect::fill(
+            x + r.x,
+            baseline + r.y,
+            r.width,
+            r.height,
+            ink,
+        ));
+    }
+    for lit in &m.literals {
+        let (runs, _) = shape_side_text(
+            fonts,
+            cfg,
+            &cfg.code_family.clone(),
+            &lit.text,
+            lit.size,
+            theme.text.math,
+            out,
+        );
+        for mut run in runs {
+            let dy = (baseline + lit.y) - run.baseline;
+            run.x += x + lit.x;
+            run.y += dy;
+            run.baseline += dy;
+            run.block = block_index;
+            out.runs.push(run);
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn layout_math_block(
     fonts: &mut FontStore,
     theme: &Theme,
     cfg: &ViewConfig,
-    source: &str,
     tex: &str,
     block_index: usize,
     x0: f32,
@@ -3809,54 +3985,13 @@ fn layout_math_block(
     avail: f32,
     out: &mut LayoutDoc,
 ) -> f32 {
-    let pad = 12.0 * cfg.zoom;
-    let radius = metrics::CORNER_RADIUS * cfg.zoom;
-    let span = {
-        let mut span = Span::plain(tex.trim());
-        span.math = true;
-        span
-    };
-    let base = BlockStyle {
-        size: cfg.body_size * cfg.zoom,
-        color: theme.text.math,
-        bold: false,
-        block_index,
-    };
-    let runs_mark = out.runs.len();
-    let rects_mark = out.rects.len();
-    let text_h = shape_block(
-        fonts,
-        theme,
-        cfg,
-        source,
-        &[span],
-        false,
-        &base,
-        x0 + pad,
-        y0 + pad,
-        avail - 2.0 * pad,
-        out,
-    );
-    let min_x = out.runs[runs_mark..]
-        .iter()
-        .map(|r| r.x)
-        .fold(f32::MAX, f32::min);
-    let max_x = out.runs[runs_mark..]
-        .iter()
-        .map(|r| r.x + r.width)
-        .fold(0.0, f32::max);
-    if max_x > min_x {
-        let dx = (x0 + avail / 2.0) - (min_x + max_x) / 2.0;
-        for run in &mut out.runs[runs_mark..] {
-            run.x += dx;
-        }
-    }
-    let box_h = text_h + 2.0 * pad;
-    out.rects.splice(
-        rects_mark..rects_mark,
-        [DecoRect::fill(x0, y0, avail, box_h, theme.blocks.code_bg).rounded(radius, radius)],
-    );
-    box_h
+    let font = OryxMathFont::new();
+    let size = cfg.body_size * cfg.zoom;
+    let m = noad::layout::layout(tex.trim(), noad::layout::MathStyle::Display, size, &font);
+    let x = x0 + ((avail - m.width) / 2.0).max(0.0);
+    let baseline = y0 + m.ascent;
+    emit_math_layout(fonts, theme, cfg, &m, x, baseline, block_index, out);
+    (m.ascent + m.descent).max(metrics::LINE_HEIGHT * size)
 }
 
 /// One footnote definition: the label as a small raised marker in link
@@ -3940,7 +4075,7 @@ fn flow_or_shape(
     avail: f32,
     out: &mut LayoutDoc,
 ) -> f32 {
-    if spans.iter().any(|s| s.image.is_some()) {
+    if spans.iter().any(|s| s.image.is_some() || s.math) {
         layout_flow(
             fonts, theme, cfg, source, media, spans, base, x0, y0, avail, out,
         )
@@ -3951,18 +4086,23 @@ fn flow_or_shape(
     }
 }
 
-/// One line images may join: its top, height, pen x, and whether it is an
-/// image row rather than a text line.
+/// One line images and equations may join: its top, height, pen x, the
+/// text baseline when it carries one, and whether it is a standalone row
+/// rather than a text line.
 struct FlowLine {
     top: f32,
     height: f32,
     end_x: f32,
+    /// Present on text lines and equation rows; image rows have none.
+    baseline: Option<f32>,
     row: bool,
 }
 
-/// Text with inline images. Text shapes normally; an image joins the last
-/// text line when it fits there, otherwise images collect into rows that
-/// wrap at the content width. Text after an image starts a new line.
+/// Text with inline images or equations. Text shapes normally; an image
+/// or equation joins the last text line when it fits there, otherwise it
+/// opens its own row. A one-line text chunk that follows an equation on an
+/// open line merges back onto that line, so a sentence flows around its
+/// math; longer continuations start below, a recorded limitation.
 #[allow(clippy::too_many_arguments)]
 fn layout_flow(
     fonts: &mut FontStore,
@@ -3984,32 +4124,35 @@ fn layout_flow(
 
     let mut i = 0;
     while i < spans.len() {
-        if spans[i].image.is_none() {
-            // The text chunk up to the next image, masked into a full-length
-            // span list so run span indices keep mapping to the model.
+        if spans[i].image.is_none() && !spans[i].math {
+            // The text chunk up to the next image or equation, masked into
+            // a full-length span list so run span indices keep mapping to
+            // the model.
             let start = i;
-            while i < spans.len() && spans[i].image.is_none() {
+            while i < spans.len() && spans[i].image.is_none() && !spans[i].math {
                 i += 1;
             }
             if spans[start..i]
                 .iter()
                 .all(|s| s.text(source).trim().is_empty())
             {
-                continue;
-            }
-            if let Some(l) = line.take() {
-                if l.row {
-                    y = l.top + l.height + 0.25 * base.size;
+                // Whitespace between two placed boxes keeps its word gap.
+                if let Some(l) = line.as_mut() {
+                    if l.baseline.is_some() {
+                        l.end_x += 0.25 * base.size;
+                    }
                 }
+                continue;
             }
             let masked: Vec<Span> = spans
                 .iter()
                 .enumerate()
                 .map(|(si, s)| {
                     let mut c = s.clone();
-                    if si < start || si >= i || s.image.is_some() {
+                    if si < start || si >= i || s.image.is_some() || s.math {
                         c.clear_text();
                         c.image = None;
+                        c.math = false;
                     }
                     c
                 })
@@ -4024,13 +4167,99 @@ fn layout_flow(
                 .filter(|r| (r.y - last_top).abs() < 1.0)
                 .map(|r| r.x + r.width)
                 .fold(x0, f32::max);
-            y += h;
-            line = Some(FlowLine {
-                top: last_top,
-                height: line_height,
-                end_x,
-                row: false,
-            });
+            let last_base = out.runs[runs_mark..]
+                .iter()
+                .filter(|r| (r.y - last_top).abs() < 1.0)
+                .map(|r| r.baseline)
+                .fold(0.0, f32::max);
+            let single_line = h <= 1.5 * line_height;
+            let merged = if let Some(l) = line.as_mut() {
+                let fits = l.end_x + (end_x - x0) <= x0 + avail;
+                match l.baseline {
+                    Some(lb) if single_line && fits => {
+                        let dx = l.end_x - x0;
+                        let dy = lb - last_base;
+                        for run in &mut out.runs[runs_mark..] {
+                            run.x += dx;
+                            run.y += dy;
+                            run.baseline += dy;
+                        }
+                        l.end_x += end_x - x0;
+                        true
+                    }
+                    _ => false,
+                }
+            } else {
+                false
+            };
+            if !merged {
+                if let Some(l) = line.take() {
+                    if l.row {
+                        let below = l.top + l.height + 0.25 * base.size;
+                        if below > y {
+                            let dy = below - y;
+                            for run in &mut out.runs[runs_mark..] {
+                                run.y += dy;
+                                run.baseline += dy;
+                            }
+                            y = below;
+                        }
+                    }
+                }
+                y += h;
+                line = Some(FlowLine {
+                    top: last_top,
+                    height: line_height,
+                    end_x,
+                    baseline: Some(last_base),
+                    row: false,
+                });
+            }
+        } else if spans[i].math {
+            let span = &spans[i];
+            let font = OryxMathFont::new();
+            let m = noad::layout::layout(
+                span.text(source).trim(),
+                noad::layout::MathStyle::Text,
+                base.size,
+                &font,
+            );
+            let w = m.width.max(1.0);
+            // A space the author typed before the equation is the trailing
+            // byte of the preceding text chunk, and shaping drops trailing
+            // whitespace at the chunk's line end; the pen restores it.
+            let spaced = (span.range.start as usize)
+                .checked_sub(1)
+                .and_then(|i| source.as_bytes().get(i))
+                .is_some_and(|b| b.is_ascii_whitespace());
+            let space = if spaced { 0.3 * base.size } else { 0.0 };
+            let joins = line
+                .as_ref()
+                .is_some_and(|l| l.baseline.is_some() && l.end_x + space + w <= x0 + avail);
+            if joins {
+                let l = line.as_mut().expect("open line");
+                let lb = l.baseline.expect("checked");
+                l.end_x += space;
+                emit_math_layout(fonts, theme, cfg, &m, l.end_x, lb, base.block_index, out);
+                l.end_x += w;
+            } else {
+                if let Some(l) = line.take() {
+                    if l.row {
+                        y = l.top + l.height + 0.25 * base.size;
+                    }
+                }
+                let baseline = y + m.ascent.max(0.75 * line_height);
+                emit_math_layout(fonts, theme, cfg, &m, x0, baseline, base.block_index, out);
+                let height = (baseline - y) + m.descent.max(0.25 * line_height);
+                line = Some(FlowLine {
+                    top: y,
+                    height,
+                    end_x: x0 + w,
+                    baseline: Some(baseline),
+                    row: true,
+                });
+            }
+            i += 1;
         } else {
             let span = &spans[i];
             let image = span.image.as_ref().expect("image span");
@@ -4061,6 +4290,7 @@ fn layout_flow(
                     top: y,
                     height: h,
                     end_x: x0 + w,
+                    baseline: None,
                     row: true,
                 });
             }
@@ -4204,10 +4434,25 @@ fn shape_marker(
     color: Rgba,
     out: &mut LayoutDoc,
 ) -> (Vec<TextRun>, f32) {
+    let family = cfg.body_family.clone();
+    shape_side_text(fonts, cfg, &family, text, size, color, out)
+}
+
+/// Shapes synthesized side text in a given family at origin; the caller
+/// places the runs. Returns them with the total width.
+fn shape_side_text(
+    fonts: &mut FontStore,
+    cfg: &ViewConfig,
+    family_name: &str,
+    text: &str,
+    size: f32,
+    color: Rgba,
+    out: &mut LayoutDoc,
+) -> (Vec<TextRun>, f32) {
     let line_height = metrics::LINE_HEIGHT * cfg.body_size * cfg.zoom;
     let mut buffer = Buffer::new(&mut fonts.font_system, Metrics::new(size, line_height));
     buffer.set_size(&mut fonts.font_system, None, None);
-    let attrs = Attrs::new().family(Family::Name(&cfg.body_family));
+    let attrs = Attrs::new().family(Family::Name(family_name));
     buffer.set_text(
         &mut fonts.font_system,
         text,
@@ -4224,7 +4469,7 @@ fn shape_marker(
         };
         width = width.max(last.x + last.w);
         let text = out.side_ref(text);
-        let family = out.family_id(&cfg.body_family);
+        let family = out.family_id(family_name);
         runs.push(TextRun {
             text,
             x: 0.0,

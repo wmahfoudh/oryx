@@ -811,40 +811,109 @@ fn footnote_reference_superscript_and_definitions_last() {
 }
 
 #[test]
-fn math_spans_style_and_scripts() {
+fn math_spans_typeset_inline_on_the_baseline() {
     let t = Theme::default_dark();
     let (doc, l) = lay2("energy $E=mc^2$ inline", 800.0);
-    let m = l
+    assert!(!l.math_glyphs.is_empty(), "the equation typesets");
+    let energy = find_text(&l, &doc, "energy");
+    let word = l
         .runs
         .iter()
-        .find(|r| l.run_text(&doc, r).contains("E=mc"))
-        .expect("math run");
-    assert_eq!(m.color, t.text.math);
-    assert_eq!(l.run_family(m), CODE_FAMILY);
-    assert!(m.italic);
-    let sup = l
-        .runs
+        .find(|r| l.run_text(&doc, r).contains("inline"))
+        .expect("the continuation run exists");
+    let first = l.math_glyphs.iter().map(|g| g.x).fold(f32::MAX, f32::min);
+    let last = l.math_glyphs.iter().map(|g| g.x).fold(0.0, f32::max);
+    assert!(
+        first >= energy.x + energy.width + 5.0,
+        "the typed space before the equation survives as a word gap, gap={}",
+        first - (energy.x + energy.width)
+    );
+    assert!(word.x > last, "before the second word");
+    assert!(
+        l.math_glyphs
+            .iter()
+            .any(|g| (g.y - energy.baseline).abs() < 2.0),
+        "base glyphs share the text baseline"
+    );
+    assert!(l
+        .math_glyphs
         .iter()
-        .find(|r| l.run_text(&doc, r) == "2" && r.size < m.size)
-        .expect("superscript run");
-    assert!(sup.baseline < m.baseline - 1.0, "superscript raised");
-    assert_eq!(sup.color, t.text.math);
+        .all(|g| g.color == t.surface.foreground));
 }
 
 #[test]
-fn math_block_centers_in_panel() {
+fn math_block_typesets_centered_without_a_panel() {
     let t = Theme::default_dark();
     let l = lay("$$E=mc^2$$", 800.0);
-    let panel = l
-        .rects
-        .iter()
-        .find(|r| r.color == t.blocks.code_bg)
-        .expect("math panel");
-    let min_x = l.runs.iter().map(|r| r.x).fold(f32::MAX, f32::min);
-    let max_x = l.runs.iter().map(|r| r.x + r.width).fold(0.0, f32::max);
+    assert!(!l.math_glyphs.is_empty(), "the equation typesets");
+    assert!(
+        l.rects.iter().all(|r| r.color != t.blocks.code_bg),
+        "typeset math sits on the page, no panel"
+    );
+    let min_x = l.math_glyphs.iter().map(|g| g.x).fold(f32::MAX, f32::min);
+    let max_x = l.math_glyphs.iter().map(|g| g.x).fold(0.0, f32::max);
     let mid = (min_x + max_x) / 2.0;
-    assert!((mid - 400.0).abs() < 30.0, "centered, mid={mid}");
-    assert!(panel.width > max_x - min_x, "panel wraps the formula");
+    assert!((mid - 400.0).abs() < 40.0, "centered, mid={mid}");
+    assert!(l
+        .math_glyphs
+        .iter()
+        .all(|g| g.color == t.surface.foreground));
+    let base = l.math_glyphs[0].size;
+    assert!(
+        l.math_glyphs.iter().any(|g| g.size < base - 1.0),
+        "the superscript renders at script size"
+    );
+}
+
+#[test]
+fn math_glyphs_reach_the_pixels() {
+    let t = Theme::default_dark();
+    let doc = markdown::parse("$$E=mc^2$$");
+    let mut media = MediaCache::new(PathBuf::from("."));
+    let mut f = fonts();
+    let l = layout(&doc, &t, &mut f, &mut media, &cfg(), 800.0);
+    let g = &l.math_glyphs[0];
+    let pixels = oryx::paint::band(&l, &doc, &t, &mut f, &mut media, &[], 0.0, 800, 400);
+    let bg = t.surface.background;
+    let bgpx = ((bg.r as u32) << 16) | ((bg.g as u32) << 8) | bg.b as u32;
+    // Ink lands somewhere in the box around the first glyph's baseline.
+    let mut inked = false;
+    for y in (g.y - g.size) as usize..(g.y + 0.4 * g.size) as usize {
+        for x in g.x as usize..(g.x + 2.0 * g.size) as usize {
+            if pixels[y * 800 + x] != bgpx {
+                inked = true;
+            }
+        }
+    }
+    assert!(inked, "the equation paints ink");
+}
+
+#[test]
+fn math_fallback_runs_in_courier_and_math_color() {
+    let t = Theme::default_dark();
+    let (doc, l) = lay2("$$\\foobar + x$$", 800.0);
+    let lit = l
+        .runs
+        .iter()
+        .find(|r| l.run_text(&doc, r) == "\\foobar")
+        .expect("literal fallback run");
+    assert_eq!(lit.color, t.text.math);
+    assert_eq!(l.run_family(lit), CODE_FAMILY);
+    assert!(!l.math_glyphs.is_empty(), "the known tail still typesets");
+}
+
+#[test]
+fn math_scales_with_zoom() {
+    let doc = markdown::parse("$$x^2$$");
+    let t = Theme::default_dark();
+    let mut media = MediaCache::new(PathBuf::from("."));
+    let mut config = cfg();
+    let l1 = layout(&doc, &t, &mut fonts(), &mut media, &config, 800.0);
+    config.zoom = 2.0;
+    let l2 = layout(&doc, &t, &mut fonts(), &mut media, &config, 800.0);
+    let s1 = l1.math_glyphs.iter().map(|g| g.size).fold(0.0, f32::max);
+    let s2 = l2.math_glyphs.iter().map(|g| g.size).fold(0.0, f32::max);
+    assert!((s2 - 2.0 * s1).abs() < 0.01, "zoom doubles glyph size");
 }
 
 #[test]
@@ -2025,8 +2094,8 @@ fn run_accessors_cover_tables_and_math() {
         .expect("the cell link run exists");
     assert_eq!(lay.run_link(&doc, cell_link), Some("https://t.example"));
     assert!(
-        joined.contains('x') && joined.contains('y'),
-        "math runs resolve, got {joined:?}"
+        !lay.math_glyphs.is_empty(),
+        "the math block typesets glyphs"
     );
 }
 

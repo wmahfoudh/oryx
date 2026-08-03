@@ -6,7 +6,7 @@ use tiny_skia::{Pixmap, Rect, Transform};
 
 use crate::doc::images::MediaCache;
 use crate::doc::model::Document;
-use crate::layout::{metrics, DecoRect, LayoutDoc, TextRun};
+use crate::layout::{metrics, DecoRect, LayoutDoc, MathGlyph, TextRun};
 use crate::style::fonts::FontStore;
 use crate::style::theme::Theme;
 
@@ -102,6 +102,17 @@ pub fn band(
             layout.run_family(run),
             y_top,
         );
+    }
+
+    let (math_head, math_tail) = layout.math_in(y_top, band_bottom);
+    for g in layout.math_glyphs[math_head]
+        .iter()
+        .chain(&layout.math_glyphs[math_tail])
+    {
+        if g.y + 0.6 * g.size < y_top || g.y - 1.2 * g.size > band_bottom {
+            continue;
+        }
+        draw_math_glyph(&mut pixmap, fonts, g, y_top);
     }
 
     pixmap
@@ -238,6 +249,75 @@ fn draw_run(
             }
         },
     );
+}
+
+/// Rasterizes one typeset math glyph from the swash cache by glyph id in
+/// the math face; no shaping is involved, noad already positioned it. The
+/// glyph's `y` is its baseline; the cache answers placement offsets from
+/// that origin.
+fn draw_math_glyph(pixmap: &mut Pixmap, fonts: &mut FontStore, g: &MathGlyph, y_top: f32) {
+    let (key, gx, gy) = cosmic_text::CacheKey::new(
+        fonts.math_face,
+        g.glyph,
+        g.size,
+        (g.x, g.y - y_top),
+        cosmic_text::fontdb::Weight::NORMAL,
+        cosmic_text::CacheKeyFlags::empty(),
+    );
+    let FontStore {
+        font_system, swash, ..
+    } = fonts;
+    let Some(image) = swash.get_image(font_system, key).as_ref() else {
+        return;
+    };
+    let left = gx + image.placement.left;
+    let top = gy - image.placement.top;
+    let width = pixmap.width() as i32;
+    let height = pixmap.height() as i32;
+    let data = pixmap.data_mut();
+    let (pw, ph) = (image.placement.width as i32, image.placement.height as i32);
+    match image.content {
+        cosmic_text::SwashContent::Mask => {
+            for py in 0..ph {
+                for px in 0..pw {
+                    let alpha = image.data[(py * pw + px) as usize] as u32;
+                    if alpha == 0 {
+                        continue;
+                    }
+                    let (tx, ty) = (left + px, top + py);
+                    if tx < 0 || ty < 0 || tx >= width || ty >= height {
+                        continue;
+                    }
+                    let i = ((ty * width + tx) * 4) as usize;
+                    data[i] = blend(g.color.r, data[i], alpha);
+                    data[i + 1] = blend(g.color.g, data[i + 1], alpha);
+                    data[i + 2] = blend(g.color.b, data[i + 2], alpha);
+                    data[i + 3] = 255;
+                }
+            }
+        }
+        cosmic_text::SwashContent::Color => {
+            for py in 0..ph {
+                for px in 0..pw {
+                    let s = ((py * pw + px) * 4) as usize;
+                    let alpha = image.data[s + 3] as u32;
+                    if alpha == 0 {
+                        continue;
+                    }
+                    let (tx, ty) = (left + px, top + py);
+                    if tx < 0 || ty < 0 || tx >= width || ty >= height {
+                        continue;
+                    }
+                    let i = ((ty * width + tx) * 4) as usize;
+                    data[i] = blend(image.data[s], data[i], alpha);
+                    data[i + 1] = blend(image.data[s + 1], data[i + 1], alpha);
+                    data[i + 2] = blend(image.data[s + 2], data[i + 2], alpha);
+                    data[i + 3] = 255;
+                }
+            }
+        }
+        cosmic_text::SwashContent::SubpixelMask => {}
+    }
 }
 
 /// Source-over blend of one channel; the destination is always opaque.

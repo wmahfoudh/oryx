@@ -55,6 +55,30 @@ pub fn parse_unless(source: impl Into<Arc<str>>, bail: impl Fn() -> bool) -> Opt
     })
 }
 
+/// The currency gate over dollar-delimited math. pulldown already requires
+/// non-space flanks and honors `\$`, which keeps most prices prose; the one
+/// reading it shares with prose is a closing dollar glued to a following
+/// number, `$5-$10` becoming math between the signs. A digit right after
+/// the closing delimiter therefore rejects the event, and the builder
+/// downgrades it to the text the author typed.
+fn dollar_math_allowed(source: &str, range: &Range<usize>) -> bool {
+    !source
+        .as_bytes()
+        .get(range.end)
+        .is_some_and(|b| b.is_ascii_digit())
+}
+
+/// GitHub's dollar-backtick form reaches the builder as inline math whose
+/// TeX keeps the backticks; they strip to the bare expression. Whitespace
+/// trims either way, TeX ignores it.
+fn strip_backtick_form(raw: &str) -> String {
+    let inner = raw
+        .strip_prefix('`')
+        .and_then(|s| s.strip_suffix('`'))
+        .unwrap_or(raw);
+    inner.trim().to_string()
+}
+
 /// Inline containers the builder can be inside. Paragraphs inside list items
 /// or footnote definitions flush as those blocks, not as plain paragraphs.
 struct Builder {
@@ -257,16 +281,31 @@ impl Builder {
                 self.push(span);
             }
             Event::InlineMath(tex) => {
-                let mut span = self.style();
-                span.set_text(tex.into_string());
-                span.math = true;
-                self.push(span);
+                if dollar_math_allowed(&self.source, &range) {
+                    let raw = tex.into_string();
+                    let mut span = self.style();
+                    span.set_text(strip_backtick_form(&raw));
+                    span.math = true;
+                    self.push(span);
+                } else {
+                    // The currency downgrade: the reader sees the dollars
+                    // and digits the author typed.
+                    let mut span = self.style();
+                    span.set_text(self.source[range].to_string());
+                    self.push(span);
+                }
             }
             Event::DisplayMath(tex) => {
-                self.flush_spans();
-                self.emit(BlockKind::MathBlock {
-                    tex: tex.into_string(),
-                });
+                if dollar_math_allowed(&self.source, &range) {
+                    self.flush_spans();
+                    self.emit(BlockKind::MathBlock {
+                        tex: tex.into_string(),
+                    });
+                } else {
+                    let mut span = self.style();
+                    span.set_text(self.source[range].to_string());
+                    self.push(span);
+                }
             }
             Event::FootnoteReference(label) => {
                 let mut span = self.style();
@@ -357,12 +396,17 @@ impl Builder {
             }
             TagEnd::CodeBlock => {
                 if let Some((language, text)) = self.code.take() {
-                    let lines = self.code_body(&text);
-                    self.emit(BlockKind::CodeBlock {
-                        language,
-                        lines,
-                        highlights: Vec::new(),
-                    });
+                    if language.as_deref() == Some("math") {
+                        // GitHub's fenced math notation.
+                        self.emit(BlockKind::MathBlock { tex: text });
+                    } else {
+                        let lines = self.code_body(&text);
+                        self.emit(BlockKind::CodeBlock {
+                            language,
+                            lines,
+                            highlights: Vec::new(),
+                        });
+                    }
                 }
             }
             TagEnd::List(_) => {
@@ -2051,6 +2095,70 @@ mod tests {
             panic!()
         };
         assert_eq!(tex.trim(), "E=mc^2");
+    }
+
+    #[test]
+    fn currency_dollars_stay_prose() {
+        // The bug class the gate exists for: pulldown reads these as math,
+        // the digit after the closing dollar downgrades them.
+        for src in ["$5-$10", "US$100 vs CA$120", "$5 or $6, $7"] {
+            let d = parse(src);
+            let BlockKind::Paragraph { spans } = &d.blocks[0].kind else {
+                panic!("{src}")
+            };
+            assert!(spans.iter().all(|s| !s.math), "{src}");
+            let text: String = spans
+                .iter()
+                .map(|s| s.text(&d.source).to_string())
+                .collect();
+            assert_eq!(text, src, "the reader sees what was typed");
+        }
+    }
+
+    #[test]
+    fn currency_pins_pulldown_math_events() {
+        use pulldown_cmark::{Event, Options, Parser};
+        let count = |src: &str| {
+            Parser::new_ext(
+                src,
+                Options::ENABLE_MATH | Options::ENABLE_SMART_PUNCTUATION,
+            )
+            .filter(|e| matches!(e, Event::InlineMath(_) | Event::DisplayMath(_)))
+            .count()
+        };
+        // These two reach the builder as math today; the gate catches them.
+        assert_eq!(count("$5-$10"), 1);
+        assert_eq!(count("US$100 vs CA$120"), 1);
+        // These never become math events; a change here means pulldown's
+        // delimiter rules moved and the gate needs a second look.
+        for src in [
+            "$5",
+            "5$ and 10$",
+            "$ x $",
+            "\\$50 and \\$60",
+            "prices $5, $6, and $7",
+        ] {
+            assert_eq!(count(src), 0, "{src}");
+        }
+    }
+
+    #[test]
+    fn dollar_backtick_notation_is_math() {
+        let d = parse("cost $`x^2`$ here");
+        let BlockKind::Paragraph { spans } = &d.blocks[0].kind else {
+            panic!()
+        };
+        let m = spans.iter().find(|s| s.math).expect("math span");
+        assert_eq!(m.text(&d.source), "x^2");
+    }
+
+    #[test]
+    fn math_fence_is_a_math_block() {
+        let d = parse("```math\n\\sum_i x_i\n```");
+        let BlockKind::MathBlock { tex } = &d.blocks[0].kind else {
+            panic!("expected math block, got {:?}", d.blocks[0].kind)
+        };
+        assert_eq!(tex.trim(), "\\sum_i x_i");
     }
 
     #[test]

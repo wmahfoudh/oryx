@@ -1,12 +1,12 @@
 VERSION := $(shell sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 
 check:
-	cargo fmt --check
-	cargo clippy --all-targets -- -D warnings
-	cargo clippy --target x86_64-pc-windows-gnu -- -D warnings
-	cargo clippy --target aarch64-apple-darwin -- -D warnings
-	cargo build
-	cargo test
+	cargo fmt --all --check
+	cargo clippy --workspace --all-targets -- -D warnings
+	cargo clippy --workspace --target x86_64-pc-windows-gnu -- -D warnings
+	cargo clippy --workspace --target aarch64-apple-darwin -- -D warnings
+	cargo build --workspace
+	cargo test --workspace
 
 release:
 	cargo build --release

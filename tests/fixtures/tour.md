@@ -152,10 +152,14 @@ to their definition; here is a second one[^note] with a word label. The
 definitions collect at the end of the document under a rule, wherever they
 were written.
 
-Inline math renders as a styled literal with simple scripts: $E=mc^2$,
-$a_i + b^{10}$, and $x_{max}$. Block math centers in a panel:
+Inline math typesets in STIX with real scripts: $E=mc^2$,
+$a_i + b^{10}$, and $x_{max}$ flow with the sentence. Block math
+centers on its own line:
 
-$$\sum_{i=1}^{n} i = n(n+1)/2$$
+$$x_n^2 + y_n^2 = z_n^2$$
+
+Currency stays prose: $5-$10 and US$100 vs CA$120 never become
+equations, while $`k^2`$ forces math through the backtick form.
 
 [^1]: The first footnote definition, written mid-document.
 [^note]: The second definition, with the label rendered as its marker.

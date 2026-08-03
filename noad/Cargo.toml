@@ -1,0 +1,14 @@
+[package]
+name = "noad"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+rust-version = "1.80"
+description = "TeX math typesetting: a parser and Appendix G layout engine over OpenType MATH metrics"
+
+[features]
+default = ["ttf"]
+ttf = ["dep:ttf-parser"]
+
+[dependencies]
+ttf-parser = { version = "0.25", optional = true }

@@ -1802,6 +1802,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "noad"
+version = "0.1.0"
+dependencies = [
+ "ttf-parser",
+]
+
+[[package]]
 name = "nom"
 version = "8.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2274,6 +2281,7 @@ dependencies = [
  "image",
  "lopdf",
  "miniz_oxide",
+ "noad",
  "open",
  "pdf-writer",
  "pulldown-cmark",
