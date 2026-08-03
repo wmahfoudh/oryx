@@ -2809,16 +2809,7 @@ fn model_selection_survives_recolor_and_relayout() {
     );
 }
 
-#[test]
-fn a_tall_inline_matrix_keeps_clear_of_neighboring_lines() {
-    let src = "The family covers determinants and norms, \
-$\\begin{vmatrix} a & b \\\\ c & d \\end{vmatrix}$ and \
-$\\begin{Vmatrix} v \\end{Vmatrix}$, and a small matrix rides its \
-sentence: $\\begin{smallmatrix} 1 & 0 \\\\ 0 & 1 \\end{smallmatrix}$. \
-Ten rows assemble their fences from extenders and this sentence wraps \
-far enough to lay several more lines below the matrix.";
-    let (_, l) = lay2(src, 1000.0);
-    assert!(!l.math_glyphs.is_empty(), "the matrices typeset");
+fn assert_math_clear_of_text(l: &LayoutDoc) {
     for g in &l.math_glyphs {
         let g_top = g.y - 0.8 * g.size;
         let g_bottom = g.y + 0.2 * g.size;
@@ -2845,6 +2836,31 @@ far enough to lay several more lines below the matrix.";
             );
         }
     }
+}
+
+#[test]
+fn a_tall_inline_matrix_keeps_clear_of_neighboring_lines() {
+    // The paragraph-start case: the matrix descends toward the lines
+    // laid below it.
+    let src = "The family covers determinants and norms, \
+$\\begin{vmatrix} a & b \\\\ c & d \\end{vmatrix}$ and \
+$\\begin{Vmatrix} v \\end{Vmatrix}$, and a small matrix rides its \
+sentence: $\\begin{smallmatrix} 1 & 0 \\\\ 0 & 1 \\end{smallmatrix}$. \
+Ten rows assemble their fences from extenders and this sentence wraps \
+far enough to lay several more lines below the matrix.";
+    let (_, l) = lay2(src, 1000.0);
+    assert!(!l.math_glyphs.is_empty(), "the matrices typeset");
+    assert_math_clear_of_text(&l);
+    // The mid-paragraph case: the matrix lands on a wrapped line and
+    // its ink reaches toward the line above as well.
+    let src = "This opening sentence is written long enough to wrap onto \
+a second line well before the determinant appears so the matrix joins a \
+line with text above it $\\begin{vmatrix} a & b \\\\ c & d \\end{vmatrix}$ \
+mid paragraph, and the tail also wraps far enough to lay several more \
+lines below the matrix so the descent side is exercised too.";
+    let (_, l) = lay2(src, 1000.0);
+    assert!(!l.math_glyphs.is_empty(), "the matrix typesets");
+    assert_math_clear_of_text(&l);
 }
 
 #[test]

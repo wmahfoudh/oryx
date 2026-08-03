@@ -4139,6 +4139,16 @@ fn flow_or_shape(
     }
 }
 
+/// Where a flow line's content starts in the layout vectors: everything
+/// appended past these marks belongs to the open line, which is what
+/// lets a tall joining equation shift the whole line down.
+struct LineMarks {
+    runs: usize,
+    rects: usize,
+    images: usize,
+    math: usize,
+}
+
 /// One line images and equations may join: its top, height, pen x, the
 /// text baseline when it carries one, and whether it is a standalone row
 /// rather than a text line.
@@ -4149,6 +4159,27 @@ struct FlowLine {
     /// Present on text lines and equation rows; image rows have none.
     baseline: Option<f32>,
     row: bool,
+    marks: LineMarks,
+}
+
+/// Moves an open line's content down, TeX's baselineskip stretching to
+/// admit taller ink.
+fn shift_line_down(out: &mut LayoutDoc, marks: &LineMarks, dy: f32) {
+    for run in &mut out.runs[marks.runs..] {
+        run.y += dy;
+        run.baseline += dy;
+    }
+    for rect in &mut out.rects[marks.rects..] {
+        rect.y += dy;
+    }
+    for image in &mut out.images[marks.images..] {
+        image.y += dy;
+    }
+    for g in &mut out.math_glyphs[marks.math..] {
+        g.y += dy;
+        g.top += dy;
+        g.bottom += dy;
+    }
 }
 
 /// Text with inline images or equations. Text shapes normally; an image
@@ -4211,6 +4242,7 @@ fn layout_flow(
                 })
                 .collect();
             let runs_mark = out.runs.len();
+            let rects_mark = out.rects.len();
             let h = shape_block(
                 fonts, theme, cfg, source, &masked, true, base, x0, y, avail, out,
             );
@@ -4266,12 +4298,27 @@ fn layout_flow(
                     }
                 }
                 y += h;
+                // The open line is the chunk's last visual line; raised
+                // marks like footnote references sit within half a size
+                // of its top.
+                let line_runs = (runs_mark..out.runs.len())
+                    .find(|&r| out.runs[r].y >= last_top - 0.5 * base.size)
+                    .unwrap_or(runs_mark);
+                let line_rects = (rects_mark..out.rects.len())
+                    .find(|&r| out.rects[r].y >= last_top - 0.5 * base.size)
+                    .unwrap_or(out.rects.len());
                 line = Some(FlowLine {
                     top: last_top,
                     height: line_height,
                     end_x,
                     baseline: Some(last_base),
                     row: false,
+                    marks: LineMarks {
+                        runs: line_runs,
+                        rects: line_rects,
+                        images: out.images.len(),
+                        math: out.math_glyphs.len(),
+                    },
                 });
             }
         } else if spans[i].math {
@@ -4292,17 +4339,22 @@ fn layout_flow(
                 .and_then(|i| source.as_bytes().get(i))
                 .is_some_and(|b| b.is_ascii_whitespace());
             let space = if spaced { 0.3 * base.size } else { 0.0 };
-            // Joining a line needs room sideways and a height the leading
-            // can absorb; a taller equation opens its own row, whose
-            // metrics cover its ink.
-            let joins = line.as_ref().is_some_and(|l| {
-                l.baseline.is_some()
-                    && l.end_x + space + w <= x0 + avail
-                    && m.ascent + m.descent <= 1.4 * line_height
-            });
+            let joins = line
+                .as_ref()
+                .is_some_and(|l| l.baseline.is_some() && l.end_x + space + w <= x0 + avail);
             if joins {
                 let l = line.as_mut().expect("open line");
                 let lb = l.baseline.expect("checked");
+                // Ink taller than the line's ascent shifts the whole line
+                // down, TeX's baselineskip stretching, so nothing reaches
+                // the line above.
+                let dy = (m.ascent - (lb - l.top)).max(0.0);
+                if dy > 0.0 {
+                    shift_line_down(out, &l.marks, dy);
+                    l.baseline = Some(lb + dy);
+                    l.height += dy;
+                }
+                let lb = lb + dy;
                 l.end_x += space;
                 emit_math_layout(fonts, theme, cfg, &m, l.end_x, lb, base.block_index, out);
                 l.end_x += w;
@@ -4320,6 +4372,12 @@ fn layout_flow(
                         y = l.top + l.height + 0.25 * base.size;
                     }
                 }
+                let marks = LineMarks {
+                    runs: out.runs.len(),
+                    rects: out.rects.len(),
+                    images: out.images.len(),
+                    math: out.math_glyphs.len(),
+                };
                 let baseline = y + m.ascent.max(0.75 * line_height);
                 emit_math_layout(fonts, theme, cfg, &m, x0, baseline, base.block_index, out);
                 let height = (baseline - y) + m.descent.max(0.25 * line_height);
@@ -4329,6 +4387,7 @@ fn layout_flow(
                     end_x: x0 + w,
                     baseline: Some(baseline),
                     row: true,
+                    marks,
                 });
             }
             i += 1;
@@ -4357,6 +4416,12 @@ fn layout_flow(
                         y = l.top + l.height + 0.25 * base.size;
                     }
                 }
+                let marks = LineMarks {
+                    runs: out.runs.len(),
+                    rects: out.rects.len(),
+                    images: out.images.len(),
+                    math: out.math_glyphs.len(),
+                };
                 place_image(out, theme, span, image, x0, y, w, h, loaded);
                 line = Some(FlowLine {
                     top: y,
@@ -4364,6 +4429,7 @@ fn layout_flow(
                     end_x: x0 + w,
                     baseline: None,
                     row: true,
+                    marks,
                 });
             }
             i += 1;

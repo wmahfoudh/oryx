@@ -88,9 +88,7 @@ $$\begin{aligned} (a+b)^2 &= (a+b)(a+b) \\ &= a^2 + 2ab + b^2 \end{aligned}$$
 
 The family covers determinants and norms, $\begin{vmatrix} a & b \\ c & d \end{vmatrix}$
 and $\begin{Vmatrix} v \end{Vmatrix}$, and a small matrix rides its sentence:
-$\begin{smallmatrix} 1 & 0 \\ 0 & 1 \end{smallmatrix}$.
-
-Ten rows assemble their
+$\begin{smallmatrix} 1 & 0 \\ 0 & 1 \end{smallmatrix}$ Ten rows assemble their
 fences from extenders:
 
 $$\begin{pmatrix} 1 \\ 2 \\ 3 \\ 4 \\ 5 \\ 6 \\ 7 \\ 8 \\ 9 \\ 10 \end{pmatrix}$$
