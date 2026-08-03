@@ -903,6 +903,20 @@ fn math_fallback_runs_in_courier_and_math_color() {
 }
 
 #[test]
+fn math_rules_paint_anti_aliased() {
+    let l = lay("$$\\frac{1}{2}$$", 800.0);
+    let bar = l
+        .rects
+        .iter()
+        .find(|r| r.height < 3.0 && r.width > 4.0)
+        .expect("the fraction bar");
+    assert!(
+        bar.anti_alias,
+        "math rules join anti-aliased glyphs and must paint the same way"
+    );
+}
+
+#[test]
 fn math_scales_with_zoom() {
     let doc = markdown::parse("$$x^2$$");
     let t = Theme::default_dark();
@@ -2751,4 +2765,35 @@ fn model_selection_survives_recolor_and_relayout() {
         before,
         "the anchor is the model; nothing to remap"
     );
+}
+
+#[test]
+fn flow_lines_stay_ordered_after_a_row_break() {
+    let t = Theme::default_dark();
+    let mut media = MediaCache::new(PathBuf::from("."));
+    let mut f = fonts();
+    let src = "Greek reads italic in lowercase, upright in capitals:\n$\\alpha \\beta \\gamma \\delta \\pi \\sigma \\omega$ beside\n$\\Gamma \\Delta \\Sigma \\Omega$. Relations space themselves:\n$a \\leq b \\neq c \\approx d \\equiv e$. Binary operators sit tighter:\n$x \\pm y \\times z \\cdot w$. The big symbols exist ahead of their limit\nmachinery: $\\sum$, $\\prod$, $\\int$, and the singletons $\\infty$,\n$\\nabla$, $\\partial$.";
+    let doc = markdown::parse(src);
+    for zoom in [2.0f32, 2.5, 3.0, 3.5, 4.0] {
+        for width in [700.0f32, 900.0, 1100.0, 1300.0] {
+            let mut config = cfg();
+            config.zoom = zoom;
+            let l = layout(&doc, &t, &mut f, &mut media, &config, width);
+            let lh = 1.5 * 22.0 * zoom;
+            for g in &l.math_glyphs {
+                for r in &l.runs {
+                    let x_overlap = g.x < r.x + r.width - 2.0 && r.x < g.x + g.size - 2.0;
+                    let dy = (r.baseline - g.y).abs();
+                    assert!(
+                        !(x_overlap && dy > 4.0 && dy < 0.7 * lh),
+                        "collision at zoom {zoom} width {width}: glyph y={} vs run y={} x={}..{}",
+                        g.y,
+                        r.baseline,
+                        r.x,
+                        r.x + r.width
+                    );
+                }
+            }
+        }
+    }
 }

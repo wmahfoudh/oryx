@@ -29,6 +29,27 @@ $x \pm y \times z \cdot w$. The big symbols exist ahead of their limit
 machinery: $\sum$, $\prod$, $\int$, and the singletons $\infty$,
 $\nabla$, $\partial$.
 
+## Constructs
+
+The quadratic formula, the font comparison's own specimen:
+
+$$x = \frac{-b \pm \sqrt{b^2 - 4ac}}{2a}$$
+
+The Basel problem and the Gaussian integral, limits above and beside:
+
+$$\sum_{n=1}^{\infty} \frac{1}{n^2} = \frac{\pi^2}{6}$$
+
+$$\int_0^{\infty} e^{-x^2} dx = \frac{\sqrt{\pi}}{2}$$
+
+Binomials stack barless in their parentheses: $\binom{n}{k}$ chooses
+$k$ from $n$. A degree rides its radical: $\sqrt[23]{x+1}$. Delimiters
+grow with what they hold:
+
+$$\left( \frac{1}{1 + \frac{1}{x}} \right)^2$$
+
+Inline, the same machinery stays text-sized: $\frac{a+b}{2}$,
+$\sqrt{2}$, and $\sum_i x_i$ sit in the sentence.
+
 ## The gate
 
 Prices never become equations: $5-$10, US$100 vs CA$120, and

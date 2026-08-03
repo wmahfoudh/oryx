@@ -45,8 +45,9 @@ pub fn band(
         }
         paint.set_color_rgba8(rect.color.r, rect.color.g, rect.color.b, rect.color.a);
         let rounded = rect.radius_top > 0.0 || rect.radius_bottom > 0.0;
-        paint.anti_alias = rounded;
-        if !rounded && rect.stroke == 0.0 {
+        let smooth = rounded || rect.anti_alias;
+        paint.anti_alias = smooth;
+        if !smooth && rect.stroke == 0.0 {
             if let Some(r) = Rect::from_xywh(
                 rect.x,
                 rect.y - y_top,

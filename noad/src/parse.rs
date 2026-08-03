@@ -5,7 +5,7 @@
 //! literals, and an unclosed group closes at the end of input. Hostile
 //! input costs a fallback, never a panic.
 
-use crate::mlist::{Atom, AtomClass, Field, MathList, Noad};
+use crate::mlist::{Atom, AtomClass, Field, Limits, MathList, Noad};
 
 /// The symbol vocabulary: command name to codepoint and class, sorted by
 /// name for binary search. Coverage grows by adding rows.
@@ -85,6 +85,25 @@ pub fn parse(tex: &str) -> MathList {
     parser.list(true)
 }
 
+/// Delimiter commands `\left` and `\right` accept, sorted for binary
+/// search. Plain characters and `.` resolve without the table.
+const DELIMITERS: &[(&str, char)] = &[
+    ("Vert", '\u{2016}'),
+    ("backslash", '\\'),
+    ("langle", '\u{27E8}'),
+    ("lbrace", '{'),
+    ("lceil", '\u{2308}'),
+    ("lfloor", '\u{230A}'),
+    ("rangle", '\u{27E9}'),
+    ("rbrace", '}'),
+    ("rceil", '\u{2309}'),
+    ("rfloor", '\u{230B}'),
+    ("vert", '|'),
+    ("{", '{'),
+    ("|", '\u{2016}'),
+    ("}", '}'),
+];
+
 fn vocabulary_lookup(name: &str) -> Option<(char, AtomClass)> {
     VOCABULARY
         .binary_search_by(|row| row.0.cmp(name))
@@ -109,6 +128,7 @@ fn literal_atom(text: impl Into<String>, span: std::ops::Range<usize>) -> Atom {
         nucleus: Field::Literal(text.into()),
         sup: None,
         sub: None,
+        limits: Limits::default(),
         span: span.clone(),
         nucleus_span: span,
     }
@@ -179,6 +199,7 @@ impl Parser {
                         nucleus: Field::Empty,
                         sup: None,
                         sub: None,
+                        limits: Limits::default(),
                         span: span.start..span.start,
                         nucleus_span: span.start..span.start,
                     };
@@ -208,19 +229,33 @@ impl Parser {
                 nucleus: Field::Symbol(c),
                 sup: None,
                 sub: None,
+                limits: Limits::default(),
                 span: tok.span.clone(),
                 nucleus_span: tok.span,
             }),
-            K::Command(name) => Some(match vocabulary_lookup(&name) {
-                Some((ch, class)) => Atom {
-                    class,
-                    nucleus: Field::Symbol(ch),
-                    sup: None,
-                    sub: None,
-                    span: tok.span.clone(),
-                    nucleus_span: tok.span,
+            K::Command(name) => Some(match name.as_str() {
+                "frac" => self.fraction(tok.span, true),
+                "binom" => self.binom(tok.span),
+                "sqrt" => self.radical(tok.span),
+                "left" => self.left_right(tok.span),
+                "right" => {
+                    // A stray closer: its delimiter goes with it, the pair
+                    // degrades to a literal.
+                    let _ = self.delimiter();
+                    literal_atom("\\right", tok.span)
+                }
+                _ => match vocabulary_lookup(&name) {
+                    Some((ch, class)) => Atom {
+                        class,
+                        nucleus: Field::Symbol(ch),
+                        sup: None,
+                        sub: None,
+                        limits: Limits::default(),
+                        span: tok.span.clone(),
+                        nucleus_span: tok.span,
+                    },
+                    None => literal_atom(format!("\\{name}"), tok.span),
                 },
-                None => literal_atom(format!("\\{name}"), tok.span),
             }),
             K::BeginGroup => {
                 let inner = self.list(false);
@@ -234,11 +269,177 @@ impl Parser {
                     nucleus: Field::List(inner),
                     sup: None,
                     sub: None,
+                    limits: Limits::default(),
                     span: tok.span.start..end,
                     nucleus_span: tok.span.start..end,
                 })
             }
             _ => None,
+        }
+    }
+
+    /// A construct atom covering `start` through everything consumed since.
+    fn construct(
+        &mut self,
+        start: std::ops::Range<usize>,
+        nucleus: Field,
+        class: AtomClass,
+    ) -> Atom {
+        let end = self.consumed_end(start.end);
+        Atom {
+            class,
+            nucleus,
+            sup: None,
+            sub: None,
+            limits: Limits::default(),
+            span: start.start..end,
+            nucleus_span: start.start..end,
+        }
+    }
+
+    /// `\frac{num}{den}`; the argument reader accepts single tokens the
+    /// way TeX does, so `\frac12` works.
+    fn fraction(&mut self, start: std::ops::Range<usize>, bar: bool) -> Atom {
+        let numerator = self.script_operand();
+        let denominator = self.script_operand();
+        self.construct(
+            start,
+            Field::Fraction {
+                numerator,
+                denominator,
+                bar,
+            },
+            AtomClass::Inner,
+        )
+    }
+
+    /// `\binom{n}{k}`: a barless stack inside stretched parentheses.
+    fn binom(&mut self, start: std::ops::Range<usize>) -> Atom {
+        let numerator = self.script_operand();
+        let denominator = self.script_operand();
+        let end = self.consumed_end(start.end);
+        let span = start.start..end;
+        let stack = Atom {
+            class: AtomClass::Inner,
+            nucleus: Field::Fraction {
+                numerator,
+                denominator,
+                bar: false,
+            },
+            sup: None,
+            sub: None,
+            limits: Limits::default(),
+            span: span.clone(),
+            nucleus_span: span.clone(),
+        };
+        Atom {
+            class: AtomClass::Inner,
+            nucleus: Field::LeftRight {
+                open: Some('('),
+                close: Some(')'),
+                body: MathList(vec![Noad::Atom(stack)]),
+            },
+            sup: None,
+            sub: None,
+            limits: Limits::default(),
+            span: span.clone(),
+            nucleus_span: span,
+        }
+    }
+
+    /// `\sqrt{x}` with the optional `[degree]`.
+    fn radical(&mut self, start: std::ops::Range<usize>) -> Atom {
+        use crate::token::TokenKind as K;
+        let degree = if matches!(self.peek().map(|t| &t.kind), Some(K::Char('['))) {
+            self.pos += 1;
+            Some(self.list_until_char(']'))
+        } else {
+            None
+        };
+        let radicand = self.script_operand();
+        self.construct(start, Field::Radical { radicand, degree }, AtomClass::Ord)
+    }
+
+    /// Elements up to a closing character, consumed; end of input closes.
+    fn list_until_char(&mut self, closer: char) -> MathList {
+        use crate::token::TokenKind as K;
+        let mut items: Vec<Noad> = Vec::new();
+        while let Some(tok) = self.peek() {
+            if matches!(&tok.kind, K::Char(c) if *c == closer) {
+                self.pos += 1;
+                break;
+            }
+            if matches!(tok.kind, K::EndGroup) {
+                break;
+            }
+            if let Some(mut atom) = self.atom() {
+                self.scripts(&mut atom);
+                items.push(Noad::Atom(atom));
+            } else {
+                self.pos += 1;
+            }
+        }
+        demote_bins(&mut items);
+        MathList(items)
+    }
+
+    /// `\left⟨delim⟩ ... \right⟨delim⟩`. A missing `\right` fails open at
+    /// the end of input or at the enclosing group's closer, which stays
+    /// for the group to consume.
+    fn left_right(&mut self, start: std::ops::Range<usize>) -> Atom {
+        use crate::token::TokenKind as K;
+        let open = self.delimiter();
+        let mut items: Vec<Noad> = Vec::new();
+        let mut close = None;
+        while let Some(tok) = self.peek() {
+            match &tok.kind {
+                K::Command(name) if name == "right" => {
+                    self.pos += 1;
+                    close = self.delimiter();
+                    break;
+                }
+                K::EndGroup => break,
+                _ => {
+                    if let Some(mut atom) = self.atom() {
+                        self.scripts(&mut atom);
+                        items.push(Noad::Atom(atom));
+                    } else {
+                        self.pos += 1;
+                    }
+                }
+            }
+        }
+        demote_bins(&mut items);
+        self.construct(
+            start,
+            Field::LeftRight {
+                open,
+                close,
+                body: MathList(items),
+            },
+            AtomClass::Inner,
+        )
+    }
+
+    /// One delimiter token after `\left` or `\right`: a character, `.` for
+    /// none, or a delimiter command. Anything else answers none and stays.
+    fn delimiter(&mut self) -> Option<char> {
+        use crate::token::TokenKind as K;
+        let resolved = match self.peek().map(|t| &t.kind) {
+            Some(K::Char('.')) => Some(None),
+            Some(K::Char(c)) => Some(Some(*c)),
+            Some(K::Command(name)) => DELIMITERS
+                .binary_search_by(|row| row.0.cmp(name.as_str()))
+                .ok()
+                .map(|i| Some(DELIMITERS[i].1)),
+            _ => None,
+        };
+        match resolved {
+            Some(delim) => {
+                self.pos += 1;
+                delim
+            }
+            None => None,
         }
     }
 
@@ -250,6 +451,20 @@ impl Parser {
         while let Some(tok) = self.peek() {
             let span = tok.span.clone();
             match tok.kind {
+                K::Command(ref name) if name == "limits" || name == "nolimits" => {
+                    // TeX's postfix limit modifiers bind to an operator;
+                    // on anything else they fall through as literals.
+                    if atom.class != AtomClass::Op {
+                        break;
+                    }
+                    atom.limits = if name == "limits" {
+                        Limits::Limits
+                    } else {
+                        Limits::NoLimits
+                    };
+                    atom.span.end = atom.span.end.max(span.end);
+                    self.pos += 1;
+                }
                 K::Prime => {
                     self.pos += 1;
                     let prime = Atom {
@@ -257,6 +472,7 @@ impl Parser {
                         nucleus: Field::Symbol('\u{2032}'),
                         sup: None,
                         sub: None,
+                        limits: Limits::default(),
                         span: span.clone(),
                         nucleus_span: span.clone(),
                     };
@@ -472,5 +688,104 @@ mod tests {
             Field::List(inner) => assert_eq!(inner.atoms().count(), 2),
             other => panic!("expected group, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn frac_takes_two_arguments() {
+        let a = atoms("\\frac{a+b}{2}x");
+        assert_eq!(a.len(), 2);
+        let Field::Fraction {
+            numerator,
+            denominator,
+            bar,
+        } = &a[0].nucleus
+        else {
+            panic!("expected fraction, got {:?}", a[0].nucleus)
+        };
+        assert!(bar);
+        assert_eq!(numerator.atoms().count(), 3);
+        assert_eq!(denominator.atoms().count(), 1);
+        assert_eq!(a[0].class, AtomClass::Inner);
+        // Single-token arguments work without braces.
+        let a = atoms("\\frac12");
+        let Field::Fraction { numerator, .. } = &a[0].nucleus else {
+            panic!()
+        };
+        assert_eq!(
+            numerator.atoms().next().unwrap().nucleus,
+            Field::Symbol('1')
+        );
+    }
+
+    #[test]
+    fn binom_is_a_barless_stack_in_parens() {
+        let a = atoms("\\binom{n}{k}");
+        let Field::LeftRight { open, close, body } = &a[0].nucleus else {
+            panic!("expected delimited group, got {:?}", a[0].nucleus)
+        };
+        assert_eq!((*open, *close), (Some('('), Some(')')));
+        let inner = body.atoms().next().expect("stack inside");
+        let Field::Fraction { bar, .. } = &inner.nucleus else {
+            panic!("expected stack, got {:?}", inner.nucleus)
+        };
+        assert!(!bar);
+    }
+
+    #[test]
+    fn sqrt_takes_optional_degree() {
+        let a = atoms("\\sqrt{x+1}");
+        let Field::Radical { radicand, degree } = &a[0].nucleus else {
+            panic!("expected radical, got {:?}", a[0].nucleus)
+        };
+        assert_eq!(radicand.atoms().count(), 3);
+        assert!(degree.is_none());
+        let a = atoms("\\sqrt[3]{x}");
+        let Field::Radical { degree, .. } = &a[0].nucleus else {
+            panic!()
+        };
+        let deg = degree.as_ref().expect("degree parsed");
+        assert_eq!(deg.atoms().next().unwrap().nucleus, Field::Symbol('3'));
+    }
+
+    #[test]
+    fn left_right_wraps_its_body() {
+        let a = atoms("\\left( \\frac{a}{b} \\right)^2");
+        assert_eq!(a.len(), 1);
+        let Field::LeftRight { open, close, body } = &a[0].nucleus else {
+            panic!("expected delimited group, got {:?}", a[0].nucleus)
+        };
+        assert_eq!((*open, *close), (Some('('), Some(')')));
+        assert_eq!(body.atoms().count(), 1);
+        assert_eq!(a[0].class, AtomClass::Inner);
+        assert!(a[0].sup.is_some(), "the script rides the whole group");
+        // The dot delimiter means none; command delimiters resolve.
+        let a = atoms("\\left. x \\right\\}");
+        let Field::LeftRight { open, close, .. } = &a[0].nucleus else {
+            panic!()
+        };
+        assert_eq!((*open, *close), (None, Some('}')));
+    }
+
+    #[test]
+    fn unmatched_left_fails_open() {
+        let a = atoms("\\left( x");
+        assert!(!a.is_empty());
+        let flat = parse("\\left( x");
+        assert!(flat.atoms().count() >= 1, "never panics, keeps content");
+        let _ = parse("x \\right)");
+        let _ = parse("\\left");
+        let _ = parse("\\left(\\left[x");
+    }
+
+    #[test]
+    fn limits_modifiers_bind_to_operators() {
+        let a = atoms("\\sum\\limits x");
+        assert_eq!(a[0].limits, Limits::Limits);
+        assert_eq!(a.len(), 2);
+        let a = atoms("\\int\\nolimits x");
+        assert_eq!(a[0].limits, Limits::NoLimits);
+        // On a non-operator the modifier is a quiet literal.
+        let a = atoms("x\\limits");
+        assert_eq!(a[1].nucleus, Field::Literal("\\limits".into()));
     }
 }

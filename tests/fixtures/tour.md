@@ -160,6 +160,10 @@ $$x_n^2 + y_n^2 = z_n^2$$
 
 Currency stays prose: $5-$10 and US$100 vs CA$120 never become
 equations, while $`k^2`$ forces math through the backtick form.
+Constructs typeset by Appendix G's rules, bar on the axis, surd
+stretched, limits stacked in display:
+
+$$x = \frac{-b \pm \sqrt{b^2 - 4ac}}{2a}$$
 
 [^1]: The first footnote definition, written mid-document.
 [^note]: The second definition, with the label rendered as its marker.

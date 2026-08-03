@@ -118,6 +118,9 @@ pub struct DecoRect {
     pub radius_bottom: f32,
     /// Outline width; 0 fills the rectangle instead.
     pub stroke: f32,
+    /// Paints with anti-aliasing. Math rules join anti-aliased glyph ink
+    /// at subpixel positions; panel edges stay crisp on the pixel grid.
+    pub anti_alias: bool,
 }
 
 impl DecoRect {
@@ -131,6 +134,7 @@ impl DecoRect {
             radius_top: 0.0,
             radius_bottom: 0.0,
             stroke: 0.0,
+            anti_alias: false,
         }
     }
 
@@ -144,6 +148,13 @@ impl DecoRect {
 
     pub fn stroked(self, stroke: f32) -> DecoRect {
         DecoRect { stroke, ..self }
+    }
+
+    pub fn smooth(self) -> DecoRect {
+        DecoRect {
+            anti_alias: true,
+            ..self
+        }
     }
 }
 
@@ -3944,13 +3955,8 @@ fn emit_math_layout(
         });
     }
     for r in &m.rules {
-        out.rects.push(DecoRect::fill(
-            x + r.x,
-            baseline + r.y,
-            r.width,
-            r.height,
-            ink,
-        ));
+        out.rects
+            .push(DecoRect::fill(x + r.x, baseline + r.y, r.width, r.height, ink).smooth());
     }
     for lit in &m.literals {
         let (runs, _) = shape_side_text(
@@ -4161,13 +4167,13 @@ fn layout_flow(
             let h = shape_block(
                 fonts, theme, cfg, source, &masked, true, base, x0, y, avail, out,
             );
-            let last_top = out.runs[runs_mark..].iter().map(|r| r.y).fold(y, f32::max);
+            let mut last_top = out.runs[runs_mark..].iter().map(|r| r.y).fold(y, f32::max);
             let end_x = out.runs[runs_mark..]
                 .iter()
                 .filter(|r| (r.y - last_top).abs() < 1.0)
                 .map(|r| r.x + r.width)
                 .fold(x0, f32::max);
-            let last_base = out.runs[runs_mark..]
+            let mut last_base = out.runs[runs_mark..]
                 .iter()
                 .filter(|r| (r.y - last_top).abs() < 1.0)
                 .map(|r| r.baseline)
@@ -4197,11 +4203,17 @@ fn layout_flow(
                     if l.row {
                         let below = l.top + l.height + 0.25 * base.size;
                         if below > y {
+                            // The chunk shaped over the open row; it moves
+                            // below, and the line metrics move with it so
+                            // the next box joins the real line, not a stale
+                            // baseline over the row.
                             let dy = below - y;
                             for run in &mut out.runs[runs_mark..] {
                                 run.y += dy;
                                 run.baseline += dy;
                             }
+                            last_top += dy;
+                            last_base += dy;
                             y = below;
                         }
                     }
