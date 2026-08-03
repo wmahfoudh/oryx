@@ -378,9 +378,17 @@ impl ExportPass {
                 // still reads it.
                 if self.queue.is_empty() {
                     let consumed = self.paginator.consume();
-                    if consumed.runs > 0 || consumed.rects > 0 || consumed.images > 0 {
-                        self.layout
-                            .drain_front(consumed.runs, consumed.rects, consumed.images);
+                    if consumed.runs > 0
+                        || consumed.rects > 0
+                        || consumed.images > 0
+                        || consumed.math > 0
+                    {
+                        self.layout.drain_front(
+                            consumed.runs,
+                            consumed.rects,
+                            consumed.images,
+                            consumed.math,
+                        );
                         self.pass
                             .as_mut()
                             .expect("emission has a pass")

@@ -6,14 +6,15 @@ use std::ops::Range;
 
 use crate::doc::model::{BlockKind, Document};
 use crate::export::PageGeometry;
-use crate::layout::{metrics, DecoRect, ImagePlace, LayoutDoc};
+use crate::layout::{metrics, DecoRect, ImagePlace, LayoutDoc, MathGlyph};
 
 /// Float slack for comparing positions that arithmetic should have made
 /// equal.
 const SLACK: f32 = 0.01;
 
-/// One page: where it starts in document coordinates, the runs and images
-/// it carries, and its rectangles already split at the break.
+/// One page: where it starts in document coordinates, the runs, images
+/// and math glyphs it carries, and its rectangles already split at the
+/// break.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Page {
     pub top: f32,
@@ -24,16 +25,19 @@ pub struct Page {
     pub runs: Range<usize>,
     pub images: Vec<ImagePlace>,
     pub rects: Vec<DecoRect>,
+    pub math: Vec<MathGlyph>,
 }
 
-/// One thing a page can hold whole: a visual line, an image, or a line
-/// with an image sitting in it. Pieces that overlap vertically belong to
-/// the same item, which keeps a raised footnote reference with the words
-/// it follows, an inline badge with its sentence, and a table row's cells
-/// together. An item is atomic, so nothing here is ever cut in half.
+/// One thing a page can hold whole: a visual line, an image, an equation,
+/// or a line with an image or equation sitting in it. Pieces that overlap
+/// vertically belong to the same item, which keeps a raised footnote
+/// reference with the words it follows, an inline badge or equation with
+/// its sentence, and a table row's cells together. An item is atomic, so
+/// nothing here is ever cut in half.
 struct Item {
     runs: Range<usize>,
     images: Vec<usize>,
+    math: Range<usize>,
     top: f32,
     bottom: f32,
 }
@@ -41,73 +45,118 @@ struct Item {
 impl Item {
     /// The block an item belongs to, absent for an image standing alone.
     fn block(&self, layout: &LayoutDoc) -> Option<usize> {
-        (!self.runs.is_empty()).then(|| layout.runs[self.runs.start].block)
+        if !self.runs.is_empty() {
+            return Some(layout.runs[self.runs.start].block);
+        }
+        (!self.math.is_empty()).then(|| layout.math_glyphs[self.math.start].block)
     }
 }
 
-/// Every run and every image, in document order, grouped into items.
+/// Every run, image and math glyph, in document order, grouped into items.
 fn items(layout: &LayoutDoc) -> Vec<Item> {
     let mut out: Vec<Item> = Vec::new();
-    group_into(layout, &mut out, &mut 0, &mut 0);
+    group_into(layout, &mut out, &mut 0, &mut 0, &mut 0);
     out
 }
 
 /// The grouping core, resumable: continues from where the cursors
-/// stopped, growing the last item where new pieces overlap it.
+/// stopped, growing the last item where new pieces overlap it. On equal
+/// tops a run wins over an image, an image over a math glyph, so the
+/// order is deterministic whatever the growth cadence.
 fn group_into(
     layout: &LayoutDoc,
     out: &mut Vec<Item>,
     run_seen: &mut usize,
     image_seen: &mut usize,
+    math_seen: &mut usize,
 ) {
-    let (mut run, mut image) = (*run_seen, *image_seen);
+    #[derive(Clone, Copy, PartialEq)]
+    enum Take {
+        Run,
+        Image,
+        Math,
+    }
+    let (mut run, mut image, mut math) = (*run_seen, *image_seen, *math_seen);
     loop {
-        let run_top = layout.runs.get(run).map(|r| r.y);
-        let image_top = layout.images.get(image).map(|i| i.y);
-        let take_run = match (run_top, image_top) {
-            (Some(a), Some(b)) => a <= b,
-            (Some(_), None) => true,
-            (None, Some(_)) => false,
-            (None, None) => break,
+        let mut take: Option<(f32, Take)> = None;
+        if let Some(r) = layout.runs.get(run) {
+            take = Some((r.y, Take::Run));
+        }
+        if let Some(i) = layout.images.get(image) {
+            if !take.is_some_and(|(top, _)| top <= i.y) {
+                take = Some((i.y, Take::Image));
+            }
+        }
+        if let Some(g) = layout.math_glyphs.get(math) {
+            if !take.is_some_and(|(top, _)| top <= g.top) {
+                take = Some((g.top, Take::Math));
+            }
+        }
+        let Some((_, take)) = take else {
+            break;
         };
-        if take_run {
-            let piece = &layout.runs[run];
-            let bottom = piece.y + metrics::LINE_HEIGHT * piece.size;
-            match out.last_mut() {
-                Some(item) if piece.y < item.bottom - SLACK => {
-                    item.runs.end = run + 1;
-                    item.top = item.top.min(piece.y);
-                    item.bottom = item.bottom.max(bottom);
+        match take {
+            Take::Run => {
+                let piece = &layout.runs[run];
+                let bottom = piece.y + metrics::LINE_HEIGHT * piece.size;
+                match out.last_mut() {
+                    Some(item) if piece.y < item.bottom - SLACK => {
+                        item.runs.end = run + 1;
+                        item.top = item.top.min(piece.y);
+                        item.bottom = item.bottom.max(bottom);
+                    }
+                    _ => out.push(Item {
+                        runs: run..run + 1,
+                        images: Vec::new(),
+                        math: math..math,
+                        top: piece.y,
+                        bottom,
+                    }),
                 }
-                _ => out.push(Item {
-                    runs: run..run + 1,
-                    images: Vec::new(),
-                    top: piece.y,
-                    bottom,
-                }),
+                run += 1;
             }
-            run += 1;
-        } else {
-            let piece = &layout.images[image];
-            let bottom = piece.y + piece.height;
-            match out.last_mut() {
-                Some(item) if piece.y < item.bottom - SLACK => {
-                    item.images.push(image);
-                    item.top = item.top.min(piece.y);
-                    item.bottom = item.bottom.max(bottom);
+            Take::Image => {
+                let piece = &layout.images[image];
+                let bottom = piece.y + piece.height;
+                match out.last_mut() {
+                    Some(item) if piece.y < item.bottom - SLACK => {
+                        item.images.push(image);
+                        item.top = item.top.min(piece.y);
+                        item.bottom = item.bottom.max(bottom);
+                    }
+                    _ => out.push(Item {
+                        runs: run..run,
+                        images: vec![image],
+                        math: math..math,
+                        top: piece.y,
+                        bottom,
+                    }),
                 }
-                _ => out.push(Item {
-                    runs: run..run,
-                    images: vec![image],
-                    top: piece.y,
-                    bottom,
-                }),
+                image += 1;
             }
-            image += 1;
+            Take::Math => {
+                let piece = &layout.math_glyphs[math];
+                match out.last_mut() {
+                    Some(item) if piece.top < item.bottom - SLACK => {
+                        item.math.end = math + 1;
+                        item.top = item.top.min(piece.top);
+                        item.bottom = item.bottom.max(piece.bottom);
+                    }
+                    _ => out.push(Item {
+                        runs: run..run,
+                        images: Vec::new(),
+                        math: math..math + 1,
+                        top: piece.top,
+                        bottom: piece.bottom,
+                    }),
+                }
+                math += 1;
+            }
         }
     }
     *run_seen = run;
     *image_seen = image;
+    *math_seen = math;
 }
 
 /// Grows each item to cover the decoration that belongs to it and hangs
@@ -270,6 +319,7 @@ pub fn paginate(doc: &Document, layout: &LayoutDoc, geometry: &PageGeometry) -> 
     let mut pages: Vec<Page> = Vec::new();
     let mut i = 0;
     let mut cursor = 0;
+    let mut math_cursor = 0;
     while i < items.len() {
         let top = page_top(doc, layout, &items, content, i, i == 0);
         let mut j = i;
@@ -297,6 +347,7 @@ pub fn paginate(doc: &Document, layout: &LayoutDoc, geometry: &PageGeometry) -> 
             }
         }
         let end = items[j - 1].runs.end.max(cursor);
+        let math_end = items[j - 1].math.end.max(math_cursor);
         let carried: Vec<usize> = items[i..j]
             .iter()
             .flat_map(|item| item.images.clone())
@@ -310,8 +361,10 @@ pub fn paginate(doc: &Document, layout: &LayoutDoc, geometry: &PageGeometry) -> 
                 .map(|index| scaled(&layout.images[*index], content))
                 .collect(),
             rects: Vec::new(),
+            math: layout.math_glyphs[math_cursor..math_end].to_vec(),
         });
         cursor = end;
+        math_cursor = math_end;
         i = j;
     }
     if pages.is_empty() {
@@ -321,6 +374,7 @@ pub fn paginate(doc: &Document, layout: &LayoutDoc, geometry: &PageGeometry) -> 
             runs: 0..0,
             images: Vec::new(),
             rects: Vec::new(),
+            math: Vec::new(),
         });
     }
     close_pages(&items, &mut pages);
@@ -342,11 +396,13 @@ pub struct Paginator {
     items: Vec<Item>,
     runs_seen: usize,
     images_seen: usize,
+    math_seen: usize,
     settled: usize,
     spans: HashMap<usize, (usize, usize)>,
-    /// First item of the open page and the run cursor behind it.
+    /// First item of the open page and the run and math cursors behind it.
     next_item: usize,
     cursor: usize,
+    math_cursor: usize,
     /// Where the close walk for page bottoms has reached.
     close_at: usize,
     /// The rectangle sweep: unswept indices sorted by (y, index), and
@@ -368,6 +424,7 @@ pub struct Consumed {
     pub runs: usize,
     pub rects: usize,
     pub images: usize,
+    pub math: usize,
 }
 
 impl Paginator {
@@ -388,6 +445,7 @@ impl Paginator {
             &mut self.items,
             &mut self.runs_seen,
             &mut self.images_seen,
+            &mut self.math_seen,
         );
         self.settle(doc, layout, content, complete);
         let mut out = Vec::new();
@@ -402,6 +460,7 @@ impl Paginator {
                 runs: 0..0,
                 images: Vec::new(),
                 rects,
+                math: Vec::new(),
             });
         }
         self.emitted += out.len();
@@ -522,6 +581,9 @@ impl Paginator {
             (f32::INFINITY, f32::INFINITY)
         };
         let rects = self.assign_rects(layout, top, bottom, next_top);
+        let math_end = self.items[j - 1].math.end.max(self.math_cursor);
+        let math = layout.math_glyphs[self.math_cursor..math_end].to_vec();
+        self.math_cursor = math_end;
         self.started = true;
         let start = self.cursor;
         self.cursor = end;
@@ -532,6 +594,7 @@ impl Paginator {
             runs: start..end,
             images,
             rects,
+            math,
         })
     }
 
@@ -542,6 +605,7 @@ impl Paginator {
     pub fn consume(&mut self) -> Consumed {
         let runs = self.cursor;
         let images = self.images_done;
+        let math = self.math_cursor;
         let rects = self
             .open_rects
             .iter()
@@ -553,6 +617,7 @@ impl Paginator {
         self.items.drain(..items_done);
         for item in &mut self.items {
             item.runs = item.runs.start - runs..item.runs.end - runs;
+            item.math = item.math.start - math..item.math.end - math;
             for image in &mut item.images {
                 *image -= images;
             }
@@ -565,9 +630,11 @@ impl Paginator {
             span.1 = span.1.saturating_sub(items_done);
         }
         self.cursor = 0;
+        self.math_cursor = 0;
         self.runs_seen -= runs;
         self.images_seen -= images;
         self.images_done = 0;
+        self.math_seen -= math;
         self.rects_seen -= rects;
         for index in self.open_rects.iter_mut().chain(&mut self.pending_rects) {
             *index -= rects;
@@ -576,6 +643,7 @@ impl Paginator {
             runs,
             rects,
             images,
+            math,
         }
     }
 
@@ -1292,5 +1360,33 @@ mod rules {
                 );
             }
         }
+    }
+
+    #[test]
+    fn consume_hands_over_emitted_math_and_the_drain_drops_it() {
+        let mut source = String::new();
+        for i in 0..40 {
+            source.push_str(&format!("Filler paragraph number {i} with body.\n\n"));
+            source.push_str("```math\n\\frac{a}{b}\n```\n\n");
+        }
+        let doc = markdown::parse(source.as_str());
+        let mut l = laid_out(&doc);
+        let total = l.math_glyphs.len();
+        assert!(total > 0, "the fixture lays out math");
+        let g = PageGeometry::new(PageSize::A4, 11.0);
+        let mut paginator = Paginator::new();
+        let pages = paginator.advance(&doc, &l, &g, true);
+        assert!(pages.len() > 1, "the fixture spans pages");
+        let carried: usize = pages.iter().map(|page| page.math.len()).sum();
+        assert_eq!(carried, total, "every glyph lands on a page");
+        let consumed = paginator.consume();
+        assert_eq!(consumed.math, total, "emitted pages hand their math over");
+        l.drain_front(
+            consumed.runs,
+            consumed.rects,
+            consumed.images,
+            consumed.math,
+        );
+        assert!(l.math_glyphs.is_empty(), "the drain drops what pages carry");
     }
 }

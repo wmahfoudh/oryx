@@ -403,6 +403,8 @@ fn paged_source() -> String {
     source.push_str("```\n\n");
     source.push_str("|h1|h2|\n|-|-|\n|a|b|\n|c|d|\n\n");
     source.push_str("> quoted one\n>\n> quoted two\n\n");
+    source.push_str("Inline math $a_i^2 + b$ rides its sentence.\n\n");
+    source.push_str("```math\n\\sum_{i=1}^{n} \\frac{1}{i^2}\n```\n\n");
     for i in 0..160 {
         source.push_str(&format!("Filler paragraph number {i} with body.\n\n"));
     }
@@ -627,6 +629,81 @@ fn a_cancelled_export_leaves_the_target_and_no_part_behind() {
         "the target is untouched"
     );
     std::fs::remove_file(&target).ok();
+}
+
+// Task 61: math in the PDF export. Equations reach the emitter as STIX
+// glyphs; rules and literal fallbacks already travel as rects and runs.
+
+#[test]
+fn an_equation_exports_typeset_and_extracts_its_characters() {
+    let doc = markdown::parse("Before.\n\n```math\n\\frac{12}{34}\n```\n\nInline $a+b=c$ after.\n");
+    let bytes = export_to_bytes(&doc, PageSize::A4);
+    let pdf = Pdf::load_mem(&bytes).expect("a reader parses the file");
+    let text = pdf.extract_text(&[1]).expect("text extracts");
+    assert!(
+        !text.contains("frac"),
+        "the equation typesets rather than printing its TeX, got {text:?}"
+    );
+    assert!(
+        text.contains("12") && text.contains("34"),
+        "the fraction's digits extract, got {text:?}"
+    );
+    for ch in ['\u{1D44E}', '\u{1D44F}', '\u{1D450}', '+', '='] {
+        assert!(text.contains(ch), "{ch:?} extracts, got {text:?}");
+    }
+    let fonts = cid_fonts(&pdf);
+    assert!(
+        fonts
+            .iter()
+            .any(|(subtype, _, file3)| subtype == "CIDFontType0" && *file3),
+        "STIX embeds as a CFF CID font, got {fonts:?}"
+    );
+}
+
+#[test]
+fn every_display_equation_lands_whole_on_one_page() {
+    let mut source = String::new();
+    for i in 0..60 {
+        source.push_str(&format!("Filler paragraph number {i} with body.\n\n"));
+        source.push_str("```math\n\\frac{a+b}{c+d}\n```\n\n");
+    }
+    let doc = markdown::parse(source.as_str());
+    let (geometry, cfg) = geometry_and_cfg();
+    let mut fonts = FontStore::new();
+    let mut media = MediaCache::new(PathBuf::from("tests/fixtures"));
+    let lay = layout(
+        &doc,
+        &Theme::default_dark(),
+        &mut fonts,
+        &mut media,
+        &cfg,
+        geometry.width,
+    );
+    let pages = paginate(&doc, &lay, &geometry);
+    assert!(pages.len() > 3, "the fixture spans pages");
+    let mut seen: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+    let mut total = 0usize;
+    for (index, page) in pages.iter().enumerate() {
+        for glyph in &page.math {
+            total += 1;
+            assert!(
+                glyph.y >= page.top - 0.01 && glyph.y <= page.bottom + 0.01,
+                "glyph baseline {} inside page {} [{}, {}]",
+                glyph.y,
+                index,
+                page.top,
+                page.bottom
+            );
+            let entry = seen.entry(glyph.block).or_insert(index);
+            assert_eq!(
+                *entry, index,
+                "equation block {} splits across pages {} and {}",
+                glyph.block, entry, index
+            );
+        }
+    }
+    assert!(total > 0, "pages carry math glyphs at all");
+    assert_eq!(seen.len(), 60, "every equation lands");
 }
 
 /// The showcase collection is the field's export scenario: emoji through

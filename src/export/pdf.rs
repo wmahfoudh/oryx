@@ -230,6 +230,9 @@ pub struct Builder {
     /// One image XObject per bitmap glyph and raster size, shared
     /// across pages; None records a glyph that produced no raster.
     glyph_images: HashMap<(FaceId, u16, u32), Option<GlyphImage>>,
+    /// Math glyph advances in ems, read once per glyph from the math
+    /// face's own metrics.
+    math_widths: HashMap<u16, f32>,
     contents: Vec<PageContent>,
     /// The sliced face writing: first-use order, and how many are out.
     face_queue: Option<Vec<FaceId>>,
@@ -285,6 +288,7 @@ impl Builder {
             images: HashMap::new(),
             bitmap: HashMap::new(),
             glyph_images: HashMap::new(),
+            math_widths: HashMap::new(),
             contents: Vec::new(),
             face_queue: None,
             faces_written: 0,
@@ -389,6 +393,7 @@ impl Builder {
                 &mut images,
             );
         }
+        self.draw_math(&mut content, page, geometry, fonts, &mut used);
         if job.settings.page_numbers {
             self.draw_page_number(
                 &mut content,
@@ -450,6 +455,85 @@ impl Builder {
             let baseline = device_y(segment.baseline, top, geometry);
             show(content, &segment, &ids, index, baseline);
         }
+    }
+
+    /// The page's math glyphs through the same CID machinery as text:
+    /// consecutive glyphs sharing a baseline, size and color group into
+    /// one segment, the registered text is the character a glyph renders
+    /// so extraction reads the equation, and widths come from the math
+    /// face's own metrics.
+    fn draw_math(
+        &mut self,
+        content: &mut Content,
+        page: &Page,
+        geometry: &PageGeometry,
+        fonts: &FontStore,
+        used: &mut Vec<FaceId>,
+    ) {
+        let face = fonts.math_face;
+        let mut i = 0;
+        while i < page.math.len() {
+            let first = &page.math[i];
+            let mut glyphs: Vec<Glyph> = Vec::new();
+            let mut text = String::new();
+            let mut j = i;
+            while j < page.math.len() {
+                let g = &page.math[j];
+                if g.y != first.y || g.size != first.size || g.color != first.color {
+                    break;
+                }
+                let start = text.len();
+                if let Some(ch) = g.ch {
+                    text.push(ch);
+                }
+                glyphs.push(Glyph {
+                    id: g.glyph,
+                    x: g.x,
+                    width: self.math_advance(fonts, g.glyph) * g.size,
+                    start,
+                    end: text.len(),
+                });
+                j += 1;
+            }
+            let segment = Segment {
+                face,
+                glyphs,
+                size: first.size,
+                color: first.color,
+                x: first.x,
+                baseline: first.y,
+            };
+            let ids = self.register(&segment, &text);
+            if !used.contains(&face) {
+                used.push(face);
+            }
+            let index = self.faces[&face].index;
+            let baseline = device_y(segment.baseline, page.top, geometry);
+            show(content, &segment, &ids, index, baseline);
+            i = j;
+        }
+    }
+
+    /// A math glyph's advance in ems, read from the face once and cached
+    /// across the export.
+    fn math_advance(&mut self, fonts: &FontStore, glyph: u16) -> f32 {
+        if let Some(cached) = self.math_widths.get(&glyph) {
+            return *cached;
+        }
+        let advance = fonts
+            .font_system
+            .db()
+            .with_face_data(fonts.math_face, |data, index| {
+                ttf_parser::Face::parse(data, index).ok().and_then(|face| {
+                    let upem = face.units_per_em() as f32;
+                    face.glyph_hor_advance(ttf_parser::GlyphId(glyph))
+                        .map(|advance| f32::from(advance) / upem)
+                })
+            })
+            .flatten()
+            .unwrap_or(0.0);
+        self.math_widths.insert(glyph, advance);
+        advance
     }
 
     /// Whether a face carries no outline tables, which is what emoji
@@ -796,6 +880,7 @@ fn finish(builder: Builder, job: &Job, fonts: &FontStore) -> Result<Option<Vec<u
         mut alloc,
         bitmap: _,
         glyph_images: _,
+        math_widths: _,
         catalog_id,
         tree_id,
         info_id,

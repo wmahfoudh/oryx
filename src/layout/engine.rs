@@ -440,6 +440,8 @@ impl LayoutDoc {
         self.math_glyphs
             .extend(scratch.math_glyphs.drain(..).map(|mut g| {
                 g.y += top;
+                g.top += top;
+                g.bottom += top;
                 g
             }));
         self.anchors
@@ -465,13 +467,20 @@ impl LayoutDoc {
 
 /// One typeset math glyph: the math face at an absolute position. `y` is
 /// the glyph's baseline in document coordinates; paint rasterizes by
-/// glyph id through the swash cache.
+/// glyph id through the swash cache. `top` and `bottom` are the whole
+/// equation's vertical extent, shared by every glyph of one equation, so
+/// pagination can treat the equation as an unbreakable band; `ch` is the
+/// character the glyph renders when one exists, which is what the PDF
+/// export writes into its ToUnicode map.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MathGlyph {
     pub glyph: u16,
     pub x: f32,
     pub y: f32,
     pub size: f32,
+    pub ch: Option<char>,
+    pub top: f32,
+    pub bottom: f32,
     pub color: crate::style::theme::Rgba,
     pub block: usize,
 }
@@ -2140,12 +2149,13 @@ impl LayoutDoc {
     /// export's drain behind its pagination cursor. Code line records
     /// fully behind the run frontier go with it, the rest shift. The
     /// caller rebases everything of its own that indexes the vectors.
-    pub(crate) fn drain_front(&mut self, runs: usize, rects: usize, images: usize) {
+    pub(crate) fn drain_front(&mut self, runs: usize, rects: usize, images: usize, math: usize) {
         debug_assert!(self.window.is_none(), "the drain and the window exclude");
         let code = self.code_lines.partition_point(|c| c.runs.end <= runs);
         self.runs.drain(..runs);
         self.rects.drain(..rects);
         self.images.drain(..images);
+        self.math_glyphs.drain(..math);
         self.code_lines.drain(..code);
         for record in &mut self.code_lines {
             record.runs = record.runs.start - runs..record.runs.end - runs;
@@ -3944,12 +3954,17 @@ fn emit_math_layout(
     out: &mut LayoutDoc,
 ) {
     let ink = theme.surface.foreground;
+    let top = baseline - m.ascent;
+    let bottom = baseline + m.descent;
     for g in &m.glyphs {
         out.math_glyphs.push(MathGlyph {
             glyph: g.glyph.0,
             x: x + g.x,
             y: baseline + g.y,
             size: g.size,
+            ch: g.ch,
+            top,
+            bottom,
             color: ink,
             block: block_index,
         });

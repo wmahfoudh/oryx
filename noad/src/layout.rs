@@ -29,6 +29,9 @@ pub struct PositionedGlyph {
     pub x: f32,
     pub y: f32,
     pub size: f32,
+    /// The character the glyph renders, when one exists: base glyphs and
+    /// size variants keep their character, assembly pieces have none.
+    pub ch: Option<char>,
     /// Byte range of the TeX source this glyph renders.
     pub source: Range<usize>,
 }
@@ -119,6 +122,9 @@ struct LaidBox {
 /// of an assembly, in stack coordinates with the ink bottom at zero.
 struct Stretched {
     glyphs: Vec<(crate::font::GlyphId, f32)>,
+    /// The stretched character for a base or ladder pick; assembly pieces
+    /// render no character of their own.
+    ch: Option<char>,
     width: f32,
     height: f32,
 }
@@ -188,7 +194,7 @@ impl Ctx<'_> {
                     return self.literal_box(&c.to_string(), atom, style);
                 };
                 if atom.class == AtomClass::Op {
-                    return self.operator_box(atom, glyph, style);
+                    return self.operator_box(atom, glyph, mapped, style);
                 }
                 let u = self.unit(style);
                 let bounds = self.font.bounds(glyph);
@@ -198,6 +204,7 @@ impl Ctx<'_> {
                         x: 0.0,
                         y: 0.0,
                         size: self.em(style),
+                        ch: Some(mapped),
                         source: atom.nucleus_span.clone(),
                     }],
                     rules: Vec::new(),
@@ -234,6 +241,7 @@ impl Ctx<'_> {
 
     /// Pushes a glyph at a position and widens the box's vertical extents
     /// by its ink, the bookkeeping `merge` does for whole boxes.
+    #[allow(clippy::too_many_arguments)]
     fn push_glyph(
         &self,
         geom: &mut MathLayout,
@@ -241,6 +249,7 @@ impl Ctx<'_> {
         x: f32,
         y: f32,
         style: MathStyle,
+        ch: Option<char>,
         source: &Range<usize>,
     ) {
         let u = self.unit(style);
@@ -250,6 +259,7 @@ impl Ctx<'_> {
             x,
             y,
             size: self.em(style),
+            ch,
             source: source.clone(),
         });
         geom.ascent = geom.ascent.max(-(y - b.y_max * u));
@@ -283,6 +293,7 @@ impl Ctx<'_> {
         if h >= target || assembly.is_none() {
             return Some(Stretched {
                 glyphs: vec![(chosen, y_min)],
+                ch: Some(ch),
                 width: self.font.advance(chosen) * u,
                 height: h,
             });
@@ -314,6 +325,7 @@ impl Ctx<'_> {
                 }
                 return Some(Stretched {
                     glyphs,
+                    ch: None,
                     width,
                     height: total,
                 });
@@ -377,6 +389,7 @@ impl Ctx<'_> {
                 x,
                 y_off + surd_bottom,
                 style,
+                surd.ch,
                 &atom.nucleus_span,
             );
         }
@@ -401,7 +414,13 @@ impl Ctx<'_> {
     /// Appendix G's operator symbol: the display style swaps in a variant
     /// tall enough for `DisplayOperatorMinHeight`, and every style centers
     /// the glyph on the math axis.
-    fn operator_box(&self, atom: &Atom, base: crate::font::GlyphId, style: MathStyle) -> LaidBox {
+    fn operator_box(
+        &self,
+        atom: &Atom,
+        base: crate::font::GlyphId,
+        ch: char,
+        style: MathStyle,
+    ) -> LaidBox {
         let c = self.font.constants();
         let u = self.unit(style);
         let mut glyph = base;
@@ -423,7 +442,15 @@ impl Ctx<'_> {
         let b = self.font.bounds(glyph);
         let y = (b.y_max + b.y_min) / 2.0 * u - c.axis_height * u;
         let mut geom = MathLayout::default();
-        self.push_glyph(&mut geom, glyph, 0.0, y, style, &atom.nucleus_span);
+        self.push_glyph(
+            &mut geom,
+            glyph,
+            0.0,
+            y,
+            style,
+            Some(ch),
+            &atom.nucleus_span,
+        );
         geom.width = self.font.advance(glyph) * u;
         LaidBox {
             geom,
@@ -543,7 +570,7 @@ impl Ctx<'_> {
         };
         let bottom = -axis + stretched.height / 2.0;
         for (g, y_off) in &stretched.glyphs {
-            self.push_glyph(geom, *g, x, y_off + bottom, style, span);
+            self.push_glyph(geom, *g, x, y_off + bottom, style, stretched.ch, span);
         }
         stretched.width
     }
@@ -1429,5 +1456,44 @@ mod tests {
             assert!(l.width.is_finite() && l.ascent.is_finite() && l.descent.is_finite());
         }
         assert_eq!(lay("").width, 0.0);
+    }
+
+    #[test]
+    fn glyphs_carry_the_characters_they_render() {
+        let l = lay("x^2");
+        let chars: Vec<Option<char>> = l.glyphs.iter().map(|g| g.ch).collect();
+        assert_eq!(chars, vec![Some('\u{1D465}'), Some('2')]);
+    }
+
+    /// The leftmost column of glyphs, which is the opening delimiter.
+    fn open_column(l: &MathLayout) -> Vec<&PositionedGlyph> {
+        let min_x = l.glyphs.iter().map(|g| g.x).fold(f32::MAX, f32::min);
+        l.glyphs.iter().filter(|g| g.x < min_x + 0.5).collect()
+    }
+
+    #[test]
+    fn a_variant_delimiter_keeps_its_base_character() {
+        let l = layout(
+            "\\left(\\frac{1}{\\frac{2}{3}}\\right)",
+            MathStyle::Display,
+            SIZE,
+            &font(),
+        );
+        let open = open_column(&l);
+        assert_eq!(open.len(), 1, "the two-deep nest is served by the ladder");
+        assert_eq!(open[0].ch, Some('('));
+    }
+
+    #[test]
+    fn assembly_pieces_carry_no_character() {
+        let l = layout(
+            "\\left(\\frac{1}{\\frac{2}{\\frac{3}{\\frac{4}{5}}}}\\right)",
+            MathStyle::Display,
+            SIZE,
+            &font(),
+        );
+        let open = open_column(&l);
+        assert!(open.len() > 1, "the deep nest forces an assembly");
+        assert!(open.iter().all(|g| g.ch.is_none()));
     }
 }
