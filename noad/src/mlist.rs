@@ -56,6 +56,15 @@ pub enum Field {
         stretch: bool,
         base: MathList,
     },
+    /// An environment's grid: rows of cells, one alignment per column
+    /// with the pattern repeating past its end, the matrix family's
+    /// interior. `small` sets the cells at script size.
+    Table {
+        rows: Vec<Vec<MathList>>,
+        align: Vec<ColAlign>,
+        gaps: TableGaps,
+        small: bool,
+    },
     /// Upright text: `\text{...}` verbatim, and operator names like
     /// `\sin`, rendered without the italic remap.
     Text(String),
@@ -67,6 +76,24 @@ pub enum Field {
     Literal(String),
     /// An empty nucleus, TeX's implicit `{}`.
     Empty,
+}
+
+/// A table column's alignment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColAlign {
+    Left,
+    Center,
+    Right,
+}
+
+/// A table's inter-column gap rule.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TableGaps {
+    /// One uniform gap between adjacent columns, in ems of the cell size.
+    Em(f32),
+    /// amsmath's `aligned`: nothing inside an (r, l) pair, one em
+    /// between pairs, so derivations touch their relations.
+    Pairs,
 }
 
 /// How an operator takes its scripts: TeX's `\limits` machinery. Default

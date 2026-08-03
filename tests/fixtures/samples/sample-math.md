@@ -72,6 +72,29 @@ A deliberately wide equation shrinks uniformly to fit its column:
 
 $$(a+b)^{10} = a^{10} + 10a^9b + 45a^8b^2 + 120a^7b^3 + 210a^6b^4 + 252a^5b^5 + 210a^4b^6 + 120a^3b^7 + 45a^2b^8 + 10ab^9 + b^{10}$$
 
+## Environments
+
+A rotation matrix measures its columns and stretches its parentheses:
+
+$$R(\theta) = \begin{pmatrix} \cos\theta & -\sin\theta \\ \sin\theta & \cos\theta \end{pmatrix}$$
+
+A piecewise definition sets behind one brace:
+
+$$|x| = \begin{cases} x & x \geq 0 \\ -x & x < 0 \end{cases}$$
+
+A derivation lines its relations through aligned:
+
+$$\begin{aligned} (a+b)^2 &= (a+b)(a+b) \\ &= a^2 + 2ab + b^2 \end{aligned}$$
+
+The family covers determinants and norms, $\begin{vmatrix} a & b \\ c & d \end{vmatrix}$
+and $\begin{Vmatrix} v \end{Vmatrix}$, and a small matrix rides its sentence:
+$\begin{smallmatrix} 1 & 0 \\ 0 & 1 \end{smallmatrix}$.
+
+Ten rows assemble their
+fences from extenders:
+
+$$\begin{pmatrix} 1 \\ 2 \\ 3 \\ 4 \\ 5 \\ 6 \\ 7 \\ 8 \\ 9 \\ 10 \end{pmatrix}$$
+
 ## The gate
 
 Prices never become equations: $5-$10, US$100 vs CA$120, and

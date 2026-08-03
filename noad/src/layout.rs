@@ -10,7 +10,7 @@
 //! at it, script and scriptscript at the font's percentage scale-downs.
 
 use crate::font::MathFont;
-use crate::mlist::{Atom, AtomClass, Field, MathList, Noad};
+use crate::mlist::{Atom, AtomClass, ColAlign, Field, MathList, Noad, TableGaps};
 use std::ops::Range;
 
 /// The four TeX styles. Cramped variants are tracked internally.
@@ -241,6 +241,12 @@ impl Ctx<'_> {
                 geom: MathLayout::default(),
                 italic: 0.0,
             },
+            Field::Table {
+                rows,
+                align,
+                gaps,
+                small,
+            } => self.table_box(rows, align, *gaps, *small, style),
             Field::Fraction {
                 numerator,
                 denominator,
@@ -443,6 +449,131 @@ impl Ctx<'_> {
             &atom.nucleus_span,
         );
         geom.width = width;
+        LaidBox { geom, italic: 0.0 }
+    }
+
+    /// An environment's grid, TeX's \halign inside \vcenter: columns at
+    /// their widest cell with the gap rule between them, rows strutted
+    /// to a minimum pitch, the block centered on the math axis. Cells
+    /// set in text style, or script style for `smallmatrix`.
+    fn table_box(
+        &self,
+        rows: &[Vec<MathList>],
+        align: &[ColAlign],
+        gaps: TableGaps,
+        small: bool,
+        style: MathStyle,
+    ) -> LaidBox {
+        let c = self.font.constants();
+        let cell_style = if small {
+            Self::script_style(style)
+        } else {
+            match style {
+                MathStyle::Display => MathStyle::Text,
+                s => s,
+            }
+        };
+        let em = self.em(cell_style);
+        let laid: Vec<Vec<MathLayout>> = rows
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .enumerate()
+                    .map(|(j, cell)| {
+                        // amsmath's even-column `{}`: an empty atom ahead
+                        // of the cell restores the relation's own spacing
+                        // at the alignment point.
+                        if matches!(gaps, TableGaps::Pairs) && j % 2 == 1 {
+                            let mut list = MathList(Vec::with_capacity(cell.0.len() + 1));
+                            list.0.push(Noad::Atom(Atom {
+                                class: AtomClass::Ord,
+                                nucleus: Field::Empty,
+                                sup: None,
+                                sub: None,
+                                limits: crate::mlist::Limits::default(),
+                                span: 0..0,
+                                nucleus_span: 0..0,
+                            }));
+                            list.0.extend(cell.0.iter().cloned());
+                            self.hlist(&list, cell_style, false)
+                        } else {
+                            self.hlist(cell, cell_style, false)
+                        }
+                    })
+                    .collect()
+            })
+            .collect();
+        if laid.is_empty() {
+            return LaidBox {
+                geom: MathLayout::default(),
+                italic: 0.0,
+            };
+        }
+        let cols = laid.iter().map(|row| row.len()).max().unwrap_or(0);
+        let mut widths = vec![0.0f32; cols];
+        for row in &laid {
+            for (j, cell) in row.iter().enumerate() {
+                widths[j] = widths[j].max(cell.width);
+            }
+        }
+        // Struts hold short rows at a readable pitch; tall cells push
+        // apart with a lineskip of air.
+        let ascents: Vec<f32> = laid
+            .iter()
+            .map(|row| row.iter().map(|c| c.ascent).fold(0.7 * em, f32::max))
+            .collect();
+        let descents: Vec<f32> = laid
+            .iter()
+            .map(|row| row.iter().map(|c| c.descent).fold(0.3 * em, f32::max))
+            .collect();
+        let mut baselines = vec![0.0f32; laid.len()];
+        for i in 1..laid.len() {
+            let pitch = (descents[i - 1] + ascents[i] + 0.1 * em).max(1.2 * em);
+            baselines[i] = baselines[i - 1] + pitch;
+        }
+        let gap_before = |j: usize| -> f32 {
+            if j == 0 {
+                return 0.0;
+            }
+            match gaps {
+                TableGaps::Em(g) => g * em,
+                // Inside an (r, l) pair the relation touches its side.
+                TableGaps::Pairs => {
+                    if j % 2 == 1 {
+                        0.0
+                    } else {
+                        em
+                    }
+                }
+            }
+        };
+        let mut col_x = vec![0.0f32; cols];
+        let mut x = 0.0;
+        for j in 0..cols {
+            x += gap_before(j);
+            col_x[j] = x;
+            x += widths[j];
+        }
+        // \vcenter: the block's midpoint lands on the axis.
+        let top = -ascents[0];
+        let bottom = baselines[laid.len() - 1] + descents[laid.len() - 1];
+        let height = bottom - top;
+        let axis = c.axis_height * self.unit(style);
+        let dy = -axis - (top + height / 2.0);
+        let mut geom = MathLayout::default();
+        for (i, row) in laid.into_iter().enumerate() {
+            for (j, cell) in row.into_iter().enumerate() {
+                let dx = match align[j % align.len()] {
+                    ColAlign::Left => 0.0,
+                    ColAlign::Center => (widths[j] - cell.width) / 2.0,
+                    ColAlign::Right => widths[j] - cell.width,
+                };
+                merge(&mut geom, cell, col_x[j] + dx, baselines[i] + dy);
+            }
+        }
+        geom.width = x;
+        geom.ascent = axis + height / 2.0;
+        geom.descent = height / 2.0 - axis;
         LaidBox { geom, italic: 0.0 }
     }
 
@@ -1737,6 +1868,159 @@ mod tests {
             "the bar sits above the base ink: bottom {} vs top {}",
             bar_bottom,
             -y_top
+        );
+    }
+
+    fn glyph_by_ch(l: &MathLayout, ch: char) -> &PositionedGlyph {
+        l.glyphs
+            .iter()
+            .find(|g| g.ch == Some(ch))
+            .unwrap_or_else(|| panic!("no glyph for {ch:?}"))
+    }
+
+    #[test]
+    fn a_matrix_measures_columns_and_struts_rows() {
+        use crate::MathFont as _;
+        let f = font();
+        let c = f.constants();
+        let l = lay("\\begin{matrix} 1 & 22 \\\\ 33 & 4 \\end{matrix}");
+        let d = f.advance(glyph_of('1')) * scale();
+        let one = glyph_by_ch(&l, '1');
+        let four = glyph_by_ch(&l, '4');
+        // Columns take their widest cell, cells center inside them, and
+        // one em separates the columns.
+        assert!((one.x - d / 2.0).abs() < EPS, "1 centers in its column");
+        let col1_x = 2.0 * d + SIZE;
+        assert!(
+            (four.x - (col1_x + d / 2.0)).abs() < EPS,
+            "4 centers in the second column, x {}",
+            four.x
+        );
+        // Digit ink is shorter than the struts, so the pitch is exactly
+        // the strutted baseline distance.
+        assert!(
+            (four.y - one.y - 1.2 * SIZE).abs() < EPS,
+            "strutted pitch, got {}",
+            four.y - one.y
+        );
+        // The whole block centers on the math axis.
+        let axis = c.axis_height * scale();
+        assert!(
+            (l.ascent - l.descent - 2.0 * axis).abs() < EPS,
+            "axis centering: ascent {} descent {}",
+            l.ascent,
+            l.descent
+        );
+    }
+
+    #[test]
+    fn pmatrix_fences_cover_a_ten_row_assembly() {
+        let rows = ["1"; 10].join(" \\\\ ");
+        let l = lay(&format!("\\begin{{pmatrix}} {rows} \\end{{pmatrix}}"));
+        let open = open_column(&l);
+        assert!(open.len() > 1, "ten rows force an assembly");
+        use crate::MathFont as _;
+        let f = font();
+        let ink_top = open
+            .iter()
+            .map(|g| g.y - f.bounds(g.glyph).y_max * scale())
+            .fold(f32::MAX, f32::min);
+        let ink_bottom = open
+            .iter()
+            .map(|g| g.y - f.bounds(g.glyph).y_min * scale())
+            .fold(f32::MIN, f32::max);
+        assert!(
+            ink_bottom - ink_top >= 9.0 * 1.2 * SIZE,
+            "the fence covers the ten strutted rows, got {}",
+            ink_bottom - ink_top
+        );
+    }
+
+    #[test]
+    fn aligned_lands_relations_at_one_x() {
+        use crate::MathFont as _;
+        let l = lay("\\begin{aligned} x &= y \\\\ xx &= y+1 \\end{aligned}");
+        let eqs: Vec<&PositionedGlyph> = l.glyphs.iter().filter(|g| g.ch == Some('=')).collect();
+        assert_eq!(eqs.len(), 2);
+        assert!(
+            (eqs[0].x - eqs[1].x).abs() < EPS,
+            "both relations at one x: {} vs {}",
+            eqs[0].x,
+            eqs[1].x
+        );
+        // amsmath's even-column empty atom: the relation keeps its thick
+        // space against the right-aligned left-hand side.
+        let x_row0 = l
+            .glyphs
+            .iter()
+            .find(|g| g.ch == Some('\u{1D465}') && (g.y - eqs[0].y).abs() < 0.1)
+            .expect("the first row's x");
+        let right = x_row0.x + font().advance(glyph_of('\u{1D465}')) * scale();
+        let thick = 5.0 / 18.0 * SIZE;
+        assert!(
+            (eqs[0].x - right - thick).abs() < EPS,
+            "thick space at the alignment point, got {}",
+            eqs[0].x - right
+        );
+    }
+
+    #[test]
+    fn cases_left_aligns_behind_its_brace() {
+        let l = lay("\\begin{cases} x & a \\\\ 0 & b \\end{cases}");
+        let x = glyph_by_ch(&l, '\u{1D465}');
+        let zero = glyph_by_ch(&l, '0');
+        assert!(
+            (x.x - zero.x).abs() < EPS,
+            "the value column left-aligns: {} vs {}",
+            x.x,
+            zero.x
+        );
+        let brace_x = l.glyphs.iter().map(|g| g.x).fold(f32::MAX, f32::min);
+        assert!(brace_x < x.x, "the brace sits left of the cells");
+    }
+
+    #[test]
+    fn array_honors_its_column_spec() {
+        use crate::MathFont as _;
+        let f = font();
+        let d = f.advance(glyph_of('1')) * scale();
+        let l = lay("\\begin{array}{rl} 1 & 2 \\\\ 333 & 444 \\end{array}");
+        let one = glyph_by_ch(&l, '1');
+        let threes: Vec<&PositionedGlyph> = l.glyphs.iter().filter(|g| g.ch == Some('3')).collect();
+        let last_three = threes
+            .iter()
+            .max_by(|a, b| a.x.total_cmp(&b.x))
+            .expect("333 renders");
+        assert!(
+            (one.x - last_three.x).abs() < EPS,
+            "the right column aligns its right edges: {} vs {}",
+            one.x,
+            last_three.x
+        );
+        let two = glyph_by_ch(&l, '2');
+        let fours: Vec<&PositionedGlyph> = l.glyphs.iter().filter(|g| g.ch == Some('4')).collect();
+        let first_four = fours
+            .iter()
+            .min_by(|a, b| a.x.total_cmp(&b.x))
+            .expect("444 renders");
+        assert!(
+            (two.x - first_four.x).abs() < EPS,
+            "the left column aligns its left edges: {} vs {}",
+            two.x,
+            first_four.x
+        );
+        let _ = d;
+    }
+
+    #[test]
+    fn smallmatrix_takes_script_size() {
+        use crate::MathFont as _;
+        let l = lay("\\begin{smallmatrix} 1 & 2 \\end{smallmatrix}");
+        let c = font().constants();
+        let expect = SIZE * c.script_percent_scale_down / 100.0;
+        assert!(
+            l.glyphs.iter().all(|g| (g.size - expect).abs() < EPS),
+            "cells set at script size"
         );
     }
 }

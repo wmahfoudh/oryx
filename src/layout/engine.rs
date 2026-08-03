@@ -4292,15 +4292,28 @@ fn layout_flow(
                 .and_then(|i| source.as_bytes().get(i))
                 .is_some_and(|b| b.is_ascii_whitespace());
             let space = if spaced { 0.3 * base.size } else { 0.0 };
-            let joins = line
-                .as_ref()
-                .is_some_and(|l| l.baseline.is_some() && l.end_x + space + w <= x0 + avail);
+            // Joining a line needs room sideways and a height the leading
+            // can absorb; a taller equation opens its own row, whose
+            // metrics cover its ink.
+            let joins = line.as_ref().is_some_and(|l| {
+                l.baseline.is_some()
+                    && l.end_x + space + w <= x0 + avail
+                    && m.ascent + m.descent <= 1.4 * line_height
+            });
             if joins {
                 let l = line.as_mut().expect("open line");
                 let lb = l.baseline.expect("checked");
                 l.end_x += space;
                 emit_math_layout(fonts, theme, cfg, &m, l.end_x, lb, base.block_index, out);
                 l.end_x += w;
+                // Ink deeper than the line box pushes what follows below.
+                if l.row {
+                    l.height = l
+                        .height
+                        .max((lb - l.top) + m.descent.max(0.25 * line_height));
+                } else {
+                    y = y.max(lb + m.descent + 0.25 * base.size);
+                }
             } else {
                 if let Some(l) = line.take() {
                     if l.row {

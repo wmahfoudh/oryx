@@ -5,7 +5,7 @@
 //! literals, and an unclosed group closes at the end of input. Hostile
 //! input costs a fallback, never a panic.
 
-use crate::mlist::{Atom, AtomClass, Field, Limits, MathList, Noad};
+use crate::mlist::{Atom, AtomClass, ColAlign, Field, Limits, MathList, Noad, TableGaps};
 
 /// The symbol vocabulary: command name to codepoint and class, sorted by
 /// name for binary search. Coverage grows by adding rows.
@@ -292,6 +292,13 @@ fn restyle_field(field: &mut Field, name: &str) {
         }
         Field::LeftRight { body, .. } => restyle(body, name),
         Field::Accent { base, .. } => restyle(base, name),
+        Field::Table { rows, .. } => {
+            for row in rows {
+                for cell in row {
+                    restyle(cell, name);
+                }
+            }
+        }
         Field::Text(_) | Field::Literal(_) | Field::Kern(_) | Field::Empty => {}
     }
 }
@@ -414,15 +421,19 @@ impl Parser<'_> {
         use crate::token::TokenKind as K;
         let tok = self.next()?;
         match tok.kind {
-            K::Char(c) => Some(Atom {
-                class: classify_char(c),
-                nucleus: Field::Symbol(c),
-                sup: None,
-                sub: None,
-                limits: Limits::default(),
-                span: tok.span.clone(),
-                nucleus_span: tok.span,
-            }),
+            K::Char(c) => {
+                // Math mode's hyphen is the minus sign.
+                let c = if c == '-' { '\u{2212}' } else { c };
+                Some(Atom {
+                    class: classify_char(c),
+                    nucleus: Field::Symbol(c),
+                    sup: None,
+                    sub: None,
+                    limits: Limits::default(),
+                    span: tok.span.clone(),
+                    nucleus_span: tok.span,
+                })
+            }
             K::Command(name) => Some(match name.as_str() {
                 "frac" => self.fraction(tok.span, true),
                 "binom" => self.binom(tok.span),
@@ -435,6 +446,18 @@ impl Parser<'_> {
                     literal_atom("\\right", tok.span)
                 }
                 "text" => self.text(tok.span),
+                "begin" => self.environment(tok.span),
+                "end" => {
+                    // A stray closer: its name goes with it, the pair
+                    // degrades to a literal.
+                    let _ = self.env_name();
+                    let end = self.consumed_end(tok.span.end);
+                    let span = tok.span.start..end;
+                    literal_atom(
+                        self.src.get(span.clone()).unwrap_or("\\end").to_string(),
+                        span,
+                    )
+                }
                 "mathbb" | "mathbf" | "mathcal" | "mathfrak" | "mathit" | "mathsf" | "mathtt" => {
                     self.styled(tok.span, &name)
                 }
@@ -641,6 +664,257 @@ impl Parser<'_> {
         }
         let text = self.src.get(content_start..content_end).unwrap_or("");
         self.construct(start, Field::Text(text.to_string()), AtomClass::Ord)
+    }
+
+    /// `\begin{name} ... \end{name}`: cells split on `&`, rows on `\\`,
+    /// each environment bringing its alignment, gap rule and fences. An
+    /// unknown name skips to its `\end` and degrades to a literal; an
+    /// unterminated body degrades whole.
+    fn environment(&mut self, start: std::ops::Range<usize>) -> Atom {
+        let Some(name) = self.env_name() else {
+            let end = self.consumed_end(start.end);
+            let span = start.start..end;
+            return literal_atom(
+                self.src.get(span.clone()).unwrap_or("\\begin").to_string(),
+                span,
+            );
+        };
+        type Fences = Option<(char, Option<char>)>;
+        let known: Option<(Vec<ColAlign>, TableGaps, bool, Fences)> = match name.as_str() {
+            "matrix" => Some((vec![ColAlign::Center], TableGaps::Em(1.0), false, None)),
+            "smallmatrix" => Some((vec![ColAlign::Center], TableGaps::Em(0.5), true, None)),
+            "pmatrix" => Some((
+                vec![ColAlign::Center],
+                TableGaps::Em(1.0),
+                false,
+                Some(('(', Some(')'))),
+            )),
+            "bmatrix" => Some((
+                vec![ColAlign::Center],
+                TableGaps::Em(1.0),
+                false,
+                Some(('[', Some(']'))),
+            )),
+            "Bmatrix" => Some((
+                vec![ColAlign::Center],
+                TableGaps::Em(1.0),
+                false,
+                Some(('{', Some('}'))),
+            )),
+            "vmatrix" => Some((
+                vec![ColAlign::Center],
+                TableGaps::Em(1.0),
+                false,
+                Some(('|', Some('|'))),
+            )),
+            "Vmatrix" => Some((
+                vec![ColAlign::Center],
+                TableGaps::Em(1.0),
+                false,
+                Some(('\u{2016}', Some('\u{2016}'))),
+            )),
+            "cases" => Some((
+                vec![ColAlign::Left],
+                TableGaps::Em(1.0),
+                false,
+                Some(('{', None)),
+            )),
+            "aligned" => Some((
+                vec![ColAlign::Right, ColAlign::Left],
+                TableGaps::Pairs,
+                false,
+                None,
+            )),
+            "array" => Some((self.array_spec(), TableGaps::Em(1.0), false, None)),
+            _ => None,
+        };
+        let Some((align, gaps, small, fences)) = known else {
+            self.skip_environment();
+            let end = self.consumed_end(start.end);
+            let span = start.start..end;
+            return literal_atom(
+                self.src.get(span.clone()).unwrap_or("\\begin").to_string(),
+                span,
+            );
+        };
+        let (rows, terminated) = self.table_cells();
+        let end = self.consumed_end(start.end);
+        let span = start.start..end;
+        if !terminated {
+            return literal_atom(
+                self.src.get(span.clone()).unwrap_or("\\begin").to_string(),
+                span,
+            );
+        }
+        let table = Atom {
+            class: AtomClass::Ord,
+            nucleus: Field::Table {
+                rows,
+                align,
+                gaps,
+                small,
+            },
+            sup: None,
+            sub: None,
+            limits: Limits::default(),
+            span: span.clone(),
+            nucleus_span: span.clone(),
+        };
+        match fences {
+            Some((open, close)) => Atom {
+                class: AtomClass::Inner,
+                nucleus: Field::LeftRight {
+                    open: Some(open),
+                    close,
+                    body: MathList(vec![Noad::Atom(table)]),
+                },
+                sup: None,
+                sub: None,
+                limits: Limits::default(),
+                span: span.clone(),
+                nucleus_span: span,
+            },
+            None => table,
+        }
+    }
+
+    /// The braced environment name after `\begin` or `\end`: letters
+    /// and stars only, anything else answers none.
+    fn env_name(&mut self) -> Option<String> {
+        use crate::token::TokenKind as K;
+        if !matches!(self.peek().map(|t| &t.kind), Some(K::BeginGroup)) {
+            return None;
+        }
+        self.pos += 1;
+        let mut name = String::new();
+        while let Some(tok) = self.peek() {
+            match &tok.kind {
+                K::Char(c) => {
+                    name.push(*c);
+                    self.pos += 1;
+                }
+                K::EndGroup => {
+                    self.pos += 1;
+                    return Some(name);
+                }
+                _ => return None,
+            }
+        }
+        None
+    }
+
+    /// `array`'s column specification: `r`, `c`, `l` collect, rules and
+    /// separators pass quietly, a missing group means one centered
+    /// column.
+    fn array_spec(&mut self) -> Vec<ColAlign> {
+        use crate::token::TokenKind as K;
+        let mut align = Vec::new();
+        if matches!(self.peek().map(|t| &t.kind), Some(K::BeginGroup)) {
+            self.pos += 1;
+            while let Some(tok) = self.peek() {
+                match &tok.kind {
+                    K::Char('l') => align.push(ColAlign::Left),
+                    K::Char('c') => align.push(ColAlign::Center),
+                    K::Char('r') => align.push(ColAlign::Right),
+                    K::Char(_) => {}
+                    K::EndGroup => {
+                        self.pos += 1;
+                        break;
+                    }
+                    _ => break,
+                }
+                self.pos += 1;
+            }
+        }
+        if align.is_empty() {
+            align.push(ColAlign::Center);
+        }
+        align
+    }
+
+    /// Consumes an unknown environment through its matching `\end`,
+    /// nested environments counted; end of input stops the skip.
+    fn skip_environment(&mut self) {
+        use crate::token::TokenKind as K;
+        let mut depth = 1usize;
+        while let Some(tok) = self.next() {
+            match &tok.kind {
+                K::Command(c) if c == "begin" => depth += 1,
+                K::Command(c) if c == "end" => {
+                    let _ = self.env_name();
+                    depth -= 1;
+                    if depth == 0 {
+                        return;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// An environment body: atoms accumulate into cells, `&` closes a
+    /// cell, `\\` a row, `\end` the table. End of input or the enclosing
+    /// group's closer answers unterminated, the closer left in place.
+    fn table_cells(&mut self) -> (Vec<Vec<MathList>>, bool) {
+        use crate::token::TokenKind as K;
+        let mut rows: Vec<Vec<MathList>> = Vec::new();
+        let mut row: Vec<MathList> = Vec::new();
+        let mut cell: Vec<Noad> = Vec::new();
+        loop {
+            let Some(tok) = self.peek() else {
+                return (rows, false);
+            };
+            let span = tok.span.clone();
+            match &tok.kind {
+                K::Align => {
+                    self.pos += 1;
+                    demote_bins(&mut cell);
+                    row.push(MathList(std::mem::take(&mut cell)));
+                }
+                K::Command(name) if name == "\\" => {
+                    self.pos += 1;
+                    demote_bins(&mut cell);
+                    row.push(MathList(std::mem::take(&mut cell)));
+                    rows.push(std::mem::take(&mut row));
+                }
+                K::Command(name) if name == "end" => {
+                    self.pos += 1;
+                    let _ = self.env_name();
+                    demote_bins(&mut cell);
+                    row.push(MathList(std::mem::take(&mut cell)));
+                    // A trailing \\ leaves one empty row; TeX drops it.
+                    let trailing_empty = row.len() == 1 && row[0].0.is_empty() && !rows.is_empty();
+                    if !trailing_empty {
+                        rows.push(std::mem::take(&mut row));
+                    }
+                    return (rows, true);
+                }
+                K::EndGroup => {
+                    return (rows, false);
+                }
+                K::Sup | K::Sub | K::Prime => {
+                    let mut atom = Atom {
+                        class: AtomClass::Ord,
+                        nucleus: Field::Empty,
+                        sup: None,
+                        sub: None,
+                        limits: Limits::default(),
+                        span: span.start..span.start,
+                        nucleus_span: span.start..span.start,
+                    };
+                    self.scripts(&mut atom);
+                    cell.push(Noad::Atom(atom));
+                }
+                _ => {
+                    if let Some(mut atom) = self.atom() {
+                        self.scripts(&mut atom);
+                        cell.push(Noad::Atom(atom));
+                    } else {
+                        self.pos += 1;
+                    }
+                }
+            }
+        }
     }
 
     /// `\sqrt{x}` with the optional `[degree]`.
@@ -910,6 +1184,13 @@ mod tests {
             Field::List(inner) => assert_eq!(inner.atoms().count(), 2),
             other => panic!("expected group nucleus, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn hyphen_reads_as_minus() {
+        let a = atoms("a-b");
+        assert_eq!(a[1].nucleus, Field::Symbol('\u{2212}'));
+        assert_eq!(a[1].class, AtomClass::Bin);
     }
 
     #[test]
@@ -1200,5 +1481,107 @@ mod tests {
             panic!("expected accent, got {:?}", a[0].nucleus)
         };
         assert_eq!(*accent, '\u{0304}');
+    }
+
+    #[test]
+    fn environments_parse_to_tables() {
+        let a = atoms("\\begin{pmatrix} a & b \\\\ c & d \\end{pmatrix}");
+        assert_eq!(a.len(), 1);
+        let Field::LeftRight { open, close, body } = &a[0].nucleus else {
+            panic!("expected fenced table, got {:?}", a[0].nucleus)
+        };
+        assert_eq!((*open, *close), (Some('('), Some(')')));
+        let inner = body.atoms().next().expect("the table inside");
+        let Field::Table {
+            rows, align, small, ..
+        } = &inner.nucleus
+        else {
+            panic!("expected table, got {:?}", inner.nucleus)
+        };
+        assert!(!small);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].len(), 2);
+        assert_eq!(
+            rows[1][1].atoms().next().unwrap().nucleus,
+            Field::Symbol('d')
+        );
+        assert_eq!(align, &vec![ColAlign::Center]);
+        // A bare matrix takes no fences; smallmatrix flags its size.
+        let a = atoms("\\begin{matrix} a \\end{matrix}");
+        assert!(matches!(&a[0].nucleus, Field::Table { small: false, .. }));
+        let a = atoms("\\begin{smallmatrix} a \\end{smallmatrix}");
+        assert!(matches!(&a[0].nucleus, Field::Table { small: true, .. }));
+    }
+
+    #[test]
+    fn the_matrix_family_picks_its_fences() {
+        for (tex, open, close) in [
+            ("\\begin{bmatrix} a \\end{bmatrix}", '[', ']'),
+            ("\\begin{vmatrix} a \\end{vmatrix}", '|', '|'),
+            ("\\begin{Vmatrix} a \\end{Vmatrix}", '\u{2016}', '\u{2016}'),
+        ] {
+            let a = atoms(tex);
+            let Field::LeftRight {
+                open: o, close: c, ..
+            } = &a[0].nucleus
+            else {
+                panic!("expected fenced table for {tex}, got {:?}", a[0].nucleus)
+            };
+            assert_eq!((*o, *c), (Some(open), Some(close)), "{tex}");
+        }
+    }
+
+    #[test]
+    fn cases_aligned_and_array_set_their_columns() {
+        let a = atoms("\\begin{cases} x & y \\\\ 0 & z \\end{cases}");
+        let Field::LeftRight { open, close, body } = &a[0].nucleus else {
+            panic!("expected braced table, got {:?}", a[0].nucleus)
+        };
+        assert_eq!((*open, *close), (Some('{'), None));
+        let inner = body.atoms().next().unwrap();
+        let Field::Table { align, .. } = &inner.nucleus else {
+            panic!("expected table, got {:?}", inner.nucleus)
+        };
+        assert_eq!(align, &vec![ColAlign::Left]);
+
+        let a = atoms("\\begin{aligned} x &= y \\\\ z &= w \\end{aligned}");
+        let Field::Table { align, rows, .. } = &a[0].nucleus else {
+            panic!("expected table, got {:?}", a[0].nucleus)
+        };
+        assert_eq!(align, &vec![ColAlign::Right, ColAlign::Left]);
+        assert_eq!(rows.len(), 2);
+
+        let a = atoms("\\begin{array}{rcl} a & b & c \\end{array}");
+        let Field::Table { align, .. } = &a[0].nucleus else {
+            panic!("expected table, got {:?}", a[0].nucleus)
+        };
+        assert_eq!(
+            align,
+            &vec![ColAlign::Right, ColAlign::Center, ColAlign::Left]
+        );
+    }
+
+    #[test]
+    fn broken_environments_degrade_to_literals() {
+        let a = atoms("\\begin{pmatrix} a & b");
+        assert!(
+            matches!(&a[0].nucleus, Field::Literal(t) if t.contains("\\begin{pmatrix}")),
+            "unterminated environment degrades whole, got {:?}",
+            a[0].nucleus
+        );
+        let a = atoms("\\begin{foo} x \\end{foo} y");
+        assert!(
+            matches!(&a[0].nucleus, Field::Literal(t) if t.contains("foo")),
+            "unknown environment degrades, got {:?}",
+            a[0].nucleus
+        );
+        assert_eq!(a[1].nucleus, Field::Symbol('y'));
+        let a = atoms("\\end{pmatrix} x");
+        assert!(matches!(&a[0].nucleus, Field::Literal(_)));
+        assert_eq!(a[1].nucleus, Field::Symbol('x'));
+        let _ = parse("\\begin");
+        let _ = parse("\\begin{");
+        let _ = parse("\\begin{pmatrix");
+        let _ = parse("{\\begin{matrix} a}");
     }
 }

@@ -2810,6 +2810,44 @@ fn model_selection_survives_recolor_and_relayout() {
 }
 
 #[test]
+fn a_tall_inline_matrix_keeps_clear_of_neighboring_lines() {
+    let src = "The family covers determinants and norms, \
+$\\begin{vmatrix} a & b \\\\ c & d \\end{vmatrix}$ and \
+$\\begin{Vmatrix} v \\end{Vmatrix}$, and a small matrix rides its \
+sentence: $\\begin{smallmatrix} 1 & 0 \\\\ 0 & 1 \\end{smallmatrix}$. \
+Ten rows assemble their fences from extenders and this sentence wraps \
+far enough to lay several more lines below the matrix.";
+    let (_, l) = lay2(src, 1000.0);
+    assert!(!l.math_glyphs.is_empty(), "the matrices typeset");
+    for g in &l.math_glyphs {
+        let g_top = g.y - 0.8 * g.size;
+        let g_bottom = g.y + 0.2 * g.size;
+        // Stretched bars and assembly pieces are far narrower than an em.
+        let g_width = match g.ch {
+            Some('|') | Some('\u{2016}') | None => 0.15 * g.size,
+            _ => 0.45 * g.size,
+        };
+        for r in &l.runs {
+            let x_overlap = g.x < r.x + r.width - 2.0 && r.x < g.x + g_width - 2.0;
+            let r_top = r.baseline - 0.75 * r.size;
+            let r_bottom = r.baseline + 0.2 * r.size;
+            let y_overlap = g_top < r_bottom - 2.0 && r_top < g_bottom - 2.0;
+            assert!(
+                !(x_overlap && y_overlap),
+                "glyph ink at ({}, {}..{}) collides with run at ({}..{}, {}..{})",
+                g.x,
+                g_top,
+                g_bottom,
+                r.x,
+                r.x + r.width,
+                r_top,
+                r_bottom
+            );
+        }
+    }
+}
+
+#[test]
 fn flow_lines_stay_ordered_after_a_row_break() {
     let t = Theme::default_dark();
     let mut media = MediaCache::new(PathBuf::from("."));

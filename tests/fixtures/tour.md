@@ -171,6 +171,10 @@ read as a book sets them:
 
 $$\sin^2 \theta + \cos^2 \theta = 1$$
 
+Environments lay their grids: matrices, cases and aligned derivations:
+
+$$R = \begin{pmatrix} \cos\theta & -\sin\theta \\ \sin\theta & \cos\theta \end{pmatrix}$$
+
 [^1]: The first footnote definition, written mid-document.
 [^note]: The second definition, with the label rendered as its marker.
 
