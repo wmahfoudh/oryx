@@ -4182,6 +4182,145 @@ fn shift_line_down(out: &mut LayoutDoc, marks: &LineMarks, dy: f32) {
     }
 }
 
+/// A shaped chunk's last visual line: its top, its right edge, and its
+/// baseline, read off the chunk's runs.
+fn chunk_metrics(runs: &[TextRun], x0: f32, y: f32) -> (f32, f32, f32) {
+    let last_top = runs.iter().map(|r| r.y).fold(y, f32::max);
+    let end_x = runs
+        .iter()
+        .filter(|r| (r.y - last_top).abs() < 1.0)
+        .map(|r| r.x + r.width)
+        .fold(x0, f32::max);
+    let last_base = runs
+        .iter()
+        .filter(|r| (r.y - last_top).abs() < 1.0)
+        .map(|r| r.baseline)
+        .fold(0.0, f32::max);
+    (last_top, end_x, last_base)
+}
+
+/// Reshapes a chunk that could not merge back after an equation so the
+/// punctuation glued to the equation joins its line and the remainder
+/// flows alone below. The prefix keeps its natural model offsets; the
+/// remainder's shift by the skipped bytes so selection and copy stay
+/// exact. Answers the remainder's marks and height, or None when there
+/// is no standalone punctuation prefix or it does not fit, the chunk
+/// reshaped in place as it was.
+#[allow(clippy::too_many_arguments)]
+fn split_glued_punctuation(
+    fonts: &mut FontStore,
+    theme: &Theme,
+    cfg: &ViewConfig,
+    source: &str,
+    masked: &[Span],
+    start: usize,
+    line: &mut FlowLine,
+    base: &BlockStyle,
+    x0: f32,
+    y: f32,
+    avail: f32,
+    runs_mark: usize,
+    rects_mark: usize,
+    out: &mut LayoutDoc,
+) -> Option<(usize, usize, f32)> {
+    let lb = line.baseline?;
+    let text = masked[start].text(source);
+    let punct: usize = text
+        .chars()
+        .take_while(|c| ".,;:!?".contains(*c))
+        .map(char::len_utf8)
+        .sum();
+    let ws: usize = text[punct..]
+        .chars()
+        .take_while(|c| c.is_whitespace())
+        .map(char::len_utf8)
+        .sum();
+    let skip = punct + ws;
+    if punct == 0 || (skip < text.len() && ws == 0) {
+        return None;
+    }
+    let prefix_text = text[..punct].to_string();
+    let rest_text = text[skip..].to_string();
+    out.runs.truncate(runs_mark);
+    out.rects.truncate(rects_mark);
+    let mut prefix_spans = masked.to_vec();
+    for (si, s) in prefix_spans.iter_mut().enumerate() {
+        if si == start {
+            s.set_text(prefix_text.clone());
+        } else {
+            s.clear_text();
+        }
+    }
+    shape_block(
+        fonts,
+        theme,
+        cfg,
+        source,
+        &prefix_spans,
+        true,
+        base,
+        x0,
+        y,
+        avail,
+        out,
+    );
+    let pw = out.runs[runs_mark..]
+        .iter()
+        .map(|r| r.x + r.width)
+        .fold(x0, f32::max)
+        - x0;
+    let pb = out.runs[runs_mark..]
+        .iter()
+        .map(|r| r.baseline)
+        .fold(0.0, f32::max);
+    if out.runs.len() == runs_mark || line.end_x + pw > x0 + avail {
+        // No prefix fits; the chunk reshapes exactly as it was.
+        out.runs.truncate(runs_mark);
+        out.rects.truncate(rects_mark);
+        shape_block(
+            fonts, theme, cfg, source, masked, true, base, x0, y, avail, out,
+        );
+        return None;
+    }
+    let dx = line.end_x - x0;
+    let dy = lb - pb;
+    for run in &mut out.runs[runs_mark..] {
+        run.x += dx;
+        run.y += dy;
+        run.baseline += dy;
+    }
+    for rect in &mut out.rects[rects_mark..] {
+        rect.x += dx;
+        rect.y += dy;
+    }
+    line.end_x += pw;
+    let rmark_runs = out.runs.len();
+    let rmark_rects = out.rects.len();
+    let mut rest_spans = masked.to_vec();
+    rest_spans[start].set_text(rest_text);
+    let h = shape_block(
+        fonts,
+        theme,
+        cfg,
+        source,
+        &rest_spans,
+        true,
+        base,
+        x0,
+        y,
+        avail,
+        out,
+    );
+    for run in &mut out.runs[rmark_runs..] {
+        if run.span == start {
+            if let TextRef::Model { start: s, .. } = &mut run.text {
+                *s += skip as u32;
+            }
+        }
+    }
+    Some((rmark_runs, rmark_rects, h))
+}
+
 /// Text with inline images or equations. Text shapes normally; an image
 /// or equation joins the last text line when it fits there, otherwise it
 /// opens its own row. A one-line text chunk that follows an equation on an
@@ -4243,20 +4382,11 @@ fn layout_flow(
                 .collect();
             let runs_mark = out.runs.len();
             let rects_mark = out.rects.len();
-            let h = shape_block(
+            let mut h = shape_block(
                 fonts, theme, cfg, source, &masked, true, base, x0, y, avail, out,
             );
-            let mut last_top = out.runs[runs_mark..].iter().map(|r| r.y).fold(y, f32::max);
-            let end_x = out.runs[runs_mark..]
-                .iter()
-                .filter(|r| (r.y - last_top).abs() < 1.0)
-                .map(|r| r.x + r.width)
-                .fold(x0, f32::max);
-            let mut last_base = out.runs[runs_mark..]
-                .iter()
-                .filter(|r| (r.y - last_top).abs() < 1.0)
-                .map(|r| r.baseline)
-                .fold(0.0, f32::max);
+            let (mut last_top, mut end_x, mut last_base) =
+                chunk_metrics(&out.runs[runs_mark..], x0, y);
             let single_line = h <= 1.5 * line_height;
             let merged = if let Some(l) = line.as_mut() {
                 let fits = l.end_x + (end_x - x0) <= x0 + avail;
@@ -4269,6 +4399,10 @@ fn layout_flow(
                             run.y += dy;
                             run.baseline += dy;
                         }
+                        for rect in &mut out.rects[rects_mark..] {
+                            rect.x += dx;
+                            rect.y += dy;
+                        }
                         l.end_x += end_x - x0;
                         true
                     }
@@ -4278,6 +4412,29 @@ fn layout_flow(
                 false
             };
             if !merged {
+                // Punctuation glued to an equation joins the equation's
+                // line even when the rest of the chunk wraps below.
+                let mut runs_mark = runs_mark;
+                let mut rects_mark = rects_mark;
+                if start > 0 && spans[start - 1].math {
+                    if let Some(l) = line.as_mut() {
+                        if let Some((rm, rcm, rh)) = split_glued_punctuation(
+                            fonts, theme, cfg, source, &masked, start, l, base, x0, y, avail,
+                            runs_mark, rects_mark, out,
+                        ) {
+                            if out.runs.len() == rm {
+                                // The chunk was the punctuation alone;
+                                // the line stays open as it was.
+                                continue;
+                            }
+                            runs_mark = rm;
+                            rects_mark = rcm;
+                            h = rh;
+                            (last_top, end_x, last_base) =
+                                chunk_metrics(&out.runs[runs_mark..], x0, y);
+                        }
+                    }
+                }
                 if let Some(l) = line.take() {
                     if l.row {
                         let below = l.top + l.height + 0.25 * base.size;
@@ -4290,6 +4447,9 @@ fn layout_flow(
                             for run in &mut out.runs[runs_mark..] {
                                 run.y += dy;
                                 run.baseline += dy;
+                            }
+                            for rect in &mut out.rects[rects_mark..] {
+                                rect.y += dy;
                             }
                             last_top += dy;
                             last_base += dy;

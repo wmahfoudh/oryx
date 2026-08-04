@@ -33,7 +33,7 @@ Oryx is built mainly for the reading case: the file you want to open fast, enjoy
 
 ## What it renders
 
-The complete recognized syntax, markdown and embedded HTML, is cataloged construct by construct in [SYNTAX.md](SYNTAX.md).
+The complete recognized syntax, markdown and embedded HTML, is cataloged construct by construct in [SYNTAX.md](SYNTAX.md). The [examples](examples/) folder shows it in whole documents and installs with Oryx.
 
 ### Markdown, the whole everyday set
 
@@ -47,13 +47,21 @@ Fenced blocks get a bordered panel and syntax colors for the languages most peop
 
 ### GitHub flavor and more
 
-All five GitHub alert kinds are styled, each with its own color and title. A YAML frontmatter header becomes a small metadata panel above the document. TeX math comes out with real symbols, inline or centered on a line of its own. Footnote markers sit raised in the text and link to their definitions, gathered at the foot of the document.
+All five GitHub alert kinds are styled, each with its own color and title. A YAML frontmatter header becomes a small metadata panel above the document. Footnote markers sit raised in the text and link to their definitions, gathered at the foot of the document.
 
 **Images and badges** render in place: PNG, JPEG, GIF, WebP or SVG. Remote images are fetched in the background and cached on disk, so a README covered in badges comes up immediately the second time it is opened, and keeps working offline. If a path is broken, it gets a placeholder carrying the alt text.
 
 **Embedded HTML** covers what GitHub renders: tables with or without a header row, collapsible `<details>` sections, HTML headings, lists and quotes, definition lists, centered blocks, images at a set width or height, rows of clickable badges, and the inline tags down to `mark`, `kbd` and `small`. Search sees into a closed section, and jumping to a match unfolds it.
 
 ![Oryx rendering a GitHub style README](screenshots/github.png)
+
+### Math, typeset
+
+Oryx typesets TeX math in the STIX Two Math font: real fractions, radicals, matrices, stretched delimiters and stacked limits, not styled text. All four GitHub notations work: `$...$`, `$$...$$`, a `math` fence, and the backtick form ``$`...`$``. Oryx infers whether a dollar sign is a currency or a math delimiter, so prices like $5-$10 stay text.
+
+The command vocabulary follows KaTeX: Greek, binary operators, relations and their negations, arrows, accents, the seven math alphabets, operator names, spacing, the matrix environments, and `\newcommand` macros. A command Oryx does not know renders as its literal source, in place, and the rest of the equation still typesets. An equation wider than the window shrinks to fit. PDF export includes the typeset math, and text copied from the PDF reads back as the equation's characters. The supported commands are listed in [SYNTAX.md](SYNTAX.md#math), and [examples/sample-math.md](examples/sample-math.md) shows everything in one document.
+
+![Typeset math in Oryx](screenshots/math.png)
 
 ## Tools
 
@@ -102,7 +110,7 @@ Download the archive for your platform from the releases page on [Codeberg](http
 tar -xzf oryx-*-linux-x86_64.tar.gz && cd oryx && ./install.sh
 ```
 
-On Windows, extract the zip and run `install.ps1` in PowerShell. The installer copies the binary and themes and registers the file association, so markdown files open with Oryx from the file manager. `./install.sh --uninstall` removes everything.
+On Windows, extract the zip and run `install.ps1` in PowerShell. The installer copies the binary, the themes and the example documents, and registers the file association, so markdown files open with Oryx from the file manager. `./install.sh --uninstall` removes everything.
 
 ### From source
 
@@ -114,7 +122,7 @@ cd oryx
 make install
 ```
 
-`make install` builds the release binary, installs it to `~/.local/bin`, copies the themes to `~/.local/share/oryx/themes` and registers the file association. Plain `cargo build --release` works too; the binary looks for `themes/` next to itself, in the XDG data directory, and in the working directory.
+`make install` builds the release binary, installs it to `~/.local/bin`, copies the themes and examples to `~/.local/share/oryx` and registers the file association. Plain `cargo build --release` works too; the binary looks for `themes/` next to itself, in the XDG data directory, and in the working directory.
 
 > [!TIP]
 > Use a release build for everyday reading, because a debug build is noticeably slower on code-heavy documents.
@@ -179,15 +187,14 @@ The 8 MB markdown export writes a 9219-page file. While open, the 8 MB markdown 
 Oryx is built for everyday documents, and some things are out of scope (for the moment):
 
 - It does not edit files.
-- Math is drawn as styled text with real symbols, not fully typeset.
 - On a file several megabytes long, the colors and the layout below the first screens take a moment to catch up. An export waits for syntax highlighting to finish before it writes, so on the 8 MB file the wall time is roughly double the export column.
-- The implemented HTML is a deliberate subset. No HTML tables, no collapsible sections.
+- The implemented HTML is a deliberate subset: what GitHub renders in a README, nothing more.
 - Remote images ride the operating system's TLS stack, which on Linux means it needs the OpenSSL library (normally shipped with every distro). Without it, badges show placeholders but everything else works.
 - macOS compiles but is untested, and there is no packaged build.
 
 ## Credits
 
-DejaVu Sans and Courier Prime are embedded in the binary. DejaVu is distributed under the DejaVu Fonts License, Courier Prime under the SIL Open Font License. The settings dialog can switch to any family installed on the system.
+DejaVu Sans, Courier Prime and STIX Two Math are embedded in the binary. DejaVu is distributed under the DejaVu Fonts License, Courier Prime and STIX Two Math under the SIL Open Font License. STIX renders the math and stays out of the font picker. The settings dialog can switch the text fonts to any family installed on the system.
 
 <details>
 <summary><b>Adapted theme palettes</b> (all MIT, with thanks to their authors)</summary>

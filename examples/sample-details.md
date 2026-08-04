@@ -1,7 +1,7 @@
 # Collapsible sections
 
-The GitHub construct: closed by default, the whole summary row toggles,
-and the chevron tracks the state.
+Collapsible sections, the way GitHub renders them: a section starts
+closed, and clicking the summary row opens it.
 
 <details>
 <summary>Installation notes</summary>
@@ -34,6 +34,6 @@ the fold is open or closed.
 
 <details>
 
-A details without a summary synthesizes one reading "Details".
+A details block without a summary gets a default "Details" title.
 
 </details>

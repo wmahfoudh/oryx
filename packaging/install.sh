@@ -18,10 +18,11 @@ fi
 
 mkdir -p "$bin" "$data"
 install -m 755 "$here/oryx" "$bin/oryx"
-rm -rf "$data/themes"
+rm -rf "$data/themes" "$data/examples"
 cp -r "$here/themes" "$data/themes"
+cp -r "$here/examples" "$data/examples"
 "$bin/oryx" --register
-echo "installed to $bin/oryx; themes in $data/themes"
+echo "installed to $bin/oryx; themes in $data/themes; examples in $data/examples"
 case ":$PATH:" in
     *":$bin:"*) ;;
     *) echo "note: $bin is not on your PATH" ;;

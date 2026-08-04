@@ -8,7 +8,7 @@ use oryx::doc::model::{BlockKind, Document, SpanScript};
 use oryx::doc::stream::{self, Swap};
 use oryx::layout::{
     layout, layout_begin, layout_extend, layout_more, layout_step, metrics, recolor_batch,
-    recolor_code_lines, window_to, LayoutDoc, ShapePool, TextRun, ViewConfig,
+    recolor_code_lines, window_to, DecoRect, LayoutDoc, ShapePool, TextRun, ViewConfig,
 };
 use oryx::style::fonts::{FontStore, CODE_FAMILY};
 use oryx::style::highlight::{self, Arrival};
@@ -2861,6 +2861,80 @@ lines below the matrix so the descent side is exercised too.";
     let (_, l) = lay2(src, 1000.0);
     assert!(!l.math_glyphs.is_empty(), "the matrix typesets");
     assert_math_clear_of_text(&l);
+}
+
+#[test]
+fn inline_code_pills_ride_their_runs_around_equations() {
+    // A text chunk that merges back onto an equation's line, or moves
+    // below an equation row, must carry its code pills with it: a pill
+    // with no run under it is the ghost-rectangle bug.
+    let t = Theme::default_dark();
+    let mut media = MediaCache::new(PathBuf::from("."));
+    let mut f = fonts();
+    let src = "Roots take an optional degree: $\\sqrt[23]{x+1}$. `\\left` and \
+`\\right` delimiters grow with their content:";
+    let doc = markdown::parse(src);
+    for zoom in [1.0f32, 1.5, 2.0, 2.5, 3.0] {
+        for width in [700.0f32, 1000.0, 1300.0] {
+            let mut config = cfg();
+            config.zoom = zoom;
+            let l = layout(&doc, &t, &mut f, &mut media, &config, width);
+            let pills: Vec<&DecoRect> = l
+                .rects
+                .iter()
+                .filter(|r| r.color == t.text.inline_code_bg)
+                .collect();
+            assert!(!pills.is_empty(), "the code spans paint pills");
+            for pill in pills {
+                let riding = l.runs.iter().any(|run| {
+                    let x_overlap = pill.x < run.x + run.width && run.x < pill.x + pill.width;
+                    let y_overlap = pill.y < run.baseline && run.y < pill.y + pill.height;
+                    x_overlap && y_overlap
+                });
+                assert!(
+                    riding,
+                    "pill without a run under it at zoom {zoom} width {width}: \
+pill x={} y={} w={}",
+                    pill.x, pill.y, pill.width
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn punctuation_glued_to_an_equation_stays_on_its_line() {
+    // The continuation after the equation is too long to merge back, so
+    // it wraps below; the period glued to the equation must not go with
+    // it.
+    let src = "Roots take an optional degree: $\\sqrt[23]{x+1}$. Now this \
+continuation is deliberately long enough that it cannot merge back as a \
+single line and must wrap onto several more lines below the equation.";
+    let (doc, l) = lay2(src, 700.0);
+    assert!(!l.math_glyphs.is_empty(), "the equation typesets");
+    let eq_base = l.math_glyphs.iter().map(|g| g.y).fold(0.0, f32::max);
+    let eq_end = l.math_glyphs.iter().map(|g| g.x).fold(0.0, f32::max);
+    let period = l
+        .runs
+        .iter()
+        .find(|r| l.run_text(&doc, r).trim() == ".")
+        .expect("the period shapes as its own run");
+    assert!(
+        (period.baseline - eq_base).abs() < 2.0,
+        "the period stays on the equation's line: period baseline {} vs \
+equation baseline {}",
+        period.baseline,
+        eq_base
+    );
+    assert!(period.x >= eq_end, "and sits right after the equation");
+    // The continuation still reads in order below, and its runs resolve
+    // the right model text after the offset shift.
+    let now = l
+        .runs
+        .iter()
+        .find(|r| l.run_text(&doc, r).contains("Now this continuation"))
+        .expect("the continuation resolves its text");
+    assert!(now.baseline > eq_base + 2.0, "the long chunk wraps below");
 }
 
 #[test]

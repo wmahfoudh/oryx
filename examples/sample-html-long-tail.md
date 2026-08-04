@@ -1,6 +1,6 @@
-# The HTML long tail
+# More HTML
 
-Everything GitHub's sanitizer allows, rendered through the model.
+The rest of the HTML tags GitHub allows in a README.
 
 <h2>Headings join the outline machinery</h2>
 
@@ -39,10 +39,10 @@ Inline: <u>underline</u>, <ins>inserted</ins>, <s>struck</s>,
 
 <picture>
 <source srcset="does-not-matter.webp">
-<img src="../oryx-test.png" alt="the picture element reduces to its img">
+<img src="oryx-test.png" alt="the picture element reduces to its img">
 </picture>
 
 <hr>
 
-An `<input type="checkbox">` degrades to its text, and unknown tags
-keep stripping to their inner text.
+An `<input type="checkbox">` renders as its text. Unknown tags are
+stripped, keeping their inner text.

@@ -9,5 +9,6 @@ if ($Uninstall) {
 New-Item -ItemType Directory -Force $dest | Out-Null
 Copy-Item (Join-Path $PSScriptRoot "oryx.exe") $dest -Force
 Copy-Item (Join-Path $PSScriptRoot "themes") $dest -Recurse -Force
+Copy-Item (Join-Path $PSScriptRoot "examples") $dest -Recurse -Force
 & (Join-Path $dest "oryx.exe") --register
 Write-Output "installed to $dest"

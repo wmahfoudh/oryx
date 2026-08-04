@@ -139,8 +139,9 @@ $$
 ````
 
 All four GitHub notations typeset through the same TeX engine in STIX
-Two Math. Prices stay prose: a digit right after a closing dollar, as in
-`$5-$10`, keeps the dollars literal.
+Two Math. Oryx infers whether a dollar sign is a currency or a math
+delimiter: a digit right after a closing dollar, as in `$5-$10`, keeps
+it text.
 
 ```latex
 x_i^2 \quad \frac{a}{b} \quad \binom{n}{k} \quad \sqrt[3]{x^3+y^3}

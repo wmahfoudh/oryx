@@ -14,29 +14,29 @@ Sand holds the night's cool an hour longer than rock.
 
 ### Gravel plains
 
-Wide, flat, and honest: nothing approaches unseen.
+Flat, open ground with long sight lines.
 
 #### Waterless stretches
 
-Weeks pass without standing water; moisture arrives as fog and roots.
+Standing water is rare; moisture comes from fog and plants.
 
 ## Behavior
 
-Herds drift apart by day and re-form at dusk along remembered lines.
+Herds spread out during the day and regroup at dusk.
 
 ### Migration
 
 #### Northern routes
 
-Old paths, walked so long they read as roads from the air.
+Long-established paths, visible from the air.
 
 #### Southern routes
 
-Younger paths, redrawn after each rare rain.
+Newer paths that shift after rain.
 
 ### Signals
 
-A turned head carries further than a call in dry air.
+Most signaling is visual: posture and head position.
 
 ## Appendix
 
@@ -52,6 +52,6 @@ clicking it in the outline reveals the section on the way there.
 
 </details>
 
-## Colophon
+## About this file
 
 Written as a sample for the Outline tab.

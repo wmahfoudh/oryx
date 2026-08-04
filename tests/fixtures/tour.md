@@ -195,8 +195,8 @@ or down to [Heading Levels](#heading-levels). The cursor turns into a
 pointer over any link.
 
 A link to another file opens it in place:
-[the outline sample](samples/sample-outline.md), or straight to
-[a section of it](samples/sample-outline.md#behavior).
+[the outline sample](../../examples/sample-outline.md), or straight to
+[a section of it](../../examples/sample-outline.md#behavior).
 
 ### Heading Levels
 

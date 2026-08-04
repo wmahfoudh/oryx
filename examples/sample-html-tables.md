@@ -1,8 +1,8 @@
 # HTML tables
 
-GitHub READMEs write tables in raw HTML when they need images in cells
-or want to skip the header. All of these render through the same grid,
-stripes and rounding as markdown tables.
+READMEs use raw HTML tables when they need images in cells or want to
+skip the header. They render with the same grid, stripes and rounding
+as markdown tables.
 
 ## With a thead
 
@@ -37,12 +37,12 @@ No `<thead>`, no `<th>`: no header band, stripes count from the top.
 
 <table>
 <tr>
-<td><img src="../oryx-test.png" width="48"> logo left</td>
+<td><img src="oryx-test.png" width="48"> logo left</td>
 <td>plain text cell</td>
 </tr>
 <tr>
 <td>plain text cell</td>
-<td><img src="../oryx-test.png" width="48"> logo right</td>
+<td><img src="oryx-test.png" width="48"> logo right</td>
 </tr>
 </table>
 
