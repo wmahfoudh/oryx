@@ -7,8 +7,10 @@
 *Open it. Read it. Export it. Close it.<br> All in seconds, in one small binary.*
 
 ![Platforms](https://img.shields.io/badge/Platforms-Linux%20%7C%20Windows%20%7C%20macOS-blue)
+![Version](https://img.shields.io/badge/Version-0.13.0-purple)
 ![License](https://img.shields.io/badge/License-GPL--3.0-orange)
 
+[Intro](#intro) •
 [What it renders](#what-it-renders) •
 [Tools](#tools) •
 [Themes](#themes) •
@@ -20,9 +22,9 @@
 
 </div>
 
-## Why Oryx
+## Intro
 
-Oryx is built mainly for the reading case: the file you want to open fast, enjoy reading, themed as per your taste, maybe export to PDF and close, without an editor or a browser tab in the way.
+Oryx started as a personal project. I consume a lot of markdown files and did not find a (very) fast tool that could render them beautifully on the desktop without the need for a browser. Exporting to PDF would be a plus. That was the first version of the functional specs. Today Oryx has evolved, adding new features and optimizing performance. Editing markdown is a tempting feature, but not on the roadmap at this stage.
 
 - **Instant**: A document is on screen in well under 100 ms from cold, even an 8 MB file.
 - **Light**: Memory stays flat as you scroll, whatever the file size.
@@ -79,11 +81,15 @@ Thirty-one themes ship with Oryx. Each is a single TOML file with **51 color rol
 
 Press `Ctrl+T` and the theme browser previews themes and applies them live:
 
-![The theme browser](screenshots/themes.png)
+<p align="center">
+  <img src="screenshots/themes.png" alt="The theme browser">
+</p>
 
 The editor changes any role with a color picker while the document restyles behind it. Editing a bundled theme writes a copy, so the shipped files stay as they were. A custom theme is one TOML file dropped in the themes directory.
 
-![The theme editor](screenshots/themes-editor.png)
+<p align="center">
+  <img src="screenshots/themes-editor.png" alt="The theme editor">
+</p>
 
 Nine themes are original designs: `oryx-light` and its dark twin `oryx-dark`, `oryx-sand` and `oryx-night`, `inkstone`, `ember`, `meadow`, `slate`, and `be-vendible`. The rest adapt permissively licensed editor palettes, [credited below](#credits).
 
