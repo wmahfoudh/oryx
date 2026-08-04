@@ -8,66 +8,450 @@
 use crate::mlist::{Atom, AtomClass, ColAlign, Field, Limits, MathList, Noad, TableGaps};
 
 /// The symbol vocabulary: command name to codepoint and class, sorted by
-/// name for binary search. Coverage grows by adding rows.
-const VOCABULARY: &[(&str, char, AtomClass)] = &[
+/// name for binary search. Coverage grows by adding rows; the layout
+/// tests pin every codepoint to a glyph in the STIX fixture.
+pub(crate) const VOCABULARY: &[(&str, char, AtomClass)] = &[
+    ("Alpha", '\u{0391}', AtomClass::Ord),
+    ("Beta", '\u{0392}', AtomClass::Ord),
+    ("Box", '\u{25A1}', AtomClass::Ord),
+    ("Bumpeq", '\u{224E}', AtomClass::Rel),
+    ("Cap", '\u{22D2}', AtomClass::Bin),
+    ("Chi", '\u{03A7}', AtomClass::Ord),
+    ("Cup", '\u{22D3}', AtomClass::Bin),
     ("Delta", '\u{0394}', AtomClass::Ord),
+    ("Diamond", '\u{25CA}', AtomClass::Ord),
+    ("Downarrow", '\u{21D3}', AtomClass::Rel),
+    ("Epsilon", '\u{0395}', AtomClass::Ord),
+    ("Eta", '\u{0397}', AtomClass::Ord),
+    ("Finv", '\u{2132}', AtomClass::Ord),
+    ("Game", '\u{2141}', AtomClass::Ord),
     ("Gamma", '\u{0393}', AtomClass::Ord),
+    ("Im", '\u{2111}', AtomClass::Ord),
+    ("Iota", '\u{0399}', AtomClass::Ord),
+    ("Join", '\u{22C8}', AtomClass::Rel),
+    ("Kappa", '\u{039A}', AtomClass::Ord),
     ("Lambda", '\u{039B}', AtomClass::Ord),
+    ("Leftarrow", '\u{21D0}', AtomClass::Rel),
+    ("Leftrightarrow", '\u{21D4}', AtomClass::Rel),
+    ("Longleftarrow", '\u{27F8}', AtomClass::Rel),
+    ("Longleftrightarrow", '\u{27FA}', AtomClass::Rel),
+    ("Longrightarrow", '\u{27F9}', AtomClass::Rel),
+    ("Lsh", '\u{21B0}', AtomClass::Rel),
+    ("Mu", '\u{039C}', AtomClass::Ord),
+    ("Nu", '\u{039D}', AtomClass::Ord),
     ("Omega", '\u{03A9}', AtomClass::Ord),
+    ("Omicron", '\u{039F}', AtomClass::Ord),
+    ("P", '\u{00B6}', AtomClass::Ord),
     ("Phi", '\u{03A6}', AtomClass::Ord),
     ("Pi", '\u{03A0}', AtomClass::Ord),
     ("Psi", '\u{03A8}', AtomClass::Ord),
+    ("Re", '\u{211C}', AtomClass::Ord),
+    ("Rho", '\u{03A1}', AtomClass::Ord),
+    ("Rightarrow", '\u{21D2}', AtomClass::Rel),
+    ("Rsh", '\u{21B1}', AtomClass::Rel),
+    ("S", '\u{00A7}', AtomClass::Ord),
     ("Sigma", '\u{03A3}', AtomClass::Ord),
+    ("Subset", '\u{22D0}', AtomClass::Rel),
+    ("Supset", '\u{22D1}', AtomClass::Rel),
+    ("Tau", '\u{03A4}', AtomClass::Ord),
     ("Theta", '\u{0398}', AtomClass::Ord),
+    ("Uparrow", '\u{21D1}', AtomClass::Rel),
+    ("Updownarrow", '\u{21D5}', AtomClass::Rel),
+    ("Upsilon", '\u{03A5}', AtomClass::Ord),
+    ("Vdash", '\u{22A9}', AtomClass::Rel),
+    ("Vert", '\u{2016}', AtomClass::Ord),
+    ("Vvdash", '\u{22AA}', AtomClass::Rel),
     ("Xi", '\u{039E}', AtomClass::Ord),
+    ("Zeta", '\u{0396}', AtomClass::Ord),
+    ("aleph", '\u{2135}', AtomClass::Ord),
     ("alpha", '\u{03B1}', AtomClass::Ord),
+    ("amalg", '\u{2A3F}', AtomClass::Bin),
+    ("angle", '\u{2220}', AtomClass::Ord),
     ("approx", '\u{2248}', AtomClass::Rel),
+    ("approxeq", '\u{224A}', AtomClass::Rel),
+    ("ast", '\u{2217}', AtomClass::Bin),
+    ("asymp", '\u{224D}', AtomClass::Rel),
+    ("backprime", '\u{2035}', AtomClass::Ord),
+    ("backsim", '\u{223D}', AtomClass::Rel),
+    ("backsimeq", '\u{22CD}', AtomClass::Rel),
+    ("backslash", '\u{005C}', AtomClass::Ord),
+    ("barwedge", '\u{22BC}', AtomClass::Bin),
+    ("because", '\u{2235}', AtomClass::Rel),
     ("beta", '\u{03B2}', AtomClass::Ord),
+    ("beth", '\u{2136}', AtomClass::Ord),
+    ("between", '\u{226C}', AtomClass::Rel),
+    ("bigcap", '\u{22C2}', AtomClass::Op),
+    ("bigcirc", '\u{25EF}', AtomClass::Bin),
+    ("bigcup", '\u{22C3}', AtomClass::Op),
+    ("bigodot", '\u{2A00}', AtomClass::Op),
+    ("bigoplus", '\u{2A01}', AtomClass::Op),
+    ("bigotimes", '\u{2A02}', AtomClass::Op),
+    ("bigsqcup", '\u{2A06}', AtomClass::Op),
+    ("bigstar", '\u{2605}', AtomClass::Ord),
+    ("bigtriangledown", '\u{25BD}', AtomClass::Bin),
+    ("bigtriangleup", '\u{25B3}', AtomClass::Bin),
+    ("biguplus", '\u{2A04}', AtomClass::Op),
+    ("bigvee", '\u{22C1}', AtomClass::Op),
+    ("bigwedge", '\u{22C0}', AtomClass::Op),
+    ("blacklozenge", '\u{29EB}', AtomClass::Ord),
+    ("blacksquare", '\u{25A0}', AtomClass::Ord),
+    ("blacktriangle", '\u{25B2}', AtomClass::Ord),
+    ("blacktriangledown", '\u{25BC}', AtomClass::Ord),
+    ("blacktriangleleft", '\u{25C0}', AtomClass::Bin),
+    ("blacktriangleright", '\u{25B6}', AtomClass::Bin),
+    ("bot", '\u{22A5}', AtomClass::Ord),
+    ("bowtie", '\u{22C8}', AtomClass::Rel),
+    ("boxdot", '\u{22A1}', AtomClass::Bin),
+    ("boxminus", '\u{229F}', AtomClass::Bin),
+    ("boxplus", '\u{229E}', AtomClass::Bin),
+    ("boxtimes", '\u{22A0}', AtomClass::Bin),
+    ("bullet", '\u{2219}', AtomClass::Bin),
+    ("bumpeq", '\u{224F}', AtomClass::Rel),
+    ("cap", '\u{2229}', AtomClass::Bin),
     ("cdot", '\u{22C5}', AtomClass::Bin),
     ("cdots", '\u{22EF}', AtomClass::Ord),
+    ("checkmark", '\u{2713}', AtomClass::Ord),
     ("chi", '\u{03C7}', AtomClass::Ord),
+    ("circ", '\u{2218}', AtomClass::Bin),
+    ("circeq", '\u{2257}', AtomClass::Rel),
+    ("circlearrowleft", '\u{21BA}', AtomClass::Rel),
+    ("circlearrowright", '\u{21BB}', AtomClass::Rel),
+    ("circledast", '\u{229B}', AtomClass::Bin),
+    ("circledcirc", '\u{229A}', AtomClass::Bin),
+    ("circleddash", '\u{229D}', AtomClass::Bin),
+    ("clubsuit", '\u{2663}', AtomClass::Ord),
+    ("colon", '\u{003A}', AtomClass::Punct),
+    ("coloneqq", '\u{2254}', AtomClass::Rel),
+    ("cong", '\u{2245}', AtomClass::Rel),
+    ("coprod", '\u{2210}', AtomClass::Op),
+    ("cup", '\u{222A}', AtomClass::Bin),
+    ("curlyeqprec", '\u{22DE}', AtomClass::Rel),
+    ("curlyeqsucc", '\u{22DF}', AtomClass::Rel),
+    ("curlyvee", '\u{22CE}', AtomClass::Bin),
+    ("curlywedge", '\u{22CF}', AtomClass::Bin),
+    ("curvearrowleft", '\u{21B6}', AtomClass::Rel),
+    ("curvearrowright", '\u{21B7}', AtomClass::Rel),
+    ("dag", '\u{2020}', AtomClass::Ord),
+    ("dagger", '\u{2020}', AtomClass::Bin),
+    ("daleth", '\u{2138}', AtomClass::Ord),
+    ("dashleftarrow", '\u{21E0}', AtomClass::Rel),
+    ("dashrightarrow", '\u{21E2}', AtomClass::Rel),
+    ("dashv", '\u{22A3}', AtomClass::Rel),
+    ("ddag", '\u{2021}', AtomClass::Ord),
+    ("ddagger", '\u{2021}', AtomClass::Bin),
+    ("ddots", '\u{22F1}', AtomClass::Ord),
+    ("degree", '\u{00B0}', AtomClass::Ord),
     ("delta", '\u{03B4}', AtomClass::Ord),
+    ("diamond", '\u{22C4}', AtomClass::Bin),
+    ("diamondsuit", '\u{2662}', AtomClass::Ord),
+    ("digamma", '\u{03DD}', AtomClass::Ord),
     ("div", '\u{00F7}', AtomClass::Bin),
+    ("divideontimes", '\u{22C7}', AtomClass::Bin),
+    ("doteq", '\u{2250}', AtomClass::Rel),
+    ("doteqdot", '\u{2251}', AtomClass::Rel),
+    ("dotplus", '\u{2214}', AtomClass::Bin),
+    ("dots", '\u{2026}', AtomClass::Ord),
+    ("dotsb", '\u{22EF}', AtomClass::Ord),
+    ("dotsc", '\u{2026}', AtomClass::Ord),
+    ("dotsi", '\u{22EF}', AtomClass::Ord),
+    ("dotsm", '\u{22EF}', AtomClass::Ord),
+    ("doublebarwedge", '\u{2A5E}', AtomClass::Bin),
+    ("downarrow", '\u{2193}', AtomClass::Rel),
+    ("downdownarrows", '\u{21CA}', AtomClass::Rel),
+    ("downharpoonleft", '\u{21C3}', AtomClass::Rel),
+    ("downharpoonright", '\u{21C2}', AtomClass::Rel),
+    ("ell", '\u{2113}', AtomClass::Ord),
+    ("emptyset", '\u{2205}', AtomClass::Ord),
     ("epsilon", '\u{03F5}', AtomClass::Ord),
+    ("eqcirc", '\u{2256}', AtomClass::Rel),
+    ("eqqcolon", '\u{2255}', AtomClass::Rel),
+    ("eqslantgtr", '\u{2A96}', AtomClass::Rel),
+    ("eqslantless", '\u{2A95}', AtomClass::Rel),
     ("equiv", '\u{2261}', AtomClass::Rel),
     ("eta", '\u{03B7}', AtomClass::Ord),
+    ("eth", '\u{00F0}', AtomClass::Ord),
+    ("exists", '\u{2203}', AtomClass::Ord),
+    ("fallingdotseq", '\u{2252}', AtomClass::Rel),
+    ("flat", '\u{266D}', AtomClass::Ord),
+    ("forall", '\u{2200}', AtomClass::Ord),
+    ("frown", '\u{2322}', AtomClass::Rel),
     ("gamma", '\u{03B3}', AtomClass::Ord),
+    ("ge", '\u{2265}', AtomClass::Rel),
     ("geq", '\u{2265}', AtomClass::Rel),
+    ("geqq", '\u{2267}', AtomClass::Rel),
+    ("geqslant", '\u{2A7E}', AtomClass::Rel),
+    ("gets", '\u{2190}', AtomClass::Rel),
+    ("gg", '\u{226B}', AtomClass::Rel),
+    ("ggg", '\u{22D9}', AtomClass::Rel),
+    ("gimel", '\u{2137}', AtomClass::Ord),
+    ("gnapprox", '\u{2A8A}', AtomClass::Rel),
+    ("gneq", '\u{2A88}', AtomClass::Rel),
+    ("gneqq", '\u{2269}', AtomClass::Rel),
+    ("gnsim", '\u{22E7}', AtomClass::Rel),
+    ("gtrapprox", '\u{2A86}', AtomClass::Rel),
+    ("gtrdot", '\u{22D7}', AtomClass::Rel),
+    ("gtreqless", '\u{22DB}', AtomClass::Rel),
+    ("gtrless", '\u{2277}', AtomClass::Rel),
+    ("gtrsim", '\u{2273}', AtomClass::Rel),
+    ("hbar", '\u{210F}', AtomClass::Ord),
+    ("heartsuit", '\u{2661}', AtomClass::Ord),
+    ("hookleftarrow", '\u{21A9}', AtomClass::Rel),
+    ("hookrightarrow", '\u{21AA}', AtomClass::Rel),
+    ("hslash", '\u{210F}', AtomClass::Ord),
+    ("iff", '\u{27FA}', AtomClass::Rel),
+    ("iiint", '\u{222D}', AtomClass::Op),
+    ("iint", '\u{222C}', AtomClass::Op),
+    ("imath", '\u{1D6A4}', AtomClass::Ord),
+    ("impliedby", '\u{27F8}', AtomClass::Rel),
+    ("implies", '\u{27F9}', AtomClass::Rel),
     ("in", '\u{2208}', AtomClass::Rel),
     ("infty", '\u{221E}', AtomClass::Ord),
     ("int", '\u{222B}', AtomClass::Op),
+    ("intercal", '\u{22BA}', AtomClass::Bin),
     ("iota", '\u{03B9}', AtomClass::Ord),
+    ("jmath", '\u{1D6A5}', AtomClass::Ord),
     ("kappa", '\u{03BA}', AtomClass::Ord),
+    ("lVert", '\u{2016}', AtomClass::Open),
     ("lambda", '\u{03BB}', AtomClass::Ord),
+    ("land", '\u{2227}', AtomClass::Bin),
+    ("langle", '\u{27E8}', AtomClass::Open),
+    ("lbrace", '\u{007B}', AtomClass::Open),
+    ("lbrack", '\u{005B}', AtomClass::Open),
+    ("lceil", '\u{2308}', AtomClass::Open),
     ("ldots", '\u{2026}', AtomClass::Ord),
+    ("le", '\u{2264}', AtomClass::Rel),
+    ("leadsto", '\u{21DD}', AtomClass::Rel),
     ("leftarrow", '\u{2190}', AtomClass::Rel),
+    ("leftarrowtail", '\u{21A2}', AtomClass::Rel),
+    ("leftharpoondown", '\u{21BD}', AtomClass::Rel),
+    ("leftharpoonup", '\u{21BC}', AtomClass::Rel),
+    ("leftleftarrows", '\u{21C7}', AtomClass::Rel),
+    ("leftrightarrow", '\u{2194}', AtomClass::Rel),
+    ("leftrightarrows", '\u{21C6}', AtomClass::Rel),
+    ("leftrightharpoons", '\u{21CB}', AtomClass::Rel),
+    ("leftthreetimes", '\u{22CB}', AtomClass::Bin),
     ("leq", '\u{2264}', AtomClass::Rel),
+    ("leqq", '\u{2266}', AtomClass::Rel),
+    ("leqslant", '\u{2A7D}', AtomClass::Rel),
+    ("lessapprox", '\u{2A85}', AtomClass::Rel),
+    ("lessdot", '\u{22D6}', AtomClass::Rel),
+    ("lesseqgtr", '\u{22DA}', AtomClass::Rel),
+    ("lessgtr", '\u{2276}', AtomClass::Rel),
+    ("lesssim", '\u{2272}', AtomClass::Rel),
+    ("lfloor", '\u{230A}', AtomClass::Open),
+    ("lgroup", '\u{27EE}', AtomClass::Open),
+    ("lhd", '\u{22B2}', AtomClass::Bin),
+    ("ll", '\u{226A}', AtomClass::Rel),
+    ("llcorner", '\u{231E}', AtomClass::Open),
+    ("lll", '\u{22D8}', AtomClass::Rel),
+    ("lmoustache", '\u{23B0}', AtomClass::Open),
+    ("lnapprox", '\u{2A89}', AtomClass::Rel),
+    ("lneq", '\u{2A87}', AtomClass::Rel),
+    ("lneqq", '\u{2268}', AtomClass::Rel),
+    ("lnot", '\u{00AC}', AtomClass::Ord),
+    ("lnsim", '\u{22E6}', AtomClass::Rel),
+    ("longleftarrow", '\u{27F5}', AtomClass::Rel),
+    ("longleftrightarrow", '\u{27F7}', AtomClass::Rel),
+    ("longmapsto", '\u{27FC}', AtomClass::Rel),
+    ("longrightarrow", '\u{27F6}', AtomClass::Rel),
+    ("looparrowleft", '\u{21AB}', AtomClass::Rel),
+    ("looparrowright", '\u{21AC}', AtomClass::Rel),
+    ("lor", '\u{2228}', AtomClass::Bin),
+    ("lozenge", '\u{25CA}', AtomClass::Ord),
+    ("lrcorner", '\u{231F}', AtomClass::Close),
+    ("ltimes", '\u{22C9}', AtomClass::Bin),
+    ("lvert", '\u{007C}', AtomClass::Open),
+    ("mapsto", '\u{21A6}', AtomClass::Rel),
+    ("measuredangle", '\u{2221}', AtomClass::Ord),
+    ("mho", '\u{2127}', AtomClass::Ord),
+    ("mid", '\u{2223}', AtomClass::Rel),
+    ("models", '\u{22A8}', AtomClass::Rel),
+    ("mp", '\u{2213}', AtomClass::Bin),
     ("mu", '\u{03BC}', AtomClass::Ord),
+    ("multimap", '\u{22B8}', AtomClass::Rel),
+    ("nLeftarrow", '\u{21CD}', AtomClass::Rel),
+    ("nLeftrightarrow", '\u{21CE}', AtomClass::Rel),
+    ("nRightarrow", '\u{21CF}', AtomClass::Rel),
+    ("nVDash", '\u{22AF}', AtomClass::Rel),
+    ("nVdash", '\u{22AE}', AtomClass::Rel),
     ("nabla", '\u{2207}', AtomClass::Ord),
+    ("natural", '\u{266E}', AtomClass::Ord),
+    ("ncong", '\u{2247}', AtomClass::Rel),
+    ("ne", '\u{2260}', AtomClass::Rel),
+    ("nearrow", '\u{2197}', AtomClass::Rel),
+    ("neg", '\u{00AC}', AtomClass::Ord),
     ("neq", '\u{2260}', AtomClass::Rel),
+    ("nexists", '\u{2204}', AtomClass::Ord),
+    ("ngeq", '\u{2271}', AtomClass::Rel),
+    ("ngtr", '\u{226F}', AtomClass::Rel),
+    ("ni", '\u{220B}', AtomClass::Rel),
+    ("nleftarrow", '\u{219A}', AtomClass::Rel),
+    ("nleftrightarrow", '\u{21AE}', AtomClass::Rel),
+    ("nleq", '\u{2270}', AtomClass::Rel),
+    ("nless", '\u{226E}', AtomClass::Rel),
+    ("nmid", '\u{2224}', AtomClass::Rel),
+    ("notin", '\u{2209}', AtomClass::Rel),
+    ("notni", '\u{220C}', AtomClass::Rel),
+    ("nparallel", '\u{2226}', AtomClass::Rel),
+    ("nprec", '\u{2280}', AtomClass::Rel),
+    ("npreceq", '\u{22E0}', AtomClass::Rel),
+    ("nrightarrow", '\u{219B}', AtomClass::Rel),
+    ("nsim", '\u{2241}', AtomClass::Rel),
+    ("nsubseteq", '\u{2288}', AtomClass::Rel),
+    ("nsucc", '\u{2281}', AtomClass::Rel),
+    ("nsucceq", '\u{22E1}', AtomClass::Rel),
+    ("nsupseteq", '\u{2289}', AtomClass::Rel),
+    ("ntriangleleft", '\u{22EA}', AtomClass::Rel),
+    ("ntrianglelefteq", '\u{22EC}', AtomClass::Rel),
+    ("ntriangleright", '\u{22EB}', AtomClass::Rel),
+    ("ntrianglerighteq", '\u{22ED}', AtomClass::Rel),
     ("nu", '\u{03BD}', AtomClass::Ord),
+    ("nvDash", '\u{22AD}', AtomClass::Rel),
+    ("nvdash", '\u{22AC}', AtomClass::Rel),
+    ("nwarrow", '\u{2196}', AtomClass::Rel),
+    ("odot", '\u{2299}', AtomClass::Bin),
+    ("oiiint", '\u{2230}', AtomClass::Op),
+    ("oiint", '\u{222F}', AtomClass::Op),
+    ("oint", '\u{222E}', AtomClass::Op),
     ("omega", '\u{03C9}', AtomClass::Ord),
+    ("omicron", '\u{03BF}', AtomClass::Ord),
+    ("ominus", '\u{2296}', AtomClass::Bin),
     ("oplus", '\u{2295}', AtomClass::Bin),
+    ("oslash", '\u{2298}', AtomClass::Bin),
     ("otimes", '\u{2297}', AtomClass::Bin),
+    ("owns", '\u{220B}', AtomClass::Rel),
+    ("parallel", '\u{2225}', AtomClass::Rel),
     ("partial", '\u{2202}', AtomClass::Ord),
+    ("perp", '\u{22A5}', AtomClass::Rel),
     ("phi", '\u{03D5}', AtomClass::Ord),
     ("pi", '\u{03C0}', AtomClass::Ord),
+    ("pitchfork", '\u{22D4}', AtomClass::Rel),
     ("pm", '\u{00B1}', AtomClass::Bin),
+    ("prec", '\u{227A}', AtomClass::Rel),
+    ("precapprox", '\u{2AB7}', AtomClass::Rel),
+    ("preccurlyeq", '\u{227C}', AtomClass::Rel),
+    ("preceq", '\u{2AAF}', AtomClass::Rel),
+    ("precnapprox", '\u{2AB9}', AtomClass::Rel),
+    ("precneqq", '\u{2AB5}', AtomClass::Rel),
+    ("precnsim", '\u{22E8}', AtomClass::Rel),
+    ("precsim", '\u{227E}', AtomClass::Rel),
+    ("prime", '\u{2032}', AtomClass::Ord),
     ("prod", '\u{220F}', AtomClass::Op),
+    ("propto", '\u{221D}', AtomClass::Rel),
     ("psi", '\u{03C8}', AtomClass::Ord),
+    ("rVert", '\u{2016}', AtomClass::Close),
+    ("rangle", '\u{27E9}', AtomClass::Close),
+    ("rbrace", '\u{007D}', AtomClass::Close),
+    ("rbrack", '\u{005D}', AtomClass::Close),
+    ("rceil", '\u{2309}', AtomClass::Close),
+    ("rfloor", '\u{230B}', AtomClass::Close),
+    ("rgroup", '\u{27EF}', AtomClass::Close),
+    ("rhd", '\u{22B3}', AtomClass::Bin),
     ("rho", '\u{03C1}', AtomClass::Ord),
     ("rightarrow", '\u{2192}', AtomClass::Rel),
+    ("rightarrowtail", '\u{21A3}', AtomClass::Rel),
+    ("rightharpoondown", '\u{21C1}', AtomClass::Rel),
+    ("rightharpoonup", '\u{21C0}', AtomClass::Rel),
+    ("rightleftarrows", '\u{21C4}', AtomClass::Rel),
+    ("rightleftharpoons", '\u{21CC}', AtomClass::Rel),
+    ("rightrightarrows", '\u{21C9}', AtomClass::Rel),
+    ("rightsquigarrow", '\u{21DD}', AtomClass::Rel),
+    ("rightthreetimes", '\u{22CC}', AtomClass::Bin),
+    ("risingdotseq", '\u{2253}', AtomClass::Rel),
+    ("rmoustache", '\u{23B1}', AtomClass::Close),
+    ("rtimes", '\u{22CA}', AtomClass::Bin),
+    ("rvert", '\u{007C}', AtomClass::Close),
+    ("searrow", '\u{2198}', AtomClass::Rel),
+    ("setminus", '\u{2216}', AtomClass::Bin),
+    ("sharp", '\u{266F}', AtomClass::Ord),
+    ("shortmid", '\u{2223}', AtomClass::Rel),
+    ("shortparallel", '\u{2225}', AtomClass::Rel),
     ("sigma", '\u{03C3}', AtomClass::Ord),
+    ("sim", '\u{223C}', AtomClass::Rel),
+    ("simeq", '\u{2243}', AtomClass::Rel),
+    ("smallfrown", '\u{2322}', AtomClass::Rel),
+    ("smallsetminus", '\u{2216}', AtomClass::Bin),
+    ("smallsmile", '\u{2323}', AtomClass::Rel),
+    ("smile", '\u{2323}', AtomClass::Rel),
+    ("spadesuit", '\u{2660}', AtomClass::Ord),
+    ("sphericalangle", '\u{2222}', AtomClass::Ord),
+    ("sqcap", '\u{2293}', AtomClass::Bin),
+    ("sqcup", '\u{2294}', AtomClass::Bin),
+    ("sqsubset", '\u{228F}', AtomClass::Rel),
+    ("sqsubseteq", '\u{2291}', AtomClass::Rel),
+    ("sqsupset", '\u{2290}', AtomClass::Rel),
+    ("sqsupseteq", '\u{2292}', AtomClass::Rel),
+    ("square", '\u{25A1}', AtomClass::Ord),
+    ("star", '\u{22C6}', AtomClass::Bin),
     ("subset", '\u{2282}', AtomClass::Rel),
     ("subseteq", '\u{2286}', AtomClass::Rel),
+    ("subseteqq", '\u{2AC5}', AtomClass::Rel),
+    ("subsetneq", '\u{228A}', AtomClass::Rel),
+    ("subsetneqq", '\u{2ACB}', AtomClass::Rel),
+    ("succ", '\u{227B}', AtomClass::Rel),
+    ("succapprox", '\u{2AB8}', AtomClass::Rel),
+    ("succcurlyeq", '\u{227D}', AtomClass::Rel),
+    ("succeq", '\u{2AB0}', AtomClass::Rel),
+    ("succnapprox", '\u{2ABA}', AtomClass::Rel),
+    ("succneqq", '\u{2AB6}', AtomClass::Rel),
+    ("succnsim", '\u{22E9}', AtomClass::Rel),
+    ("succsim", '\u{227F}', AtomClass::Rel),
     ("sum", '\u{2211}', AtomClass::Op),
+    ("supset", '\u{2283}', AtomClass::Rel),
+    ("supseteq", '\u{2287}', AtomClass::Rel),
+    ("supseteqq", '\u{2AC6}', AtomClass::Rel),
+    ("supsetneq", '\u{228B}', AtomClass::Rel),
+    ("supsetneqq", '\u{2ACC}', AtomClass::Rel),
+    ("surd", '\u{221A}', AtomClass::Ord),
+    ("swarrow", '\u{2199}', AtomClass::Rel),
     ("tau", '\u{03C4}', AtomClass::Ord),
+    ("therefore", '\u{2234}', AtomClass::Rel),
     ("theta", '\u{03B8}', AtomClass::Ord),
+    ("thickapprox", '\u{2248}', AtomClass::Rel),
+    ("thicksim", '\u{223C}', AtomClass::Rel),
     ("times", '\u{00D7}', AtomClass::Bin),
     ("to", '\u{2192}', AtomClass::Rel),
+    ("top", '\u{22A4}', AtomClass::Ord),
+    ("triangle", '\u{25B3}', AtomClass::Ord),
+    ("triangledown", '\u{25BD}', AtomClass::Ord),
+    ("triangleleft", '\u{25C3}', AtomClass::Bin),
+    ("trianglelefteq", '\u{22B4}', AtomClass::Rel),
+    ("triangleq", '\u{225C}', AtomClass::Rel),
+    ("triangleright", '\u{25B9}', AtomClass::Bin),
+    ("trianglerighteq", '\u{22B5}', AtomClass::Rel),
+    ("twoheadleftarrow", '\u{219E}', AtomClass::Rel),
+    ("twoheadrightarrow", '\u{21A0}', AtomClass::Rel),
+    ("ulcorner", '\u{231C}', AtomClass::Open),
+    ("unlhd", '\u{22B4}', AtomClass::Bin),
+    ("unrhd", '\u{22B5}', AtomClass::Bin),
+    ("uparrow", '\u{2191}', AtomClass::Rel),
+    ("updownarrow", '\u{2195}', AtomClass::Rel),
+    ("upharpoonleft", '\u{21BF}', AtomClass::Rel),
+    ("upharpoonright", '\u{21BE}', AtomClass::Rel),
+    ("uplus", '\u{228E}', AtomClass::Bin),
     ("upsilon", '\u{03C5}', AtomClass::Ord),
+    ("upuparrows", '\u{21C8}', AtomClass::Rel),
+    ("urcorner", '\u{231D}', AtomClass::Close),
+    ("vDash", '\u{22A8}', AtomClass::Rel),
     ("varepsilon", '\u{03B5}', AtomClass::Ord),
+    ("varkappa", '\u{03F0}', AtomClass::Ord),
+    ("varnothing", '\u{2205}', AtomClass::Ord),
     ("varphi", '\u{03C6}', AtomClass::Ord),
+    ("varpi", '\u{03D6}', AtomClass::Ord),
+    ("varpropto", '\u{221D}', AtomClass::Rel),
+    ("varrho", '\u{03F1}', AtomClass::Ord),
+    ("varsigma", '\u{03C2}', AtomClass::Ord),
+    ("vartheta", '\u{03D1}', AtomClass::Ord),
+    ("vartriangle", '\u{25B3}', AtomClass::Rel),
+    ("vartriangleleft", '\u{22B2}', AtomClass::Rel),
+    ("vartriangleright", '\u{22B3}', AtomClass::Rel),
+    ("vdash", '\u{22A2}', AtomClass::Rel),
+    ("vdots", '\u{22EE}', AtomClass::Ord),
+    ("vee", '\u{2228}', AtomClass::Bin),
+    ("vert", '\u{007C}', AtomClass::Ord),
+    ("wedge", '\u{2227}', AtomClass::Bin),
+    ("wp", '\u{2118}', AtomClass::Ord),
+    ("wr", '\u{2240}', AtomClass::Bin),
     ("xi", '\u{03BE}', AtomClass::Ord),
     ("zeta", '\u{03B6}', AtomClass::Ord),
     ("{", '{', AtomClass::Open),
@@ -82,23 +466,46 @@ pub fn parse(tex: &str) -> MathList {
         tokens: crate::token::tokenize(tex),
         pos: 0,
         src: tex,
+        macros: std::collections::HashMap::new(),
+        expansions: EXPANSION_CAP,
+        spliced: 0,
     };
     parser.list(true)
 }
 
 /// Delimiter commands `\left` and `\right` accept, sorted for binary
 /// search. Plain characters and `.` resolve without the table.
-const DELIMITERS: &[(&str, char)] = &[
+pub(crate) const DELIMITERS: &[(&str, char)] = &[
+    ("Downarrow", '\u{21D3}'),
+    ("Uparrow", '\u{21D1}'),
+    ("Updownarrow", '\u{21D5}'),
     ("Vert", '\u{2016}'),
     ("backslash", '\\'),
+    ("downarrow", '\u{2193}'),
+    ("lVert", '\u{2016}'),
     ("langle", '\u{27E8}'),
     ("lbrace", '{'),
+    ("lbrack", '['),
     ("lceil", '\u{2308}'),
     ("lfloor", '\u{230A}'),
+    ("lgroup", '\u{27EE}'),
+    ("llcorner", '\u{231E}'),
+    ("lmoustache", '\u{23B0}'),
+    ("lrcorner", '\u{231F}'),
+    ("lvert", '|'),
+    ("rVert", '\u{2016}'),
     ("rangle", '\u{27E9}'),
     ("rbrace", '}'),
+    ("rbrack", ']'),
     ("rceil", '\u{2309}'),
     ("rfloor", '\u{230B}'),
+    ("rgroup", '\u{27EF}'),
+    ("rmoustache", '\u{23B1}'),
+    ("rvert", '|'),
+    ("ulcorner", '\u{231C}'),
+    ("uparrow", '\u{2191}'),
+    ("updownarrow", '\u{2195}'),
+    ("urcorner", '\u{231D}'),
     ("vert", '|'),
     ("{", '{'),
     ("|", '\u{2016}'),
@@ -114,35 +521,44 @@ fn vocabulary_lookup(name: &str) -> Option<(char, AtomClass)> {
 
 /// Accent commands: the combining character and whether wide forms may
 /// stretch horizontally. Sorted for binary search.
-const ACCENTS: &[(&str, char, bool)] = &[
+pub(crate) const ACCENTS: &[(&str, char, bool)] = &[
     ("acute", '\u{0301}', false),
     ("bar", '\u{0304}', false),
     ("breve", '\u{0306}', false),
     ("check", '\u{030C}', false),
+    ("ddddot", '\u{20DC}', false),
+    ("dddot", '\u{20DB}', false),
     ("ddot", '\u{0308}', false),
     ("dot", '\u{0307}', false),
     ("grave", '\u{0300}', false),
     ("hat", '\u{0302}', false),
     ("mathring", '\u{030A}', false),
+    ("overleftarrow", '\u{20D6}', true),
+    ("overleftrightarrow", '\u{20E1}', true),
+    ("overrightarrow", '\u{20D7}', true),
     ("tilde", '\u{0303}', false),
     ("vec", '\u{20D7}', false),
+    ("widecheck", '\u{030C}', true),
     ("widehat", '\u{0302}', true),
     ("widetilde", '\u{0303}', true),
 ];
 
 /// Operator names: upright Op atoms, flagged when TeX stacks their
 /// limits in display style. Sorted for binary search.
-const OP_NAMES: &[(&str, bool)] = &[
+pub(crate) const OP_NAMES: &[(&str, bool)] = &[
     ("Pr", true),
     ("arccos", false),
     ("arcsin", false),
     ("arctan", false),
     ("arg", false),
+    ("argmax", true),
+    ("argmin", true),
     ("cos", false),
     ("cosh", false),
     ("cot", false),
     ("coth", false),
     ("csc", false),
+    ("csch", false),
     ("deg", false),
     ("det", true),
     ("dim", false),
@@ -150,6 +566,7 @@ const OP_NAMES: &[(&str, bool)] = &[
     ("gcd", true),
     ("hom", false),
     ("inf", true),
+    ("injlim", true),
     ("ker", false),
     ("lg", false),
     ("lim", true),
@@ -159,7 +576,10 @@ const OP_NAMES: &[(&str, bool)] = &[
     ("log", false),
     ("max", true),
     ("min", true),
+    ("plim", true),
+    ("projlim", true),
     ("sec", false),
+    ("sech", false),
     ("sin", false),
     ("sinh", false),
     ("sup", true),
@@ -349,10 +769,29 @@ fn demote_bins(items: &mut [Noad]) {
     }
 }
 
+/// Macro expansion budgets: calls expanded per parse, and total tokens
+/// spliced across them. Hostile definitions exhaust a budget and every
+/// later call degrades to a literal; both bounds keep the parse linear
+/// in the source.
+const EXPANSION_CAP: usize = 256;
+const SPLICE_CEILING: usize = 50_000;
+
+/// A document-defined macro: `\newcommand`'s parameter count, the
+/// optional default for `#1`, and the body tokens as captured.
+#[derive(Clone)]
+struct Macro {
+    params: usize,
+    default: Option<Vec<crate::token::Token>>,
+    body: Vec<crate::token::Token>,
+}
+
 struct Parser<'a> {
     tokens: Vec<crate::token::Token>,
     pos: usize,
     src: &'a str,
+    macros: std::collections::HashMap<String, Macro>,
+    expansions: usize,
+    spliced: usize,
 }
 
 impl Parser<'_> {
@@ -417,9 +856,33 @@ impl Parser<'_> {
 
     /// One scriptless atom from the stream: a character, a command, or a
     /// braced group. The caller has excluded every other token kind.
+    /// Definitions and macro calls resolve here first, transparent to
+    /// every construct that reads atoms; whenever the stream is nonempty
+    /// the call consumes at least one token.
     fn atom(&mut self) -> Option<Atom> {
         use crate::token::TokenKind as K;
-        let tok = self.next()?;
+        let tok = loop {
+            let tok = self.next()?;
+            if let K::Command(name) = &tok.kind {
+                if name == "newcommand" || name == "renewcommand" {
+                    if self.define().is_ok() {
+                        continue;
+                    }
+                    let end = self.consumed_end(tok.span.end);
+                    let span = tok.span.start..end;
+                    let text = self.src.get(span.clone()).unwrap_or("\\newcommand");
+                    return Some(literal_atom(text.to_string(), span));
+                }
+                if self.macros.contains_key(name.as_str()) {
+                    let name = name.clone();
+                    if self.expand(&name, tok.span.clone()) {
+                        continue;
+                    }
+                    return Some(literal_atom(format!("\\{name}"), tok.span));
+                }
+            }
+            break tok;
+        };
         match tok.kind {
             K::Char(c) => {
                 // Math mode's hyphen is the minus sign.
@@ -445,7 +908,33 @@ impl Parser<'_> {
                     let _ = self.delimiter();
                     literal_atom("\\right", tok.span)
                 }
-                "text" => self.text(tok.span),
+                "text" | "mathrm" => self.text(tok.span, &name),
+                "operatorname" => {
+                    // The starred form stacks its display limits.
+                    let star = matches!(self.peek().map(|t| &t.kind), Some(K::Char('*')));
+                    if star {
+                        self.pos += 1;
+                    }
+                    let mut atom = self.text(tok.span, &name);
+                    if matches!(atom.nucleus, Field::Text(_)) {
+                        atom.class = AtomClass::Op;
+                        atom.limits = if star {
+                            Limits::Default
+                        } else {
+                            Limits::NoLimits
+                        };
+                    }
+                    atom
+                }
+                "bmod" => Atom {
+                    class: AtomClass::Bin,
+                    nucleus: Field::Text("mod".into()),
+                    sup: None,
+                    sub: None,
+                    limits: Limits::NoLimits,
+                    span: tok.span.clone(),
+                    nucleus_span: tok.span,
+                },
                 "begin" => self.environment(tok.span),
                 "end" => {
                     // A stray closer: its name goes with it, the pair
@@ -636,13 +1125,14 @@ impl Parser<'_> {
         )
     }
 
-    /// `\text{...}`: the braced source verbatim, spaces and nested braces
-    /// included, which the tokenizer's spans recover from the source.
-    /// Without a group the command degrades to a literal.
-    fn text(&mut self, start: std::ops::Range<usize>) -> Atom {
+    /// `\text{...}` and its upright kin: the braced source verbatim,
+    /// spaces and nested braces included, which the tokenizer's spans
+    /// recover from the source. Without a group the command degrades to
+    /// a literal under its own name.
+    fn text(&mut self, start: std::ops::Range<usize>, name: &str) -> Atom {
         use crate::token::TokenKind as K;
         if !matches!(self.peek().map(|t| &t.kind), Some(K::BeginGroup)) {
-            return literal_atom("\\text", start);
+            return literal_atom(format!("\\{name}"), start);
         }
         let open = self.next().expect("peeked");
         let content_start = open.span.end;
@@ -664,6 +1154,196 @@ impl Parser<'_> {
         }
         let text = self.src.get(content_start..content_end).unwrap_or("");
         self.construct(start, Field::Text(text.to_string()), AtomClass::Ord)
+    }
+
+    /// `\newcommand{\name}[params][default]{body}`: the name braced or
+    /// bare, up to nine parameters, one optional default making `#1`
+    /// optional at the call. Both spellings define alike and the last
+    /// definition wins. A malformed definition answers Err and the
+    /// caller degrades what was consumed.
+    fn define(&mut self) -> Result<(), ()> {
+        use crate::token::TokenKind as K;
+        let name = match self.peek().map(|t| &t.kind) {
+            Some(K::Command(n)) => {
+                let n = n.clone();
+                self.pos += 1;
+                n
+            }
+            Some(K::BeginGroup) => {
+                self.pos += 1;
+                let Some(K::Command(n)) = self.peek().map(|t| &t.kind) else {
+                    return Err(());
+                };
+                let n = n.clone();
+                self.pos += 1;
+                if !matches!(self.peek().map(|t| &t.kind), Some(K::EndGroup)) {
+                    return Err(());
+                }
+                self.pos += 1;
+                n
+            }
+            _ => return Err(()),
+        };
+        let mut params = 0usize;
+        let mut default = None;
+        if matches!(self.peek().map(|t| &t.kind), Some(K::Char('['))) {
+            self.pos += 1;
+            let Some(K::Char(d @ '0'..='9')) = self.peek().map(|t| &t.kind) else {
+                return Err(());
+            };
+            params = *d as usize - '0' as usize;
+            self.pos += 1;
+            if !matches!(self.peek().map(|t| &t.kind), Some(K::Char(']'))) {
+                return Err(());
+            }
+            self.pos += 1;
+            if matches!(self.peek().map(|t| &t.kind), Some(K::Char('['))) {
+                let Some(tokens) = self.bracket_tokens() else {
+                    return Err(());
+                };
+                default = Some(tokens);
+            }
+        }
+        if !matches!(self.peek().map(|t| &t.kind), Some(K::BeginGroup)) {
+            return Err(());
+        }
+        self.pos += 1;
+        let (body, closed) = self.balanced_tokens();
+        if !closed {
+            return Err(());
+        }
+        self.macros.insert(
+            name,
+            Macro {
+                params,
+                default,
+                body,
+            },
+        );
+        Ok(())
+    }
+
+    /// Expands one macro call at the cursor: arguments read from the
+    /// stream, parameters substituted into the body, the result spliced
+    /// where the call stood. Body tokens are restamped with the call's
+    /// span so their constructs select as the call; argument tokens
+    /// keep their own. Answers false on an exhausted budget, the call
+    /// degrading to a literal.
+    fn expand(&mut self, name: &str, start: std::ops::Range<usize>) -> bool {
+        use crate::token::TokenKind as K;
+        if self.expansions == 0 || self.spliced >= SPLICE_CEILING {
+            return false;
+        }
+        self.expansions -= 1;
+        let Some(mac) = self.macros.get(name).cloned() else {
+            return false;
+        };
+        let mut args: Vec<Vec<crate::token::Token>> = Vec::new();
+        if let Some(default) = mac.default {
+            if matches!(self.peek().map(|t| &t.kind), Some(K::Char('['))) {
+                args.push(self.bracket_tokens().unwrap_or_default());
+            } else {
+                args.push(default);
+            }
+        }
+        while args.len() < mac.params {
+            args.push(self.macro_arg());
+        }
+        let span = start.start..self.consumed_end(start.end);
+        let mut out: Vec<crate::token::Token> = Vec::new();
+        let mut i = 0;
+        while i < mac.body.len() {
+            if matches!(mac.body[i].kind, K::Char('#')) && i + 1 < mac.body.len() {
+                if let K::Char(d) = mac.body[i + 1].kind {
+                    if d == '#' {
+                        out.push(crate::token::Token {
+                            kind: K::Char('#'),
+                            span: span.clone(),
+                        });
+                        i += 2;
+                        continue;
+                    }
+                    if let Some(n) = d.to_digit(10) {
+                        // #1 through #9; #0 and a count past the
+                        // arguments splice nothing.
+                        if let Some(k) = (n as usize).checked_sub(1) {
+                            if k < args.len() {
+                                out.extend(args[k].iter().cloned());
+                            }
+                        }
+                        i += 2;
+                        continue;
+                    }
+                }
+            }
+            out.push(crate::token::Token {
+                kind: mac.body[i].kind.clone(),
+                span: span.clone(),
+            });
+            i += 1;
+        }
+        self.spliced += out.len();
+        self.tokens.splice(self.pos..self.pos, out);
+        true
+    }
+
+    /// One macro argument: a braced group's tokens, or the single next
+    /// token. End of input answers empty.
+    fn macro_arg(&mut self) -> Vec<crate::token::Token> {
+        use crate::token::TokenKind as K;
+        match self.peek().map(|t| &t.kind) {
+            Some(K::BeginGroup) => {
+                self.pos += 1;
+                self.balanced_tokens().0
+            }
+            Some(_) => self.next().into_iter().collect(),
+            None => Vec::new(),
+        }
+    }
+
+    /// Captures tokens to the matching group closer, the opener already
+    /// consumed and the closer consumed but excluded. Answers whether
+    /// the closer was found.
+    fn balanced_tokens(&mut self) -> (Vec<crate::token::Token>, bool) {
+        use crate::token::TokenKind as K;
+        let mut depth = 1usize;
+        let mut out = Vec::new();
+        while let Some(tok) = self.next() {
+            match tok.kind {
+                K::BeginGroup => depth += 1,
+                K::EndGroup => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return (out, true);
+                    }
+                }
+                _ => {}
+            }
+            out.push(tok);
+        }
+        (out, false)
+    }
+
+    /// Captures a bracketed `[...]` token run at the cursor, braces
+    /// hiding any `]` inside them. A missing closer restores the cursor
+    /// and answers none.
+    fn bracket_tokens(&mut self) -> Option<Vec<crate::token::Token>> {
+        use crate::token::TokenKind as K;
+        let saved = self.pos;
+        self.pos += 1;
+        let mut depth = 0usize;
+        let mut out = Vec::new();
+        while let Some(tok) = self.next() {
+            match &tok.kind {
+                K::BeginGroup => depth += 1,
+                K::EndGroup => depth = depth.saturating_sub(1),
+                K::Char(']') if depth == 0 => return Some(out),
+                _ => {}
+            }
+            out.push(tok);
+        }
+        self.pos = saved;
+        None
     }
 
     /// `\begin{name} ... \end{name}`: cells split on `&`, rows on `\\`,
@@ -1559,6 +2239,347 @@ mod tests {
             align,
             &vec![ColAlign::Right, ColAlign::Center, ColAlign::Left]
         );
+    }
+
+    #[test]
+    fn all_command_tables_are_sorted_and_duplicate_free() {
+        for pair in DELIMITERS.windows(2) {
+            assert!(pair[0].0 < pair[1].0, "{} before {}", pair[0].0, pair[1].0);
+        }
+        for pair in ACCENTS.windows(2) {
+            assert!(pair[0].0 < pair[1].0, "{} before {}", pair[0].0, pair[1].0);
+        }
+        for pair in OP_NAMES.windows(2) {
+            assert!(pair[0].0 < pair[1].0, "{} before {}", pair[0].0, pair[1].0);
+        }
+    }
+
+    #[test]
+    fn the_greek_alphabet_is_complete() {
+        // Every Greek letter command resolves to a symbol, never a
+        // literal: a row lost in a table rewrite fails here by name.
+        for name in [
+            "alpha",
+            "beta",
+            "gamma",
+            "delta",
+            "epsilon",
+            "zeta",
+            "eta",
+            "theta",
+            "iota",
+            "kappa",
+            "lambda",
+            "mu",
+            "nu",
+            "xi",
+            "omicron",
+            "pi",
+            "rho",
+            "sigma",
+            "tau",
+            "upsilon",
+            "phi",
+            "chi",
+            "psi",
+            "omega",
+            "varepsilon",
+            "vartheta",
+            "varkappa",
+            "varpi",
+            "varrho",
+            "varsigma",
+            "varphi",
+            "digamma",
+            "Alpha",
+            "Beta",
+            "Gamma",
+            "Delta",
+            "Epsilon",
+            "Zeta",
+            "Eta",
+            "Theta",
+            "Iota",
+            "Kappa",
+            "Lambda",
+            "Mu",
+            "Nu",
+            "Xi",
+            "Omicron",
+            "Pi",
+            "Rho",
+            "Sigma",
+            "Tau",
+            "Upsilon",
+            "Phi",
+            "Chi",
+            "Psi",
+            "Omega",
+        ] {
+            let a = atoms(&format!("\\{name}"));
+            assert!(
+                matches!(a[0].nucleus, Field::Symbol(_)),
+                "\\{name} must resolve, got {:?}",
+                a[0].nucleus
+            );
+        }
+    }
+
+    #[test]
+    fn the_sweep_samples_resolve() {
+        use AtomClass as C;
+        for (tex, ch, class) in [
+            // Greek completions and variants.
+            ("\\Upsilon", '\u{03A5}', C::Ord),
+            ("\\varpi", '\u{03D6}', C::Ord),
+            ("\\digamma", '\u{03DD}', C::Ord),
+            // Binary operators.
+            ("\\ast", '\u{2217}', C::Bin),
+            ("\\circ", '\u{2218}', C::Bin),
+            ("\\ltimes", '\u{22C9}', C::Bin),
+            ("\\boxplus", '\u{229E}', C::Bin),
+            // Relations.
+            ("\\ll", '\u{226A}', C::Rel),
+            ("\\preceq", '\u{2AAF}', C::Rel),
+            ("\\vdash", '\u{22A2}', C::Rel),
+            ("\\rightleftharpoons", '\u{21CC}', C::Rel),
+            // Negations.
+            ("\\nleq", '\u{2270}', C::Rel),
+            ("\\nvdash", '\u{22AC}', C::Rel),
+            ("\\nsubseteq", '\u{2288}', C::Rel),
+            // Arrows.
+            ("\\hookrightarrow", '\u{21AA}', C::Rel),
+            ("\\Longrightarrow", '\u{27F9}', C::Rel),
+            ("\\iff", '\u{27FA}', C::Rel),
+            ("\\twoheadrightarrow", '\u{21A0}', C::Rel),
+            // Big operators.
+            ("\\bigcup", '\u{22C3}', C::Op),
+            ("\\oint", '\u{222E}', C::Op),
+            ("\\bigoplus", '\u{2A01}', C::Op),
+            // Miscellany.
+            ("\\aleph", '\u{2135}', C::Ord),
+            ("\\forall", '\u{2200}', C::Ord),
+            ("\\hbar", '\u{210F}', C::Ord),
+            ("\\S", '\u{00A7}', C::Ord),
+            ("\\vdots", '\u{22EE}', C::Ord),
+            // Aliases.
+            ("\\le", '\u{2264}', C::Rel),
+            ("\\land", '\u{2227}', C::Bin),
+            ("\\gets", '\u{2190}', C::Rel),
+            // Delimiters as standalone symbols.
+            ("\\lceil", '\u{2308}', C::Open),
+            ("\\rVert", '\u{2016}', C::Close),
+            ("\\colon", ':', C::Punct),
+        ] {
+            // Operands on both sides keep binary atoms from demoting.
+            let a = atoms(&format!("x{tex} y"));
+            assert_eq!(a.len(), 3, "{tex}");
+            assert_eq!(a[1].nucleus, Field::Symbol(ch), "{tex}");
+            assert_eq!(a[1].class, class, "{tex}");
+        }
+        // The new rows reach \left and \right.
+        let a = atoms("\\left\\lvert x \\right\\rvert");
+        let Field::LeftRight { open, close, .. } = &a[0].nucleus else {
+            panic!("expected delimited group, got {:?}", a[0].nucleus)
+        };
+        assert_eq!((*open, *close), (Some('|'), Some('|')));
+        let a = atoms("\\left\\uparrow x \\right.");
+        let Field::LeftRight { open, .. } = &a[0].nucleus else {
+            panic!("expected delimited group, got {:?}", a[0].nucleus)
+        };
+        assert_eq!(*open, Some('\u{2191}'));
+    }
+
+    #[test]
+    fn mathrm_and_operatorname_render_upright() {
+        let a = atoms("\\mathrm{d}x");
+        assert_eq!(a[0].nucleus, Field::Text("d".into()));
+        assert_eq!(a[0].class, AtomClass::Ord);
+        assert_eq!(a[1].nucleus, Field::Symbol('x'));
+        // A missing group degrades with the command's own name.
+        let a = atoms("\\mathrm x");
+        assert_eq!(a[0].nucleus, Field::Literal("\\mathrm".into()));
+        let a = atoms("\\operatorname{Var}(X)");
+        assert_eq!(a[0].nucleus, Field::Text("Var".into()));
+        assert_eq!(a[0].class, AtomClass::Op);
+        assert_eq!(a[0].limits, Limits::NoLimits);
+        let a = atoms("\\operatorname*{argmax}_x");
+        assert_eq!(a[0].limits, Limits::Default);
+        let a = atoms("a\\bmod b");
+        assert_eq!(a[1].nucleus, Field::Text("mod".into()));
+        assert_eq!(a[1].class, AtomClass::Bin);
+    }
+
+    #[test]
+    fn wide_arrow_and_dotted_accents_join_the_family() {
+        let a = atoms("\\overrightarrow{AB}");
+        let Field::Accent {
+            accent,
+            stretch,
+            base,
+        } = &a[0].nucleus
+        else {
+            panic!("expected accent, got {:?}", a[0].nucleus)
+        };
+        assert_eq!((*accent, *stretch), ('\u{20D7}', true));
+        assert_eq!(base.atoms().count(), 2);
+        let a = atoms("\\dddot{x}");
+        let Field::Accent { accent, .. } = &a[0].nucleus else {
+            panic!("expected accent, got {:?}", a[0].nucleus)
+        };
+        assert_eq!(*accent, '\u{20DB}');
+    }
+
+    #[test]
+    fn newcommand_defines_and_expands() {
+        let a = atoms("\\newcommand{\\R}{\\mathbb{R}}\\R");
+        assert_eq!(a.len(), 1);
+        assert_eq!(a[0].nucleus, Field::Symbol('\u{211D}'));
+        // The unbraced name form; a definition alone produces nothing.
+        assert!(atoms("\\newcommand\\half{\\frac{1}{2}}").is_empty());
+        // Macros expand inside environment cells.
+        let a = atoms("\\newcommand{\\f}{x}\\begin{matrix} \\f \\end{matrix}");
+        let Field::Table { rows, .. } = &a[0].nucleus else {
+            panic!("expected table, got {:?}", a[0].nucleus)
+        };
+        assert_eq!(
+            rows[0][0].atoms().next().unwrap().nucleus,
+            Field::Symbol('x')
+        );
+    }
+
+    #[test]
+    fn macro_arguments_substitute() {
+        let a = atoms("\\newcommand{\\avg}[1]{\\frac{#1}{2}}\\avg{x+y}");
+        assert_eq!(a.len(), 1);
+        let Field::Fraction {
+            numerator,
+            denominator,
+            ..
+        } = &a[0].nucleus
+        else {
+            panic!("expected fraction, got {:?}", a[0].nucleus)
+        };
+        assert_eq!(numerator.atoms().count(), 3);
+        assert_eq!(
+            denominator.atoms().next().unwrap().nucleus,
+            Field::Symbol('2')
+        );
+        // Two arguments land in order.
+        let a = atoms("\\newcommand{\\pair}[2]{(#1,#2)}\\pair{a}{b}");
+        let nuclei: Vec<Field> = a.iter().map(|at| at.nucleus.clone()).collect();
+        assert_eq!(
+            nuclei,
+            vec![
+                Field::Symbol('('),
+                Field::Symbol('a'),
+                Field::Symbol(','),
+                Field::Symbol('b'),
+                Field::Symbol(')'),
+            ]
+        );
+        // A braced argument keeps its own nested braces balanced.
+        let a = atoms("\\newcommand{\\avg}[1]{\\frac{#1}{2}}\\avg{\\frac{a}{b}}");
+        let Field::Fraction { numerator, .. } = &a[0].nucleus else {
+            panic!("expected fraction, got {:?}", a[0].nucleus)
+        };
+        assert_eq!(numerator.atoms().count(), 1);
+        assert!(matches!(
+            numerator.atoms().next().unwrap().nucleus,
+            Field::Fraction { .. }
+        ));
+        // A parameter past the argument count splices nothing.
+        let a = atoms("\\newcommand{\\q}[1]{#1#2}\\q{a}");
+        assert_eq!(a.len(), 1);
+        assert_eq!(a[0].nucleus, Field::Symbol('a'));
+    }
+
+    #[test]
+    fn macro_optional_argument_defaults() {
+        let def = "\\newcommand{\\rt}[2][2]{\\sqrt[#1]{#2}}";
+        let a = atoms(&format!("{def}\\rt{{x}}"));
+        let Field::Radical { degree, .. } = &a[0].nucleus else {
+            panic!("expected radical, got {:?}", a[0].nucleus)
+        };
+        let deg = degree.as_ref().expect("default fills the degree");
+        assert_eq!(deg.atoms().next().unwrap().nucleus, Field::Symbol('2'));
+        let a = atoms(&format!("{def}\\rt[3]{{x}}"));
+        let Field::Radical { degree, .. } = &a[0].nucleus else {
+            panic!("expected radical, got {:?}", a[0].nucleus)
+        };
+        let deg = degree.as_ref().expect("bracket overrides the default");
+        assert_eq!(deg.atoms().next().unwrap().nucleus, Field::Symbol('3'));
+    }
+
+    #[test]
+    fn renewcommand_overrides_and_macros_shadow_vocabulary() {
+        let a = atoms("\\newcommand{\\f}{x}\\renewcommand{\\f}{y}\\f");
+        assert_eq!(a[0].nucleus, Field::Symbol('y'));
+        let a = atoms("\\renewcommand{\\alpha}{\\beta}\\alpha");
+        assert_eq!(a[0].nucleus, Field::Symbol('\u{03B2}'));
+    }
+
+    #[test]
+    fn runaway_macros_hit_their_budgets() {
+        // Self-recursion terminates, the cap leaving a literal tail.
+        let list = parse("\\newcommand{\\a}{\\a}\\a");
+        assert!(list
+            .atoms()
+            .any(|at| matches!(&at.nucleus, Field::Literal(t) if t == "\\a")));
+        // A doubling bomb stays bounded instead of exploding.
+        let bomb = "\\newcommand{\\a}{zzzzzzzzzz}\
+                    \\newcommand{\\b}{\\a\\a\\a\\a\\a\\a\\a\\a\\a\\a}\
+                    \\newcommand{\\c}{\\b\\b\\b\\b\\b\\b\\b\\b\\b\\b}\
+                    \\newcommand{\\d}{\\c\\c\\c\\c\\c\\c\\c\\c\\c\\c}\
+                    \\newcommand{\\e}{\\d\\d\\d\\d\\d\\d\\d\\d\\d\\d}\\e";
+        let list = parse(bomb);
+        assert!(list.atoms().count() < 100_000);
+        // The token ceiling stops a wide, shallow expansion; the numbers
+        // sit above the 50k ceiling but below the expansion cap.
+        let body = "z".repeat(300);
+        let calls = "\\z".repeat(220);
+        let list = parse(&format!("\\newcommand{{\\z}}{{{body}}}{calls}"));
+        assert!(list.atoms().count() < 220 * 300);
+        assert!(list
+            .atoms()
+            .any(|at| matches!(&at.nucleus, Field::Literal(t) if t == "\\z")));
+    }
+
+    #[test]
+    fn malformed_definitions_degrade_to_literals() {
+        for tex in [
+            "\\newcommand",
+            "\\newcommand{\\a}",
+            "\\newcommand{a}{b}",
+            "\\newcommand{\\a}[x]{b}",
+            "\\newcommand{\\a}[12]{b}",
+            "\\newcommand{\\a",
+            "\\newcommand{\\a}{b",
+            "\\renewcommand",
+        ] {
+            let _ = parse(tex);
+        }
+        let a = atoms("\\newcommand{a}{b}x");
+        assert!(matches!(&a[0].nucleus, Field::Literal(_)));
+        assert_eq!(a.last().unwrap().nucleus, Field::Symbol('x'));
+    }
+
+    #[test]
+    fn expansions_stamp_the_call_site() {
+        let src = "\\newcommand{\\R}{\\mathbb{R}}\\R^2";
+        let a = atoms(src);
+        assert_eq!(a.len(), 1);
+        let call = src.rfind("\\R").unwrap();
+        assert_eq!(a[0].nucleus_span, call..call + 2);
+        assert_eq!(a[0].span, call..src.len());
+        // Argument tokens keep their own source spans.
+        let src = "\\newcommand{\\w}[1]{\\hat{#1}}\\w{x}";
+        let a = atoms(src);
+        let Field::Accent { base, .. } = &a[0].nucleus else {
+            panic!("expected accent, got {:?}", a[0].nucleus)
+        };
+        let x = src.rfind('x').unwrap();
+        assert_eq!(base.atoms().next().unwrap().span, x..x + 1);
     }
 
     #[test]

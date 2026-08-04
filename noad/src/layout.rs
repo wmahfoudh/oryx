@@ -93,13 +93,22 @@ const SPACING: [[i8; 8]; 8] = [
 
 /// The classic italic remapping: letters render from the Mathematical
 /// Alphanumeric block, the way TeX sets variables. Latin h is the one hole
-/// in the block, U+210E Planck constant. Uppercase Greek stays upright.
+/// in the block, U+210E Planck constant. Uppercase Greek stays upright;
+/// the variant Greek letters and the partial differential sit outside the
+/// α..ω run and map to their own italic codepoints.
 fn math_italic(c: char) -> char {
     let mapped = match c {
         'h' => 0x210E,
         'a'..='z' => 0x1D44E + (c as u32 - 'a' as u32),
         'A'..='Z' => 0x1D434 + (c as u32 - 'A' as u32),
         '\u{03B1}'..='\u{03C9}' => 0x1D6FC + (c as u32 - 0x03B1),
+        '\u{03D1}' => 0x1D717,
+        '\u{03D5}' => 0x1D719,
+        '\u{03D6}' => 0x1D71B,
+        '\u{03F0}' => 0x1D718,
+        '\u{03F1}' => 0x1D71A,
+        '\u{03F5}' => 0x1D716,
+        '\u{2202}' => 0x1D715,
         _ => c as u32,
     };
     char::from_u32(mapped).unwrap_or(c)
@@ -1091,6 +1100,40 @@ mod tests {
     }
 
     #[test]
+    fn every_command_table_codepoint_has_a_stix_glyph() {
+        use crate::MathFont as _;
+        let f = font();
+        for (name, ch, _) in crate::parse::VOCABULARY {
+            let c = math_italic(*ch);
+            assert!(f.glyph(c).is_some(), "\\{name} U+{:04X}", c as u32);
+        }
+        for (name, ch) in crate::parse::DELIMITERS {
+            assert!(f.glyph(*ch).is_some(), "\\{name} U+{:04X}", *ch as u32);
+        }
+        for (name, ch, _) in crate::parse::ACCENTS {
+            assert!(f.glyph(*ch).is_some(), "\\{name} U+{:04X}", *ch as u32);
+        }
+    }
+
+    #[test]
+    fn variant_greek_and_partial_italicize() {
+        // The variant letters sit outside the α..ω run but TeX still
+        // sets them italic, as it does the partial differential.
+        for (tex, italic) in [
+            ("\\phi", '\u{1D719}'),
+            ("\\epsilon", '\u{1D716}'),
+            ("\\vartheta", '\u{1D717}'),
+            ("\\varkappa", '\u{1D718}'),
+            ("\\varrho", '\u{1D71A}'),
+            ("\\varpi", '\u{1D71B}'),
+            ("\\partial", '\u{1D715}'),
+        ] {
+            let l = lay(tex);
+            assert_eq!(l.glyphs[0].glyph, glyph_of(italic), "{tex}");
+        }
+    }
+
+    #[test]
     fn spacing_matrix_places_medium_and_thick_spaces() {
         // Ord Bin Ord: medium spaces, 4/18 em.
         let l = lay("a+b");
@@ -2022,5 +2065,105 @@ mod tests {
             l.glyphs.iter().all(|g| (g.size - expect).abs() < EPS),
             "cells set at script size"
         );
+    }
+
+    /// A deterministic xorshift step, the fuzz harness's only source of
+    /// variation.
+    fn xorshift(state: &mut u64) -> u64 {
+        let mut x = *state;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        *state = x;
+        x
+    }
+
+    /// One mutation of a source string: truncate, delete, insert a
+    /// syntax character, duplicate a run, or swap two characters, always
+    /// on character boundaries.
+    fn mutate(src: &str, state: &mut u64) -> String {
+        const SPECIALS: &[char] = &['\\', '{', '}', '^', '_', '&', '#', '[', ']', '%', '\''];
+        let mut out: Vec<char> = src.chars().collect();
+        if out.is_empty() {
+            return String::new();
+        }
+        let i = (xorshift(state) as usize) % out.len();
+        match xorshift(state) % 5 {
+            0 => out.truncate(i),
+            1 => {
+                out.remove(i);
+            }
+            2 => {
+                let c = SPECIALS[(xorshift(state) as usize) % SPECIALS.len()];
+                out.insert(i, c);
+            }
+            3 => {
+                let j = (xorshift(state) as usize) % out.len();
+                let (a, b) = (i.min(j), i.max(j));
+                let run: Vec<char> = out[a..b].to_vec();
+                out.splice(a..a, run);
+            }
+            _ => {
+                let j = (xorshift(state) as usize) % out.len();
+                out.swap(i, j);
+            }
+        }
+        out.into_iter().collect()
+    }
+
+    #[test]
+    fn fuzzed_real_world_corpus_never_panics() {
+        let corpus: &[&str] = &[
+            "E = mc^2",
+            "x = \\frac{-b \\pm \\sqrt{b^2 - 4ac}}{2a}",
+            "\\int_{-\\infty}^{\\infty} e^{-x^2}\\,dx = \\sqrt{\\pi}",
+            "e^{i\\pi} + 1 = 0",
+            "\\sum_{n=1}^{\\infty} \\frac{1}{n^2} = \\frac{\\pi^2}{6}",
+            "\\nabla \\times \\vec{B} = \\mu_0 \\vec{J} + \\mu_0 \\varepsilon_0 \
+             \\frac{\\partial \\vec{E}}{\\partial t}",
+            "i\\hbar\\frac{\\partial}{\\partial t}\\Psi = \\hat{H}\\Psi",
+            "\\begin{pmatrix} \\cos\\theta & -\\sin\\theta \\\\ \
+             \\sin\\theta & \\cos\\theta \\end{pmatrix}",
+            "|x| = \\begin{cases} x & x \\geq 0 \\\\ -x & x < 0 \\end{cases}",
+            "\\begin{aligned} (a+b)^2 &= a^2 + 2ab + b^2 \\\\ &\\geq 4ab \\end{aligned}",
+            "\\lim_{x \\to 0} \\frac{\\sin x}{x} = 1",
+            "\\binom{n}{k} = \\frac{n!}{k!(n-k)!}",
+            "\\hat{f}(\\xi) = \\int_{-\\infty}^{\\infty} f(x)\\, e^{-2\\pi i x \\xi}\\,dx",
+            "\\{x \\in \\mathbb{R} : x^2 < 2\\} \\subseteq \\mathbb{Q}^c",
+            "\\newcommand{\\avg}[1]{\\left\\langle #1 \\right\\rangle} \
+             \\avg{x^2} - \\avg{x}^2",
+            "\\sqrt{2} = 1 + \\frac{1}{2 + \\frac{1}{2 + \\frac{1}{2 + \\cdots}}}",
+            "\\oint_{\\partial \\Sigma} \\vec{F} \\cdot d\\vec{r} = \
+             \\iint_{\\Sigma} \\nabla \\times \\vec{F} \\cdot d\\vec{S}",
+            "\\operatorname{Var}(X) = \\mathbb{E}[X^2] - \\mathbb{E}[X]^2",
+            "\\frac{\\mathrm{d}}{\\mathrm{d}x} \\ln x = \\frac{1}{x}",
+            "\\lVert x + y \\rVert \\leq \\lVert x \\rVert + \\lVert y \\rVert",
+            "\\forall \\epsilon > 0\\, \\exists \\delta > 0 : |x - a| < \\delta \
+             \\implies |f(x) - f(a)| < \\epsilon",
+            "P(A \\mid B) = \\frac{P(B \\mid A)\\,P(A)}{P(B)} \\quad \\text{(Bayes)}",
+            "\\overrightarrow{AB} + \\overrightarrow{BC} = \\overrightarrow{AC}",
+            "\\bigcup_{i=1}^{n} A_i \\supseteq \\bigcap_{i=1}^{n} A_i",
+            "\\sqrt[3]{x^3 + y^3} \\neq x + y",
+            "\\newcommand{\\norm}[2][2]{\\lVert #2 \\rVert_{#1}} \
+             \\operatorname*{argmin}_{w} \\norm[1]{Xw - y}",
+            "A \\subsetneq B \\iff A \\subseteq B \\land A \\neq B",
+            "x^{y^{z^w}} + {a_b}_{c_d}",
+        ];
+        let f = font();
+        let mut state: u64 = 0x243F_6A88_85A3_08D3;
+        for src in corpus {
+            for round in 0..49 {
+                let tex = if round == 0 {
+                    (*src).to_string()
+                } else {
+                    mutate(src, &mut state)
+                };
+                for style in [MathStyle::Display, MathStyle::Text] {
+                    let l = layout(&tex, style, SIZE, &f);
+                    assert!(l.width.is_finite(), "{tex}");
+                    assert!(l.ascent.is_finite() && l.descent.is_finite(), "{tex}");
+                }
+            }
+        }
     }
 }

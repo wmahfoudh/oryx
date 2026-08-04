@@ -93,6 +93,44 @@ fences from extenders:
 
 $$\begin{pmatrix} 1 \\ 2 \\ 3 \\ 4 \\ 5 \\ 6 \\ 7 \\ 8 \\ 9 \\ 10 \end{pmatrix}$$
 
+## Macros
+
+A document defines its own commands and uses them in the same span:
+
+$$\newcommand{\avg}[1]{\left\langle #1 \right\rangle} \operatorname{Var}(X) = \avg{X^2} - \avg{X}^2$$
+
+An optional first argument takes a default, here the norm's index:
+
+$$\newcommand{\norm}[2][2]{\lVert #2 \rVert_{#1}} \norm{v} \quad \norm[1]{v} \quad \norm[\infty]{v}$$
+
+## The wider vocabulary
+
+Arrows and mappings: $f \colon A \hookrightarrow B \twoheadrightarrow C$,
+$x \mapsto x^2$, $P \iff Q \implies R$, and equilibria
+$A \rightleftharpoons B$. Relations with their negations:
+$a \ll b \preceq c \sim d$, $A \subsetneq B \nsubseteq C$, $p \nmid q$,
+$u \parallel v \perp w$. Big operators range over sets:
+$\bigcup_i A_i \supseteq \bigcap_i A_i$, $\bigoplus_k V_k$,
+$\oint_\gamma \omega$, $\iint_D f \, \mathrm{d}A$.
+
+Variant Greek and the letterlike singletons:
+$\varphi\ \vartheta\ \varpi\ \varrho\ \varsigma\ \digamma$, $\hbar$,
+$\ell$, $\Re$, $\Im$, $\aleph$, $\wp$, $\mho$. Logic and ornament:
+$\forall x\ \exists y : \neg(x \land y) \lor \top$, the suits
+$\spadesuit \heartsuit \diamondsuit \clubsuit$, the accidentals
+$\flat \natural \sharp$, and $\therefore$, $\because$.
+
+The delimiter rows pair up: $\lvert x \rvert$, $\lVert A \rVert$,
+$\lceil x \rceil$, $\lfloor y \rfloor$, corners
+$\ulcorner p \urcorner$, and arrows stretch as fences:
+$\left\uparrow \frac{a}{b} \right\downarrow$. The arrow accents cover
+vectors both ways: $\overrightarrow{AB}$, $\overleftarrow{BA}$,
+$\overleftrightarrow{AB}$, with $\dddot{x}$ and $\widecheck{abc}$
+rounding out the family. Operator names grew their analysis set:
+$\operatorname*{argmin}_w f(w)$, $\operatorname{Var}(X)$, $\csch x$,
+$\sech y$, and $a \bmod n$; the upright differential writes
+$\frac{\mathrm{d}}{\mathrm{d}x}$.
+
 ## The gate
 
 Prices never become equations: $5-$10, US$100 vs CA$120, and
@@ -103,4 +141,7 @@ math where ambiguity remains: $`k^2`$. An escaped \$50 stays a dollar.
 
 A command the engine does not know yet degrades quietly, in place:
 $x = \undefinedop{y} + z^2$ typesets everything it understands and
-carries the rest as literal TeX in the math color.
+carries the rest as literal TeX in the math color. A runaway macro
+exhausts its budget and degrades the same way:
+$\newcommand{\selfref}{\selfref} \selfref$ terminates as a literal
+instead of recursing.

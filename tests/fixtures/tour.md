@@ -175,6 +175,12 @@ Environments lay their grids: matrices, cases and aligned derivations:
 
 $$R = \begin{pmatrix} \cos\theta & -\sin\theta \\ \sin\theta & \cos\theta \end{pmatrix}$$
 
+The vocabulary spans the KaTeX families, $\varphi \nleq \psi$,
+$A \hookrightarrow B$, $\operatorname{Var}(X)$, $\lVert v \rVert$, and
+documents define their own macros:
+
+$$\newcommand{\avg}[1]{\left\langle #1 \right\rangle} \avg{x^2} - \avg{x}^2 \geq 0$$
+
 [^1]: The first footnote definition, written mid-document.
 [^note]: The second definition, with the label rendered as its marker.
 
