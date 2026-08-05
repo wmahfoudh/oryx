@@ -424,6 +424,16 @@ impl Sidebar {
         let ui = &theme.ui;
         let width = self.width;
         painter.fill(0.0, 0.0, width, h, 0.0, ui.sidebar_bg);
+        self.list_h = h - 2.0 * PAD - CAPTION_H;
+        match self.tab {
+            Tab::Files => self.draw_files(painter, theme),
+            Tab::Outline => self.draw_outline(painter, theme, outline, current),
+        }
+        // Masks cover row overflow above and below the list viewport; the
+        // captions and the border paint over them.
+        painter.fill(0.0, 0.0, width, PAD + CAPTION_H, 0.0, ui.sidebar_bg);
+        painter.fill(0.0, h - PAD, width, PAD, 0.0, ui.sidebar_bg);
+        self.draw_captions(painter, theme);
         painter.line(
             width - 0.5,
             0.0,
@@ -432,12 +442,6 @@ impl Sidebar {
             1.0,
             theme.blocks.table_border,
         );
-        self.list_h = h - 2.0 * PAD - CAPTION_H;
-        self.draw_captions(painter, theme);
-        match self.tab {
-            Tab::Files => self.draw_files(painter, theme),
-            Tab::Outline => self.draw_outline(painter, theme, outline, current),
-        }
     }
 
     /// The two tab captions: a small icon beside a text label, the
@@ -674,6 +678,29 @@ fn truncated(painter: &mut Painter, name: &str, avail: f32, weight: u16) -> Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::doc::markdown;
+    use crate::style::fonts::FontStore;
+    use tiny_skia::Pixmap;
+
+    /// Pixels outside the list viewport: the caption band above and the
+    /// padding strip below. Scrolling the list must never repaint them.
+    fn chrome_pixels(
+        side: &mut Sidebar,
+        outline: &mut OutlineTree,
+        fonts: &mut FontStore,
+        theme: &Theme,
+    ) -> Vec<u8> {
+        let (w, h) = (260usize, 300usize);
+        let mut pixmap = Pixmap::new(w as u32, h as u32).unwrap();
+        let mut painter = Painter::new(&mut pixmap, fonts, None);
+        side.draw(&mut painter, theme, outline, None);
+        let row = w * 4;
+        let top = (PAD + CAPTION_H) as usize;
+        let bottom = h - PAD as usize;
+        let mut band = pixmap.data()[..top * row].to_vec();
+        band.extend_from_slice(&pixmap.data()[bottom * row..]);
+        band
+    }
 
     fn temp_tree(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("oryx-side-{}-{name}", std::process::id()));
@@ -700,6 +727,36 @@ mod tests {
 
     fn names(side: &Sidebar) -> Vec<String> {
         side.entries.iter().map(|e| e.name.clone()).collect()
+    }
+
+    #[test]
+    fn a_scrolled_outline_paints_only_inside_the_list_viewport() {
+        let dir = temp_tree("chrome-outline");
+        let mut side = Sidebar::new(&dir);
+        side.set_tab(Tab::Outline);
+        let source: String = (1..=30).map(|i| format!("# Heading {i}\n\n")).collect();
+        let doc = markdown::parse(&*source);
+        let mut outline = OutlineTree::build(&doc);
+        let mut fonts = FontStore::new();
+        let theme = Theme::default_dark();
+        let rested = chrome_pixels(&mut side, &mut outline, &mut fonts, &theme);
+        outline.scroll = ROW_H / 2.0;
+        let scrolled = chrome_pixels(&mut side, &mut outline, &mut fonts, &theme);
+        assert_eq!(rested, scrolled, "a partial row leaked into the chrome");
+    }
+
+    #[test]
+    fn a_scrolled_file_tree_paints_only_inside_the_list_viewport() {
+        let dir = temp_tree("chrome-files");
+        let mut side = Sidebar::new(&dir);
+        let doc = markdown::parse("");
+        let mut outline = OutlineTree::build(&doc);
+        let mut fonts = FontStore::new();
+        let theme = Theme::default_dark();
+        let rested = chrome_pixels(&mut side, &mut outline, &mut fonts, &theme);
+        side.scroll = ROW_H / 2.0;
+        let scrolled = chrome_pixels(&mut side, &mut outline, &mut fonts, &theme);
+        assert_eq!(rested, scrolled, "a partial row leaked into the chrome");
     }
 
     #[test]

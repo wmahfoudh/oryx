@@ -790,7 +790,7 @@ mod tests {
     use crate::doc::images::MediaCache;
     use crate::doc::markdown;
     use crate::doc::model::Document;
-    use crate::export::PageSize;
+    use crate::export::{Orientation, PageSize};
     use crate::layout::{layout, ViewConfig};
     use crate::style::fonts::FontStore;
     use crate::style::theme::Theme;
@@ -827,7 +827,7 @@ mod tests {
     fn no_page_cuts_a_line() {
         let doc = many_paragraphs();
         let l = laid_out(&doc);
-        let g = PageGeometry::new(PageSize::A4, 11.0);
+        let g = PageGeometry::new(PageSize::A4, Orientation::Portrait, 11.0);
         let pages = paginate(&doc, &l, &g);
         assert!(pages.len() > 1, "120 paragraphs need more than one page");
         for page in &pages {
@@ -846,7 +846,11 @@ mod tests {
     fn every_page_starts_flush_on_its_first_line() {
         let doc = many_paragraphs();
         let l = laid_out(&doc);
-        let pages = paginate(&doc, &l, &PageGeometry::new(PageSize::A4, 11.0));
+        let pages = paginate(
+            &doc,
+            &l,
+            &PageGeometry::new(PageSize::A4, Orientation::Portrait, 11.0),
+        );
         for page in &pages {
             assert_eq!(page.top, l.runs[page.runs.start].y, "no stray leading gap");
         }
@@ -856,7 +860,11 @@ mod tests {
     fn the_pages_cover_every_run_exactly_once() {
         let doc = many_paragraphs();
         let l = laid_out(&doc);
-        let pages = paginate(&doc, &l, &PageGeometry::new(PageSize::A4, 11.0));
+        let pages = paginate(
+            &doc,
+            &l,
+            &PageGeometry::new(PageSize::A4, Orientation::Portrait, 11.0),
+        );
         assert_eq!(pages[0].runs.start, 0);
         for pair in pages.windows(2) {
             assert_eq!(pair[0].runs.end, pair[1].runs.start, "no gap, no overlap");
@@ -868,7 +876,7 @@ mod tests {
     fn an_item_taller_than_a_page_is_placed_anyway() {
         let doc = markdown::parse("# X");
         let l = laid_out_with_body_size(&doc, 400.0);
-        let g = PageGeometry::new(PageSize::A4, 11.0);
+        let g = PageGeometry::new(PageSize::A4, Orientation::Portrait, 11.0);
         let tall = metrics::LINE_HEIGHT * l.runs[0].size;
         assert!(tall > g.content_height(), "the fixture really is oversized");
         let pages = paginate(&doc, &l, &g);
@@ -880,7 +888,11 @@ mod tests {
     fn an_empty_document_still_makes_one_page() {
         let doc = markdown::parse("");
         let l = laid_out(&doc);
-        let pages = paginate(&doc, &l, &PageGeometry::new(PageSize::A4, 11.0));
+        let pages = paginate(
+            &doc,
+            &l,
+            &PageGeometry::new(PageSize::A4, Orientation::Portrait, 11.0),
+        );
         assert_eq!(pages.len(), 1, "a PDF cannot have zero pages");
         assert!(pages[0].runs.is_empty());
     }
@@ -894,7 +906,11 @@ mod tests {
         fence.push_str("```\n");
         let doc = markdown::parse(fence.as_str());
         let l = laid_out(&doc);
-        let pages = paginate(&doc, &l, &PageGeometry::new(PageSize::A4, 11.0));
+        let pages = paginate(
+            &doc,
+            &l,
+            &PageGeometry::new(PageSize::A4, Orientation::Portrait, 11.0),
+        );
         assert!(pages.len() > 1, "90 code lines need more than one page");
         let upper = &pages[0].rects[0];
         let lower = &pages[1].rects[0];
@@ -912,7 +928,7 @@ mod rules {
     use crate::doc::images::MediaCache;
     use crate::doc::markdown;
     use crate::doc::model::{BlockKind, Document};
-    use crate::export::{PageGeometry, PageSize};
+    use crate::export::{Orientation, PageGeometry, PageSize};
     use crate::layout::{layout, ViewConfig};
     use crate::style::fonts::FontStore;
     use crate::style::theme::Theme;
@@ -920,7 +936,7 @@ mod rules {
     use std::path::PathBuf;
 
     fn geometry() -> PageGeometry {
-        PageGeometry::new(PageSize::A4, 11.0)
+        PageGeometry::new(PageSize::A4, Orientation::Portrait, 11.0)
     }
 
     /// Headings every few paragraphs, each paragraph long enough to wrap,
@@ -1131,7 +1147,7 @@ mod rules {
     fn an_image_taller_than_a_page_is_scaled_to_fit() {
         let doc = markdown::parse("![logo](oryx-test.png)\n");
         // A tiny page makes any image oversized without a fixture file.
-        let g = PageGeometry::new(PageSize::A4, 200.0);
+        let g = PageGeometry::new(PageSize::A4, Orientation::Portrait, 200.0);
         let l = laid_out_with_body_size(&doc, 11.0);
         let source = l.images[0].clone();
         assert!(
@@ -1373,7 +1389,7 @@ mod rules {
         let mut l = laid_out(&doc);
         let total = l.math_glyphs.len();
         assert!(total > 0, "the fixture lays out math");
-        let g = PageGeometry::new(PageSize::A4, 11.0);
+        let g = PageGeometry::new(PageSize::A4, Orientation::Portrait, 11.0);
         let mut paginator = Paginator::new();
         let pages = paginator.advance(&doc, &l, &g, true);
         assert!(pages.len() > 1, "the fixture spans pages");

@@ -3,7 +3,7 @@
 
 use winit::keyboard::{Key, NamedKey};
 
-use crate::export::{ExportSettings, PageSize, Progress};
+use crate::export::{ExportSettings, Orientation, PageSize, Progress};
 use crate::paint::painter::Painter;
 use crate::style::fonts::BODY_FAMILY;
 use crate::style::theme::{Rgba, Theme};
@@ -159,17 +159,19 @@ pub enum Row {
     CodeFamily,
     CodeSize,
     Page,
+    Orientation,
     PageNumbers,
     Export,
 }
 
-const ROWS: [Row; 8] = [
+const ROWS: [Row; 9] = [
     Row::Theme,
     Row::BodyFamily,
     Row::BodySize,
     Row::CodeFamily,
     Row::CodeSize,
     Row::Page,
+    Row::Orientation,
     Row::PageNumbers,
     Row::Export,
 ];
@@ -183,6 +185,7 @@ impl Row {
             Row::CodeFamily => "code font",
             Row::CodeSize => "code size",
             Row::Page => "page",
+            Row::Orientation => "orientation",
             Row::PageNumbers => "page numbers",
             Row::Export => "Export",
         }
@@ -258,6 +261,12 @@ impl ExportDialog {
                 self.settings.code_size = step_size(self.settings.code_size, delta as f32)
             }
             Row::Page => self.settings.page = cycle_page(self.settings.page, delta),
+            Row::Orientation => {
+                self.settings.orientation = match self.settings.orientation {
+                    Orientation::Portrait => Orientation::Landscape,
+                    Orientation::Landscape => Orientation::Portrait,
+                }
+            }
             Row::PageNumbers => self.settings.page_numbers = !self.settings.page_numbers,
             _ => {}
         }
@@ -334,6 +343,7 @@ impl ExportDialog {
             Row::CodeFamily => self.settings.code_family.clone(),
             Row::CodeSize => format!("{:.0}", self.settings.code_size),
             Row::Page => self.settings.page.label().to_string(),
+            Row::Orientation => self.settings.orientation.label().to_string(),
             Row::PageNumbers => {
                 if self.settings.page_numbers {
                     "on".to_string()
@@ -545,7 +555,7 @@ impl Overlay for ExportDialog {
                     return OverlayResult::Apply(Action::Export(Box::new(self.settings.clone())))
                 }
                 Row::PageNumbers => self.toggle(),
-                Row::BodySize | Row::CodeSize | Row::Page => {}
+                Row::BodySize | Row::CodeSize | Row::Page | Row::Orientation => {}
                 _ => self.open_pick(),
             },
             Key::Named(NamedKey::Escape) => return OverlayResult::Close,
@@ -570,6 +580,9 @@ impl Overlay for ExportDialog {
         let row = ((y - py - DIALOG_HEADER_H) / DIALOG_ROW_H).floor();
         if row >= 0.0 && (row as usize) < ROWS.len() {
             self.row = row as usize;
+            if self.current() == Row::Export {
+                return OverlayResult::Apply(Action::Export(Box::new(self.settings.clone())));
+            }
         }
         OverlayResult::Open
     }
@@ -756,6 +769,41 @@ mod tests {
                 assert_eq!(settings.page, PageSize::Letter, "the edit travels with it");
             }
             _ => panic!("the export row applies"),
+        }
+    }
+
+    #[test]
+    fn the_orientation_cycles_both_ways() {
+        let mut d = dialog();
+        d.select(Row::Orientation);
+        d.right();
+        assert_eq!(d.settings().orientation, Orientation::Landscape);
+        d.right();
+        assert_eq!(
+            d.settings().orientation,
+            Orientation::Portrait,
+            "wraps round"
+        );
+        d.left();
+        assert_eq!(
+            d.settings().orientation,
+            Orientation::Landscape,
+            "and the other way"
+        );
+    }
+
+    #[test]
+    fn a_click_on_the_export_row_starts_the_export() {
+        let mut d = dialog();
+        d.geometry = (100.0, 100.0, DIALOG_W, 400.0);
+        d.select(Row::Page);
+        d.right();
+        let y = 100.0 + DIALOG_HEADER_H + (ROWS.len() as f32 - 1.0) * DIALOG_ROW_H + 5.0;
+        match d.click(150.0, y) {
+            OverlayResult::Apply(Action::Export(settings)) => {
+                assert_eq!(settings.page, PageSize::Letter, "the edit travels with it");
+            }
+            _ => panic!("a click on the export row applies"),
         }
     }
 

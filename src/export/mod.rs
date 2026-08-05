@@ -33,7 +33,8 @@ use crate::platform::config::Config;
 use crate::style::fonts::FontStore;
 use crate::style::theme::Theme;
 
-/// The sheet an export writes onto, portrait only.
+/// The sheet an export writes onto; `points` is its portrait size and
+/// the orientation turns it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PageSize {
@@ -62,6 +63,24 @@ impl PageSize {
     }
 }
 
+/// Which way the sheet turns: landscape swaps its axes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Orientation {
+    #[default]
+    Portrait,
+    Landscape,
+}
+
+impl Orientation {
+    pub fn label(self) -> &'static str {
+        match self {
+            Orientation::Portrait => "portrait",
+            Orientation::Landscape => "landscape",
+        }
+    }
+}
+
 /// What an export renders with, held apart from the appearance settings
 /// so a reader on a dark theme exports light without switching themes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -73,12 +92,13 @@ pub struct ExportSettings {
     pub body_size: f32,
     pub code_size: f32,
     pub page: PageSize,
+    pub orientation: Orientation,
     pub page_numbers: bool,
 }
 
 impl ExportSettings {
     /// The values an export starts life with: whatever the reader is
-    /// looking at, on A4, numbered.
+    /// looking at, on portrait A4, numbered.
     pub fn seeded_from(config: &Config) -> ExportSettings {
         ExportSettings {
             theme: config.theme.clone(),
@@ -87,6 +107,7 @@ impl ExportSettings {
             body_size: config.body_size,
             code_size: config.code_size,
             page: PageSize::A4,
+            orientation: Orientation::Portrait,
             page_numbers: true,
         }
     }
@@ -110,8 +131,14 @@ pub struct PageGeometry {
 }
 
 impl PageGeometry {
-    pub fn new(page: PageSize, body_size: f32) -> PageGeometry {
-        let (width, height) = page.points();
+    pub fn new(page: PageSize, orientation: Orientation, body_size: f32) -> PageGeometry {
+        let (width, height) = match orientation {
+            Orientation::Portrait => page.points(),
+            Orientation::Landscape => {
+                let (w, h) = page.points();
+                (h, w)
+            }
+        };
         PageGeometry {
             width,
             height,
@@ -199,7 +226,7 @@ pub struct ExportPass {
 
 impl ExportPass {
     pub fn new(settings: &ExportSettings, theme: Theme, target: PathBuf) -> ExportPass {
-        let geometry = PageGeometry::new(settings.page, settings.body_size);
+        let geometry = PageGeometry::new(settings.page, settings.orientation, settings.body_size);
         let title = target
             .file_stem()
             .map(|stem| stem.to_string_lossy().to_string())
@@ -484,11 +511,22 @@ mod tests {
 
     #[test]
     fn a4_uses_the_same_margin_rules_as_the_screen() {
-        let g = PageGeometry::new(PageSize::A4, 11.0);
+        let g = PageGeometry::new(PageSize::A4, Orientation::Portrait, 11.0);
         assert_eq!((g.width, g.height), (595.28, 841.89));
         assert!((g.margin_x - 0.08 * 595.28).abs() < 0.01, "8 percent sides");
         assert_eq!(g.margin_y, 22.0, "2em of the body size");
         assert!((g.content_height() - (841.89 - 44.0)).abs() < 0.01);
+    }
+
+    #[test]
+    fn landscape_swaps_the_sheets_axes() {
+        let g = PageGeometry::new(PageSize::A4, Orientation::Landscape, 11.0);
+        assert_eq!((g.width, g.height), (841.89, 595.28));
+        assert!(
+            (g.margin_x - 0.08 * 841.89).abs() < 0.01,
+            "margins follow the turned sheet"
+        );
+        assert_eq!(g.margin_y, 22.0, "vertical margin still 2em");
     }
 
     #[test]

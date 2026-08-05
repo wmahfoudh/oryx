@@ -10,7 +10,7 @@ use oryx::doc::images::MediaCache;
 use oryx::doc::markdown;
 use oryx::doc::model::Document;
 use oryx::export::paginate::{paginate, Paginator};
-use oryx::export::{pdf, ExportPass, ExportSettings, PageGeometry, PageSize};
+use oryx::export::{pdf, ExportPass, ExportSettings, Orientation, PageGeometry, PageSize};
 use oryx::layout::{layout, layout_begin, layout_step, ViewConfig};
 use oryx::style::fonts::FontStore;
 use oryx::style::theme::Theme;
@@ -20,12 +20,13 @@ fn export_to_bytes(doc: &Document, page: PageSize) -> Vec<u8> {
 }
 
 fn export_with(doc: &Document, page: PageSize, page_numbers: bool) -> Vec<u8> {
-    export_cfg(doc, page, page_numbers, None)
+    export_cfg(doc, page, Orientation::Portrait, page_numbers, None)
 }
 
 fn export_cfg(
     doc: &Document,
     page: PageSize,
+    orientation: Orientation,
     page_numbers: bool,
     body_family: Option<&str>,
 ) -> Vec<u8> {
@@ -41,11 +42,12 @@ fn export_cfg(
         cfg.body_family = family.to_string();
     }
     let theme = Theme::default_dark();
-    let geometry = PageGeometry::new(page, cfg.body_size);
+    let geometry = PageGeometry::new(page, orientation, cfg.body_size);
     let settings = ExportSettings {
         body_size: cfg.body_size,
         code_size: cfg.code_size,
         page,
+        orientation,
         page_numbers,
         ..ExportSettings::default()
     };
@@ -93,6 +95,28 @@ fn the_media_box_matches_the_chosen_page_size() {
         .map(|v| v.as_float().unwrap())
         .collect();
     assert_eq!(sizes, vec![0.0, 0.0, 612.0, 792.0]);
+}
+
+#[test]
+fn a_landscape_export_writes_a_turned_media_box() {
+    let doc = markdown::parse("Short.");
+    let bytes = export_cfg(&doc, PageSize::Letter, Orientation::Landscape, false, None);
+    let pdf = Pdf::load_mem(&bytes).unwrap();
+    let (_, page) = pdf.get_pages().into_iter().next().unwrap();
+    let media = pdf
+        .get_object(page)
+        .unwrap()
+        .as_dict()
+        .unwrap()
+        .get(b"MediaBox")
+        .unwrap();
+    let sizes: Vec<f32> = media
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_float().unwrap())
+        .collect();
+    assert_eq!(sizes, vec![0.0, 0.0, 792.0, 612.0]);
 }
 
 #[test]
@@ -354,7 +378,13 @@ fn a_cff_face_embeds_as_cidfonttype0_with_fontfile3() {
         return;
     };
     let doc = markdown::parse("Some body text in a CFF face.");
-    let bytes = export_cfg(&doc, PageSize::A4, false, Some(&family));
+    let bytes = export_cfg(
+        &doc,
+        PageSize::A4,
+        Orientation::Portrait,
+        false,
+        Some(&family),
+    );
     let pdf = Pdf::load_mem(&bytes).unwrap();
     let fonts = cid_fonts(&pdf);
     assert!(
@@ -419,7 +449,10 @@ fn geometry_and_cfg() -> (PageGeometry, ViewConfig) {
         zoom: 1.0,
         ..ViewConfig::default()
     };
-    (PageGeometry::new(PageSize::A4, cfg.body_size), cfg)
+    (
+        PageGeometry::new(PageSize::A4, Orientation::Portrait, cfg.body_size),
+        cfg,
+    )
 }
 
 /// Feeds the paginator a layout grown `stride` steps at a time and

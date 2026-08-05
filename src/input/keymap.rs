@@ -105,14 +105,14 @@ pub const SHORTCUTS: &[Shortcut] = &[
         bindings: &[(Binding::Ctrl("b"), Command::Sidebar)],
     },
     Shortcut {
-        keys: "Ctrl+E",
+        keys: "Ctrl+P",
         action: "Export to PDF",
-        bindings: &[(Binding::Ctrl("e"), Command::Export)],
+        bindings: &[(Binding::Ctrl("p"), Command::Export)],
     },
     Shortcut {
-        keys: "Ctrl+Shift+E",
+        keys: "Ctrl+Shift+P",
         action: "Export settings",
-        bindings: &[(Binding::CtrlShift("e"), Command::ExportSettings)],
+        bindings: &[(Binding::CtrlShift("p"), Command::ExportSettings)],
     },
     Shortcut {
         keys: "F1",
@@ -298,6 +298,21 @@ mod tests {
         assert_eq!(command(&chr(","), true, false), Some(Command::Settings));
         assert_eq!(command(&chr("a"), true, false), Some(Command::SelectAll));
         assert_eq!(command(&chr("0"), true, false), Some(Command::ZoomReset));
+    }
+
+    #[test]
+    fn the_print_pair_exports_and_the_e_chords_are_free() {
+        assert_eq!(command(&chr("p"), true, false), Some(Command::Export));
+        assert_eq!(
+            command(&chr("P"), true, true),
+            Some(Command::ExportSettings)
+        );
+        assert_eq!(
+            command(&chr("e"), true, false),
+            None,
+            "reserved for the editing phase's view toggle"
+        );
+        assert_eq!(command(&chr("E"), true, true), None);
     }
 
     #[test]

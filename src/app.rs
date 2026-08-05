@@ -156,6 +156,7 @@ pub fn run(path: Option<PathBuf>, theme_name: Option<String>) -> anyhow::Result<
         export_warning: None,
         view_dirty: false,
         pre_edit: None,
+        pre_browse: None,
         overlay_canvas: None,
         sidebar: None,
         outline,
@@ -317,6 +318,9 @@ struct App {
     overlay_mouse: bool,
     /// Theme to restore when the editor closes without saving.
     pre_edit: Option<Theme>,
+    /// The confirmed theme while the browser is open: keyboard stepping
+    /// previews live, and a close without Enter or a click puts this back.
+    pre_browse: Option<Theme>,
     /// Reused overlay canvas and the region the last frame painted.
     overlay_canvas: Option<OverlayCanvas>,
     /// A running export, driven a slice at a time from the redraw.
@@ -971,6 +975,7 @@ impl App {
         if self.overlay.is_some() {
             self.overlay_result(OverlayResult::Close);
         } else {
+            self.pre_browse = Some(self.theme.clone());
             self.overlay = Some(Box::new(ThemeBrowser::new(
                 theme_dirs(),
                 &self.config.theme,
@@ -1463,12 +1468,23 @@ impl App {
                 if let Some(previous) = self.pre_edit.take() {
                     self.set_live_theme(previous);
                 }
+                // A browser closed on an unconfirmed keyboard preview:
+                // back to the confirmed theme.
+                if let Some(previous) = self.pre_browse.take() {
+                    if previous != self.theme {
+                        self.set_live_theme(previous);
+                    }
+                }
             }
             OverlayResult::Apply(Action::SetTheme(path)) => {
                 self.apply_theme(&path);
-                // A save from the editor moves its revert point forward.
+                // A save from the editor or a confirm from the browser
+                // moves the revert point forward.
                 if self.pre_edit.is_some() {
                     self.pre_edit = Some(self.theme.clone());
+                }
+                if self.pre_browse.is_some() {
+                    self.pre_browse = Some(self.theme.clone());
                 }
             }
             OverlayResult::Apply(Action::RenamedTheme { from, to }) => {
@@ -1479,7 +1495,12 @@ impl App {
             }
             OverlayResult::Apply(Action::EditTheme(path)) => {
                 if let Some(editor) = ThemeEditor::new(&path) {
-                    self.pre_edit = Some(self.theme.clone());
+                    // Opened from the browser, the revert point is the
+                    // confirmed theme, not a preview the arrows left live.
+                    self.pre_edit = Some(match self.pre_browse.take() {
+                        Some(confirmed) => confirmed,
+                        None => self.theme.clone(),
+                    });
                     let preview = editor.current();
                     self.overlay = Some(Box::new(editor));
                     self.set_live_theme(preview);

@@ -139,7 +139,7 @@ pub fn save_to(path: &Path, config: &Config) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::export::PageSize;
+    use crate::export::{Orientation, PageSize};
 
     fn temp_path(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("oryx-config-{}-{name}", std::process::id()))
@@ -232,7 +232,18 @@ mod tests {
         assert_eq!(export.body_size, 22.0);
         assert_eq!(export.code_family, config.code_family);
         assert_eq!(export.page, PageSize::A4);
+        assert_eq!(export.orientation, Orientation::Portrait);
         assert!(export.page_numbers, "on until the reader turns them off");
+    }
+
+    #[test]
+    fn an_export_table_without_orientation_reads_portrait() {
+        let path = temp_path("no-orientation.toml");
+        std::fs::write(&path, "[export]\ntheme = \"nord\"\n").unwrap();
+        let loaded = load_from(&path);
+        std::fs::remove_file(&path).unwrap();
+        let export = loaded.export.expect("the table is read");
+        assert_eq!(export.orientation, Orientation::Portrait);
     }
 
     #[test]
@@ -255,6 +266,7 @@ mod tests {
                 body_size: 11.0,
                 code_size: 9.0,
                 page: PageSize::Letter,
+                orientation: Orientation::Landscape,
                 page_numbers: false,
             }),
             window: Some(WindowState {

@@ -136,7 +136,7 @@ pub fn assert_first_frame_is_whole(laid: &Laid, what: &str) {
     );
 }
 
-/// The whole export path a Ctrl+E pays after highlighting settles: the
+/// The whole export path a Ctrl+P pays after highlighting settles: the
 /// streamed pass the app drives, fused layout, pagination and pooled
 /// emission flushing to a scratch file.
 pub fn measure_export(

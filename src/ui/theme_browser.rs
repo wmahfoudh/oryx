@@ -146,6 +146,19 @@ impl ThemeBrowser {
         }
     }
 
+    /// The highlighted theme as a live preview. Nothing persists: the app
+    /// puts the confirmed theme back when the browser closes unconfirmed.
+    fn preview(&self) -> OverlayResult {
+        match self
+            .rows
+            .get(self.selected)
+            .and_then(|row| theme::load_file(&row.path))
+        {
+            Some(theme) => OverlayResult::Apply(Action::PreviewTheme(Box::new(theme))),
+            None => OverlayResult::Open,
+        }
+    }
+
     /// Copies the row's file and immediately opens the copy for renaming.
     fn duplicate(&mut self, index: usize) {
         let Some(row) = self.rows.get(index) else {
@@ -547,10 +560,14 @@ impl Overlay for ThemeBrowser {
             Key::Named(NamedKey::ArrowDown) => {
                 if self.selected + 1 < self.rows.len() {
                     self.select(self.selected + 1);
+                    return self.preview();
                 }
             }
             Key::Named(NamedKey::ArrowUp) => {
-                self.select(self.selected.saturating_sub(1));
+                if self.selected > 0 {
+                    self.select(self.selected - 1);
+                    return self.preview();
+                }
             }
             Key::Named(NamedKey::Enter) => {
                 if let Some(row) = self.rows.get(self.selected) {
@@ -707,6 +724,39 @@ mod tests {
         let names: Vec<&str> = browser.rows.iter().map(|r| r.name.as_str()).collect();
         std::fs::remove_dir_all(&dir).unwrap();
         assert_eq!(names, ["beta-light", "zulu-light", "alpha-dark"]);
+    }
+
+    #[test]
+    fn stepping_with_the_keyboard_previews_the_highlighted_theme() {
+        let dir = temp_dir("preview");
+        std::fs::write(
+            dir.join("alpha-dark.toml"),
+            "[surface]\nbackground = \"#282a36\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("beta-light.toml"),
+            "[surface]\nbackground = \"#ffffff\"\n",
+        )
+        .unwrap();
+        let mut browser = ThemeBrowser::new(vec![dir.clone()], "beta-light");
+        let stepped = browser.key(&Key::Named(NamedKey::ArrowDown), false, false);
+        let pinned = browser.key(&Key::Named(NamedKey::ArrowDown), false, false);
+        std::fs::remove_dir_all(&dir).unwrap();
+        match stepped {
+            OverlayResult::Apply(Action::PreviewTheme(theme)) => {
+                assert_eq!(
+                    theme.surface.background,
+                    theme::parse_hex("#282a36").unwrap(),
+                    "the highlighted theme is the one previewed"
+                );
+            }
+            _ => panic!("stepping previews live"),
+        }
+        assert!(
+            matches!(pinned, OverlayResult::Open),
+            "a step against the end moves nothing and previews nothing"
+        );
     }
 
     #[test]
