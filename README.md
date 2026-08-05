@@ -7,7 +7,7 @@
 *Open it. Read it. Export it. Close it.<br> All in seconds, in one small binary.*
 
 ![Platforms](https://img.shields.io/badge/Platforms-Linux%20%7C%20Windows%20%7C%20macOS-blue)
-![Version](https://img.shields.io/badge/Version-0.13.0-purple)
+![Version](https://img.shields.io/badge/Version-0.13.1-purple)
 ![License](https://img.shields.io/badge/License-GPL--3.0-orange)
 
 [Intro](#intro) •
@@ -79,7 +79,7 @@ The command vocabulary follows KaTeX: Greek, binary operators, relations and the
 
 Thirty-one themes ship with Oryx. Each is a single TOML file with **51 color roles**, so every element can be colored on its own. A missing key falls back to a default; a malformed file is skipped, and the active theme stays.
 
-Press `Ctrl+T` and the theme browser previews themes and applies them live:
+Press `Ctrl+T` and the theme browser previews themes and applies them live. The arrow keys preview each theme as they step through the list, `Enter` keeps it, and `Escape` restores the previous one:
 
 <p align="center">
   <img src="screenshots/themes.png" alt="The theme browser">
@@ -95,9 +95,9 @@ Nine themes are original designs: `oryx-light` and its dark twin `oryx-dark`, `o
 
 ## Export to PDF
 
-`Ctrl+Shift+E` opens the export settings: theme, body font and size, code font and size, page size and page numbers. They are kept apart from the app's own appearance and remembered between runs, so reading in a dark theme at 22 points and exporting in a light one at 11 needs no switching back and forth.
+`Ctrl+Shift+P` opens the export settings: theme, body font and size, code font and size, page size, orientation and page numbers. They are kept apart from the app's own appearance and remembered between runs, so reading in a dark theme at 22 points and exporting in a light one at 11 needs no switching back and forth.
 
-`Ctrl+E` exports the document and asks where to save it. The page carries the document as it looks on screen with the configured export theme. Headings become the outline a PDF viewer navigates by, and the fonts are embedded. Emoji render in the PDF as images, so a document full of them exports fine.
+`Ctrl+P` exports the document and asks where to save it. The page carries the document as it looks on screen with the configured export theme. Headings become the outline a PDF viewer navigates by, and the fonts are embedded. Emoji render in the PDF as images, so a document full of them exports fine.
 
 **Care is taken so that**:
 
@@ -152,8 +152,8 @@ oryx --version          # print the version
 | `Ctrl+,` | Settings |
 | `Ctrl+T` | Theme browser |
 | `Ctrl+B` | Folder sidebar |
-| `Ctrl+E` | Export to PDF |
-| `Ctrl+Shift+E` | Export settings |
+| `Ctrl+P` | Export to PDF |
+| `Ctrl+Shift+P` | Export settings |
 | `F1` | Shortcuts help |
 | `F5` / `Ctrl+R` | Reload from disk |
 | `Ctrl+Plus` / `Ctrl+Minus` | Zoom in / out |
