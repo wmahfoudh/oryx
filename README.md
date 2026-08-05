@@ -1,25 +1,16 @@
 <div align="center">
 
-# Oryx
+![Oryx: a fast, native viewer for markdown and code](screenshots/hero.png)
 
-**A fast, native viewer for markdown and code.**
-
-*Open it. Read it. Export it. Close it.<br> All in seconds, in one small binary.*
-
-![Platforms](https://img.shields.io/badge/Platforms-Linux%20%7C%20Windows%20%7C%20macOS-blue)
 ![Version](https://img.shields.io/badge/Version-0.13.1-purple)
-![License](https://img.shields.io/badge/License-GPL--3.0-orange)
+![Made with Rust](https://img.shields.io/badge/Made%20with-Rust-orange?logo=rust&logoColor=white)
 
-[Intro](#intro) •
 [What it renders](#what-it-renders) •
-[Tools](#tools) •
 [Themes](#themes) •
 [PDF export](#export-to-pdf) •
 [Install](#install) •
 [How to use Oryx](#how-to-use-oryx) •
 [Performance](#performance)
-
-![Oryx rendering a markdown document](screenshots/hero.png)
 
 </div>
 
