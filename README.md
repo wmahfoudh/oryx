@@ -16,6 +16,7 @@
 [Themes](#themes) •
 [PDF export](#export-to-pdf) •
 [Install](#install) •
+[How to use Oryx](#how-to-use-oryx) •
 [Performance](#performance)
 
 ![Oryx rendering a markdown document](screenshots/hero.png)
@@ -24,7 +25,7 @@
 
 ## Intro
 
-Oryx started as a personal project. I consume a lot of markdown files and did not find a (very) fast tool that could render them beautifully on the desktop without the need for a browser. Exporting to PDF would be a plus. That was the first version of the functional specs. Today Oryx has evolved, adding new features and optimizing performance. Editing markdown is a tempting feature, but not on the roadmap at this stage.
+Oryx started as a personal project. I work with a lot of markdown files and did not find a (very) fast tool that could render them beautifully on the desktop without the need for a browser. Exporting to PDF would be a plus. That was the first version of the functional specs. Today Oryx has evolved, adding many features with a steady focus on performance. Editing markdown is a tempting feature, but not on the roadmap at this stage.
 
 - **Instant**: A document is on screen in well under 100 ms from cold, even an 8 MB file.
 - **Light**: Memory stays flat as you scroll, whatever the file size.
@@ -35,23 +36,23 @@ Oryx started as a personal project. I consume a lot of markdown files and did no
 
 ## What it renders
 
-The complete recognized syntax, markdown and embedded HTML, is cataloged construct by construct in [SYNTAX.md](SYNTAX.md). The [examples](examples/) folder shows it in whole documents and installs with Oryx.
+The complete recognized syntax, markdown and embedded HTML, is listed in [SYNTAX.md](SYNTAX.md). The [examples](examples/) folder is installed with Oryx and shows some real implementations.
 
-### Markdown, the whole everyday set
+### Markdown, the whole set
 
-Headings, bold, italic, strikethrough, inline code, links and bare URLs (a link to another file opens it in Oryx), nested blockquotes, horizontal rules, smart quotes and dashes, and emoji shortcodes like `:tada:`. Ordered, unordered and task lists nest as deep as needed, and a wrapped line aligns with the text above it, not with the bullet. Tables keep per-column alignment, shade alternating rows and wrap long cells, so a wide table never runs off the page.
+Headings, bold, italic, strikethrough, inline code, links and bare URLs (a link to another file opens it in Oryx), nested blockquotes, horizontal rules, smart quotes and dashes, and emoji shortcodes like `:tada:` :tada:. Ordered, unordered and task lists nest as deep as needed. A lot of care was given to details: for example, a wrapped line aligns with the text above it, not with the bullet, and tables keep per-column alignment, shade alternating rows and wrap long cells, so a wide table does not run off the page.
 
 ### Code, highlighted
 
-Fenced blocks get a bordered panel and syntax colors for the languages most people write, and a line too long for the panel wraps inside it. Oryx also opens source files directly and renders the whole file as one highlighted document. Over a hundred extensions carry colors, from Rust and Python through TypeScript, Kotlin, Swift, Terraform and Zig, and a `Dockerfile` or a `Makefile` is recognized by its name alone. Any other text file opens in the code font, and a binary is announced in one line.
+Fenced blocks get a bordered panel and syntax colors for code, and a line too long for the panel wraps inside it. Oryx also opens source files directly and renders them as one highlighted document. Over a hundred extensions are supported, from Rust and Python through TypeScript, Kotlin, Swift, Terraform and Zig. A `Dockerfile` or a `Makefile` is recognized by its name. Any other text file opens in the code font. Binary files are refused.
 
 ![Oryx rendering highlighted code](screenshots/code.png)
 
 ### GitHub flavor and more
 
-All five GitHub alert kinds are styled, each with its own color and title. A YAML frontmatter header becomes a small metadata panel above the document. Footnote markers sit raised in the text and link to their definitions, gathered at the foot of the document.
+The five GitHub alerts are styled, each with its own color and title. YAML frontmatter headers are supported and become a small metadata panel above the document. Footnote markers appear raised in the text and link to their definitions, gathered at the foot of the document.
 
-**Images and badges** render in place: PNG, JPEG, GIF, WebP or SVG. Remote images are fetched in the background and cached on disk, so a README covered in badges comes up immediately the second time it is opened, and keeps working offline. If a path is broken, it gets a placeholder carrying the alt text.
+**Images and badges**: Supported formats are PNG, JPEG, GIF, WebP or SVG. Remote images are fetched in the background and cached on disk, so a README covered in badges comes up immediately the second time it is opened, and keeps working offline. If a path is broken, images are replaced by a placeholder with the alt text.
 
 **Embedded HTML** covers what GitHub renders: tables with or without a header row, collapsible `<details>` sections, HTML headings, lists and quotes, definition lists, centered blocks, images at a set width or height, rows of clickable badges, and the inline tags down to `mark`, `kbd` and `small`. Search sees into a closed section, and jumping to a match unfolds it.
 
@@ -59,15 +60,15 @@ All five GitHub alert kinds are styled, each with its own color and title. A YAM
 
 ### Math, typeset
 
-Oryx typesets TeX math in the STIX Two Math font: real fractions, radicals, matrices, stretched delimiters and stacked limits, not styled text. All four GitHub notations work: `$...$`, `$$...$$`, a `math` fence, and the backtick form ``$`...`$``. Oryx infers whether a dollar sign is a currency or a math delimiter, so prices like $5-$10 stay text.
+Oryx typesets TeX math in the STIX Two Math font: fractions, radicals, matrices, stretched delimiters and stacked limits. It recognizes all four GitHub notations: `$...$`, `$$...$$`, a `math` fence, and the backtick form ``$`...`$``. Oryx infers whether a dollar sign is a currency or a math delimiter, so prices like `$5-$10` stay text.
 
-The command vocabulary follows KaTeX: Greek, binary operators, relations and their negations, arrows, accents, the seven math alphabets, operator names, spacing, the matrix environments, and `\newcommand` macros. A command Oryx does not know renders as its literal source, in place, and the rest of the equation still typesets. An equation wider than the window shrinks to fit. PDF export includes the typeset math, and text copied from the PDF reads back as the equation's characters. The supported commands are listed in [SYNTAX.md](SYNTAX.md#math), and [examples/sample-math.md](examples/sample-math.md) shows everything in one document.
+The command vocabulary is KaTeX compatible: Greek, binary operators, relations and their negations, arrows, accents, the seven math alphabets, operator names, spacing, the matrix environments, and `\newcommand` macros. If Oryx encounters an unknown command, it will render it as its literal source, and the rest of the equation renders normally. An equation wider than the window shrinks to fit (to a reasonable extent). PDF export includes the typeset math, and text copied from the PDF reads back as the equation's characters. The supported commands are listed in [SYNTAX.md](SYNTAX.md#math), and [examples/sample-math.md](examples/sample-math.md) shows many implementations in the same document.
 
 ![Typeset math in Oryx](screenshots/math.png)
 
 ## Tools
 
-- **Find in document**: `Ctrl+F` searches text. The search is smart about case: `oryx` matches Oryx, ORYX and oryx, while `Oryx` performs an exact match. A match can cross styling, so `fast viewer` is found even when it was written as **fast** *viewer*, and it can cross a wrapped line. The whole document is searchable even while a big file is still loading.
+- **Find in document**: `Ctrl+F` searches text. The search is smart about case: `oryx` matches Oryx, ORYX and oryx, while `Oryx` performs an exact match. A match can cross styling, so `fast viewer` is found even when it was written as `**fast** *viewer*`, and it can cross a wrapped line. The whole document is searchable even while a big file is still loading.
 - **Select and copy**: `Ctrl+C` copies a selection as plain text. `Ctrl+Shift+C` copies the original markdown of the selection. A double click selects the word, a triple click the paragraph, the code line or the table cell. Select all is instant at any file size, a selection survives zooming, theme switches and window resizes, and both copies work before a big file has finished loading.
 - **Sidebar**: `Ctrl+B` opens a two-tab panel: the folder tree around the open file, and an outline of the document's headings that tracks the reading position, folds its branches, and jumps on a click. Both tabs drive entirely from the keyboard.
 - **Open file**: `Ctrl+O` opens the native file dialog.
@@ -77,15 +78,15 @@ The command vocabulary follows KaTeX: Greek, binary operators, relations and the
 
 ## Themes
 
-Thirty-one themes ship with Oryx. Each is a single TOML file with **51 color roles**, so every element can be colored on its own. A missing key falls back to a default; a malformed file is skipped, and the active theme stays.
+Thirty-one themes ship with Oryx. Editable TOML files with **51 color roles**, so every possible markdown element can be colored separately.
 
-Press `Ctrl+T` and the theme browser previews themes and applies them live. The arrow keys preview each theme as they step through the list, `Enter` keeps it, and `Escape` restores the previous one:
+Press `Ctrl+T` to open the theme browser. Arrow keys move through the list and preview the selected theme, `Enter` validates, and `Escape` restores the previous one (cancels):
 
 <p align="center">
   <img src="screenshots/themes.png" alt="The theme browser">
 </p>
 
-The editor changes any role with a color picker while the document restyles behind it. Editing a bundled theme writes a copy, so the shipped files stay as they were. A custom theme is one TOML file dropped in the themes directory.
+The theme editor changes any role with a color picker while the document restyles behind it. Editing a bundled theme creates a copy, so the shipped files remain as they were. A custom theme is a TOML file saved in the themes directory.
 
 <p align="center">
   <img src="screenshots/themes-editor.png" alt="The theme editor">
@@ -95,11 +96,11 @@ Nine themes are original designs: `oryx-light` and its dark twin `oryx-dark`, `o
 
 ## Export to PDF
 
-`Ctrl+Shift+P` opens the export settings: theme, body font and size, code font and size, page size, orientation and page numbers. They are kept apart from the app's own appearance and remembered between runs, so reading in a dark theme at 22 points and exporting in a light one at 11 needs no switching back and forth.
+`Ctrl+Shift+P` opens the export settings: theme, body font and size, code font and size, page size, orientation and page numbers. The export settings are kept separate from the app's own appearance and remembered between runs. The idea is that reading in a dark theme at 22 points and exporting in a light one at 11 should not need switching back and forth each time we need an export.
 
-`Ctrl+P` exports the document and asks where to save it. The page carries the document as it looks on screen with the configured export theme. Headings become the outline a PDF viewer navigates by, and the fonts are embedded. Emoji render in the PDF as images, so a document full of them exports fine.
+`Ctrl+P` exports the document using the configured export settings. Markdown headings are converted to PDF outlines, and the fonts are embedded. Emoji render in the PDF as images.
 
-**Care is taken so that**:
+**Oryx tries its best so that**:
 
 - Page breaks don't happen through a line,
 - Headings are not left alone at the foot of a page,
@@ -133,7 +134,9 @@ make install
 > [!TIP]
 > Use a release build for everyday reading, because a debug build is noticeably slower on code-heavy documents.
 
-## Use
+## How to use Oryx
+
+After installing, simply open Oryx from the launcher and navigate folders and files through the sidebar.
 
 > [!NOTE]
 > There are no menus. **Press `F1`** for the complete shortcut list, `Esc` to close a panel or quit.
@@ -151,7 +154,7 @@ oryx --version          # print the version
 | `Ctrl+O` | Open file |
 | `Ctrl+,` | Settings |
 | `Ctrl+T` | Theme browser |
-| `Ctrl+B` | Folder sidebar |
+| `Ctrl+B` | Folder/Outline sidebar |
 | `Ctrl+P` | Export to PDF |
 | `Ctrl+Shift+P` | Export settings |
 | `F1` | Shortcuts help |
@@ -172,9 +175,11 @@ oryx --version          # print the version
 
 ## Performance
 
-For a big markdown file, Oryx parses only its first screens before the first paint and the rest arrives from a background thread. Layout shapes on all CPU cores, so the wash-in below the first screens and every zoom or resize uses the whole machine. Only the part of the document around the reading position is kept in drawn form; scrolling rebuilds the landing from recorded positions, identically, in about a millisecond, so memory stays flat however long the document is. Painting covers a band around the viewport, a couple of screens either side, and scrolling inside that band is a memory copy, so the cost of a scroll frame does not depend on how long the document is. Syntax highlighting and the layout below follow in the background, a slice at a time, without moving anything already on screen. A PDF export streams pages to disk as they are laid out, so even a five-thousand-page export runs in a few megabytes of working memory. The event loop wakes only for input, and an idle window uses **no CPU at all**.
+Performance is one of the reasons Oryx was created. Most markdown viewers start struggling above one megabyte of file size, without even offering decent theming. Oryx has been architected to address this problem: a beautiful and seamless user experience whatever the file size and whatever the hardware on which it runs. Here is how it works:
 
-Measured on a 2019 Linux laptop, release build. First frame is cold launch to first paint; the export column is the export itself, measured after syntax highlighting has settled:
+For a big markdown file, Oryx parses only its first screens before the first paint and the rest arrives from a background thread. It uses all CPU cores to build the layout, for the wash-in below the first screens as well as every zoom or resize. Only the part of the document around the reading position is kept in drawn form; scrolling rebuilds the landing from recorded positions in about a millisecond, so memory stays flat however long the document is. Painting covers a band around the viewport, a couple of screens either side, and scrolling inside that band is a memory copy, so the cost of a scroll frame does not depend on how long the document is. Syntax highlighting and the layout below follow in the background, a slice at a time, without moving anything already on screen. A PDF export streams pages to disk as they are laid out, so even a five-thousand-page export runs in a few megabytes of working memory. The event loop wakes only for input, and an idle window uses **no CPU at all**.
+
+Measured on a 2019 laptop (Linux OS), release build. First frame is cold launch to first paint; the export column is the export itself, measured after syntax highlighting has settled:
 
 | Document | First frame | PDF export |
 |---|---|---|
@@ -190,13 +195,13 @@ The 8 MB markdown export writes a 9219-page file. While open, the 8 MB markdown 
 
 ## Limits
 
-Oryx is built for everyday documents, and some things are out of scope (for the moment):
+Oryx is built for everyday use, and some things are out of scope (for the moment):
 
 - It does not edit files.
 - On a file several megabytes long, the colors and the layout below the first screens take a moment to catch up. An export waits for syntax highlighting to finish before it writes, so on the 8 MB file the wall time is roughly double the export column.
-- The implemented HTML is a deliberate subset: what GitHub renders in a README, nothing more.
-- Remote images ride the operating system's TLS stack, which on Linux means it needs the OpenSSL library (normally shipped with every distro). Without it, badges show placeholders but everything else works.
-- macOS compiles but is untested, and there is no packaged build.
+- The implemented HTML is a subset: what GitHub renders in a README, nothing more.
+- Remote images use the operating system's TLS stack, which on Linux means it needs the OpenSSL library (normally shipped with every distro). Without it, badges show placeholders but everything else works.
+- macOS compiles but is untested, and there is no packaged build as I don't have a Mac. The Windows release is compiled on my Linux machine.
 
 ## Credits
 
