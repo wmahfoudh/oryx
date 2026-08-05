@@ -13,6 +13,8 @@ anyhow = "1"
 arboard = { version = "3", default-features = false, features = ["wayland-data-control"] }
 cosmic-text = "0.17.0"
 directories = "6"
+html5ever = "0.39"
+markup5ever_rcdom = "0.39"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "rayon"] }
 miniz_oxide = "0.8"
 noad = { path = "noad" }
@@ -20,6 +22,7 @@ open = "5"
 pdf-writer = "0.15"
 pulldown-cmark = "0.13"
 resvg = "0.45.1"
+roxmltree = "0.20"
 rfd = "0.17.2"
 serde = { version = "1", features = ["derive"] }
 softbuffer = "0.4"
@@ -30,6 +33,7 @@ toml = "0.8"
 ttf-parser = "0.25"
 ureq = { version = "3.2.1", default-features = false, features = ["native-tls", "gzip"] }
 winit = "0.30"
+zip = { version = "4.2", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "rayon"] }

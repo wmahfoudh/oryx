@@ -22,6 +22,8 @@ pub enum FileKind {
     Code(&'static str),
     /// Prose, laid out as wrapped paragraphs.
     Text,
+    /// An EPUB book; a zip, so it never meets the binary sniff.
+    Epub,
     /// Not identified by extension. Its content decides: text opens as code
     /// with no language, binary is refused.
     Unknown,
@@ -42,6 +44,9 @@ pub fn detect(path: &Path) -> FileKind {
     }
     if ext == "txt" {
         return FileKind::Text;
+    }
+    if ext == "epub" {
+        return FileKind::Epub;
     }
     match CODE_EXTENSIONS.binary_search_by_key(&ext.as_str(), |(k, _)| k) {
         Ok(i) => FileKind::Code(CODE_EXTENSIONS[i].1),
@@ -83,6 +88,15 @@ pub struct Opened {
 pub fn open(path: &Path, deadline: Option<Instant>) -> anyhow::Result<Opened> {
     let bytes =
         std::fs::read(path).map_err(|e| anyhow::anyhow!("cannot open {}: {e}", path.display()))?;
+    // A book is a zip and full of NUL bytes; it routes before the sniff.
+    if detect(path) == FileKind::Epub {
+        let document = super::epub::open_book(bytes)?;
+        return Ok(Opened {
+            document,
+            pending: Vec::new(),
+            streamed: false,
+        });
+    }
     if is_binary(&bytes) {
         anyhow::bail!("{} is not a text file", path.display());
     }
@@ -111,6 +125,7 @@ pub fn open(path: &Path, deadline: Option<Instant>) -> anyhow::Result<Opened> {
         },
         FileKind::Code(token) => code_document(Some(token), &text),
         FileKind::Text => plain_document(&text),
+        FileKind::Epub => unreachable!("books returned before the sniff"),
         FileKind::Unknown => code_document(None, &text),
     };
     let pending = apply_budget(&mut document, deadline);
@@ -207,7 +222,7 @@ pub fn message(text: &str) -> Document {
 
 /// Every extension Oryx renders intentionally, for dialog filters.
 pub fn recognized_extensions() -> Vec<&'static str> {
-    ["md", "markdown", "txt"]
+    ["md", "markdown", "txt", "epub"]
         .into_iter()
         .chain(CODE_EXTENSIONS.iter().map(|(ext, _)| *ext))
         .collect()
@@ -239,6 +254,7 @@ fn code_document(token: Option<&str>, text: &str) -> Document {
         blocks: vec![block],
         source: Arc::from(text),
         details: Vec::new(),
+        title: None,
     }
 }
 
@@ -268,6 +284,7 @@ fn plain_document(text: &str) -> Document {
         blocks,
         source: Arc::from(text),
         details: Vec::new(),
+        title: None,
     }
 }
 

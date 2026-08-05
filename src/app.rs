@@ -209,8 +209,10 @@ fn file_link_target(target: &str, base: Option<&Path>) -> Option<(PathBuf, Optio
     path.is_file().then_some((path, fragment))
 }
 
-fn window_title(path: Option<&Path>) -> String {
-    match path.and_then(|p| p.file_name()).and_then(|n| n.to_str()) {
+/// A book's `dc:title` wins over the file name; files have no title.
+fn window_title(book: Option<&str>, path: Option<&Path>) -> String {
+    let name = book.or_else(|| path.and_then(|p| p.file_name()).and_then(|n| n.to_str()));
+    match name {
         Some(name) => format!("{name} \u{00B7} oryx"),
         None => "oryx".to_string(),
     }
@@ -1263,7 +1265,8 @@ impl App {
             side.set_current(&path);
         }
         if let Some(gfx) = self.gfx.as_ref() {
-            gfx.window.set_title(&window_title(Some(&path)));
+            gfx.window
+                .set_title(&window_title(self.document.title.as_deref(), Some(&path)));
         }
         self.request_redraw();
     }
@@ -2149,7 +2152,10 @@ impl ApplicationHandler for App {
         // desktop entry matching the app_id instead.
         let icon = winit::window::Icon::from_rgba(ICON_64.to_vec(), 64, 64).ok();
         let mut attributes = Window::default_attributes()
-            .with_title(window_title(self.path.as_deref()))
+            .with_title(window_title(
+                self.document.title.as_deref(),
+                self.path.as_deref(),
+            ))
             .with_window_icon(icon);
         // Reopen as last closed: size, position when it still lands on a
         // monitor, and the maximized state on top so unmaximizing falls
@@ -2443,10 +2449,19 @@ mod tests {
     fn window_title_carries_the_file_name() {
         use std::path::Path;
         assert_eq!(
-            super::window_title(Some(Path::new("/docs/notes/README.md"))),
+            super::window_title(None, Some(Path::new("/docs/notes/README.md"))),
             "README.md · oryx"
         );
-        assert_eq!(super::window_title(None), "oryx");
+        assert_eq!(super::window_title(None, None), "oryx");
+    }
+
+    #[test]
+    fn window_title_prefers_the_book_title() {
+        use std::path::Path;
+        assert_eq!(
+            super::window_title(Some("Test Book"), Some(Path::new("/books/b.epub"))),
+            "Test Book · oryx"
+        );
     }
 
     #[test]

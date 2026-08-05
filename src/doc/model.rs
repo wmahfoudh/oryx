@@ -11,9 +11,13 @@ pub struct Document {
     /// The text the document was parsed from; block and span ranges index
     /// into it. Markdown copy slices it directly. Shared with the parse
     /// and highlight workers, which clone the `Arc`, never the text.
+    /// For a book this is the synthetic source: the chapters' text in
+    /// spine order, built by the walker, no markup in it.
     pub source: Arc<str>,
     /// The `<details>` regions, indexed by the group id blocks carry.
     pub details: Vec<DetailsGroup>,
+    /// A book's `dc:title`, shown in the window title; None for files.
+    pub title: Option<String>,
 }
 
 impl Default for Document {
@@ -22,6 +26,7 @@ impl Default for Document {
             blocks: Vec::new(),
             source: Arc::from(""),
             details: Vec::new(),
+            title: None,
         }
     }
 }
@@ -161,6 +166,12 @@ pub enum BlockKind {
     Summary {
         spans: Vec<Span>,
         group: u16,
+    },
+    /// The seam before a book chapter: extra space in layout, a forced
+    /// page break in export. `spine` is the index of the chapter that
+    /// follows; the first chapter carries no marker.
+    ChapterBreak {
+        spine: usize,
     },
 }
 

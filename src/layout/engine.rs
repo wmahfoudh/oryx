@@ -1547,7 +1547,8 @@ fn block_metrics(block: &Block, cfg: &ViewConfig) -> Option<(Option<u8>, bool, f
         | BlockKind::Table { .. }
         | BlockKind::Image { .. }
         | BlockKind::MathBlock { .. }
-        | BlockKind::Frontmatter { .. } => cfg.body_size * cfg.zoom,
+        | BlockKind::Frontmatter { .. }
+        | BlockKind::ChapterBreak { .. } => cfg.body_size * cfg.zoom,
         BlockKind::FootnoteDef { .. } => 0.85 * cfg.body_size * cfg.zoom,
     };
     Some((heading, is_list, base_size))
@@ -1848,6 +1849,9 @@ pub(crate) fn shape_kind(
             scratch,
         ),
         BlockKind::CodeBlock { .. } => 0.0,
+        // The chapter seam: one blank body line, nothing drawn; the
+        // block spacing on both sides completes the larger gap.
+        BlockKind::ChapterBreak { .. } => metrics::LINE_HEIGHT * base_size,
         BlockKind::Rule => {
             let thickness = (1.0 * cfg.zoom).max(1.0);
             scratch.rects.push(DecoRect::fill(
