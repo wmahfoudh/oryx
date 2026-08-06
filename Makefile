@@ -23,6 +23,7 @@ release:
 	cp -r examples release/windows/oryx/examples
 	cp LICENSE packaging/install.ps1 release/windows/oryx/
 	cd release/windows && zip -qr ../oryx-$(VERSION)-windows-x86_64.zip oryx
+	sh packaging/msi.sh $(VERSION) release/windows/oryx release/oryx-$(VERSION)-windows-x86_64.msi
 	rm -rf release/linux release/windows
 	ls -l release
 
