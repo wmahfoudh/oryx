@@ -1109,18 +1109,24 @@ impl Builder {
 
     /// A group whose close arrives without a summary row gets one reading
     /// "Details", GitHub's fallback, inserted before the group's content.
+    /// The row takes its neighbor's offset as an empty range, keeping
+    /// blocks ordered by source offset for the offset-to-block search.
     fn summarize(&mut self, id: u16) {
         if self.details_summarized[id as usize] {
             return;
         }
         self.details_summarized[id as usize] = true;
         let at = self.details_start[id as usize].min(self.blocks.len());
+        let start = match self.blocks.get(at) {
+            Some(next) => next.range.start,
+            None => self.blocks.last().map(|b| b.range.end).unwrap_or(0),
+        };
         self.blocks.insert(
             at,
             Block {
                 quote_depth: 0,
                 alert: None,
-                range: 0..0,
+                range: start..start,
                 centered: false,
                 details: self.details[id as usize].parent,
                 kind: BlockKind::Summary {
@@ -1949,6 +1955,23 @@ mod tests {
         assert_eq!(spans[0].text(&d.source), "Details");
         assert_eq!(*group, 0);
         assert_eq!(d.blocks[1].details, Some(0));
+    }
+
+    /// The synthesized summary carries its neighbor's offset, keeping
+    /// blocks ordered by source offset for the offset-to-block search.
+    #[test]
+    fn a_synthesized_summary_keeps_blocks_ordered_by_offset() {
+        let d = parse("intro\n\n<details>\n\nHidden prose.\n\n</details>");
+        let intro = d
+            .block_at_offset(2)
+            .expect("the offset sits inside the intro");
+        assert!(
+            matches!(&d.blocks[intro].kind, BlockKind::Paragraph { .. }),
+            "got {:?}",
+            d.blocks[intro].kind
+        );
+        let starts: Vec<usize> = d.blocks.iter().map(|b| b.range.start).collect();
+        assert!(starts.is_sorted(), "block starts in order, got {starts:?}");
     }
 
     #[test]

@@ -683,11 +683,12 @@ impl Walker {
     }
 
     /// The seam before spine item `spine`; extra space in layout, a
-    /// forced page break in export.
+    /// forced page break in export. Emission stamps the marker's empty
+    /// range at the seam, keeping blocks ordered by source offset for
+    /// the offset-to-block search.
     pub fn chapter_break(&mut self, spine: usize) {
         self.flush();
-        self.blocks
-            .push(Block::plain(BlockKind::ChapterBreak { spine }));
+        self.emit(BlockKind::ChapterBreak { spine });
     }
 
     /// Seals every span against the finished source and hands the book
@@ -1308,19 +1309,25 @@ impl Walker {
     }
 
     /// A group whose close arrives without a summary row gets one
-    /// reading "Details", the markdown scanner's fallback.
+    /// reading "Details", the markdown scanner's fallback. The row takes
+    /// its neighbor's offset as an empty range, keeping blocks ordered
+    /// by source offset for the offset-to-block search.
     fn summarize(&mut self, id: u16) {
         if self.details_summarized[id as usize] {
             return;
         }
         self.details_summarized[id as usize] = true;
         let at = self.details_start[id as usize].min(self.blocks.len());
+        let start = match self.blocks.get(at) {
+            Some(next) => next.range.start,
+            None => self.blocks.last().map(|b| b.range.end).unwrap_or(0),
+        };
         self.blocks.insert(
             at,
             Block {
                 quote_depth: 0,
                 alert: None,
-                range: 0..0,
+                range: start..start,
                 centered: false,
                 details: self.details[id as usize].parent,
                 kind: BlockKind::Summary {

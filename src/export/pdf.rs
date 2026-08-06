@@ -1088,11 +1088,14 @@ fn write_outline(
             let Some((page, y)) = place(job, tops, anchor) else {
                 continue;
             };
+            // A book heading may break its title over lines with <br>;
+            // a bookmark is one line.
             let title: String = spans
                 .iter()
                 .map(|span| span.text(&job.doc.source))
                 .collect();
-            if title.trim().is_empty() {
+            let title = title.split_whitespace().collect::<Vec<_>>().join(" ");
+            if title.is_empty() {
                 continue;
             }
             items.push(Item {

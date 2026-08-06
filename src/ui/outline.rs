@@ -119,7 +119,10 @@ impl OutlineTree {
             let BlockKind::Heading { level, spans, .. } = &doc.blocks[block].kind else {
                 continue;
             };
+            // A book heading may break its title over lines with <br>;
+            // the sidebar row draws one line.
             let text: String = spans.iter().map(|s| s.text(&doc.source)).collect();
+            let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
             let parent = self.entries.iter().rposition(|e| e.level < *level);
             let depth = parent.map(|p| self.entries[p].depth + 1).unwrap_or(0);
             if let Some(p) = parent {

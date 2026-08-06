@@ -468,6 +468,50 @@ fn toc_falls_back_to_the_ncx() {
     assert_eq!(toc[1].fragment.as_deref(), Some("i"));
 }
 
+/// The NCX spec mandates a DOCTYPE line and real books carry it; the
+/// XML parser must accept the DTD instead of refusing the whole file.
+#[test]
+fn a_doctyped_ncx_reads() {
+    let bytes = book()
+        .ncx(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+             <!DOCTYPE ncx PUBLIC \"-//NISO//DTD ncx 2005-1//EN\" \
+             \"http://www.daisy.org/z3986/2005/ncx-2005-1.dtd\">\n\
+             <ncx xmlns=\"http://www.daisy.org/z3986/2005/ncx/\"><navMap>\
+             <navPoint><navLabel><text>Start</text></navLabel><content src=\"text/one.xhtml\"/></navPoint>\
+             </navMap></ncx>",
+        )
+        .chapter("one.xhtml", "<html><body><p>One.</p></body></html>")
+        .build();
+    let mut archive = Archive::open(bytes).unwrap();
+    let package = epub::read_package(&mut archive).unwrap();
+    let toc = epub::read_toc(&mut archive, &package);
+
+    assert_eq!(toc.len(), 1);
+    assert_eq!(toc[0].label, "Start");
+}
+
+/// A chapter heading may break its title over several lines with `<br>`;
+/// the outline row draws one line, so the entry text stays on one.
+#[test]
+fn a_heading_broken_by_br_outlines_on_one_line() {
+    use oryx::ui::outline::OutlineTree;
+    let bytes = book()
+        .chapter(
+            "one.xhtml",
+            "<html><body><h1>1<br/>&#160;<br/>LE MYST\u{c8}RE<br/>DE L\u{2019}EXISTENCE</h1>\
+             <p>Text.</p></body></html>",
+        )
+        .build();
+    let (doc, _, _) = epub::open_prefix(bytes).unwrap();
+    let tree = OutlineTree::build(&doc);
+    assert_eq!(tree.entries().len(), 1);
+    assert_eq!(
+        tree.entries()[0].text,
+        "1 LE MYST\u{c8}RE DE L\u{2019}EXISTENCE"
+    );
+}
+
 #[test]
 fn anchors_cover_chapters_and_ids() {
     let bytes = book()
@@ -764,6 +808,38 @@ fn timing_probe() {
         "open_prefix: {t_prefix:?} for {} source bytes ({job_note})",
         prefix_doc.source.len()
     );
+}
+
+/// A chapter holding only its heading is followed at once by the next
+/// chapter's break marker; the marker must not swallow the TOC target.
+/// Blocks stay ordered by source offset, which the offset-to-block
+/// binary search relies on.
+#[test]
+fn a_toc_target_lands_on_its_chapter_heading() {
+    let bytes = book()
+        .ncx(
+            "<?xml version=\"1.0\"?><ncx xmlns=\"http://www.daisy.org/z3986/2005/ncx/\"><navMap>\
+             <navPoint><navLabel><text>One</text></navLabel><content src=\"text/one.xhtml\"/></navPoint>\
+             <navPoint><navLabel><text>Two</text></navLabel><content src=\"text/three.xhtml\"/></navPoint>\
+             </navMap></ncx>",
+        )
+        .chapter("one.xhtml", "<html><body><h1>ONE</h1></body></html>")
+        .chapter("two.xhtml", "<html><body><p>Body text.</p></body></html>")
+        .chapter("three.xhtml", "<html><body><h1>TWO</h1></body></html>")
+        .build();
+    let book = epub::open_book(bytes).unwrap();
+    let doc = &book.document;
+    for entry in &book.toc {
+        let offset = epub::resolve_target(doc, &entry.path, entry.fragment.as_deref())
+            .expect("the chapter start is anchored");
+        let block = doc.block_at_offset(offset).expect("a block holds it");
+        assert!(
+            matches!(doc.blocks[block].kind, BlockKind::Heading { .. }),
+            "{} lands on {:?}",
+            entry.label,
+            doc.blocks[block].kind
+        );
+    }
 }
 
 #[test]

@@ -106,12 +106,25 @@ pub fn resolve(root: &str, href: &str) -> String {
     crate::doc::html::join_href(root, href)
 }
 
+/// XML parsing with DTDs allowed: the NCX spec mandates a DOCTYPE and
+/// real books carry one on every XML file. roxmltree caps entity depth
+/// and expansion, so a hostile internal subset stays bounded.
+fn parse_xml(text: &str) -> Result<roxmltree::Document<'_>, roxmltree::Error> {
+    roxmltree::Document::parse_with_options(
+        text,
+        roxmltree::ParsingOptions {
+            allow_dtd: true,
+            ..Default::default()
+        },
+    )
+}
+
 pub fn read_package(archive: &mut Archive) -> anyhow::Result<Package> {
     let container = archive
         .read("META-INF/container.xml")
         .ok_or(Refusal::NoPackage)?;
     let container = String::from_utf8_lossy(&container).into_owned();
-    let tree = roxmltree::Document::parse(&container).map_err(|_| Refusal::NoPackage)?;
+    let tree = parse_xml(&container).map_err(|_| Refusal::NoPackage)?;
     let opf_path = tree
         .descendants()
         .find(|n| {
@@ -130,7 +143,7 @@ pub fn read_package(archive: &mut Archive) -> anyhow::Result<Package> {
 
     let opf = archive.read(&opf_path).ok_or(Refusal::NoPackage)?;
     let opf = String::from_utf8_lossy(&opf).into_owned();
-    let tree = roxmltree::Document::parse(&opf).map_err(|_| Refusal::NoPackage)?;
+    let tree = parse_xml(&opf).map_err(|_| Refusal::NoPackage)?;
 
     let fixed = tree.descendants().any(|n| {
         n.tag_name().name() == "meta"
@@ -216,7 +229,7 @@ fn check_encryption(archive: &mut Archive, package: &Package) -> anyhow::Result<
         return Ok(());
     };
     let text = String::from_utf8_lossy(&bytes).into_owned();
-    let Ok(tree) = roxmltree::Document::parse(&text) else {
+    let Ok(tree) = parse_xml(&text) else {
         return Err(Refusal::Drm.into());
     };
     for node in tree.descendants() {
@@ -587,7 +600,7 @@ fn read_ncx(xml: &str, base: &str) -> Vec<TocEntry> {
         }
     }
 
-    let Ok(tree) = roxmltree::Document::parse(xml) else {
+    let Ok(tree) = parse_xml(xml) else {
         return Vec::new();
     };
     let mut out = Vec::new();

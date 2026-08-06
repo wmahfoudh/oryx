@@ -161,6 +161,21 @@ fn the_pdf_outline_follows_the_book_toc() {
     );
 }
 
+/// A book without any table of contents falls back to the heading scan;
+/// a heading broken over lines with `<br>` bookmarks on one line.
+#[test]
+fn a_br_heading_bookmarks_on_one_line() {
+    let bytes = epub_common::book()
+        .chapter(
+            "one.xhtml",
+            "<html><body><h1>1<br/>&#160;<br/>LE MYST\u{c8}RE</h1><p>Text.</p></body></html>",
+        )
+        .build();
+    let book = oryx::doc::epub::open_book(bytes).unwrap();
+    let pdf = Pdf::load_mem(&export_book(&book)).unwrap();
+    assert_eq!(outline_titles(&pdf), vec!["1 LE MYST\u{c8}RE"]);
+}
+
 fn export_with(doc: &Document, page: PageSize, page_numbers: bool) -> Vec<u8> {
     export_cfg(doc, page, Orientation::Portrait, page_numbers, None)
 }
