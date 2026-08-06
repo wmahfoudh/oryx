@@ -1216,9 +1216,11 @@ impl App {
         let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         let loaded = load::open(&path, Some(Instant::now() + load::OPEN_BUDGET));
         let opened = loaded.is_ok();
+        let mut book_images = Vec::new();
         match loaded {
             Ok(o) => {
                 self.document = o.document;
+                book_images = o.images;
                 self.start_highlight(o.pending);
                 if o.streamed {
                     self.start_parse();
@@ -1246,6 +1248,9 @@ impl App {
         }
         self.media = MediaCache::new(dir.clone());
         self.media.set_waker(self.waker.clone());
+        for (key, image) in book_images {
+            self.media.insert_original(key, image);
+        }
         self.scroll_y = 0.0;
         self.selection = None;
         self.sel_anchor = None;

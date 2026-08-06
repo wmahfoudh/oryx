@@ -2323,6 +2323,7 @@ version = "0.13.1"
 dependencies = [
  "anyhow",
  "arboard",
+ "base64",
  "cosmic-text",
  "directories",
  "html5ever",

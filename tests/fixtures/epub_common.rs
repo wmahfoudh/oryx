@@ -19,6 +19,8 @@ pub struct BookBuilder {
     chapters: Vec<(String, Vec<u8>)>,
     fonts: Vec<String>,
     stylesheet: Option<String>,
+    /// (OPF-relative href, bytes); media type follows the extension.
+    images: Vec<(String, Vec<u8>)>,
 }
 
 pub fn book() -> BookBuilder {
@@ -31,7 +33,16 @@ pub fn book() -> BookBuilder {
         chapters: Vec::new(),
         fonts: Vec::new(),
         stylesheet: None,
+        images: Vec::new(),
     }
+}
+
+/// A solid-color PNG for image fixtures.
+pub fn png_bytes(width: u32, height: u32) -> Vec<u8> {
+    let img = image::RgbaImage::from_pixel(width, height, image::Rgba([10, 20, 30, 255]));
+    let mut bytes = Cursor::new(Vec::new());
+    img.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+    bytes.into_inner()
 }
 
 impl BookBuilder {
@@ -44,6 +55,12 @@ impl BookBuilder {
     /// A chapter with caller-controlled bytes; the UTF-16 case.
     pub fn chapter_bytes(mut self, name: &str, bytes: Vec<u8>) -> Self {
         self.chapters.push((format!("text/{name}"), bytes));
+        self
+    }
+
+    /// An image entry in the manifest and the archive.
+    pub fn image(mut self, href: &str, bytes: Vec<u8>) -> Self {
+        self.images.push((href.to_string(), bytes));
         self
     }
 
@@ -136,6 +153,11 @@ impl BookBuilder {
                 "    <item id=\"css0\" href=\"style/main.css\" media-type=\"text/css\"/>\n",
             );
         }
+        for (i, (href, _)) in self.images.iter().enumerate() {
+            opf.push_str(&format!(
+                "    <item id=\"img{i}\" href=\"{href}\" media-type=\"image/png\"/>\n"
+            ));
+        }
         opf.push_str("  </manifest>\n  <spine>\n");
         for i in 0..self.chapters.len() {
             opf.push_str(&format!("    <itemref idref=\"c{i}\"/>\n"));
@@ -147,6 +169,10 @@ impl BookBuilder {
         if let Some(css) = &self.stylesheet {
             zip.start_file("OEBPS/style/main.css", deflated).unwrap();
             zip.write_all(css.as_bytes()).unwrap();
+        }
+        for (href, bytes) in &self.images {
+            zip.start_file(format!("OEBPS/{href}"), deflated).unwrap();
+            zip.write_all(bytes).unwrap();
         }
         for (href, bytes) in &self.chapters {
             zip.start_file(format!("OEBPS/{href}"), deflated).unwrap();

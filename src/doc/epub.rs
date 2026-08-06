@@ -103,43 +103,7 @@ pub struct Package {
 /// Joins an href onto the package root: `../` segments collapse and
 /// percent escapes decode, since hrefs are URLs and zip names are not.
 pub fn resolve(root: &str, href: &str) -> String {
-    let href = percent_decode(href);
-    let mut parts: Vec<&str> = root.split('/').filter(|p| !p.is_empty()).collect();
-    for segment in href.split('/') {
-        match segment {
-            "" | "." => {}
-            ".." => {
-                parts.pop();
-            }
-            part => parts.push(part),
-        }
-    }
-    parts.join("/")
-}
-
-fn percent_decode(href: &str) -> std::borrow::Cow<'_, str> {
-    if !href.contains('%') {
-        return std::borrow::Cow::Borrowed(href);
-    }
-    let bytes = href.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        let hex = (bytes[i] == b'%' && i + 2 < bytes.len())
-            .then(|| u8::from_str_radix(&href[i + 1..i + 3], 16).ok())
-            .flatten();
-        match hex {
-            Some(byte) => {
-                out.push(byte);
-                i += 3;
-            }
-            None => {
-                out.push(bytes[i]);
-                i += 1;
-            }
-        }
-    }
-    std::borrow::Cow::Owned(String::from_utf8_lossy(&out).into_owned())
+    crate::doc::html::join_href(root, href)
 }
 
 pub fn read_package(archive: &mut Archive) -> anyhow::Result<Package> {
@@ -262,7 +226,7 @@ fn check_encryption(archive: &mut Archive, package: &Package) -> anyhow::Result<
         let Some(uri) = node.attribute("URI") else {
             return Err(Refusal::Drm.into());
         };
-        let path = percent_decode(uri.trim_start_matches('/')).into_owned();
+        let path = crate::doc::html::percent_decode(uri.trim_start_matches('/')).into_owned();
         if !is_font(package, &path) {
             return Err(Refusal::Drm.into());
         }
@@ -299,9 +263,18 @@ fn decode(bytes: &[u8]) -> String {
     }
 }
 
+/// An opened book: the document and the decoded images the chapters
+/// referenced, keyed by their book-internal source for the image store.
+#[derive(Debug)]
+pub struct Book {
+    pub document: Document,
+    pub images: Vec<(String, image::RgbaImage)>,
+}
+
 /// The whole book, synchronously: every spine item walked in order into
-/// one Document over the synthetic source.
-pub fn open_book(bytes: Vec<u8>) -> anyhow::Result<Document> {
+/// one Document over the synthetic source, images decoding as the
+/// chapter holding them parses.
+pub fn open_book(bytes: Vec<u8>) -> anyhow::Result<Book> {
     let mut archive = Archive::open(bytes)?;
     let package = read_package(&mut archive)?;
     let mut table = crate::doc::html::EmphasisTable::default();
@@ -314,21 +287,84 @@ pub fn open_book(bytes: Vec<u8>) -> anyhow::Result<Document> {
     }
     let mut walker = crate::doc::html::Walker::new();
     walker.set_emphasis(table);
+    let mut images = Vec::new();
+    let mut seen = std::collections::HashSet::new();
     for (position, &item) in package.spine.iter().enumerate() {
         if position > 0 {
             walker.chapter_break(position);
         }
         let path = resolve(&package.root, &package.manifest[item].href);
+        let base = match path.rfind('/') {
+            Some(slash) => path[..slash].to_string(),
+            None => String::new(),
+        };
+        walker.set_chapter_base(&base);
         let Some(bytes) = archive.read(&path) else {
             continue;
         };
         walker.walk_chapter(&decode(&bytes));
+        chapter_images(&mut archive, &base, &mut walker, &mut seen, &mut images);
     }
     let (blocks, source, details) = walker.finish();
-    Ok(Document {
-        blocks,
-        source: Arc::from(source),
-        details,
-        title: package.title,
+    Ok(Book {
+        document: Document {
+            blocks,
+            source: Arc::from(source),
+            details,
+            title: package.title,
+        },
+        images,
     })
+}
+
+/// Extracts and decodes what one chapter referenced: plain images by
+/// their archive path, inline svgs with their archive references
+/// inlined as data URIs so resvg can resolve them.
+fn chapter_images(
+    archive: &mut Archive,
+    base: &str,
+    walker: &mut crate::doc::html::Walker,
+    seen: &mut std::collections::HashSet<String>,
+    images: &mut Vec<(String, image::RgbaImage)>,
+) {
+    for src in walker.take_images() {
+        if src.starts_with("http") || !seen.insert(src.clone()) {
+            continue;
+        }
+        if let Some(bytes) = archive.read(&src) {
+            if let Some(decoded) = crate::doc::images::decode(&bytes) {
+                images.push((src, decoded));
+            }
+        }
+    }
+    for svg in walker.take_svgs() {
+        let mut markup = svg.markup;
+        for href in &svg.refs {
+            let target = crate::doc::html::join_href(base, href);
+            if let Some(raw) = archive.read(&target) {
+                use base64::Engine;
+                let data = format!(
+                    "\"data:{};base64,{}\"",
+                    media_type_of(&target),
+                    base64::engine::general_purpose::STANDARD.encode(raw)
+                );
+                markup = markup.replace(&format!("\"{href}\""), &data);
+            }
+        }
+        if let Some(decoded) = crate::doc::images::decode(markup.as_bytes()) {
+            images.push((svg.key, decoded));
+        }
+    }
+}
+
+fn media_type_of(path: &str) -> &'static str {
+    let ext = path.rsplit('.').next().unwrap_or_default();
+    match ext.to_ascii_lowercase().as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        _ => "application/octet-stream",
+    }
 }

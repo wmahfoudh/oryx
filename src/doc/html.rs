@@ -13,7 +13,7 @@ use markup5ever_rcdom::{Handle, NodeData, RcDom};
 
 use crate::doc::markdown::{slug, trim_cell};
 use crate::doc::model::{
-    seal_blocks, Block, BlockKind, CodeBody, DetailsGroup, Marker, Span, SpanScript,
+    seal_blocks, Block, BlockKind, CodeBody, DetailsGroup, Marker, Span, SpanImage, SpanScript,
 };
 
 /// Structural containers with no mapping of their own: a paragraph ends
@@ -381,6 +381,93 @@ fn selector_key(selector: &str) -> Option<(String, String)> {
     Some((element, class))
 }
 
+/// Joins an href onto a base directory: `../` collapses, `./` drops, a
+/// leading `/` starts from the archive root, and percent escapes decode,
+/// since hrefs are URLs and archive names are not.
+pub(crate) fn join_href(base: &str, href: &str) -> String {
+    let href = percent_decode(href);
+    let mut parts: Vec<&str> = if href.starts_with('/') {
+        Vec::new()
+    } else {
+        base.split('/').filter(|p| !p.is_empty()).collect()
+    };
+    for segment in href.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            part => parts.push(part),
+        }
+    }
+    parts.join("/")
+}
+
+pub(crate) fn percent_decode(href: &str) -> std::borrow::Cow<'_, str> {
+    if !href.contains('%') {
+        return std::borrow::Cow::Borrowed(href);
+    }
+    let bytes = href.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = (bytes[i] == b'%' && i + 2 < bytes.len())
+            .then(|| u8::from_str_radix(&href[i + 1..i + 3], 16).ok())
+            .flatten();
+        match hex {
+            Some(byte) => {
+                out.push(byte);
+                i += 3;
+            }
+            None => {
+                out.push(bytes[i]);
+                i += 1;
+            }
+        }
+    }
+    std::borrow::Cow::Owned(String::from_utf8_lossy(&out).into_owned())
+}
+
+/// An inline `<svg>` subtree awaiting rasterization: its serialized
+/// markup and the raw hrefs its `<image>` elements reference, for the
+/// caller to inline before decoding.
+pub struct PendingSvg {
+    pub key: String,
+    pub markup: String,
+    pub refs: Vec<String>,
+}
+
+fn serialize_subtree(node: &Handle) -> String {
+    let mut out = Vec::new();
+    let handle: markup5ever_rcdom::SerializableHandle = node.clone().into();
+    let opts = html5ever::serialize::SerializeOpts {
+        traversal_scope: html5ever::serialize::TraversalScope::IncludeNode,
+        ..Default::default()
+    };
+    let _ = html5ever::serialize::serialize(&mut out, &handle, opts);
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Archive hrefs referenced by `<image>` elements in an svg subtree;
+/// data URIs and remote URLs stay as they are.
+fn svg_refs(node: &Handle, out: &mut Vec<String>) {
+    if let NodeData::Element { name, attrs, .. } = &node.data {
+        if name.local.as_ref().eq_ignore_ascii_case("image") {
+            for a in attrs.borrow().iter() {
+                if a.name.local.as_ref() == "href" {
+                    let value = a.value.to_string();
+                    if !value.starts_with("data:") && !value.starts_with("http") {
+                        out.push(value);
+                    }
+                }
+            }
+        }
+    }
+    for child in node.children.borrow().iter() {
+        svg_refs(child, out);
+    }
+}
+
 fn strip_comments(css: &str) -> String {
     let mut out = String::with_capacity(css.len());
     let mut rest = css;
@@ -477,6 +564,14 @@ pub struct Walker {
     emphasis: EmphasisTable,
     /// Inherited CSS emphasis down the tree; the root is all-inherit.
     css: Vec<CssState>,
+    /// The current chapter's directory inside the archive; relative
+    /// image sources resolve against it.
+    base: String,
+    /// Image sources the current chapter referenced, for extraction.
+    images: Vec<String>,
+    /// Inline `<svg>` subtrees the current chapter held.
+    svgs: Vec<PendingSvg>,
+    svg_serial: u32,
 }
 
 impl Default for Walker {
@@ -514,6 +609,10 @@ impl Walker {
             table: None,
             emphasis: EmphasisTable::default(),
             css: vec![CssState::default()],
+            base: String::new(),
+            images: Vec::new(),
+            svgs: Vec::new(),
+            svg_serial: 0,
         }
     }
 
@@ -521,6 +620,21 @@ impl Walker {
     /// fold in as they walk.
     pub fn set_emphasis(&mut self, table: EmphasisTable) {
         self.emphasis = table;
+    }
+
+    /// The archive directory of the chapter about to walk.
+    pub fn set_chapter_base(&mut self, base: &str) {
+        self.base = base.to_string();
+    }
+
+    /// Image sources referenced since the last take, resolved.
+    pub fn take_images(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.images)
+    }
+
+    /// Inline svgs gathered since the last take.
+    pub fn take_svgs(&mut self) -> Vec<PendingSvg> {
+        std::mem::take(&mut self.svgs)
     }
 
     /// Parses one chapter and walks it. html5ever never fails; malformed
@@ -613,9 +727,45 @@ impl Walker {
                 self.emphasis.add_css(&css);
             }
             "img" => {
-                if let Some(alt) = attr("alt") {
-                    self.push_str(&alt);
+                let alt = attr("alt").unwrap_or_default();
+                let src = attr("src")
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty());
+                match src {
+                    Some(src) => {
+                        let src = if src.starts_with("http://") || src.starts_with("https://") {
+                            src
+                        } else {
+                            join_href(&self.base, &src)
+                        };
+                        let mut span = self.style();
+                        span.set_text(alt);
+                        span.image = Some(SpanImage {
+                            src: src.clone(),
+                            width: attr("width").and_then(|v| v.parse().ok()),
+                            height: attr("height").and_then(|v| v.parse().ok()),
+                        });
+                        self.spans.push(span);
+                        self.images.push(src);
+                    }
+                    None => self.push_str(&alt),
                 }
+            }
+            "svg" => {
+                let key = format!("svg:{}:{}", self.base, self.svg_serial);
+                self.svg_serial += 1;
+                let markup = serialize_subtree(node);
+                let mut refs = Vec::new();
+                svg_refs(node, &mut refs);
+                let mut span = self.style();
+                span.set_text("");
+                span.image = Some(SpanImage {
+                    src: key.clone(),
+                    width: attr("width").and_then(|v| v.parse().ok()),
+                    height: attr("height").and_then(|v| v.parse().ok()),
+                });
+                self.spans.push(span);
+                self.svgs.push(PendingSvg { key, markup, refs });
             }
             "a" => {
                 let external =
@@ -1565,6 +1715,33 @@ mod tests {
             joined.contains("\u{201C}q\u{201D}"),
             "q should gain quotation marks: {joined:?}"
         );
+    }
+
+    #[test]
+    fn img_maps_to_an_inline_image_span_with_size() {
+        let mut walker = Walker::new();
+        walker.set_chapter_base("OEBPS/text");
+        walker.walk_chapter(
+            "<html><body><p><img src=\"pic.png\" width=\"64\" height=\"32\" alt=\"B\"/></p></body></html>",
+        );
+        let (blocks, source, _) = walker.finish();
+        let spans = spans_of(&blocks[0]);
+        let image = spans[0].image.as_ref().expect("an image span");
+        assert_eq!(image.src, "OEBPS/text/pic.png");
+        assert_eq!(image.width, Some(64));
+        assert_eq!(image.height, Some(32));
+        assert_eq!(spans[0].text(&source), "B");
+    }
+
+    #[test]
+    fn join_href_resolves_dots_root_and_escapes() {
+        assert_eq!(
+            join_href("OEBPS/text", "../images/a%20b.png"),
+            "OEBPS/images/a b.png"
+        );
+        assert_eq!(join_href("OEBPS/text", "/images/x.png"), "images/x.png");
+        assert_eq!(join_href("", "x.png"), "x.png");
+        assert_eq!(join_href("OEBPS/text", "pic.png"), "OEBPS/text/pic.png");
     }
 
     #[test]

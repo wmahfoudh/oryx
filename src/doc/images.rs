@@ -224,6 +224,12 @@ impl MediaCache {
         self.originals.get(src).and_then(|o| o.as_ref())
     }
 
+    /// Decoded pixels under a caller-chosen key; the book path, whose
+    /// sources live in an archive rather than beside the document.
+    pub fn insert_original(&mut self, key: String, image: RgbaImage) {
+        self.originals.insert(key, Some(image));
+    }
+
     /// Natural pixel dimensions, or None when the image cannot load.
     pub fn dimensions(&mut self, src: &str) -> Option<(u32, u32)> {
         self.original(src).map(|img| img.dimensions())

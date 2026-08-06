@@ -11,6 +11,7 @@ rust-version = "1.80"
 [dependencies]
 anyhow = "1"
 arboard = { version = "3", default-features = false, features = ["wayland-data-control"] }
+base64 = "0.22"
 cosmic-text = "0.17.0"
 directories = "6"
 html5ever = "0.39"

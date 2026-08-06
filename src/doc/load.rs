@@ -83,6 +83,9 @@ pub struct Opened {
     /// True when the document holds only a parsed prefix and the parse
     /// worker owes the rest; the blocks cover the source up to the cut.
     pub streamed: bool,
+    /// A book's decoded images for the media cache; empty for files,
+    /// whose images load from disk beside the document.
+    pub images: Vec<(String, image::RgbaImage)>,
 }
 
 pub fn open(path: &Path, deadline: Option<Instant>) -> anyhow::Result<Opened> {
@@ -90,12 +93,13 @@ pub fn open(path: &Path, deadline: Option<Instant>) -> anyhow::Result<Opened> {
         std::fs::read(path).map_err(|e| anyhow::anyhow!("cannot open {}: {e}", path.display()))?;
     // A book is a zip and full of NUL bytes; it routes before the sniff.
     if detect(path) == FileKind::Epub {
-        let mut document = super::epub::open_book(bytes)?;
-        let pending = apply_budget(&mut document, deadline);
+        let mut book = super::epub::open_book(bytes)?;
+        let pending = apply_budget(&mut book.document, deadline);
         return Ok(Opened {
-            document,
+            document: book.document,
             pending,
             streamed: false,
+            images: book.images,
         });
     }
     if is_binary(&bytes) {
@@ -134,6 +138,7 @@ pub fn open(path: &Path, deadline: Option<Instant>) -> anyhow::Result<Opened> {
         document,
         pending,
         streamed,
+        images: Vec::new(),
     })
 }
 
