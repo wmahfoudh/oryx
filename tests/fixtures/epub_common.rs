@@ -21,6 +21,10 @@ pub struct BookBuilder {
     stylesheet: Option<String>,
     /// (OPF-relative href, bytes); media type follows the extension.
     images: Vec<(String, Vec<u8>)>,
+    /// A `nav.xhtml` with the `nav` property, as written.
+    nav_doc: Option<String>,
+    /// A `toc.ncx` named by the spine's `toc` attribute, as written.
+    ncx: Option<String>,
 }
 
 pub fn book() -> BookBuilder {
@@ -34,6 +38,8 @@ pub fn book() -> BookBuilder {
         fonts: Vec::new(),
         stylesheet: None,
         images: Vec::new(),
+        nav_doc: None,
+        ncx: None,
     }
 }
 
@@ -55,6 +61,24 @@ impl BookBuilder {
     /// A chapter with caller-controlled bytes; the UTF-16 case.
     pub fn chapter_bytes(mut self, name: &str, bytes: Vec<u8>) -> Self {
         self.chapters.push((format!("text/{name}"), bytes));
+        self
+    }
+
+    /// The EPUB3 nav document, written to `nav.xhtml` beside the OPF.
+    pub fn nav_doc(mut self, xhtml: &str) -> Self {
+        self.nav_doc = Some(xhtml.to_string());
+        self
+    }
+
+    /// The EPUB2 NCX, written to `toc.ncx` and named by the spine.
+    pub fn ncx(mut self, xml: &str) -> Self {
+        self.ncx = Some(xml.to_string());
+        self
+    }
+
+    /// Drops `dc:identifier`, for the path-fallback case.
+    pub fn no_identifier(mut self) -> Self {
+        self.identifier = None;
         self
     }
 
@@ -158,7 +182,19 @@ impl BookBuilder {
                 "    <item id=\"img{i}\" href=\"{href}\" media-type=\"image/png\"/>\n"
             ));
         }
-        opf.push_str("  </manifest>\n  <spine>\n");
+        if self.nav_doc.is_some() {
+            opf.push_str(
+                "    <item id=\"nav\" href=\"nav.xhtml\" media-type=\"application/xhtml+xml\" properties=\"nav\"/>\n",
+            );
+        }
+        if self.ncx.is_some() {
+            opf.push_str(
+                "    <item id=\"ncx\" href=\"toc.ncx\" media-type=\"application/x-dtbncx+xml\"/>\n",
+            );
+            opf.push_str("  </manifest>\n  <spine toc=\"ncx\">\n");
+        } else {
+            opf.push_str("  </manifest>\n  <spine>\n");
+        }
         for i in 0..self.chapters.len() {
             opf.push_str(&format!("    <itemref idref=\"c{i}\"/>\n"));
         }
@@ -169,6 +205,14 @@ impl BookBuilder {
         if let Some(css) = &self.stylesheet {
             zip.start_file("OEBPS/style/main.css", deflated).unwrap();
             zip.write_all(css.as_bytes()).unwrap();
+        }
+        if let Some(nav) = &self.nav_doc {
+            zip.start_file("OEBPS/nav.xhtml", deflated).unwrap();
+            zip.write_all(nav.as_bytes()).unwrap();
+        }
+        if let Some(ncx) = &self.ncx {
+            zip.start_file("OEBPS/toc.ncx", deflated).unwrap();
+            zip.write_all(ncx.as_bytes()).unwrap();
         }
         for (href, bytes) in &self.images {
             zip.start_file(format!("OEBPS/{href}"), deflated).unwrap();

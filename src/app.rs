@@ -50,7 +50,7 @@ const RECOLOR_WAVE: Duration = Duration::from_millis(400);
 const ICON_64: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/icon_64.rgba"));
 
 pub fn run(path: Option<PathBuf>, theme_name: Option<String>) -> anyhow::Result<()> {
-    let (document, pending, streamed, book) = match &path {
+    let (document, pending, streamed, book, book_toc) = match &path {
         Some(p) => {
             let opened = load::open(p, Some(Instant::now() + load::OPEN_BUDGET))?;
             (
@@ -58,9 +58,10 @@ pub fn run(path: Option<PathBuf>, theme_name: Option<String>) -> anyhow::Result<
                 opened.pending,
                 opened.streamed,
                 opened.book,
+                opened.toc,
             )
         }
-        None => (Document::default(), Vec::new(), false, None),
+        None => (Document::default(), Vec::new(), false, None, Vec::new()),
     };
     // Absolute from here on: a bare relative name like `README.md` has the
     // empty string as parent, which breaks the sidebar root and the dialog.
@@ -121,7 +122,11 @@ pub fn run(path: Option<PathBuf>, theme_name: Option<String>) -> anyhow::Result<
         .unwrap_or(1)
         .clamp(1, 8);
     let pool = Arc::new(ShapePool::new(pool_width, &fonts.seed()));
-    let outline = OutlineTree::build(&document);
+    let outline = if book_toc.is_empty() {
+        OutlineTree::build(&document)
+    } else {
+        OutlineTree::from_toc(&book_toc, &document)
+    };
     let mut app = App {
         gfx: None,
         document,
@@ -145,6 +150,9 @@ pub fn run(path: Option<PathBuf>, theme_name: Option<String>) -> anyhow::Result<
         pass_spent: Duration::ZERO,
         pending_scroll: None,
         pending_anchor: None,
+        pending_offset: None,
+        book_toc,
+        positions: config::Positions::load(),
         layout_width: 0.0,
         band: None,
         scroll_y: 0.0,
@@ -177,6 +185,11 @@ pub fn run(path: Option<PathBuf>, theme_name: Option<String>) -> anyhow::Result<
     if let Some(job) = book {
         app.start_book(job);
     }
+    app.pending_offset = app
+        .document
+        .book_id
+        .as_deref()
+        .and_then(|key| app.positions.lookup(key));
     event_loop.run_app(&mut app)?;
     Ok(())
 }
@@ -195,7 +208,9 @@ fn outline_current(
         return None;
     }
     let entry = outline
-        .current_of(scroll_y, |b| lay.approx_top(b, 0))
+        .current_of(scroll_y, |b| {
+            (b != usize::MAX).then(|| lay.approx_top(b, 0)).flatten()
+        })
         .map(|e| outline.visible_entry(e));
     outline.track_current(entry, sidebar::ROW_H, side.list_h());
     entry
@@ -300,6 +315,14 @@ struct App {
     pending_scroll: Option<f32>,
     /// Anchor target clicked before its heading was placed.
     pending_anchor: Option<String>,
+    /// A book source offset to land on once delivered and placed: a
+    /// restored reading position or an internal link's target.
+    pending_offset: Option<usize>,
+    /// A book's table of contents as authored; empty for files, whose
+    /// outline scans headings instead.
+    book_toc: Vec<epub::TocEntry>,
+    /// Where reading stopped per book, written on switch and close.
+    positions: config::Positions,
     layout_width: f32,
     band: Option<BandCache>,
     scroll_y: f32,
@@ -457,6 +480,7 @@ impl App {
                 if self.sidebar.is_some() {
                     self.toggle_sidebar();
                 } else {
+                    self.remember_position();
                     event_loop.exit();
                 }
             }
@@ -888,11 +912,13 @@ impl App {
             blocks,
             details,
             source,
+            anchors,
         } = delivered;
         // A book's delivery grows the source; the prefix is its head bit
         // for bit, so every kept range stays valid on the longer text.
         if let Some(source) = source {
             self.document.source = source;
+            self.document.anchors = anchors.into_iter().collect();
         }
         let spliced = match stream::swap(&self.document.blocks, blocks) {
             stream::Swap::Splice(tail) => {
@@ -900,7 +926,11 @@ impl App {
                 // The tail's group ids index the full parse's vector;
                 // toggles already made on prefix groups carry over.
                 self.document.details = stream::adopt_details(&self.document.details, details);
-                self.outline.extend(&self.document);
+                if self.book_toc.is_empty() {
+                    self.outline.extend(&self.document);
+                } else {
+                    self.outline.re_resolve(&self.document);
+                }
                 self.pass
                     .as_mut()
                     .is_some_and(|pass| layout_extend(&self.document, pass))
@@ -1158,21 +1188,53 @@ impl App {
     /// Scrolls to a heading block: a placed anchor jumps now; a folded
     /// or unplaced one reveals and lands through the pending target.
     fn jump_to_heading(&mut self, block: usize) {
-        let Some(BlockKind::Heading { anchor, .. }) =
-            self.document.blocks.get(block).map(|b| &b.kind)
-        else {
+        match self.document.blocks.get(block).map(|b| &b.kind) {
+            Some(BlockKind::Heading { anchor, .. }) => {
+                let target = format!("#{anchor}");
+                if let Some(y) = self.layout.as_ref().and_then(|l| l.anchor_y(&target)) {
+                    self.scroll_to(y);
+                    return;
+                }
+                if self.document.reveal(block) {
+                    self.restart_layout();
+                }
+                self.pending_anchor = Some(target);
+                self.request_redraw();
+            }
+            // A book outline entry lands on any block kind; the jump
+            // goes by source offset through the pending path, which
+            // covers placed and not-yet-placed alike. An unresolved
+            // entry has no block and goes nowhere.
+            Some(_) => {
+                let offset = self.document.blocks[block].range.start;
+                if self.document.reveal(block) {
+                    self.restart_layout();
+                }
+                self.pending_offset = Some(offset);
+                self.request_redraw();
+            }
+            None => {}
+        }
+    }
+
+    /// Files the book's reading position: the block at the viewport
+    /// top, by its source offset. Files are not remembered.
+    fn remember_position(&mut self) {
+        let Some(key) = self.document.book_id.clone() else {
             return;
         };
-        let target = format!("#{anchor}");
-        if let Some(y) = self.layout.as_ref().and_then(|l| l.anchor_y(&target)) {
-            self.scroll_to(y);
+        let Some(lay) = self.layout.as_ref() else {
             return;
+        };
+        let mut offset = 0usize;
+        for (index, block) in self.document.blocks.iter().enumerate() {
+            match lay.approx_top(index, 0) {
+                Some(top) if top <= self.scroll_y + 1.0 => offset = block.range.start,
+                _ => break,
+            }
         }
-        if self.document.reveal(block) {
-            self.restart_layout();
-        }
-        self.pending_anchor = Some(target);
-        self.request_redraw();
+        self.positions.remember(&key, offset);
+        self.positions.save();
     }
 
     /// Runs a sidebar action and persists the tree's root when it moved.
@@ -1249,14 +1311,17 @@ impl App {
             self.overlay = None;
         }
         self.export_warning = None;
+        self.remember_position();
         let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         let loaded = load::open(&path, Some(Instant::now() + load::OPEN_BUDGET));
         let opened = loaded.is_ok();
         let mut book_job = None;
+        self.book_toc = Vec::new();
         match loaded {
             Ok(o) => {
                 self.document = o.document;
                 book_job = o.book;
+                self.book_toc = o.toc;
                 self.start_highlight(o.pending);
                 if o.streamed && book_job.is_none() {
                     self.start_parse();
@@ -1274,7 +1339,11 @@ impl App {
                 self.parse_pending = false;
             }
         }
-        self.outline = OutlineTree::build(&self.document);
+        self.outline = if self.book_toc.is_empty() {
+            OutlineTree::build(&self.document)
+        } else {
+            OutlineTree::from_toc(&self.book_toc, &self.document)
+        };
         self.path = Some(path.to_path_buf());
         let dir = path
             .parent()
@@ -1299,6 +1368,12 @@ impl App {
         // alone they fire against the new one once its layout grows.
         self.pending_scroll = None;
         self.pending_anchor = None;
+        // A remembered book resumes where reading stopped, once placed.
+        self.pending_offset = self
+            .document
+            .book_id
+            .as_deref()
+            .and_then(|key| self.positions.lookup(key));
         if let Some(side) = self.sidebar.as_mut() {
             if reroot && side.root() != dir {
                 let tab = side.tab();
@@ -1687,6 +1762,23 @@ impl App {
         };
         if let Some(anchor) = lay.anchor_y(&target) {
             self.scroll_to(anchor);
+        } else if let Some(rest) = target.strip_prefix("book:") {
+            // An internal book link: the whole model first, so a forward
+            // reference resolves, then the anchor map answers.
+            self.finish_parse();
+            let (path, fragment) = match rest.split_once('#') {
+                Some((p, f)) => (p, Some(f)),
+                None => (rest, None),
+            };
+            if let Some(offset) = epub::resolve_target(&self.document, path, fragment) {
+                if let Some(block) = self.document.block_at_offset(offset) {
+                    if self.document.reveal(block) {
+                        self.restart_layout();
+                    }
+                }
+                self.pending_offset = Some(offset);
+                self.request_redraw();
+            }
         } else if target.starts_with("http://") || target.starts_with("https://") {
             if let Err(err) = open::that_detached(&target) {
                 eprintln!("oryx: cannot open {target}: {err}");
@@ -1879,7 +1971,10 @@ impl App {
     /// Applies a scroll position or an anchor asked for before the pass
     /// had placed it.
     fn resolve_pending(&mut self) {
-        if self.pending_scroll.is_none() && self.pending_anchor.is_none() {
+        if self.pending_scroll.is_none()
+            && self.pending_anchor.is_none()
+            && self.pending_offset.is_none()
+        {
             return;
         }
         let height = self.doc_height();
@@ -1888,6 +1983,27 @@ impl App {
             if scroll::reached(target, height, vh) {
                 self.pending_scroll = None;
                 self.scroll_y = target;
+            }
+        }
+        if let Some(offset) = self.pending_offset {
+            // Held while the offset lies past the delivered source; the
+            // worker's delivery brings the rest.
+            let covered = offset < self.document.source.len() || !self.parse_pending;
+            if covered {
+                let placed = self
+                    .document
+                    .block_at_offset(offset)
+                    .and_then(|b| self.layout.as_ref().and_then(|l| l.approx_top(b, 0)));
+                match placed {
+                    Some(y) if scroll::reached(y, height, vh) || !self.layout_pending() => {
+                        self.pending_offset = None;
+                        self.scroll_to(y);
+                    }
+                    None if !self.layout_pending() && !self.parse_pending => {
+                        self.pending_offset = None;
+                    }
+                    _ => {}
+                }
             }
         }
         let Some(name) = self.pending_anchor.clone() else {
@@ -2245,7 +2361,10 @@ impl ApplicationHandler for App {
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                self.remember_position();
+                event_loop.exit();
+            }
             WindowEvent::ModifiersChanged(m) => self.modifiers = m.state(),
             WindowEvent::KeyboardInput {
                 event:

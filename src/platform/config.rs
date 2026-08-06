@@ -109,6 +109,83 @@ pub fn path() -> Option<PathBuf> {
     ProjectDirs::from("", "", "oryx").map(|dirs| dirs.config_dir().join("config.toml"))
 }
 
+/// Location of the reading-position file, beside the config.
+pub fn positions_path() -> Option<PathBuf> {
+    ProjectDirs::from("", "", "oryx").map(|dirs| dirs.config_dir().join("positions.toml"))
+}
+
+/// How many books keep a remembered position.
+const POSITIONS_KEPT: usize = 100;
+
+/// Where reading stopped, per book, most recent last. Keyed by the
+/// book's `dc:identifier` with the canonical path as fallback, holding
+/// the source offset of the line at the top of the viewport.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Positions {
+    pub book: Vec<BookPosition>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct BookPosition {
+    pub key: String,
+    pub offset: usize,
+}
+
+impl Positions {
+    pub fn load() -> Positions {
+        positions_path()
+            .map(|p| Self::load_from(&p))
+            .unwrap_or_default()
+    }
+
+    pub fn load_from(path: &Path) -> Positions {
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|text| toml::from_str(&text).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn save(&self) {
+        if let Some(p) = positions_path() {
+            self.save_to(&p);
+        }
+    }
+
+    pub fn save_to(&self, path: &Path) {
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let text = toml::to_string(self).expect("positions serialize");
+        if let Err(err) = std::fs::write(path, text) {
+            eprintln!("oryx: cannot save positions {}: {err}", path.display());
+        }
+    }
+
+    /// Files a book's position, most recent last, the oldest pruned
+    /// past the cap.
+    pub fn remember(&mut self, key: &str, offset: usize) {
+        self.book.retain(|b| b.key != key);
+        self.book.push(BookPosition {
+            key: key.to_string(),
+            offset,
+        });
+        if self.book.len() > POSITIONS_KEPT {
+            let excess = self.book.len() - POSITIONS_KEPT;
+            self.book.drain(..excess);
+        }
+    }
+
+    pub fn lookup(&self, key: &str) -> Option<usize> {
+        self.book
+            .iter()
+            .rev()
+            .find(|b| b.key == key)
+            .map(|b| b.offset)
+    }
+}
+
 pub fn load() -> Config {
     path().map(|p| load_from(&p)).unwrap_or_default()
 }

@@ -332,7 +332,7 @@ fn six_fat_chapters() -> Vec<u8> {
 
 #[test]
 fn the_prefix_takes_whole_chapters_past_the_target() {
-    let (doc, job) = epub::open_prefix(six_fat_chapters()).unwrap();
+    let (doc, _, job) = epub::open_prefix(six_fat_chapters()).unwrap();
     let job = job.expect("a big book leaves a continuation");
     assert!(job.has_chapters(), "chapters remain for the worker");
     assert!(
@@ -353,7 +353,7 @@ fn the_prefix_takes_whole_chapters_past_the_target() {
 
 #[test]
 fn the_delivery_extends_the_prefix_bit_for_bit() {
-    let (doc, job) = epub::open_prefix(six_fat_chapters()).unwrap();
+    let (doc, _, job) = epub::open_prefix(six_fat_chapters()).unwrap();
     let job = job.expect("a continuation");
     let (sink, _) = collecting_sink();
     let delivered = epub::run(job, &|| false, sink).expect("an unbailed run delivers");
@@ -381,7 +381,7 @@ fn images_decode_through_the_sink_not_at_open() {
             "<html><body><p><img src=\"../images/one.png\"/><img src=\"../images/two.png\"/></p></body></html>",
         )
         .build();
-    let (_, job) = epub::open_prefix(bytes).unwrap();
+    let (_, _, job) = epub::open_prefix(bytes).unwrap();
     let mut job = job.expect("images leave a decode job");
     assert!(
         !job.has_chapters(),
@@ -402,9 +402,238 @@ fn images_decode_through_the_sink_not_at_open() {
 
 #[test]
 fn a_bailed_run_delivers_nothing() {
-    let (_, job) = epub::open_prefix(six_fat_chapters()).unwrap();
+    let (_, _, job) = epub::open_prefix(six_fat_chapters()).unwrap();
     let (sink, _) = collecting_sink();
     assert!(epub::run(job.unwrap(), &|| true, sink).is_none());
+}
+
+#[test]
+fn toc_reads_the_nav_document() {
+    let bytes = book()
+        .nav_doc(
+            "<html xmlns:epub=\"http://www.idpf.org/2007/ops\"><body><nav epub:type=\"toc\"><ol>\
+             <li><a href=\"text/one.xhtml\">One</a></li>\
+             <li><a href=\"text/two.xhtml\">Two</a><ol>\
+             <li><a href=\"text/two.xhtml#deep\">Deep</a></li></ol></li>\
+             </ol></nav></body></html>",
+        )
+        .chapter("one.xhtml", "<html><body><p>One.</p></body></html>")
+        .chapter("two.xhtml", "<html><body><p>Two.</p></body></html>")
+        .build();
+    let mut archive = Archive::open(bytes).unwrap();
+    let package = epub::read_package(&mut archive).unwrap();
+    let toc = epub::read_toc(&mut archive, &package);
+
+    let shape: Vec<(&str, u8, &str, Option<&str>)> = toc
+        .iter()
+        .map(|e| {
+            (
+                e.label.as_str(),
+                e.depth,
+                e.path.as_str(),
+                e.fragment.as_deref(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        shape,
+        [
+            ("One", 0, "OEBPS/text/one.xhtml", None),
+            ("Two", 0, "OEBPS/text/two.xhtml", None),
+            ("Deep", 1, "OEBPS/text/two.xhtml", Some("deep")),
+        ]
+    );
+}
+
+#[test]
+fn toc_falls_back_to_the_ncx() {
+    let bytes = book()
+        .ncx(
+            "<?xml version=\"1.0\"?><ncx xmlns=\"http://www.daisy.org/z3986/2005/ncx/\"><navMap>\
+             <navPoint><navLabel><text>Start</text></navLabel><content src=\"text/one.xhtml\"/>\
+             <navPoint><navLabel><text>Inner</text></navLabel><content src=\"text/one.xhtml#i\"/></navPoint>\
+             </navPoint></navMap></ncx>",
+        )
+        .chapter("one.xhtml", "<html><body><p>One.</p></body></html>")
+        .build();
+    let mut archive = Archive::open(bytes).unwrap();
+    let package = epub::read_package(&mut archive).unwrap();
+    let toc = epub::read_toc(&mut archive, &package);
+
+    assert_eq!(toc.len(), 2);
+    assert_eq!(toc[0].label, "Start");
+    assert_eq!(toc[0].depth, 0);
+    assert_eq!(toc[1].label, "Inner");
+    assert_eq!(toc[1].depth, 1);
+    assert_eq!(toc[1].fragment.as_deref(), Some("i"));
+}
+
+#[test]
+fn anchors_cover_chapters_and_ids() {
+    let bytes = book()
+        .chapter(
+            "one.xhtml",
+            "<html><body><p>Opening text.</p><p id=\"f1\">Note text here.</p></body></html>",
+        )
+        .chapter("two.xhtml", "<html><body><p>Second.</p></body></html>")
+        .build();
+    let doc = epub::open_book(bytes).unwrap().document;
+
+    assert_eq!(doc.anchors.get("OEBPS/text/one.xhtml"), Some(&0));
+    let note = *doc
+        .anchors
+        .get("OEBPS/text/one.xhtml#f1")
+        .expect("the id is recorded");
+    assert!(
+        doc.source[note..].starts_with("Note text here."),
+        "the anchor lands on its element's text, got {:?}",
+        &doc.source[note..note.saturating_add(20).min(doc.source.len())]
+    );
+    let second = *doc.anchors.get("OEBPS/text/two.xhtml").unwrap();
+    assert!(doc.source[second..].starts_with("Second."));
+}
+
+#[test]
+fn internal_links_carry_book_targets() {
+    let bytes = book()
+        .chapter(
+            "one.xhtml",
+            "<html><body><p><a href=\"two.xhtml#x\">note</a> and <a href=\"gone.xhtml\">dead</a></p></body></html>",
+        )
+        .chapter("two.xhtml", "<html><body><p id=\"x\">Target.</p></body></html>")
+        .build();
+    let doc = epub::open_book(bytes).unwrap().document;
+
+    let BlockKind::Paragraph { spans } = &doc.blocks[0].kind else {
+        panic!("expected a paragraph, got {:?}", doc.blocks[0].kind);
+    };
+    let note = spans
+        .iter()
+        .find(|s| s.text(&doc.source) == "note")
+        .unwrap();
+    assert_eq!(note.link.as_deref(), Some("book:OEBPS/text/two.xhtml#x"));
+    assert!(
+        spans
+            .iter()
+            .all(|s| s.link.is_none() || s.text(&doc.source) == "note"),
+        "a link to a file outside the spine stays plain text"
+    );
+}
+
+#[test]
+fn fragment_misses_fall_back_to_the_chapter_start() {
+    let bytes = book()
+        .chapter("one.xhtml", "<html><body><p>One.</p></body></html>")
+        .chapter("two.xhtml", "<html><body><p>Two.</p></body></html>")
+        .build();
+    let doc = epub::open_book(bytes).unwrap().document;
+
+    let start = *doc.anchors.get("OEBPS/text/two.xhtml").unwrap();
+    assert_eq!(
+        epub::resolve_target(&doc, "OEBPS/text/two.xhtml", Some("nope")),
+        Some(start)
+    );
+    assert_eq!(
+        epub::resolve_target(&doc, "OEBPS/text/gone.xhtml", None),
+        None
+    );
+}
+
+#[test]
+fn book_id_prefers_identifier_and_falls_back_to_the_path() {
+    let path = book()
+        .chapter("one.xhtml", "<html><body><p>One.</p></body></html>")
+        .write_to("oryx_epub_id_test.epub");
+    let opened = load::open(&path, None).unwrap();
+    assert_eq!(opened.document.book_id.as_deref(), Some("urn:test:1"));
+
+    let path2 = book()
+        .no_identifier()
+        .chapter("one.xhtml", "<html><body><p>One.</p></body></html>")
+        .write_to("oryx_epub_noid_test.epub");
+    let opened2 = load::open(&path2, None).unwrap();
+    let canonical = path2.canonicalize().unwrap().display().to_string();
+    assert_eq!(
+        opened2.document.book_id.as_deref(),
+        Some(canonical.as_str())
+    );
+    std::fs::remove_file(&path).ok();
+    std::fs::remove_file(&path2).ok();
+}
+
+#[test]
+fn positions_remember_prune_and_move_back() {
+    use oryx::platform::config::Positions;
+    let mut positions = Positions::default();
+    for i in 0..105 {
+        positions.remember(&format!("book-{i}"), i * 10);
+    }
+    assert_eq!(positions.lookup("book-0"), None, "the oldest are pruned");
+    assert_eq!(positions.lookup("book-104"), Some(1040));
+    positions.remember("book-10", 777);
+    assert_eq!(positions.lookup("book-10"), Some(777));
+
+    let path = std::env::temp_dir().join("oryx_positions_test.toml");
+    positions.save_to(&path);
+    let reloaded = Positions::load_from(&path);
+    std::fs::remove_file(&path).ok();
+    assert_eq!(reloaded.lookup("book-10"), Some(777));
+    assert_eq!(reloaded.lookup("book-104"), Some(1040));
+}
+
+#[test]
+fn the_outline_resolves_toc_entries_as_the_worker_delivers() {
+    use oryx::ui::outline::OutlineTree;
+    let para = format!("<p>{}</p>", "word ".repeat(8000));
+    let mut b = book().nav_doc(
+        "<html><body><nav epub:type=\"toc\"><ol>\
+         <li><a href=\"text/c0.xhtml\">First</a></li>\
+         <li><a href=\"text/c5.xhtml\">Last</a></li>\
+         <li><a href=\"text/gone.xhtml\">Absent</a></li>\
+         </ol></nav></body></html>",
+    );
+    for i in 0..6 {
+        b = b.chapter(
+            &format!("c{i}.xhtml"),
+            &format!("<html><body>{para}</body></html>"),
+        );
+    }
+    let bytes = b.build();
+
+    let (doc, _, job) = epub::open_prefix(bytes.clone()).unwrap();
+    let mut archive = Archive::open(bytes).unwrap();
+    let package = epub::read_package(&mut archive).unwrap();
+    let toc = epub::read_toc(&mut archive, &package);
+
+    let mut tree = OutlineTree::from_toc(&toc, &doc);
+    assert_eq!(tree.entries().len(), 3);
+    assert_ne!(
+        tree.entries()[0].block,
+        usize::MAX,
+        "the first chapter resolves"
+    );
+    assert_eq!(
+        tree.entries()[1].block,
+        usize::MAX,
+        "the last chapter is not delivered yet"
+    );
+
+    let (sink, _) = collecting_sink();
+    let delivered = epub::run(job.unwrap(), &|| false, sink).unwrap();
+    let full = Document {
+        blocks: delivered.blocks,
+        source: delivered.source.unwrap(),
+        details: delivered.details,
+        anchors: delivered.anchors.into_iter().collect(),
+        ..Document::default()
+    };
+    tree.re_resolve(&full);
+    assert_ne!(tree.entries()[1].block, usize::MAX, "delivery resolves it");
+    assert_eq!(
+        tree.entries()[2].block,
+        usize::MAX,
+        "an absent file stays inert"
+    );
 }
 
 /// Temporary stage-timing probe for real books; run with
@@ -458,7 +687,7 @@ fn timing_probe() {
 
     // What the app now pays before the first frame.
     let t = Instant::now();
-    let (prefix_doc, job) = epub::open_prefix(bytes).unwrap();
+    let (prefix_doc, _, job) = epub::open_prefix(bytes).unwrap();
     let t_prefix = t.elapsed();
     let job_note = match &job {
         Some(j) if j.has_chapters() => "chapters remain",

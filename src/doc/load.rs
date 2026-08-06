@@ -86,6 +86,8 @@ pub struct Opened {
     /// A book's continuation: the walk past the prefix and the images
     /// not yet decoded. The app starts it once the media cache exists.
     pub book: Option<super::epub::BookJob>,
+    /// A book's table of contents as authored; empty for files.
+    pub toc: Vec<super::epub::TocEntry>,
 }
 
 pub fn open(path: &Path, deadline: Option<Instant>) -> anyhow::Result<Opened> {
@@ -93,7 +95,12 @@ pub fn open(path: &Path, deadline: Option<Instant>) -> anyhow::Result<Opened> {
         std::fs::read(path).map_err(|e| anyhow::anyhow!("cannot open {}: {e}", path.display()))?;
     // A book is a zip and full of NUL bytes; it routes before the sniff.
     if detect(path) == FileKind::Epub {
-        let (mut document, book) = super::epub::open_prefix(bytes)?;
+        let (mut document, toc, book) = super::epub::open_prefix(bytes)?;
+        // Position memory falls back to the canonical path when the
+        // metadata carries no identifier.
+        if document.book_id.is_none() {
+            document.book_id = path.canonicalize().ok().map(|p| p.display().to_string());
+        }
         let pending = apply_budget(&mut document, deadline);
         let streamed = book.as_ref().is_some_and(|job| job.has_chapters());
         return Ok(Opened {
@@ -101,6 +108,7 @@ pub fn open(path: &Path, deadline: Option<Instant>) -> anyhow::Result<Opened> {
             pending,
             streamed,
             book,
+            toc,
         });
     }
     if is_binary(&bytes) {
@@ -140,6 +148,7 @@ pub fn open(path: &Path, deadline: Option<Instant>) -> anyhow::Result<Opened> {
         pending,
         streamed,
         book: None,
+        toc: Vec::new(),
     })
 }
 
@@ -260,8 +269,7 @@ fn code_document(token: Option<&str>, text: &str) -> Document {
     Document {
         blocks: vec![block],
         source: Arc::from(text),
-        details: Vec::new(),
-        title: None,
+        ..Document::default()
     }
 }
 
@@ -290,8 +298,7 @@ fn plain_document(text: &str) -> Document {
     Document {
         blocks,
         source: Arc::from(text),
-        details: Vec::new(),
-        title: None,
+        ..Document::default()
     }
 }
 

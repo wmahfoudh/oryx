@@ -31,11 +31,18 @@ pub struct Row {
     pub depth: u8,
     pub has_children: bool,
     pub collapsed: bool,
+    /// A book TOC entry whose target does not resolve: drawn dimmed,
+    /// jumps nowhere.
+    pub dead: bool,
 }
 
 #[derive(Default)]
 pub struct OutlineTree {
     entries: Vec<Entry>,
+    /// Book mode: each entry's TOC target, parallel to `entries`, for
+    /// resolving against the anchor map as deliveries land. Empty for
+    /// the heading outline.
+    targets: Vec<(String, Option<String>)>,
     /// Folded entries, keyed by model block index, which growth never
     /// shifts. Session-only; a rebuild starts expanded.
     collapsed: HashSet<usize>,
@@ -55,6 +62,54 @@ impl OutlineTree {
         let mut tree = OutlineTree::default();
         tree.extend(doc);
         tree
+    }
+
+    /// A book's outline: the authored table of contents, nesting as
+    /// written, every entry present from the start. Targets resolve
+    /// through the anchor map to blocks; one the map does not cover yet
+    /// stays unresolved until `re_resolve` after a delivery, and one
+    /// naming an absent file stays unresolved for good.
+    pub fn from_toc(toc: &[crate::doc::epub::TocEntry], doc: &Document) -> OutlineTree {
+        let mut tree = OutlineTree::default();
+        for entry in toc {
+            // The heading machinery parents by level; a TOC's depth maps
+            // onto it as level minus one.
+            let parent = if entry.depth == 0 {
+                None
+            } else {
+                tree.entries.iter().rposition(|e| e.level < entry.depth + 1)
+            };
+            let depth = parent.map(|p| tree.entries[p].depth + 1).unwrap_or(0);
+            if let Some(p) = parent {
+                tree.entries[p].has_children = true;
+            }
+            tree.entries.push(Entry {
+                text: entry.label.clone(),
+                block: usize::MAX,
+                level: entry.depth + 1,
+                parent,
+                depth,
+                has_children: false,
+            });
+            tree.targets
+                .push((entry.path.clone(), entry.fragment.clone()));
+        }
+        tree.re_resolve(doc);
+        tree
+    }
+
+    /// Resolves unresolved book entries against the anchor map; a
+    /// delivery grows the map, so later chapters resolve here.
+    pub fn re_resolve(&mut self, doc: &Document) {
+        for (index, (path, fragment)) in self.targets.iter().enumerate() {
+            if self.entries[index].block != usize::MAX || path.is_empty() {
+                continue;
+            }
+            let offset = crate::doc::epub::resolve_target(doc, path, fragment.as_deref());
+            if let Some(block) = offset.and_then(|o| doc.block_at_offset(o)) {
+                self.entries[index].block = block;
+            }
+        }
     }
 
     /// Appends entries for blocks parsed since the last call. Existing
@@ -110,6 +165,7 @@ impl OutlineTree {
                 depth: e.depth,
                 has_children: e.has_children,
                 collapsed: self.collapsed.contains(&e.block),
+                dead: e.block == usize::MAX,
             })
             .collect()
     }

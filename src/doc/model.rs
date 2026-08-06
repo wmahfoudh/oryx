@@ -18,6 +18,13 @@ pub struct Document {
     pub details: Vec<DetailsGroup>,
     /// A book's `dc:title`, shown in the window title; None for files.
     pub title: Option<String>,
+    /// A book's anchor map: `path` and `path#id` to source offsets, the
+    /// chapters and every element id. Links and the TOC resolve through
+    /// it; a delivery replaces it whole. Empty for files.
+    pub anchors: std::collections::HashMap<String, usize>,
+    /// The key position memory files a book under: `dc:identifier`, or
+    /// the canonical path when the metadata has none. None for files.
+    pub book_id: Option<String>,
 }
 
 impl Default for Document {
@@ -27,6 +34,8 @@ impl Default for Document {
             source: Arc::from(""),
             details: Vec::new(),
             title: None,
+            anchors: std::collections::HashMap::new(),
+            book_id: None,
         }
     }
 }
@@ -59,6 +68,13 @@ impl Document {
     pub fn toggle_details(&mut self, group: u16) {
         let g = &mut self.details[group as usize];
         g.open = !g.open;
+    }
+
+    /// The block holding a source offset: the last one starting at or
+    /// before it. Book anchors resolve to blocks through this.
+    pub fn block_at_offset(&self, offset: usize) -> Option<usize> {
+        let after = self.blocks.partition_point(|b| b.range.start <= offset);
+        after.checked_sub(1)
     }
 
     /// Opens every closed group enclosing a block, answering whether

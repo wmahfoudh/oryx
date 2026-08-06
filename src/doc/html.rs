@@ -567,6 +567,14 @@ pub struct Walker {
     /// The current chapter's directory inside the archive; relative
     /// image sources resolve against it.
     base: String,
+    /// The current chapter's own archive path, the anchor keys' prefix.
+    chapter_path: String,
+    /// `path` and `path#id` to source offsets, recorded as the walk
+    /// passes chapters and ids.
+    anchors: Vec<(String, usize)>,
+    /// Archive paths of every spine item; a relative href landing
+    /// outside this set renders as plain text.
+    book_files: std::collections::HashSet<String>,
     /// Image sources the current chapter referenced, for extraction.
     images: Vec<String>,
     /// Inline `<svg>` subtrees the current chapter held.
@@ -610,6 +618,9 @@ impl Walker {
             emphasis: EmphasisTable::default(),
             css: vec![CssState::default()],
             base: String::new(),
+            chapter_path: String::new(),
+            anchors: Vec::new(),
+            book_files: std::collections::HashSet::new(),
             images: Vec::new(),
             svgs: Vec::new(),
             svg_serial: 0,
@@ -622,9 +633,33 @@ impl Walker {
         self.emphasis = table;
     }
 
-    /// The archive directory of the chapter about to walk.
-    pub fn set_chapter_base(&mut self, base: &str) {
-        self.base = base.to_string();
+    /// The chapter about to walk, by its archive path: relative sources
+    /// resolve against its directory, and its start is recorded as the
+    /// bare-path anchor.
+    pub fn set_chapter(&mut self, path: &str) {
+        self.base = match path.rfind('/') {
+            Some(slash) => path[..slash].to_string(),
+            None => String::new(),
+        };
+        self.chapter_path = path.to_string();
+        self.anchors.push((path.to_string(), self.pending_pos()));
+    }
+
+    /// The spine's archive paths, for deciding which hrefs are links.
+    pub fn set_book_files(&mut self, files: std::collections::HashSet<String>) {
+        self.book_files = files;
+    }
+
+    /// Anchors recorded so far; the whole map, not a delta.
+    pub fn anchors(&self) -> &[(String, usize)] {
+        &self.anchors
+    }
+
+    /// Where the next visible character will land in the source.
+    fn pending_pos(&self) -> usize {
+        self.source.len()
+            + self.spans.iter().map(|s| s.raw_text().len()).sum::<usize>()
+            + usize::from(self.space)
     }
 
     /// Image sources referenced since the last take, resolved.
@@ -707,6 +742,10 @@ impl Walker {
         if SKIP_TAGS.contains(&tag) {
             return;
         }
+        if let Some(id) = attr("id") {
+            self.anchors
+                .push((format!("{}#{id}", self.chapter_path), self.pending_pos()));
+        }
         let class_attr = attr("class").unwrap_or_default();
         let mut emphasis = self.emphasis.resolve(tag, &class_attr);
         if let Some(style) = attr("style") {
@@ -782,10 +821,32 @@ impl Walker {
                 self.svgs.push(PendingSvg { key, markup, refs });
             }
             "a" => {
-                let external =
-                    attr("href").filter(|h| h.starts_with("http://") || h.starts_with("https://"));
+                let target = attr("href").and_then(|href| {
+                    if href.starts_with("http://") || href.starts_with("https://") {
+                        return Some(href);
+                    }
+                    // A book-internal href: resolved now, followed at
+                    // click time through the anchor map. A target
+                    // outside the spine stays plain text.
+                    let (path, fragment) = match href.split_once('#') {
+                        Some((p, f)) => (p, Some(f)),
+                        None => (href.as_str(), None),
+                    };
+                    let resolved = if path.is_empty() {
+                        self.chapter_path.clone()
+                    } else {
+                        join_href(&self.base, path)
+                    };
+                    if !self.book_files.contains(&resolved) {
+                        return None;
+                    }
+                    match fragment {
+                        Some(f) => Some(format!("book:{resolved}#{f}")),
+                        None => Some(format!("book:{resolved}")),
+                    }
+                });
                 let prior = self.link.take();
-                self.link = external.or_else(|| prior.clone());
+                self.link = target.or_else(|| prior.clone());
                 self.children(node);
                 self.link = prior;
             }
@@ -1734,7 +1795,7 @@ mod tests {
     #[test]
     fn img_maps_to_an_inline_image_span_with_size() {
         let mut walker = Walker::new();
-        walker.set_chapter_base("OEBPS/text");
+        walker.set_chapter("OEBPS/text/page.xhtml");
         walker.walk_chapter(
             "<html><body><p><img src=\"pic.png\" width=\"64\" height=\"32\" alt=\"B\"/></p></body></html>",
         );

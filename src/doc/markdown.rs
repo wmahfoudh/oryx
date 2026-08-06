@@ -52,7 +52,7 @@ pub fn parse_unless(source: impl Into<Arc<str>>, bail: impl Fn() -> bool) -> Opt
         blocks,
         source,
         details: builder.details,
-        title: None,
+        ..Document::default()
     })
 }
 

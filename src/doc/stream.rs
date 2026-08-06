@@ -139,6 +139,9 @@ pub struct Delivered {
     pub blocks: Vec<Block>,
     pub details: Vec<DetailsGroup>,
     pub source: Option<std::sync::Arc<str>>,
+    /// A book's full anchor map, replacing the prefix's; empty for
+    /// markdown, whose anchors live on its heading blocks.
+    pub anchors: Vec<(String, usize)>,
 }
 
 /// A parked delivery and the generation that produced it.
@@ -180,6 +183,7 @@ impl ParseWorker {
                     blocks: document.blocks,
                     details: document.details,
                     source: None,
+                    anchors: Vec::new(),
                 })
             },
             waker,
@@ -332,6 +336,7 @@ mod tests {
                     blocks: Vec::new(),
                     details: Vec::new(),
                     source: Some(Arc::from("the grown book source")),
+                    anchors: Vec::new(),
                 })
             },
             || {},

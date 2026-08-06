@@ -541,7 +541,13 @@ impl Sidebar {
                 );
             }
             let x = PAD + row.depth as f32 * INDENT;
-            let color = ui.sidebar_fg;
+            // An unresolved book entry dims like a dot file and jumps
+            // nowhere.
+            let color = if row.dead {
+                dim(ui.sidebar_fg)
+            } else {
+                ui.sidebar_fg
+            };
             if row.has_children {
                 let cx = x + 3.0;
                 let cy = ry + ROW_H / 2.0;
