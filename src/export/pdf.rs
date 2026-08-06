@@ -191,6 +191,9 @@ pub struct Job<'a> {
     pub geometry: &'a PageGeometry,
     pub settings: &'a ExportSettings,
     pub title: &'a str,
+    /// A book's table of contents; when present it drives the PDF
+    /// outline instead of the heading scan. Empty for files.
+    pub toc: &'a [crate::doc::epub::TocEntry],
 }
 
 /// A clickable box and what it points at, before the target is resolved.
@@ -1049,34 +1052,59 @@ fn write_outline(
     page_ids: &[Ref],
 ) -> Option<Ref> {
     let mut items: Vec<Item> = Vec::new();
-    for block in &job.doc.blocks {
-        let BlockKind::Heading {
-            level,
-            spans,
-            anchor,
-        } = &block.kind
-        else {
+    // A book's outline is its authored table of contents, each entry at
+    // the page holding its resolved target; every other document scans
+    // its headings.
+    for entry in job.toc {
+        let offset =
+            crate::doc::epub::resolve_target(job.doc, &entry.path, entry.fragment.as_deref());
+        let Some(block) = offset.and_then(|o| job.doc.block_at_offset(o)) else {
             continue;
         };
-        let Some((page, y)) = place(job, tops, anchor) else {
+        let Some(y) = job.layout.approx_top(block, 0) else {
             continue;
         };
-        let title: String = spans
-            .iter()
-            .map(|span| span.text(&job.doc.source))
-            .collect();
-        if title.trim().is_empty() {
-            continue;
-        }
+        let page = tops.partition_point(|top| *top <= y).saturating_sub(1);
         items.push(Item {
-            title,
-            level: *level,
+            title: entry.label.clone(),
+            level: entry.depth + 1,
             page,
-            y,
+            y: device_y(y, tops[page], job.geometry),
             id: alloc.next(),
             parent: None,
             children: Vec::new(),
         });
+    }
+    if job.toc.is_empty() {
+        for block in &job.doc.blocks {
+            let BlockKind::Heading {
+                level,
+                spans,
+                anchor,
+            } = &block.kind
+            else {
+                continue;
+            };
+            let Some((page, y)) = place(job, tops, anchor) else {
+                continue;
+            };
+            let title: String = spans
+                .iter()
+                .map(|span| span.text(&job.doc.source))
+                .collect();
+            if title.trim().is_empty() {
+                continue;
+            }
+            items.push(Item {
+                title,
+                level: *level,
+                page,
+                y,
+                id: alloc.next(),
+                parent: None,
+                children: Vec::new(),
+            });
+        }
     }
     if items.is_empty() {
         return None;

@@ -222,9 +222,18 @@ pub struct ExportPass {
     /// Created with the `.part` file when emission starts.
     builder: Option<Builder>,
     failed: Option<String>,
+    /// A book's table of contents, driving the PDF outline; empty for
+    /// files.
+    toc: Vec<crate::doc::epub::TocEntry>,
 }
 
 impl ExportPass {
+    /// Hands the pass a book's table of contents for the PDF outline.
+    pub fn with_toc(mut self, toc: Vec<crate::doc::epub::TocEntry>) -> ExportPass {
+        self.toc = toc;
+        self
+    }
+
     pub fn new(settings: &ExportSettings, theme: Theme, target: PathBuf) -> ExportPass {
         let geometry = PageGeometry::new(settings.page, settings.orientation, settings.body_size);
         let title = target
@@ -257,6 +266,7 @@ impl ExportPass {
             emitted: 0,
             builder: None,
             failed: None,
+            toc: Vec::new(),
         }
     }
 
@@ -391,6 +401,7 @@ impl ExportPass {
                         geometry: &self.geometry,
                         settings: &self.settings,
                         title: &self.title,
+                        toc: &self.toc,
                     };
                     let builder = self.builder.as_mut().expect("emission has a builder");
                     builder.add_page_shaped(&job, &page, fonts, media, shaped);
@@ -490,6 +501,7 @@ impl ExportPass {
             geometry: &self.geometry,
             settings: &self.settings,
             title: &self.title,
+            toc: &self.toc,
         };
         builder.finish(&job, fonts).map_err(std::io::Error::other)?;
         std::fs::rename(&self.part, &self.target)?;

@@ -1,5 +1,7 @@
-//! Builds EPUB archives in memory for the epub tests, so every fixture
-//! stays readable Rust instead of a binary file in the tree.
+//! Builds EPUB archives in memory for the epub and export tests, so
+//! every fixture stays readable Rust instead of a binary file in the
+//! tree. Two test binaries share it, and neither uses all of it.
+#![allow(dead_code)]
 
 use std::io::{Cursor, Write};
 

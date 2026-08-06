@@ -1473,7 +1473,7 @@ impl App {
         let Some(target) = target else {
             return;
         };
-        let pass = ExportPass::new(&settings, theme, target);
+        let pass = ExportPass::new(&settings, theme, target).with_toc(self.book_toc.clone());
         self.overlay = Some(Box::new(ExportProgress::new(pass.progress())));
         self.export_warning = fell_back.then(|| format!("theme {} is gone", settings.theme));
         self.export = Some(pass);

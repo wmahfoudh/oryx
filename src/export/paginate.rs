@@ -221,6 +221,47 @@ fn block_spans(layout: &LayoutDoc, items: &[Item]) -> HashMap<usize, (usize, usi
     spans
 }
 
+/// Block indices of the chapter-break markers, in order; empty for
+/// everything but books.
+fn marker_blocks(doc: &Document) -> Vec<usize> {
+    doc.blocks
+        .iter()
+        .enumerate()
+        .filter_map(|(index, block)| {
+            matches!(block.kind, BlockKind::ChapterBreak { .. }).then_some(index)
+        })
+        .collect()
+}
+
+/// The forced page break: the first item in `(i, j)` whose block lies in
+/// a later chapter than item `i`'s cuts the page there, so every chapter
+/// starts fresh. Adjacent markers hold no item between them and collapse
+/// to one break; a trailing marker has no item after it and emits
+/// nothing. `j` when no chapter seam falls inside the page.
+fn forced_break(
+    markers: &[usize],
+    layout: &LayoutDoc,
+    items: &[Item],
+    i: usize,
+    j: usize,
+) -> usize {
+    if markers.is_empty() {
+        return j;
+    }
+    let Some(first) = items[i].block(layout) else {
+        return j;
+    };
+    let chapter = markers.partition_point(|&m| m <= first);
+    for (k, item) in items.iter().enumerate().take(j).skip(i + 1) {
+        if let Some(block) = item.block(layout) {
+            if markers.partition_point(|&m| m <= block) > chapter {
+                return k;
+            }
+        }
+    }
+    j
+}
+
 /// Whether a break before item `k` is one of the ones that read badly.
 /// The page currently starts at item `i`.
 fn rejected(
@@ -316,6 +357,7 @@ pub fn paginate(doc: &Document, layout: &LayoutDoc, geometry: &PageGeometry) -> 
     let mut items = items(layout);
     extend_items(doc, layout, content, &mut items);
     let spans = block_spans(layout, &items);
+    let markers = marker_blocks(doc);
     let mut pages: Vec<Page> = Vec::new();
     let mut i = 0;
     let mut cursor = 0;
@@ -331,7 +373,12 @@ pub fn paginate(doc: &Document, layout: &LayoutDoc, geometry: &PageGeometry) -> 
         if j == i {
             j = i + 1;
         }
-        if j < items.len() {
+        let forced = forced_break(&markers, layout, &items, i, j);
+        if forced < j {
+            // A chapter seam is always an acceptable break; the taste
+            // rules never move it.
+            j = forced;
+        } else if j < items.len() {
             let mut candidate = j;
             loop {
                 if !rejected(doc, layout, &items, &spans, i, candidate) {
@@ -531,7 +578,9 @@ impl Paginator {
         while j < self.settled && self.items[j].bottom - top <= content + SLACK {
             j += 1;
         }
-        if j >= self.settled && !complete {
+        let markers = marker_blocks(doc);
+        let forced = forced_break(&markers, layout, &self.items[..self.settled.max(i)], i, j);
+        if forced >= j && j >= self.settled && !complete {
             // Everything settled still fits; more may join the page.
             return None;
         }
@@ -539,7 +588,15 @@ impl Paginator {
         if j == i {
             j = i + 1;
         }
-        if j < self.items.len() {
+        if forced < j {
+            // A chapter seam is always an acceptable break; the taste
+            // rules never move it, but the page still waits until its
+            // blocks are behind the pass.
+            if !self.closable(doc, layout, forced, complete) {
+                return None;
+            }
+            j = forced;
+        } else if j < self.items.len() {
             if !self.closable(doc, layout, j, complete) {
                 return None;
             }

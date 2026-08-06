@@ -15,8 +15,150 @@ use oryx::layout::{layout, layout_begin, layout_step, ViewConfig};
 use oryx::style::fonts::FontStore;
 use oryx::style::theme::Theme;
 
+#[path = "fixtures/epub_common.rs"]
+mod epub_common;
+
 fn export_to_bytes(doc: &Document, page: PageSize) -> Vec<u8> {
     export_with(doc, page, false)
+}
+
+/// A book export: the same pass with the authored table of contents
+/// driving the PDF outline.
+fn export_book(book: &oryx::doc::epub::Book) -> Vec<u8> {
+    let mut fonts = FontStore::new();
+    let mut media = MediaCache::new(PathBuf::from("tests/fixtures"));
+    let cfg = ViewConfig {
+        body_size: 11.0,
+        code_size: 9.0,
+        zoom: 1.0,
+        ..ViewConfig::default()
+    };
+    let theme = Theme::default_dark();
+    let geometry = PageGeometry::new(PageSize::A4, Orientation::Portrait, cfg.body_size);
+    let settings = ExportSettings {
+        body_size: cfg.body_size,
+        code_size: cfg.code_size,
+        ..ExportSettings::default()
+    };
+    let doc = &book.document;
+    let laid = layout(doc, &theme, &mut fonts, &mut media, &cfg, geometry.width);
+    let pages = paginate(doc, &laid, &geometry);
+    let job = pdf::Job {
+        doc,
+        layout: &laid,
+        theme: &theme,
+        geometry: &geometry,
+        settings: &settings,
+        title: "test",
+        toc: &book.toc,
+    };
+    pdf::build(&job, &pages, &mut fonts, &mut media).expect("the export builds")
+}
+
+#[test]
+fn book_chapters_start_on_fresh_pages() {
+    let bytes = epub_common::book()
+        .chapter(
+            "one.xhtml",
+            "<html><body><p>Alpha chapter text.</p></body></html>",
+        )
+        .chapter(
+            "two.xhtml",
+            "<html><body><p>Beta chapter text.</p></body></html>",
+        )
+        .chapter(
+            "three.xhtml",
+            "<html><body><p>Gamma chapter text.</p></body></html>",
+        )
+        .build();
+    let book = oryx::doc::epub::open_book(bytes).unwrap();
+    let pdf = Pdf::load_mem(&export_to_bytes(&book.document, PageSize::A4)).unwrap();
+    assert_eq!(pdf.get_pages().len(), 3, "one page per chapter");
+    let first = pdf.extract_text(&[1]).unwrap();
+    assert!(
+        first.contains("Alpha") && !first.contains("Beta"),
+        "{first}"
+    );
+    let second = pdf.extract_text(&[2]).unwrap();
+    assert!(
+        second.contains("Beta") && !second.contains("Gamma"),
+        "{second}"
+    );
+    let third = pdf.extract_text(&[3]).unwrap();
+    assert!(third.contains("Gamma"), "{third}");
+}
+
+#[test]
+fn adjacent_and_trailing_chapter_breaks_collapse() {
+    use oryx::doc::model::{Block, BlockKind, Span};
+    let para = |text: &str| {
+        Block::plain(BlockKind::Paragraph {
+            spans: vec![Span::plain(text)],
+        })
+    };
+    let chapter_break = |spine| Block::plain(BlockKind::ChapterBreak { spine });
+    let doc = Document {
+        blocks: vec![
+            para("start"),
+            chapter_break(1),
+            chapter_break(2),
+            para("end"),
+            chapter_break(3),
+        ],
+        ..Document::default()
+    };
+    let pdf = Pdf::load_mem(&export_to_bytes(&doc, PageSize::A4)).unwrap();
+    assert_eq!(
+        pdf.get_pages().len(),
+        2,
+        "adjacent markers make one break, a trailing one makes none"
+    );
+}
+
+/// Ledger probe: whole-book export wall time. Run with
+/// ORYX_BOOK=<path> cargo test --release --test export book_export_probe -- --ignored --nocapture
+#[test]
+#[ignore]
+fn book_export_probe() {
+    let path = std::env::var("ORYX_BOOK").expect("set ORYX_BOOK");
+    let book = oryx::doc::epub::open_book(std::fs::read(&path).unwrap()).unwrap();
+    let t = Instant::now();
+    let bytes = export_book(&book);
+    let pages = Pdf::load_mem(&bytes).unwrap().get_pages().len();
+    println!(
+        "export: {:?}, {} pages, {} bytes of pdf",
+        t.elapsed(),
+        pages,
+        bytes.len()
+    );
+}
+
+#[test]
+fn the_pdf_outline_follows_the_book_toc() {
+    let bytes = epub_common::book()
+        .nav_doc(
+            "<html><body><nav epub:type=\"toc\"><ol>\
+             <li><a href=\"text/one.xhtml\">First Case</a></li>\
+             <li><a href=\"text/two.xhtml\">Second Case</a><ol>\
+             <li><a href=\"text/two.xhtml#tw\">A Twist</a></li></ol></li>\
+             </ol></nav></body></html>",
+        )
+        .chapter(
+            "one.xhtml",
+            "<html><body><h1>Heading One</h1><p>First chapter text.</p></body></html>",
+        )
+        .chapter(
+            "two.xhtml",
+            "<html><body><h1 id=\"tw\">Heading Two</h1><p>Second chapter text.</p></body></html>",
+        )
+        .build();
+    let book = oryx::doc::epub::open_book(bytes).unwrap();
+    let pdf = Pdf::load_mem(&export_book(&book)).unwrap();
+    assert_eq!(
+        outline_titles(&pdf),
+        vec!["First Case", "Second Case", "A Twist"],
+        "the authored table of contents, not the heading scan"
+    );
 }
 
 fn export_with(doc: &Document, page: PageSize, page_numbers: bool) -> Vec<u8> {
@@ -60,6 +202,7 @@ fn export_cfg(
         geometry: &geometry,
         settings: &settings,
         title: "test",
+        toc: &[],
     };
     pdf::build(&job, &pages, &mut fonts, &mut media).expect("the export builds")
 }

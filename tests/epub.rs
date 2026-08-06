@@ -636,6 +636,33 @@ fn the_outline_resolves_toc_entries_as_the_worker_delivers() {
     );
 }
 
+#[test]
+fn the_shipped_sherlock_opens_and_names_its_adventures() {
+    let bytes = std::fs::read("examples/sherlock-holmes.epub").expect("the shipped book exists");
+    let book = epub::open_book(bytes).unwrap();
+    assert_eq!(
+        book.document.title.as_deref(),
+        Some("The Adventures of Sherlock Holmes")
+    );
+    let labels: Vec<&str> = book.toc.iter().map(|e| e.label.as_str()).collect();
+    assert!(
+        labels.iter().any(|l| l.contains("A Scandal in Bohemia")),
+        "{labels:?}"
+    );
+    assert!(
+        labels.len() >= 12,
+        "twelve adventures at least, got {}",
+        labels.len()
+    );
+    let breaks = book
+        .document
+        .blocks
+        .iter()
+        .filter(|b| matches!(b.kind, BlockKind::ChapterBreak { .. }))
+        .count();
+    assert!(breaks >= 12, "chapter seams for the page breaks: {breaks}");
+}
+
 /// Temporary stage-timing probe for real books; run with
 /// ORYX_BOOK=<path> cargo test --release --test epub timing_probe -- --ignored --nocapture
 #[test]
