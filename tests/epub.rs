@@ -663,6 +663,29 @@ fn the_shipped_sherlock_opens_and_names_its_adventures() {
     assert!(breaks >= 12, "chapter seams for the page breaks: {breaks}");
 }
 
+/// The product promise holds for books: the shipped Sherlock opens its
+/// prefix inside the startup budget. The whole walk and the decode pool
+/// ride the workers and never gate the first frame.
+#[test]
+#[ignore = "timing asserts only hold in release mode"]
+fn the_shipped_book_meets_the_open_budget() {
+    let bytes = std::fs::read("examples/sherlock-holmes.epub").expect("the shipped book exists");
+    let t = std::time::Instant::now();
+    let (doc, _, job) = epub::open_prefix(bytes).unwrap();
+    let prefix_ms = t.elapsed().as_millis();
+    println!(
+        "sherlock: prefix {prefix_ms}ms, {} source bytes, worker owed: {}",
+        doc.source.len(),
+        job.is_some()
+    );
+    if !cfg!(debug_assertions) {
+        assert!(
+            prefix_ms < 100,
+            "the prefix must open inside the budget: {prefix_ms}ms"
+        );
+    }
+}
+
 /// Temporary stage-timing probe for real books; run with
 /// ORYX_BOOK=<path> cargo test --release --test epub timing_probe -- --ignored --nocapture
 #[test]

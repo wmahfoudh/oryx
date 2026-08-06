@@ -1,11 +1,12 @@
 <div align="center">
 
-![Oryx: a fast, native viewer for markdown and code](screenshots/hero.png)
+![Oryx: a fast, native viewer for markdown, code and books](screenshots/hero.png)
 
-![Version](https://img.shields.io/badge/Version-0.13.1-purple)
+![Version](https://img.shields.io/badge/Version-0.14.0-purple)
 ![Made with Rust](https://img.shields.io/badge/Made%20with-Rust-orange?logo=rust&logoColor=white)
 
 [What it renders](#what-it-renders) •
+[Books](#books-epub) •
 [Themes](#themes) •
 [PDF export](#export-to-pdf) •
 [Install](#install) •
@@ -16,7 +17,7 @@
 
 ## Intro
 
-Oryx started as a personal project. I work with a lot of markdown files and did not find a (very) fast tool that could render them beautifully on the desktop without the need for a browser. Exporting to PDF would be a plus. That was the first version of the functional specs. Today Oryx has evolved, adding many features with a steady focus on performance. Editing markdown is a tempting feature, but not on the roadmap at this stage.
+Oryx started as a personal project. I work with a lot of markdown files and did not find a (very) fast tool that could render them beautifully on the desktop without the need for a browser. Exporting to PDF would be a plus. That was the first version of the functional specs. Today Oryx has evolved, adding many features with a steady focus on performance. The latest addition is EPUB: Oryx opens a book like any other document and renders it in its own themes. Editing markdown is a tempting feature, but not on the roadmap at this stage.
 
 - **Instant**: A document is on screen in well under 100 ms from cold, even an 8 MB file.
 - **Light**: Memory stays flat as you scroll, whatever the file size.
@@ -57,11 +58,19 @@ The command vocabulary is KaTeX compatible: Greek, binary operators, relations a
 
 ![Typeset math in Oryx](screenshots/math.png)
 
+### Books (EPUB)
+
+Oryx opens EPUB books and renders them as one continuous document, in the active theme rather than the book's own styling. The book keeps its structure: chapter headings, italics and bold (including the ones its stylesheet sets), images and the cover, tables and highlighted code. The first chapters display immediately and the rest of the book loads in the background.
+
+The sidebar's Outline tab shows the book's own table of contents, follows the reading position and jumps on a click. Links inside the book work, so a footnote reference jumps to its note and back. Unlike markdown files, which open at the top, ebooks reopen where reading stopped.
+
+DRM-protected books and fixed-layout books (usually comics and picture books) are not supported. The [examples](examples/) folder installed with Oryx includes *The Adventures of Sherlock Holmes* to try it on.
+
 ## Tools
 
 - **Find in document**: `Ctrl+F` searches text. The search is smart about case: `oryx` matches Oryx, ORYX and oryx, while `Oryx` performs an exact match. A match can cross styling, so `fast viewer` is found even when it was written as `**fast** *viewer*`, and it can cross a wrapped line. The whole document is searchable even while a big file is still loading.
 - **Select and copy**: `Ctrl+C` copies a selection as plain text. `Ctrl+Shift+C` copies the original markdown of the selection. A double click selects the word, a triple click the paragraph, the code line or the table cell. Select all is instant at any file size, a selection survives zooming, theme switches and window resizes, and both copies work before a big file has finished loading.
-- **Sidebar**: `Ctrl+B` opens a two-tab panel: the folder tree around the open file, and an outline of the document's headings that tracks the reading position, folds its branches, and jumps on a click. Both tabs drive entirely from the keyboard.
+- **Sidebar**: `Ctrl+B` opens a two-tab panel: the folder tree around the open file, and an outline of the document's headings that tracks the reading position, folds its branches, and jumps on a click. For a book, the outline is its table of contents. Both tabs drive entirely from the keyboard.
 - **Open file**: `Ctrl+O` opens the native file dialog.
 - **Live reload**: `F5` reloads a file being edited elsewhere.
 - **Zoom**: `Ctrl+Plus` (in) and `Ctrl+Minus` (out).
@@ -89,7 +98,7 @@ Nine themes are original designs: `oryx-light` and its dark twin `oryx-dark`, `o
 
 `Ctrl+Shift+P` opens the export settings: theme, body font and size, code font and size, page size, orientation and page numbers. The export settings are kept separate from the app's own appearance and remembered between runs. The idea is that reading in a dark theme at 22 points and exporting in a light one at 11 should not need switching back and forth each time we need an export.
 
-`Ctrl+P` exports the document using the configured export settings. Markdown headings are converted to PDF outlines, and the fonts are embedded. Emoji render in the PDF as images.
+`Ctrl+P` exports the document using the configured export settings. Markdown headings are converted to PDF outlines, and the fonts are embedded. Emoji render in the PDF as images. A book exports with each chapter starting on a new page, and its table of contents becomes the PDF outline.
 
 **Oryx tries its best so that**:
 
@@ -108,7 +117,7 @@ Download the archive for your platform from the releases page on [Codeberg](http
 tar -xzf oryx-*-linux-x86_64.tar.gz && cd oryx && ./install.sh
 ```
 
-On Windows, extract the zip and run `install.ps1` in PowerShell. The installer copies the binary, the themes and the example documents, and registers the file association, so markdown files open with Oryx from the file manager. `./install.sh --uninstall` removes everything.
+On Windows, extract the zip and run `install.ps1` in PowerShell. The installer copies the binary, the themes and the example documents, and registers the file association, so markdown files and EPUB books open with Oryx from the file manager. `./install.sh --uninstall` removes everything.
 
 ### From source
 
@@ -134,6 +143,7 @@ After installing, simply open Oryx from the launcher and navigate folders and fi
 
 ```sh
 oryx README.md          # open a file
+oryx book.epub          # books read in the active theme
 oryx src/main.rs        # code files render highlighted
 oryx --theme nord file  # pick a theme for this session
 oryx --register         # install the file association and icons
@@ -168,7 +178,7 @@ oryx --version          # print the version
 
 Performance is one of the reasons Oryx was created. Most markdown viewers start struggling above one megabyte of file size, without even offering decent theming. Oryx has been architected to address this problem: a beautiful and seamless user experience whatever the file size and whatever the hardware on which it runs. Here is how it works:
 
-For a big markdown file, Oryx parses only its first screens before the first paint and the rest arrives from a background thread. It uses all CPU cores to build the layout, for the wash-in below the first screens as well as every zoom or resize. Only the part of the document around the reading position is kept in drawn form; scrolling rebuilds the landing from recorded positions in about a millisecond, so memory stays flat however long the document is. Painting covers a band around the viewport, a couple of screens either side, and scrolling inside that band is a memory copy, so the cost of a scroll frame does not depend on how long the document is. Syntax highlighting and the layout below follow in the background, a slice at a time, without moving anything already on screen. A PDF export streams pages to disk as they are laid out, so even a five-thousand-page export runs in a few megabytes of working memory. The event loop wakes only for input, and an idle window uses **no CPU at all**.
+For a big markdown file, Oryx parses only its first screens before the first paint and the rest arrives from a background thread. It uses all CPU cores to build the layout, for the wash-in below the first screens as well as every zoom or resize. Only the part of the document around the reading position is kept in drawn form; scrolling rebuilds the landing from recorded positions in about a millisecond, so memory stays flat however long the document is. Painting covers a band around the viewport, a couple of screens either side, and scrolling inside that band is a memory copy, so the cost of a scroll frame does not depend on how long the document is. Syntax highlighting and the layout below follow in the background, a slice at a time, without moving anything already on screen. A PDF export streams pages to disk as they are laid out, so even a five-thousand-page export runs in a few megabytes of working memory. A book opens the same way: the first chapters parse before the first paint, and the rest of the book arrives in the background, images included. The event loop wakes only for input, and an idle window uses **no CPU at all**.
 
 Measured on a 2019 laptop (Linux OS), release build. First frame is cold launch to first paint; the export column is the export itself, measured after syntax highlighting has settled:
 
@@ -179,7 +189,7 @@ Measured on a 2019 laptop (Linux OS), release build. First frame is cold launch 
 | 1 MB markdown | **80 ms** | 1.2 s |
 | 8 MB markdown | **80 ms** | 10.7 s |
 
-The 8 MB markdown export writes a 9219-page file. While open, the 8 MB markdown file reads in about 200 MB of memory and the 8 MB source file in about 90 MB. Performance tests in the repository check the startup, relayout, paint and export timings and the memory figures.
+The 8 MB markdown export writes a 9219-page file. While open, the 8 MB markdown file reads in about 200 MB of memory and the 8 MB source file in about 90 MB. The sample book, *The Adventures of Sherlock Holmes*, parses its first chapters in 9 ms and exports its 211 pages in 0.8 s. Performance tests in the repository check the startup, relayout, paint and export timings and the memory figures.
 
 > [!NOTE]
 > Oryx is not a markdown-to-PDF converter. Its export reproduces the page you read, pixel for pixel: the theme, every shaped glyph, syntax colors for close to a hundred languages, images, links, the outline and the embedded fonts, at a millisecond or two per finished page whatever the document size. Raw conversion without any of that is far faster, a few milliseconds for a whole small file, and it is a different job.
@@ -191,12 +201,15 @@ Oryx is built for everyday use, and some things are out of scope (for the moment
 - It does not edit files.
 - On a file several megabytes long, the colors and the layout below the first screens take a moment to catch up. An export waits for syntax highlighting to finish before it writes, so on the 8 MB file the wall time is roughly double the export column.
 - The implemented HTML is a subset: what GitHub renders in a README, nothing more.
+- A book full of screenshots keeps its decoded images in memory while open, which for a heavy technical book can reach a few hundred megabytes.
 - Remote images use the operating system's TLS stack, which on Linux means it needs the OpenSSL library (normally shipped with every distro). Without it, badges show placeholders but everything else works.
 - macOS compiles but is untested, and there is no packaged build as I don't have a Mac. The Windows release is compiled on my Linux machine.
 
 ## Credits
 
 DejaVu Sans, Courier Prime and STIX Two Math are embedded in the binary. DejaVu is distributed under the DejaVu Fonts License, Courier Prime and STIX Two Math under the SIL Open Font License. STIX renders the math and stays out of the font picker. The settings dialog can switch the text fonts to any family installed on the system.
+
+The sample book in [examples](examples/) is the [Standard Ebooks](https://standardebooks.org) edition of *The Adventures of Sherlock Holmes*, in the public domain and dedicated with CC0 by its producers.
 
 <details>
 <summary><b>Adapted theme palettes</b> (all MIT, with thanks to their authors)</summary>

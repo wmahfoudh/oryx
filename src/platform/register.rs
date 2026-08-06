@@ -40,12 +40,12 @@ pub fn desktop_entry(exe: &Path) -> String {
         "[Desktop Entry]\n\
          Type=Application\n\
          Name=Oryx\n\
-         Comment=Fast markdown viewer\n\
+         Comment=Fast viewer for markdown, code and books\n\
          Exec={} %f\n\
          Icon=oryx\n\
          Terminal=false\n\
          Categories=Office;Viewer;\n\
-         MimeType=text/markdown;text/x-markdown;text/plain;\n\
+         MimeType=text/markdown;text/x-markdown;text/plain;application/epub+zip;\n\
          StartupWMClass=oryx\n",
         exe.display()
     )
@@ -145,6 +145,11 @@ mod tests {
         assert!(entry.contains("Icon=oryx\n"));
         assert!(entry.contains("StartupWMClass=oryx\n"));
         assert!(entry.contains("MimeType=text/markdown;"));
+        assert!(
+            entry.contains("application/epub+zip;"),
+            "books open from the file manager"
+        );
+        assert!(entry.contains("Comment=Fast viewer for markdown, code and books\n"));
     }
 
     #[test]
