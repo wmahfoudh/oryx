@@ -31,8 +31,396 @@ const BOUNDARY_TAGS: &[&str] = &[
     "section",
 ];
 
-/// Subtrees with no rendered text.
-const SKIP_TAGS: &[&str] = &["head", "script", "style", "template", "title"];
+/// Subtrees with no rendered text. `<head>` walks normally: its `<style>`
+/// feeds the emphasis table and `<title>` is skipped on its own.
+const SKIP_TAGS: &[&str] = &["script", "template", "title"];
+
+/// Font families whose presence first in a `font-family` list marks
+/// typewriter text; the generic `monospace` anywhere does the same.
+const MONO_FACES: &[&str] = &[
+    "andale mono",
+    "consolas",
+    "courier",
+    "courier new",
+    "courier prime",
+    "dejavu sans mono",
+    "fira code",
+    "fira mono",
+    "liberation mono",
+    "lucida console",
+    "menlo",
+    "monaco",
+    "roboto mono",
+    "source code pro",
+    "ubuntu mono",
+];
+
+/// The emphasis traits a stylesheet may speak about; everything else in
+/// a book's CSS is discarded unread.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct EmphasisFlags {
+    pub italic: bool,
+    pub bold: bool,
+    pub strike: bool,
+    pub underline: bool,
+    pub sub: bool,
+    pub sup: bool,
+    pub mono: bool,
+    pub centered: bool,
+}
+
+/// What one selector says: traits it turns on and traits it explicitly
+/// turns off (`normal`, `none`); an unmentioned trait inherits.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Emphasis {
+    pub set: EmphasisFlags,
+    pub clear: EmphasisFlags,
+}
+
+macro_rules! each_trait {
+    ($macro:ident) => {
+        $macro!(italic);
+        $macro!(bold);
+        $macro!(strike);
+        $macro!(underline);
+        $macro!(sub);
+        $macro!(sup);
+        $macro!(mono);
+        $macro!(centered);
+    };
+}
+
+impl Emphasis {
+    /// Later rules win per trait, CSS order semantics without a cascade.
+    fn overwrite(&mut self, from: Emphasis) {
+        macro_rules! merge {
+            ($f:ident) => {
+                if from.set.$f || from.clear.$f {
+                    self.set.$f = from.set.$f;
+                    self.clear.$f = from.clear.$f;
+                }
+            };
+        }
+        each_trait!(merge);
+    }
+
+    /// Whether any span trait is mentioned; centered is a block trait
+    /// and rides its own path.
+    fn mentions_inline(&self) -> bool {
+        let (s, c) = (&self.set, &self.clear);
+        s.italic
+            || s.bold
+            || s.strike
+            || s.underline
+            || s.sub
+            || s.sup
+            || s.mono
+            || c.italic
+            || c.bold
+            || c.strike
+            || c.underline
+            || c.sub
+            || c.sup
+            || c.mono
+    }
+
+    /// The block trait: Some(true) centered, Some(false) explicitly not,
+    /// None unmentioned.
+    fn centered(&self) -> Option<bool> {
+        if self.set.centered {
+            Some(true)
+        } else if self.clear.centered {
+            Some(false)
+        } else {
+            None
+        }
+    }
+}
+
+/// The inherited CSS emphasis at a point in the tree: per trait, forced
+/// on, forced off, or inherited from the tags.
+#[derive(Debug, Default, Clone, Copy)]
+struct CssState {
+    italic: Option<bool>,
+    bold: Option<bool>,
+    strike: Option<bool>,
+    underline: Option<bool>,
+    sub: Option<bool>,
+    sup: Option<bool>,
+    mono: Option<bool>,
+}
+
+impl CssState {
+    fn apply(mut self, e: &Emphasis) -> CssState {
+        macro_rules! apply {
+            ($f:ident) => {
+                if e.set.$f {
+                    self.$f = Some(true);
+                } else if e.clear.$f {
+                    self.$f = Some(false);
+                }
+            };
+        }
+        apply!(italic);
+        apply!(bold);
+        apply!(strike);
+        apply!(underline);
+        apply!(sub);
+        apply!(sup);
+        apply!(mono);
+        self
+    }
+}
+
+/// The six-property reading of a book's stylesheets: class and element
+/// selectors mapped to emphasis, everything else discarded unread. Not
+/// a CSS engine; there is no cascade and no specificity beyond element,
+/// class, element.class in that order.
+#[derive(Default)]
+pub struct EmphasisTable {
+    rules: std::collections::HashMap<(String, String), Emphasis>,
+}
+
+impl EmphasisTable {
+    /// Folds one stylesheet in. Rules under combinators, pseudo-classes,
+    /// ids, or attribute selectors are skipped whole; at-rules skip with
+    /// their blocks.
+    pub fn add_css(&mut self, css: &str) {
+        let css = strip_comments(css);
+        let mut rest = css.as_str();
+        loop {
+            rest = rest.trim_start();
+            if rest.is_empty() {
+                break;
+            }
+            if rest.starts_with('@') {
+                rest = skip_at_rule(rest);
+                continue;
+            }
+            let Some(open) = rest.find('{') else {
+                break;
+            };
+            let Some(close) = rest[open..].find('}') else {
+                break;
+            };
+            let selectors = &rest[..open];
+            let emphasis = Self::declarations(&rest[open + 1..open + close]);
+            if emphasis != Emphasis::default() {
+                for selector in selectors.split(',') {
+                    if let Some(key) = selector_key(selector) {
+                        self.rules.entry(key).or_default().overwrite(emphasis);
+                    }
+                }
+            }
+            rest = &rest[open + close + 1..];
+        }
+    }
+
+    /// Reads one declaration block for the six properties.
+    pub fn declarations(text: &str) -> Emphasis {
+        let mut out = Emphasis::default();
+        for declaration in text.split(';') {
+            let Some((property, value)) = declaration.split_once(':') else {
+                continue;
+            };
+            let property = property.trim().to_ascii_lowercase();
+            let value = value
+                .trim()
+                .trim_end_matches("!important")
+                .trim()
+                .to_ascii_lowercase();
+            match property.as_str() {
+                "font-style" => {
+                    if value.contains("italic") || value.contains("oblique") {
+                        out.set.italic = true;
+                        out.clear.italic = false;
+                    } else if value == "normal" {
+                        out.set.italic = false;
+                        out.clear.italic = true;
+                    }
+                }
+                "font-weight" => {
+                    let heavy = value == "bold"
+                        || value == "bolder"
+                        || value
+                            .split_whitespace()
+                            .next()
+                            .and_then(|v| v.parse::<u32>().ok())
+                            .is_some_and(|w| w >= 600);
+                    if heavy {
+                        out.set.bold = true;
+                        out.clear.bold = false;
+                    } else if value == "normal"
+                        || value == "lighter"
+                        || value.parse::<u32>().is_ok()
+                    {
+                        out.set.bold = false;
+                        out.clear.bold = true;
+                    }
+                }
+                "text-decoration" | "text-decoration-line" => {
+                    if value.split_whitespace().any(|w| w == "none") {
+                        out.set.strike = false;
+                        out.clear.strike = true;
+                        out.set.underline = false;
+                        out.clear.underline = true;
+                    } else {
+                        if value.split_whitespace().any(|w| w == "line-through") {
+                            out.set.strike = true;
+                            out.clear.strike = false;
+                        }
+                        if value.split_whitespace().any(|w| w == "underline") {
+                            out.set.underline = true;
+                            out.clear.underline = false;
+                        }
+                    }
+                }
+                "vertical-align" => match value.as_str() {
+                    "sub" => {
+                        out.set.sub = true;
+                        out.clear.sub = false;
+                        out.set.sup = false;
+                        out.clear.sup = true;
+                    }
+                    "super" => {
+                        out.set.sup = true;
+                        out.clear.sup = false;
+                        out.set.sub = false;
+                        out.clear.sub = true;
+                    }
+                    "baseline" => {
+                        out.set.sub = false;
+                        out.clear.sub = true;
+                        out.set.sup = false;
+                        out.clear.sup = true;
+                    }
+                    _ => {}
+                },
+                "text-align" => match value.as_str() {
+                    "center" => {
+                        out.set.centered = true;
+                        out.clear.centered = false;
+                    }
+                    "left" | "right" | "justify" | "start" | "end" => {
+                        out.set.centered = false;
+                        out.clear.centered = true;
+                    }
+                    _ => {}
+                },
+                "font-family" => {
+                    let mut families = value
+                        .split(',')
+                        .map(|f| f.trim().trim_matches(['"', '\'']).trim());
+                    let generic = families.clone().any(|f| f == "monospace");
+                    let first_known = families.next().is_some_and(|f| MONO_FACES.contains(&f));
+                    if generic || first_known {
+                        out.set.mono = true;
+                        out.clear.mono = false;
+                    } else {
+                        out.set.mono = false;
+                        out.clear.mono = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+
+    /// The emphasis for one element: element rule, then class rules,
+    /// then element.class rules, later lookups winning per trait.
+    pub fn resolve(&self, element: &str, class_attr: &str) -> Emphasis {
+        let mut out = Emphasis::default();
+        if self.rules.is_empty() {
+            return out;
+        }
+        let element = element.to_ascii_lowercase();
+        if let Some(e) = self.rules.get(&(element.clone(), String::new())) {
+            out.overwrite(*e);
+        }
+        for class in class_attr.split_whitespace() {
+            if let Some(e) = self.rules.get(&(String::new(), class.to_string())) {
+                out.overwrite(*e);
+            }
+        }
+        for class in class_attr.split_whitespace() {
+            if let Some(e) = self.rules.get(&(element.clone(), class.to_string())) {
+                out.overwrite(*e);
+            }
+        }
+        out
+    }
+}
+
+/// Raw text of a subtree, tags dropped; the `<style>` body reader.
+fn collect_text(node: &Handle, out: &mut String) {
+    if let NodeData::Text { contents } = &node.data {
+        out.push_str(&contents.borrow());
+    }
+    for child in node.children.borrow().iter() {
+        collect_text(child, out);
+    }
+}
+
+/// `element`, `.class`, or `element.class`; anything else is None.
+fn selector_key(selector: &str) -> Option<(String, String)> {
+    let selector = selector.trim();
+    if selector.is_empty()
+        || selector
+            .chars()
+            .any(|c| c.is_whitespace() || ">+~:[#*\"'&()".contains(c))
+    {
+        return None;
+    }
+    let mut parts = selector.split('.');
+    let element = parts.next().unwrap_or("").to_ascii_lowercase();
+    let class = parts.next().unwrap_or("").to_string();
+    if parts.next().is_some() || (element.is_empty() && class.is_empty()) {
+        return None;
+    }
+    Some((element, class))
+}
+
+fn strip_comments(css: &str) -> String {
+    let mut out = String::with_capacity(css.len());
+    let mut rest = css;
+    while let Some(start) = rest.find("/*") {
+        out.push_str(&rest[..start]);
+        match rest[start..].find("*/") {
+            Some(end) => rest = &rest[start + end + 2..],
+            None => return out,
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Skips an at-rule: to its semicolon, or over its balanced block.
+fn skip_at_rule(rest: &str) -> &str {
+    let stop = rest.find(['{', ';']);
+    match stop {
+        Some(i) if rest.as_bytes()[i] == b';' => &rest[i + 1..],
+        Some(mut i) => {
+            let bytes = rest.as_bytes();
+            let mut depth = 0usize;
+            while i < bytes.len() {
+                match bytes[i] {
+                    b'{' => depth += 1,
+                    b'}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return &rest[i + 1..];
+                        }
+                    }
+                    _ => {}
+                }
+                i += 1;
+            }
+            ""
+        }
+        None => "",
+    }
+}
 
 struct ListLevel {
     ordered: bool,
@@ -86,6 +474,9 @@ pub struct Walker {
     lists: Vec<ListLevel>,
     pre: Option<Pre>,
     table: Option<TableAcc>,
+    emphasis: EmphasisTable,
+    /// Inherited CSS emphasis down the tree; the root is all-inherit.
+    css: Vec<CssState>,
 }
 
 impl Default for Walker {
@@ -121,7 +512,15 @@ impl Walker {
             lists: Vec::new(),
             pre: None,
             table: None,
+            emphasis: EmphasisTable::default(),
+            css: vec![CssState::default()],
         }
+    }
+
+    /// The book's stylesheet reading; chapters' own `<style>` elements
+    /// fold in as they walk.
+    pub fn set_emphasis(&mut self, table: EmphasisTable) {
+        self.emphasis = table;
     }
 
     /// Parses one chapter and walks it. html5ever never fails; malformed
@@ -180,11 +579,39 @@ impl Walker {
         if SKIP_TAGS.contains(&tag) {
             return;
         }
+        let class_attr = attr("class").unwrap_or_default();
+        let mut emphasis = self.emphasis.resolve(tag, &class_attr);
+        if let Some(style) = attr("style") {
+            emphasis.overwrite(EmphasisTable::declarations(&style));
+        }
+        let pushed = emphasis.mentions_inline();
+        if pushed {
+            let top = *self.css.last().expect("the root css state");
+            self.css.push(top.apply(&emphasis));
+        }
+        self.dispatch(tag, attr, node, &emphasis);
+        if pushed {
+            self.css.pop();
+        }
+    }
+
+    fn dispatch(
+        &mut self,
+        tag: &str,
+        attr: &dyn Fn(&str) -> Option<String>,
+        node: &Handle,
+        emphasis: &Emphasis,
+    ) {
         // Inside a table, block structure flattens into the open cell;
         // only the table family and inline styling keep their meaning.
         let in_table = self.table.is_some();
         match tag {
             "br" => self.linebreak(),
+            "style" => {
+                let mut css = String::new();
+                collect_text(node, &mut css);
+                self.emphasis.add_css(&css);
+            }
             "img" => {
                 if let Some(alt) = attr("alt") {
                     self.push_str(&alt);
@@ -232,7 +659,8 @@ impl Walker {
                 });
             }
             "p" | "div" if !in_table => {
-                let centered = attr("align").is_some_and(|a| a.eq_ignore_ascii_case("center"));
+                let centered = attr("align").is_some_and(|a| a.eq_ignore_ascii_case("center"))
+                    || emphasis.centered() == Some(true);
                 self.center.push(centered);
                 self.flush();
                 self.children(node);
@@ -409,18 +837,21 @@ impl Walker {
         *counter = counter.saturating_sub(1);
     }
 
-    /// A span carrying the current inline style and no text yet.
+    /// A span carrying the current inline style and no text yet. The
+    /// CSS state decides a mentioned trait either way; the tag counters
+    /// decide the rest.
     fn style(&self) -> Span {
+        let css = self.css.last().copied().unwrap_or_default();
         let mut span = Span::plain("");
-        span.bold = self.bold > 0 || self.dt;
-        span.italic = self.italic > 0;
-        span.strike = self.strike > 0;
-        span.underline = self.underline > 0;
+        span.bold = css.bold.unwrap_or(self.bold > 0 || self.dt);
+        span.italic = css.italic.unwrap_or(self.italic > 0);
+        span.strike = css.strike.unwrap_or(self.strike > 0);
+        span.underline = css.underline.unwrap_or(self.underline > 0);
         span.mark = self.marked > 0;
-        span.code = self.coded > 0;
-        span.script = if self.sub > 0 {
+        span.code = css.mono.unwrap_or(self.coded > 0);
+        span.script = if css.sub.unwrap_or(self.sub > 0) {
             SpanScript::Sub
-        } else if self.sup > 0 {
+        } else if css.sup.unwrap_or(self.sup > 0) {
             SpanScript::Sup
         } else if self.small > 0 {
             SpanScript::Small
@@ -734,9 +1165,234 @@ mod tests {
     use crate::doc::model::{DetailsGroup, Marker, SpanScript};
 
     fn walk(xhtml: &str) -> (Vec<Block>, String, Vec<DetailsGroup>) {
+        walk_styled("", xhtml)
+    }
+
+    fn walk_styled(css: &str, xhtml: &str) -> (Vec<Block>, String, Vec<DetailsGroup>) {
         let mut walker = Walker::new();
+        let mut table = EmphasisTable::default();
+        table.add_css(css);
+        walker.set_emphasis(table);
         walker.walk_chapter(xhtml);
         walker.finish()
+    }
+
+    fn spans_of(block: &Block) -> &[Span] {
+        match &block.kind {
+            BlockKind::Paragraph { spans } => spans,
+            other => panic!("expected a paragraph, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_class_italicizes_its_span() {
+        let (blocks, source, _) = walk_styled(
+            ".i { font-style: italic }",
+            "<html><body><p><span class=\"i\">soft</span> hard</p></body></html>",
+        );
+        let spans = spans_of(&blocks[0]);
+        assert!(
+            spans
+                .iter()
+                .find(|s| s.text(&source) == "soft")
+                .unwrap()
+                .italic
+        );
+        assert!(
+            !spans
+                .iter()
+                .find(|s| s.text(&source) == " hard")
+                .unwrap()
+                .italic
+        );
+    }
+
+    #[test]
+    fn an_element_scoped_class_applies_only_there() {
+        let (blocks, _, _) = walk_styled(
+            "p.si { font-style: italic }",
+            "<html><body><p class=\"si\">a</p><div class=\"si\">b</div></body></html>",
+        );
+        assert!(spans_of(&blocks[0])[0].italic);
+        assert!(!spans_of(&blocks[1])[0].italic);
+    }
+
+    #[test]
+    fn normal_clears_inherited_italic_from_class_and_tag() {
+        let (blocks, source, _) = walk_styled(
+            ".it { font-style: italic } .up { font-style: normal }",
+            "<html><body><p class=\"it\">one <span class=\"up\">two</span> three</p>\
+             <p><i>a <span class=\"up\">b</span></i></p></body></html>",
+        );
+        let first = spans_of(&blocks[0]);
+        assert!(
+            first
+                .iter()
+                .find(|s| s.text(&source) == "one")
+                .unwrap()
+                .italic
+        );
+        assert!(
+            !first
+                .iter()
+                .find(|s| s.text(&source) == " two")
+                .unwrap()
+                .italic
+        );
+        assert!(
+            first
+                .iter()
+                .find(|s| s.text(&source) == " three")
+                .unwrap()
+                .italic
+        );
+        let second = spans_of(&blocks[1]);
+        assert!(
+            second
+                .iter()
+                .find(|s| s.text(&source) == "a")
+                .unwrap()
+                .italic
+        );
+        assert!(
+            !second
+                .iter()
+                .find(|s| s.text(&source) == " b")
+                .unwrap()
+                .italic
+        );
+    }
+
+    #[test]
+    fn numeric_weight_bolds() {
+        let (blocks, _, _) = walk_styled(
+            ".b { font-weight: 700 }",
+            "<html><body><p class=\"b\">heavy</p></body></html>",
+        );
+        assert!(spans_of(&blocks[0])[0].bold);
+    }
+
+    #[test]
+    fn decorations_strike_underline_and_clear() {
+        let (blocks, source, _) = walk_styled(
+            ".s { text-decoration: line-through } .u { text-decoration: underline } .n { text-decoration: none }",
+            "<html><body><p><span class=\"s\">gone</span><span class=\"u\">under</span></p>\
+             <p><u>x <span class=\"n\">y</span></u></p></body></html>",
+        );
+        let first = spans_of(&blocks[0]);
+        assert!(
+            first
+                .iter()
+                .find(|s| s.text(&source) == "gone")
+                .unwrap()
+                .strike
+        );
+        assert!(
+            first
+                .iter()
+                .find(|s| s.text(&source) == "under")
+                .unwrap()
+                .underline
+        );
+        let second = spans_of(&blocks[1]);
+        assert!(
+            second
+                .iter()
+                .find(|s| s.text(&source) == "x")
+                .unwrap()
+                .underline
+        );
+        assert!(
+            !second
+                .iter()
+                .find(|s| s.text(&source) == " y")
+                .unwrap()
+                .underline
+        );
+    }
+
+    #[test]
+    fn vertical_align_reaches_the_script_mechanism() {
+        let (blocks, source, _) = walk_styled(
+            ".sb { vertical-align: sub } .sp { vertical-align: super }",
+            "<html><body><p>a<span class=\"sb\">1</span><span class=\"sp\">2</span></p></body></html>",
+        );
+        let spans = spans_of(&blocks[0]);
+        assert_eq!(
+            spans
+                .iter()
+                .find(|s| s.text(&source) == "1")
+                .unwrap()
+                .script,
+            SpanScript::Sub
+        );
+        assert_eq!(
+            spans
+                .iter()
+                .find(|s| s.text(&source) == "2")
+                .unwrap()
+                .script,
+            SpanScript::Sup
+        );
+    }
+
+    #[test]
+    fn text_align_center_centers_the_block() {
+        let (blocks, _, _) = walk_styled(
+            ".tb { text-align: center }",
+            "<html><body><p class=\"tb\">* * *</p></body></html>",
+        );
+        assert!(blocks[0].centered);
+    }
+
+    #[test]
+    fn a_monospace_family_renders_as_inline_code() {
+        let (blocks, _, _) = walk_styled(
+            ".mono { font-family: \"Courier New\", monospace }",
+            "<html><body><p class=\"mono\">STOP</p></body></html>",
+        );
+        assert!(spans_of(&blocks[0])[0].code);
+    }
+
+    #[test]
+    fn other_properties_and_combinators_are_ignored() {
+        let (blocks, _, _) = walk_styled(
+            ".c { color: red; font-size: 30px } div > p { font-style: italic }",
+            "<html><body><div><p class=\"c\">plain</p></div></body></html>",
+        );
+        let span = &spans_of(&blocks[0])[0];
+        assert!(!span.italic && !span.bold && !span.code);
+    }
+
+    #[test]
+    fn a_chapter_style_element_styles_that_chapter() {
+        let (blocks, _, _) = walk(
+            "<html><head><style>.i { font-style: italic }</style></head>\
+             <body><p class=\"i\">styled</p></body></html>",
+        );
+        assert!(spans_of(&blocks[0])[0].italic);
+    }
+
+    #[test]
+    fn a_style_attribute_styles_its_element() {
+        let (blocks, source, _) = walk(
+            "<html><body><p style=\"font-style: italic\">a <span style=\"font-style: normal\">b</span></p></body></html>",
+        );
+        let spans = spans_of(&blocks[0]);
+        assert!(
+            spans
+                .iter()
+                .find(|s| s.text(&source) == "a")
+                .unwrap()
+                .italic
+        );
+        assert!(
+            !spans
+                .iter()
+                .find(|s| s.text(&source) == " b")
+                .unwrap()
+                .italic
+        );
     }
 
     fn text_of(spans: &[Span], source: &str) -> String {

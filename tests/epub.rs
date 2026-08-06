@@ -164,6 +164,25 @@ fn utf16_chapter_decodes() {
 }
 
 #[test]
+fn manifest_css_gives_books_their_italics() {
+    let bytes = book()
+        .stylesheet(".i { font-style: italic }")
+        .chapter(
+            "one.xhtml",
+            "<html><body><p><span class=\"i\">Curiouser and curiouser!</span></p></body></html>",
+        )
+        .build();
+    let doc = epub::open_book(bytes).unwrap();
+    let BlockKind::Paragraph { spans } = &doc.blocks[0].kind else {
+        panic!("expected a paragraph, got {:?}", doc.blocks[0].kind);
+    };
+    assert!(
+        spans[0].italic,
+        "the class-styled dialogue should stay italic"
+    );
+}
+
+#[test]
 fn code_in_an_opened_book_highlights() {
     let path = book()
         .chapter(

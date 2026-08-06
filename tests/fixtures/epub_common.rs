@@ -18,6 +18,7 @@ pub struct BookBuilder {
     /// (zip path, bytes, media type); spine members in insertion order.
     chapters: Vec<(String, Vec<u8>)>,
     fonts: Vec<String>,
+    stylesheet: Option<String>,
 }
 
 pub fn book() -> BookBuilder {
@@ -29,6 +30,7 @@ pub fn book() -> BookBuilder {
         encrypted: Vec::new(),
         chapters: Vec::new(),
         fonts: Vec::new(),
+        stylesheet: None,
     }
 }
 
@@ -42,6 +44,12 @@ impl BookBuilder {
     /// A chapter with caller-controlled bytes; the UTF-16 case.
     pub fn chapter_bytes(mut self, name: &str, bytes: Vec<u8>) -> Self {
         self.chapters.push((format!("text/{name}"), bytes));
+        self
+    }
+
+    /// A stylesheet manifest entry the chapters reference.
+    pub fn stylesheet(mut self, css: &str) -> Self {
+        self.stylesheet = Some(css.to_string());
         self
     }
 
@@ -123,6 +131,11 @@ impl BookBuilder {
                 "    <item id=\"f{i}\" href=\"{href}\" media-type=\"application/vnd.ms-opentype\"/>\n"
             ));
         }
+        if self.stylesheet.is_some() {
+            opf.push_str(
+                "    <item id=\"css0\" href=\"style/main.css\" media-type=\"text/css\"/>\n",
+            );
+        }
         opf.push_str("  </manifest>\n  <spine>\n");
         for i in 0..self.chapters.len() {
             opf.push_str(&format!("    <itemref idref=\"c{i}\"/>\n"));
@@ -131,6 +144,10 @@ impl BookBuilder {
         zip.start_file("OEBPS/content.opf", deflated).unwrap();
         zip.write_all(opf.as_bytes()).unwrap();
 
+        if let Some(css) = &self.stylesheet {
+            zip.start_file("OEBPS/style/main.css", deflated).unwrap();
+            zip.write_all(css.as_bytes()).unwrap();
+        }
         for (href, bytes) in &self.chapters {
             zip.start_file(format!("OEBPS/{href}"), deflated).unwrap();
             zip.write_all(bytes).unwrap();

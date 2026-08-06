@@ -304,7 +304,16 @@ fn decode(bytes: &[u8]) -> String {
 pub fn open_book(bytes: Vec<u8>) -> anyhow::Result<Document> {
     let mut archive = Archive::open(bytes)?;
     let package = read_package(&mut archive)?;
+    let mut table = crate::doc::html::EmphasisTable::default();
+    for item in &package.manifest {
+        if item.media_type.eq_ignore_ascii_case("text/css") {
+            if let Some(css) = archive.read(&resolve(&package.root, &item.href)) {
+                table.add_css(&String::from_utf8_lossy(&css));
+            }
+        }
+    }
     let mut walker = crate::doc::html::Walker::new();
+    walker.set_emphasis(table);
     for (position, &item) in package.spine.iter().enumerate() {
         if position > 0 {
             walker.chapter_break(position);
