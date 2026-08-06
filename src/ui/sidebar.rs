@@ -136,7 +136,7 @@ fn icon_for(path: &Path) -> Icon {
         FileKind::Code(_) => Icon::Code,
         FileKind::Text => Icon::Text,
         FileKind::Epub => Icon::Document,
-        FileKind::Unknown => Icon::Unknown,
+        FileKind::Undisplayable | FileKind::Unknown => Icon::Unknown,
     }
 }
 
@@ -173,6 +173,7 @@ fn recognized(path: &Path, is_dir: bool) -> bool {
     }
     match load::detect(path) {
         FileKind::Unknown => load::is_text_file(path),
+        FileKind::Undisplayable => false,
         _ => true,
     }
 }

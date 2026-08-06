@@ -24,6 +24,9 @@ pub enum FileKind {
     Text,
     /// An EPUB book; a zip, so it never meets the binary sniff.
     Epub,
+    /// A format Oryx knows it cannot display (PDF). Refused by name:
+    /// some PDFs open with an all-ASCII head the content sniff passes.
+    Undisplayable,
     /// Not identified by extension. Its content decides: text opens as code
     /// with no language, binary is refused.
     Unknown,
@@ -48,6 +51,9 @@ pub fn detect(path: &Path) -> FileKind {
     if ext == "epub" {
         return FileKind::Epub;
     }
+    if ext == "pdf" {
+        return FileKind::Undisplayable;
+    }
     match CODE_EXTENSIONS.binary_search_by_key(&ext.as_str(), |(k, _)| k) {
         Ok(i) => FileKind::Code(CODE_EXTENSIONS[i].1),
         Err(_) => FileKind::Unknown,
@@ -65,6 +71,9 @@ fn is_binary(bytes: &[u8]) -> bool {
 /// that cannot be read is not displayable either, so it answers false.
 pub fn is_text_file(path: &Path) -> bool {
     use std::io::Read;
+    if detect(path) == FileKind::Undisplayable {
+        return false;
+    }
     let Ok(mut file) = std::fs::File::open(path) else {
         return false;
     };
@@ -93,6 +102,12 @@ pub struct Opened {
 pub fn open(path: &Path, deadline: Option<Instant>) -> anyhow::Result<Opened> {
     let bytes =
         std::fs::read(path).map_err(|e| anyhow::anyhow!("cannot open {}: {e}", path.display()))?;
+    if detect(path) == FileKind::Undisplayable {
+        anyhow::bail!(
+            "{} is a PDF file; Oryx does not display PDF files",
+            path.display()
+        );
+    }
     // A book is a zip and full of NUL bytes; it routes before the sniff.
     if detect(path) == FileKind::Epub {
         let (mut document, toc, book) = super::epub::open_prefix(bytes)?;
@@ -140,6 +155,7 @@ pub fn open(path: &Path, deadline: Option<Instant>) -> anyhow::Result<Opened> {
         FileKind::Code(token) => code_document(Some(token), &text),
         FileKind::Text => plain_document(&text),
         FileKind::Epub => unreachable!("books returned before the sniff"),
+        FileKind::Undisplayable => unreachable!("refused before the sniff"),
         FileKind::Unknown => code_document(None, &text),
     };
     let pending = apply_budget(&mut document, deadline);
@@ -456,6 +472,33 @@ mod tests {
 
     fn detect_ext(name: &str) -> FileKind {
         detect(Path::new(name))
+    }
+
+    /// A Quartz-produced PDF opens with an all-ASCII head, so the NUL
+    /// sniff alone cannot catch it; the extension must.
+    #[test]
+    fn pdf_is_known_and_refused_before_the_sniff() {
+        assert_eq!(detect_ext("book.pdf"), FileKind::Undisplayable);
+        assert_eq!(detect_ext("BOOK.PDF"), FileKind::Undisplayable);
+
+        let dir = std::env::temp_dir().join(format!("oryx-pdf-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("ascii-head.pdf");
+        std::fs::write(
+            &path,
+            b"%PDF-1.4\n1 0 obj\n<< /Producer (Quartz PDFContext) >>\nendobj\n",
+        )
+        .unwrap();
+        assert!(
+            !is_text_file(&path),
+            "an ASCII-headed PDF must not sniff as text"
+        );
+        let err = match open(&path, None) {
+            Err(err) => err,
+            Ok(_) => panic!("an ASCII-headed PDF must refuse"),
+        };
+        assert!(err.to_string().contains("PDF"), "{err}");
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]
