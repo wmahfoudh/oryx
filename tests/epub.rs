@@ -164,6 +164,37 @@ fn utf16_chapter_decodes() {
 }
 
 #[test]
+fn code_in_an_opened_book_highlights() {
+    let path = book()
+        .chapter(
+            "one.xhtml",
+            "<html><body><pre><code class=\"language-rust\">fn main() {}\n</code></pre></body></html>",
+        )
+        .write_to("oryx_epub_highlight_test.epub");
+    let opened = load::open(&path, None).unwrap();
+    std::fs::remove_file(&path).ok();
+
+    let code = opened
+        .document
+        .blocks
+        .iter()
+        .find_map(|b| match &b.kind {
+            BlockKind::CodeBlock {
+                language,
+                highlights,
+                ..
+            } => Some((language.clone(), highlights.clone())),
+            _ => None,
+        })
+        .expect("the book should hold a code block");
+    assert_eq!(code.0.as_deref(), Some("rust"));
+    assert!(
+        code.1.first().is_some_and(|line| !line.is_empty()),
+        "the first line should carry highlight spans"
+    );
+}
+
+#[test]
 fn detect_answers_epub() {
     assert_eq!(
         load::detect(std::path::Path::new("book.epub")),

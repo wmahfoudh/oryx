@@ -90,10 +90,11 @@ pub fn open(path: &Path, deadline: Option<Instant>) -> anyhow::Result<Opened> {
         std::fs::read(path).map_err(|e| anyhow::anyhow!("cannot open {}: {e}", path.display()))?;
     // A book is a zip and full of NUL bytes; it routes before the sniff.
     if detect(path) == FileKind::Epub {
-        let document = super::epub::open_book(bytes)?;
+        let mut document = super::epub::open_book(bytes)?;
+        let pending = apply_budget(&mut document, deadline);
         return Ok(Opened {
             document,
-            pending: Vec::new(),
+            pending,
             streamed: false,
         });
     }

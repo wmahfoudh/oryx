@@ -197,7 +197,7 @@ fn decode_entities(text: &str) -> String {
 
 /// Drops the outer whitespace a cell inherits from source formatting.
 /// Image spans stay whole; their text is the alt.
-fn trim_cell(spans: &mut Vec<Span>) {
+pub(crate) fn trim_cell(spans: &mut Vec<Span>) {
     while let Some(first) = spans.first_mut() {
         if first.image.is_some() {
             break;
@@ -1386,7 +1386,7 @@ fn alert_kind(kind: BlockQuoteKind) -> AlertKind {
 
 /// GitHub-style slug: lowercase, alphanumerics kept, spaces to hyphens.
 /// Runs at heading end, before sealing, so every span still owns its text.
-fn slug(spans: &[Span]) -> String {
+pub(crate) fn slug(spans: &[Span]) -> String {
     let text: String = spans.iter().map(|s| s.raw_text()).collect();
     let mut out = String::new();
     for c in text.chars() {

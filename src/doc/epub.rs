@@ -315,11 +315,11 @@ pub fn open_book(bytes: Vec<u8>) -> anyhow::Result<Document> {
         };
         walker.walk_chapter(&decode(&bytes));
     }
-    let (blocks, source) = walker.finish();
+    let (blocks, source, details) = walker.finish();
     Ok(Document {
         blocks,
         source: Arc::from(source),
-        details: Vec::new(),
+        details,
         title: package.title,
     })
 }
