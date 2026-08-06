@@ -201,7 +201,6 @@ Oryx is built for everyday use, and some things are out of scope (for the moment
 - It does not edit files.
 - On a file several megabytes long, the colors and the layout below the first screens take a moment to catch up. An export waits for syntax highlighting to finish before it writes, so on the 8 MB file the wall time is roughly double the export column.
 - The implemented HTML is a subset: what GitHub renders in a README, nothing more.
-- A book full of screenshots keeps its decoded images in memory while open, which for a heavy technical book can reach a few hundred megabytes.
 - Remote images use the operating system's TLS stack, which on Linux means it needs the OpenSSL library (normally shipped with every distro). Without it, badges show placeholders but everything else works.
 - macOS compiles but is untested, and there is no packaged build as I don't have a Mac. The Windows release is compiled on my Linux machine.
 

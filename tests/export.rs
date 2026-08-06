@@ -25,8 +25,12 @@ fn export_to_bytes(doc: &Document, page: PageSize) -> Vec<u8> {
 /// A book export: the same pass with the authored table of contents
 /// driving the PDF outline.
 fn export_book(book: &oryx::doc::epub::Book) -> Vec<u8> {
-    let mut fonts = FontStore::new();
     let mut media = MediaCache::new(PathBuf::from("tests/fixtures"));
+    export_book_with(book, &mut media)
+}
+
+fn export_book_with(book: &oryx::doc::epub::Book, media: &mut MediaCache) -> Vec<u8> {
+    let mut fonts = FontStore::new();
     let cfg = ViewConfig {
         body_size: 11.0,
         code_size: 9.0,
@@ -41,7 +45,7 @@ fn export_book(book: &oryx::doc::epub::Book) -> Vec<u8> {
         ..ExportSettings::default()
     };
     let doc = &book.document;
-    let laid = layout(doc, &theme, &mut fonts, &mut media, &cfg, geometry.width);
+    let laid = layout(doc, &theme, &mut fonts, media, &cfg, geometry.width);
     let pages = paginate(doc, &laid, &geometry);
     let job = pdf::Job {
         doc,
@@ -52,7 +56,30 @@ fn export_book(book: &oryx::doc::epub::Book) -> Vec<u8> {
         title: "test",
         toc: &book.toc,
     };
-    pdf::build(&job, &pages, &mut fonts, &mut media).expect("the export builds")
+    pdf::build(&job, &pages, &mut fonts, media).expect("the export builds")
+}
+
+/// A cold book image, adopted as its stored source only, still embeds
+/// as pixels: the export warms each image synchronously instead of
+/// racing the decode pool.
+#[test]
+fn a_cold_book_image_exports_as_pixels() {
+    let bytes = epub_common::book()
+        .image("images/pic.png", epub_common::png_bytes(8, 4))
+        .chapter(
+            "one.xhtml",
+            "<html><body><p><img src=\"../images/pic.png\"/></p></body></html>",
+        )
+        .build();
+    let (_, _, job) = oryx::doc::epub::open_prefix(bytes.clone()).unwrap();
+    let mut media = MediaCache::new(PathBuf::from("tests/fixtures"));
+    media.adopt(job.expect("images leave a job").take_sources());
+    let book = oryx::doc::epub::open_book(bytes).unwrap();
+    let pdf = Pdf::load_mem(&export_book_with(&book, &mut media)).unwrap();
+    assert!(
+        image_xobjects(&pdf) >= 1,
+        "the image embeds, not the placeholder"
+    );
 }
 
 #[test]

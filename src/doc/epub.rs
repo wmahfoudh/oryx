@@ -288,14 +288,14 @@ pub struct Book {
 use crate::doc::images::BookSource;
 
 /// The book past the prefix: the archive, the walker mid-book, and the
-/// decode jobs not yet run. `run` continues it on the parse worker; the
-/// archive buffer dies with the job when the walk completes.
+/// image sources not yet handed over. `run` continues it on the parse
+/// worker; the archive buffer dies with the job when the walk
+/// completes.
 pub struct BookJob {
     archive: Archive,
     package: Package,
     walker: crate::doc::html::Walker,
     next: usize,
-    jobs: Vec<(String, BookSource)>,
     sources: Vec<crate::doc::images::SourceEntry>,
     seen: std::collections::HashSet<String>,
 }
@@ -305,13 +305,9 @@ impl BookJob {
         self.next < self.package.spine.len()
     }
 
-    /// Decode jobs queued since the last take.
-    pub fn take_jobs(&mut self) -> Vec<(String, BookSource)> {
-        std::mem::take(&mut self.jobs)
-    }
-
     /// Image sources with their header dimensions since the last take,
-    /// for the store; sizes reach layout ahead of any pixel.
+    /// for the store; sizes reach layout ahead of any pixel, and the
+    /// pixels themselves decode on demand from the store.
     pub fn take_sources(&mut self) -> Vec<crate::doc::images::SourceEntry> {
         std::mem::take(&mut self.sources)
     }
@@ -344,8 +340,7 @@ impl BookJob {
             if let Some(bytes) = self.archive.read(&src) {
                 let source = BookSource::Raster(bytes);
                 let dims = crate::doc::images::probe_source(&source);
-                self.sources.push((src.clone(), source.clone(), dims));
-                self.jobs.push((src, source));
+                self.sources.push((src, source, dims));
             }
         }
         for svg in self.walker.take_svgs() {
@@ -364,8 +359,7 @@ impl BookJob {
             }
             let source = BookSource::Svg(markup);
             let dims = crate::doc::images::probe_source(&source);
-            self.sources.push((svg.key.clone(), source.clone(), dims));
-            self.jobs.push((svg.key, source));
+            self.sources.push((svg.key, source, dims));
         }
     }
 }
@@ -400,7 +394,6 @@ pub fn open_prefix(bytes: Vec<u8>) -> anyhow::Result<(Document, Vec<TocEntry>, O
         package,
         walker,
         next: 0,
-        jobs: Vec::new(),
         sources: Vec::new(),
         seen: std::collections::HashSet::new(),
     };
@@ -416,7 +409,7 @@ pub fn open_prefix(bytes: Vec<u8>) -> anyhow::Result<(Document, Vec<TocEntry>, O
         anchors: job.walker.anchors().iter().cloned().collect(),
         book_id: job.package.identifier.clone(),
     };
-    let job = (job.has_chapters() || !job.jobs.is_empty()).then_some(job);
+    let job = (job.has_chapters() || !job.sources.is_empty()).then_some(job);
     Ok((document, toc, job))
 }
 
@@ -629,24 +622,21 @@ pub fn resolve_target(doc: &Document, path: &str, fragment: Option<&str>) -> Opt
 }
 
 /// Continues the book on the parse worker: remaining chapters walk and
-/// their decode jobs feed the pool as they appear, so pixels arrive
-/// while the text is still growing. The delivery is the full model over
-/// the grown source; a bail between chapters delivers nothing.
+/// their image sources hand over as they appear, so every size is known
+/// before its block lays out. The delivery is the full model over the
+/// grown source; a bail between chapters delivers nothing.
 pub fn run(
     mut job: BookJob,
     bail: &dyn Fn() -> bool,
-    sink: crate::doc::images::ImageSink,
     sources: crate::doc::images::SourceSink,
 ) -> Option<crate::doc::stream::Delivered> {
     sources(job.take_sources());
-    crate::doc::images::spawn_decodes(job.take_jobs(), Arc::clone(&sink));
     while job.has_chapters() {
         if bail() {
             return None;
         }
         job.step();
         sources(job.take_sources());
-        crate::doc::images::spawn_decodes(job.take_jobs(), Arc::clone(&sink));
     }
     let BookJob { walker, .. } = job;
     let anchors = walker.anchors().to_vec();
@@ -674,15 +664,15 @@ pub fn open_book(bytes: Vec<u8>) -> anyhow::Result<Book> {
     while job.has_chapters() {
         job.step();
     }
-    let jobs = job.take_jobs();
+    let image_sources = job.take_sources();
     let title = job.package.title.clone();
     let book_id = job.package.identifier.clone();
     let BookJob { walker, .. } = job;
     let anchors = walker.anchors().iter().cloned().collect();
     let (blocks, source, details) = walker.finish();
-    let images = jobs
+    let images = image_sources
         .into_iter()
-        .filter_map(|(key, source)| {
+        .filter_map(|(key, source, _)| {
             crate::doc::images::decode_source(&source).map(|image| (key, image))
         })
         .collect();

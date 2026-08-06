@@ -135,13 +135,13 @@ struct BookImage {
     dims: (u32, u32),
 }
 
-/// Decodes queued book images on a small pool feeding the sink.
-pub fn spawn_decodes(jobs: Vec<(String, BookSource)>, sink: ImageSink) {
-    if jobs.is_empty() {
-        return;
-    }
-    let pool = DecodePool::spawn(sink);
-    pool.send(jobs);
+/// The budget for decoded book originals, about twenty screenshots:
+/// enough that the visible region and zoom stay warm, small enough that
+/// a book never holds every original at once.
+const BOOK_BUDGET: usize = 64 << 20;
+
+fn rgba_bytes(image: &RgbaImage) -> usize {
+    image.width() as usize * image.height() as usize * 4
 }
 
 /// A handful of decode threads behind one queue. Dropping the pool
@@ -239,6 +239,11 @@ pub struct MediaCache {
     book: HashMap<String, BookImage>,
     /// Book keys with a decode in flight, so a repaint asks only once.
     decoding: std::collections::HashSet<String>,
+    /// Decoded book originals by recency, oldest first, and their byte
+    /// total against the budget.
+    lru: Vec<String>,
+    lru_bytes: usize,
+    book_budget: usize,
     /// The on-demand decode pool, spawned on first use and living with
     /// the cache; dropping the cache closes its queue.
     pool: Option<DecodePool>,
@@ -262,6 +267,9 @@ impl MediaCache {
             remote: HashMap::new(),
             book: HashMap::new(),
             decoding: std::collections::HashSet::new(),
+            lru: Vec::new(),
+            lru_bytes: 0,
+            book_budget: BOOK_BUDGET,
             pool: None,
             arrivals: Arc::new(Mutex::new(Vec::new())),
             waker: None,
@@ -285,6 +293,50 @@ impl MediaCache {
                 }
             }
         }
+    }
+
+    /// Lands decoded book pixels under the budget: the newest original
+    /// joins the recency list and the oldest leave until the total
+    /// fits. A None pins the placeholder and costs nothing.
+    fn adopt_pixels(&mut self, key: String, image: Option<RgbaImage>) {
+        self.drop_book_original(&key);
+        if let Some(image) = &image {
+            self.lru_bytes += rgba_bytes(image);
+            self.lru.push(key.clone());
+        }
+        self.originals.insert(key, image);
+        while self.lru_bytes > self.book_budget && self.lru.len() > 1 {
+            let oldest = self.lru[0].clone();
+            self.drop_book_original(&oldest);
+        }
+    }
+
+    fn drop_book_original(&mut self, key: &str) {
+        let Some(position) = self.lru.iter().position(|k| k == key) else {
+            return;
+        };
+        self.lru.remove(position);
+        if let Some(Some(image)) = self.originals.remove(key) {
+            self.lru_bytes -= rgba_bytes(&image);
+        }
+    }
+
+    /// Marks a decoded book original as just used.
+    fn touch(&mut self, key: &str) {
+        if let Some(position) = self.lru.iter().position(|k| k == key) {
+            let key = self.lru.remove(position);
+            self.lru.push(key);
+        }
+    }
+
+    /// Decodes a book image now, for the export pass that reads pixels
+    /// synchronously; a warm or non-book key is untouched.
+    pub fn warm(&mut self, src: &str) {
+        if self.originals.contains_key(src) || !self.book.contains_key(src) {
+            return;
+        }
+        let image = decode_source(&self.book[src].source);
+        self.adopt_pixels(src.to_string(), image);
     }
 
     /// Queues a stored source on the pool once; the arrival folds in
@@ -331,12 +383,10 @@ impl MediaCache {
                 Folded::Relayout
             });
             match image {
+                _ if book => self.adopt_pixels(url, image),
                 Some(image) => {
                     self.originals.insert(url.clone(), Some(image));
                     self.remote.remove(&url);
-                }
-                None if book => {
-                    self.originals.insert(url, None);
                 }
                 None => {
                     self.remote.insert(url, RemoteState::Failed);
@@ -417,6 +467,7 @@ impl MediaCache {
             let loaded = load(&self.doc_dir, src);
             self.originals.insert(src.to_string(), loaded);
         }
+        self.touch(src);
         self.originals.get(src).and_then(|o| o.as_ref())
     }
 
@@ -656,6 +707,68 @@ mod tests {
         assert!(
             matches!(media.originals.get("book/bad.bin"), Some(None)),
             "the placeholder is pinned"
+        );
+    }
+
+    /// Paint's ask for a cold book image draws the placeholder, queues
+    /// exactly one decode, and finds the pixels after the arrival folds.
+    #[test]
+    fn a_cold_book_image_decodes_on_demand_once() {
+        let mut media = MediaCache::new(temp_dir());
+        let source = BookSource::Raster(png_bytes(8, 4));
+        media.adopt(vec![("book/pic.png".to_string(), source, Some((8, 4)))]);
+        assert!(
+            media.scaled("book/pic.png", 4, 2).is_none(),
+            "a cold ask answers the placeholder"
+        );
+        assert!(media.scaled("book/pic.png", 4, 2).is_none());
+        assert_eq!(media.decoding.len(), 1, "one decode in flight, not two");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if media.drain_remote() == Folded::Repaint {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the decode never landed"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(media.scaled("book/pic.png", 4, 2).is_some());
+        assert!(media.decoding.is_empty());
+    }
+
+    /// Decoded book originals hold a byte budget: past it the least
+    /// recently touched leave, and a return decodes again.
+    #[test]
+    fn book_originals_evict_past_the_budget_oldest_first() {
+        let mut media = MediaCache::new(temp_dir());
+        // Two 8x4 rgba originals fit, a third does not.
+        media.book_budget = 300;
+        for name in ["a", "b", "c"] {
+            media.adopt(vec![(
+                format!("book/{name}.png"),
+                BookSource::Raster(png_bytes(8, 4)),
+                Some((8, 4)),
+            )]);
+        }
+        media.warm("book/a.png");
+        media.warm("book/b.png");
+        media.warm("book/c.png");
+        assert!(
+            !media.originals.contains_key("book/a.png"),
+            "the oldest left"
+        );
+        assert!(media.originals.contains_key("book/b.png"));
+        assert!(media.originals.contains_key("book/c.png"));
+        media.warm("book/a.png");
+        assert!(
+            media.originals.contains_key("book/a.png"),
+            "a return decodes again"
+        );
+        assert!(
+            !media.originals.contains_key("book/b.png"),
+            "now the oldest leaves"
         );
     }
 

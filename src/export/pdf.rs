@@ -762,6 +762,10 @@ impl Builder {
         if let Some(id) = self.images.get(src) {
             return Some(*id);
         }
+        // A book image may hold only its stored source; the export
+        // reads pixels now, so it decodes now instead of racing the
+        // pool and embedding a placeholder.
+        media.warm(src);
         // The samples are the source's own, not the box it is drawn in:
         // a page places an image in points, and a point holds several
         // pixels, so sampling at the placed size prints it soft.

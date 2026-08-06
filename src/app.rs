@@ -864,24 +864,18 @@ impl App {
             .start(self.document.source.clone(), move || waker());
     }
 
-    /// Continues a book past its prefix on the parse worker, its images
-    /// decoding on the pool and arriving through the media cache. The
+    /// Continues a book past its prefix on the parse worker. The
     /// prefix's image sources adopt here, before the first layout, so
-    /// every prefix size is known from the first frame. A book whose
-    /// chapters all fit the prefix only owes decodes.
+    /// every prefix size is known from the first frame; pixels decode
+    /// on demand as paint reaches them.
     fn start_book(&mut self, mut job: epub::BookJob) {
         self.media.adopt(job.take_sources());
-        let sink = self.media.feeder();
         if job.has_chapters() {
             let sources = self.media.source_sink();
             self.parse_pending = true;
             let waker = self.waker.clone();
-            self.parser.start_with(
-                move |bail| epub::run(job, bail, sink, sources),
-                move || waker(),
-            );
-        } else {
-            images::spawn_decodes(job.take_jobs(), sink);
+            self.parser
+                .start_with(move |bail| epub::run(job, bail, sources), move || waker());
         }
     }
 
