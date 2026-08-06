@@ -307,6 +307,186 @@ fn code_in_an_opened_book_highlights() {
     );
 }
 
+type SeenImages = std::sync::Arc<std::sync::Mutex<Vec<(String, bool)>>>;
+
+fn collecting_sink() -> (oryx::doc::images::ImageSink, SeenImages) {
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let feed = std::sync::Arc::clone(&seen);
+    let sink: oryx::doc::images::ImageSink = std::sync::Arc::new(move |key, image: Option<_>| {
+        feed.lock().unwrap().push((key, image.is_some()));
+    });
+    (sink, seen)
+}
+
+fn six_fat_chapters() -> Vec<u8> {
+    let para = format!("<p>{}</p>", "word ".repeat(8000));
+    let mut b = book();
+    for i in 0..6 {
+        b = b.chapter(
+            &format!("c{i}.xhtml"),
+            &format!("<html><body>{para}</body></html>"),
+        );
+    }
+    b.build()
+}
+
+#[test]
+fn the_prefix_takes_whole_chapters_past_the_target() {
+    let (doc, job) = epub::open_prefix(six_fat_chapters()).unwrap();
+    let job = job.expect("a big book leaves a continuation");
+    assert!(job.has_chapters(), "chapters remain for the worker");
+    assert!(
+        doc.source.len() >= 128 * 1024,
+        "the prefix crosses the target, got {}",
+        doc.source.len()
+    );
+    let paragraphs = doc
+        .blocks
+        .iter()
+        .filter(|b| matches!(b.kind, BlockKind::Paragraph { .. }))
+        .count();
+    assert!(
+        paragraphs < 6,
+        "the prefix must not hold the whole book, got {paragraphs} paragraphs"
+    );
+}
+
+#[test]
+fn the_delivery_extends_the_prefix_bit_for_bit() {
+    let (doc, job) = epub::open_prefix(six_fat_chapters()).unwrap();
+    let job = job.expect("a continuation");
+    let (sink, _) = collecting_sink();
+    let delivered = epub::run(job, &|| false, sink).expect("an unbailed run delivers");
+
+    let full = delivered.source.expect("a book delivery swaps the source");
+    assert!(
+        full.as_bytes().starts_with(doc.source.as_bytes()),
+        "the delivered source must begin with the prefix bytes"
+    );
+    match oryx::doc::stream::swap(&doc.blocks, delivered.blocks) {
+        oryx::doc::stream::Swap::Splice(tail) => {
+            assert!(!tail.is_empty(), "the tail holds the remaining chapters")
+        }
+        oryx::doc::stream::Swap::Replace(_) => panic!("a book delivery must splice, never replace"),
+    }
+}
+
+#[test]
+fn images_decode_through_the_sink_not_at_open() {
+    let bytes = book()
+        .image("images/one.png", png_bytes(8, 4))
+        .image("images/two.png", png_bytes(6, 3))
+        .chapter(
+            "one.xhtml",
+            "<html><body><p><img src=\"../images/one.png\"/><img src=\"../images/two.png\"/></p></body></html>",
+        )
+        .build();
+    let (_, job) = epub::open_prefix(bytes).unwrap();
+    let mut job = job.expect("images leave a decode job");
+    assert!(
+        !job.has_chapters(),
+        "a one-chapter book walks whole at open"
+    );
+
+    let (sink, seen) = collecting_sink();
+    epub::spawn_decodes(job.take_jobs(), sink);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while seen.lock().unwrap().len() < 2 && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 2, "both images arrive through the sink");
+    assert!(seen.iter().all(|(_, decoded)| *decoded));
+    assert!(seen.iter().any(|(k, _)| k == "OEBPS/images/one.png"));
+}
+
+#[test]
+fn a_bailed_run_delivers_nothing() {
+    let (_, job) = epub::open_prefix(six_fat_chapters()).unwrap();
+    let (sink, _) = collecting_sink();
+    assert!(epub::run(job.unwrap(), &|| true, sink).is_none());
+}
+
+/// Temporary stage-timing probe for real books; run with
+/// ORYX_BOOK=<path> cargo test --release --test epub timing_probe -- --ignored --nocapture
+#[test]
+#[ignore]
+fn timing_probe() {
+    use std::time::Instant;
+    let path = std::env::var("ORYX_BOOK").expect("set ORYX_BOOK");
+    let bytes = std::fs::read(&path).unwrap();
+    let size = bytes.len();
+
+    let t = Instant::now();
+    let mut archive = Archive::open(bytes.clone()).unwrap();
+    let t_archive = t.elapsed();
+
+    let t = Instant::now();
+    let package = epub::read_package(&mut archive).unwrap();
+    let t_package = t.elapsed();
+
+    // Walk only: chapters through the walker, no image extraction.
+    let t = Instant::now();
+    let mut table = oryx::doc::html::EmphasisTable::default();
+    for item in &package.manifest {
+        if item.media_type.eq_ignore_ascii_case("text/css") {
+            if let Some(css) = archive.read(&epub::resolve(&package.root, &item.href)) {
+                table.add_css(&String::from_utf8_lossy(&css));
+            }
+        }
+    }
+    let t_css = t.elapsed();
+
+    let t = Instant::now();
+    let mut walker = oryx::doc::html::Walker::new();
+    walker.set_emphasis(table);
+    let mut chapter_bytes = 0usize;
+    for &item in &package.spine {
+        let href = epub::resolve(&package.root, &package.manifest[item].href);
+        if let Some(bytes) = archive.read(&href) {
+            chapter_bytes += bytes.len();
+            walker.walk_chapter(&String::from_utf8_lossy(&bytes));
+        }
+    }
+    let (blocks, source, _) = walker.finish();
+    let t_walk = t.elapsed();
+
+    // The full path, images included.
+    let t = Instant::now();
+    let book = epub::open_book(bytes.clone()).unwrap();
+    let t_full = t.elapsed();
+
+    // What the app now pays before the first frame.
+    let t = Instant::now();
+    let (prefix_doc, job) = epub::open_prefix(bytes).unwrap();
+    let t_prefix = t.elapsed();
+    let job_note = match &job {
+        Some(j) if j.has_chapters() => "chapters remain",
+        Some(_) => "decodes only",
+        None => "nothing owed",
+    };
+
+    println!(
+        "file: {size} bytes, {} chapters, {chapter_bytes} bytes of xhtml",
+        package.spine.len()
+    );
+    println!(
+        "model: {} blocks, {} bytes of source",
+        blocks.len(),
+        source.len()
+    );
+    println!("images: {} decoded", book.images.len());
+    println!("archive open: {t_archive:?}");
+    println!("package:      {t_package:?}");
+    println!("css table:    {t_css:?}");
+    println!("walk all:     {t_walk:?}");
+    println!("full open_book (walk + images): {t_full:?}");
+    println!(
+        "open_prefix: {t_prefix:?} for {} source bytes ({job_note})",
+        prefix_doc.source.len()
+    );
+}
+
 #[test]
 fn detect_answers_epub() {
     assert_eq!(

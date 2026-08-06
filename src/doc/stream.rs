@@ -131,9 +131,18 @@ pub fn adopt_details(current: &[DetailsGroup], mut full: Vec<DetailsGroup>) -> V
     full
 }
 
-/// A parked delivery: the generation that produced it, its blocks, and
-/// its details groups.
-type Delivery = (u64, Vec<Block>, Vec<DetailsGroup>);
+/// What a worker hands back: the full model, and for a book the grown
+/// source the blocks index, which the prefix's source is a bit-for-bit
+/// head of. A markdown delivery never changes the source.
+#[derive(Debug)]
+pub struct Delivered {
+    pub blocks: Vec<Block>,
+    pub details: Vec<DetailsGroup>,
+    pub source: Option<std::sync::Arc<str>>,
+}
+
+/// A parked delivery and the generation that produced it.
+type Delivery = (u64, Delivered);
 
 /// Owns the background full parse. One generation is live at a time:
 /// starting again or cancelling bumps it, the running worker bails at its
@@ -165,20 +174,40 @@ impl ParseWorker {
     /// the running worker.
     pub fn start(&mut self, source: impl Into<Arc<str>>, waker: impl Fn() + Send + 'static) {
         let source: Arc<str> = source.into();
+        self.start_with(
+            move |bail| {
+                crate::doc::markdown::parse_unless(source, bail).map(|document| Delivered {
+                    blocks: document.blocks,
+                    details: document.details,
+                    source: None,
+                })
+            },
+            waker,
+        );
+    }
+
+    /// Runs any producing job off the main thread under the same
+    /// generation, slot, and waker discipline; the book walk rides this.
+    /// The job's bail hook answers true once the generation moves on.
+    pub fn start_with(
+        &mut self,
+        job: impl FnOnce(&dyn Fn() -> bool) -> Option<Delivered> + Send + 'static,
+        waker: impl Fn() + Send + 'static,
+    ) {
         let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         let slot = Arc::clone(&self.slot);
         let current = Arc::clone(&self.generation);
         self.handle = Some(std::thread::spawn(move || {
-            let bail = || current.load(Ordering::SeqCst) != generation;
-            let Some(document) = crate::doc::markdown::parse_unless(source, bail) else {
+            let bail = move || current.load(Ordering::SeqCst) != generation;
+            let Some(delivered) = job(&bail) else {
                 return;
             };
             {
                 let mut slot = slot.lock().expect("parse slot");
-                if current.load(Ordering::SeqCst) != generation {
+                if bail() {
                     return;
                 }
-                *slot = Some((generation, document.blocks, document.details));
+                *slot = Some((generation, delivered));
             }
             waker();
         }));
@@ -193,18 +222,18 @@ impl ParseWorker {
     }
 
     /// The current generation's delivery, once, when it has arrived.
-    pub fn drain(&mut self) -> Option<(Vec<Block>, Vec<DetailsGroup>)> {
+    pub fn drain(&mut self) -> Option<Delivered> {
         let mut slot = self.slot.lock().expect("parse slot");
         let current = self.generation.load(Ordering::SeqCst);
         match slot.take() {
-            Some((generation, blocks, details)) if generation == current => Some((blocks, details)),
+            Some((generation, delivered)) if generation == current => Some(delivered),
             _ => None,
         }
     }
 
     /// Blocks until the running worker finishes and hands over its
     /// delivery; None when nothing current is owed.
-    pub fn finish(&mut self) -> Option<(Vec<Block>, Vec<DetailsGroup>)> {
+    pub fn finish(&mut self) -> Option<Delivered> {
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
@@ -218,7 +247,7 @@ mod tests {
     use std::sync::atomic::AtomicBool;
     use std::time::Duration;
 
-    fn drain_within(worker: &mut ParseWorker, ms: u64) -> Option<(Vec<Block>, Vec<DetailsGroup>)> {
+    fn drain_within(worker: &mut ParseWorker, ms: u64) -> Option<Delivered> {
         for _ in 0..ms {
             if let Some(delivery) = worker.drain() {
                 return Some(delivery);
@@ -235,8 +264,15 @@ mod tests {
         let woke = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&woke);
         worker.start(source.clone(), move || flag.store(true, Ordering::SeqCst));
-        let (blocks, _) = drain_within(&mut worker, 2000).expect("a delivery arrives");
-        assert_eq!(blocks, crate::doc::markdown::parse(source.as_str()).blocks);
+        let delivered = drain_within(&mut worker, 2000).expect("a delivery arrives");
+        assert_eq!(
+            delivered.blocks,
+            crate::doc::markdown::parse(source.as_str()).blocks
+        );
+        assert!(
+            delivered.source.is_none(),
+            "markdown never swaps the source"
+        );
         assert!(woke.load(Ordering::SeqCst), "the waker ran");
         assert!(worker.drain().is_none(), "a delivery drains once");
     }
@@ -248,8 +284,11 @@ mod tests {
         let mut worker = ParseWorker::new();
         worker.start(first, || {});
         worker.start(second.clone(), || {});
-        let (blocks, _) = drain_within(&mut worker, 2000).expect("the live delivery arrives");
-        assert_eq!(blocks, crate::doc::markdown::parse(second.as_str()).blocks);
+        let delivered = drain_within(&mut worker, 2000).expect("the live delivery arrives");
+        assert_eq!(
+            delivered.blocks,
+            crate::doc::markdown::parse(second.as_str()).blocks
+        );
     }
 
     #[test]
@@ -285,12 +324,29 @@ mod tests {
     }
 
     #[test]
+    fn a_job_delivery_can_swap_the_source() {
+        let mut worker = ParseWorker::new();
+        worker.start_with(
+            |_| {
+                Some(Delivered {
+                    blocks: Vec::new(),
+                    details: Vec::new(),
+                    source: Some(Arc::from("the grown book source")),
+                })
+            },
+            || {},
+        );
+        let delivered = worker.finish().expect("the job delivers");
+        assert_eq!(delivered.source.as_deref(), Some("the grown book source"));
+    }
+
+    #[test]
     fn a_cancelled_worker_delivers_nothing() {
         let source = "# Title\n\nbody\n".to_string();
         let mut worker = ParseWorker::new();
         worker.start(source, || {});
         worker.cancel();
-        assert_eq!(drain_within(&mut worker, 100), None);
+        assert!(drain_within(&mut worker, 100).is_none());
     }
 
     #[test]
@@ -353,8 +409,11 @@ mod tests {
         let mut worker = ParseWorker::new();
         assert!(worker.finish().is_none(), "nothing owed before a start");
         worker.start(source.clone(), || {});
-        let (blocks, _) = worker.finish().expect("finish waits for the blocks");
-        assert_eq!(blocks, crate::doc::markdown::parse(source.as_str()).blocks);
+        let delivered = worker.finish().expect("finish waits for the blocks");
+        assert_eq!(
+            delivered.blocks,
+            crate::doc::markdown::parse(source.as_str()).blocks
+        );
         assert!(worker.finish().is_none(), "a delivery is owed once");
     }
 

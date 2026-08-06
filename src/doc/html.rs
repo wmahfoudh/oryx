@@ -663,6 +663,20 @@ impl Walker {
         (self.blocks, self.source, self.details)
     }
 
+    /// A sealed copy of the book so far, the walker left to continue;
+    /// the prefix document at open. Sealing decides by text and offset,
+    /// so the copy equals the same blocks inside a later `finish`.
+    pub fn snapshot(&self) -> (Vec<Block>, String, Vec<DetailsGroup>) {
+        let mut blocks = self.blocks.clone();
+        seal_blocks(&mut blocks, &self.source);
+        (blocks, self.source.clone(), self.details.clone())
+    }
+
+    /// Bytes of book text walked so far; the prefix cut reads it.
+    pub fn source_len(&self) -> usize {
+        self.source.len()
+    }
+
     /// Walks a DOM subtree into the model.
     pub fn walk(&mut self, node: &Handle) {
         match &node.data {

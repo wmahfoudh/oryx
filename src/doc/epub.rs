@@ -271,10 +271,90 @@ pub struct Book {
     pub images: Vec<(String, image::RgbaImage)>,
 }
 
-/// The whole book, synchronously: every spine item walked in order into
-/// one Document over the synthetic source, images decoding as the
-/// chapter holding them parses.
-pub fn open_book(bytes: Vec<u8>) -> anyhow::Result<Book> {
+/// One queued decode: bytes still encoded, markup still text. The pool
+/// turns them into pixels off the open path.
+pub enum DecodeJob {
+    Raster { key: String, bytes: Vec<u8> },
+    Svg { key: String, markup: String },
+}
+
+/// The book past the prefix: the archive, the walker mid-book, and the
+/// decode jobs not yet run. `run` continues it on the parse worker; the
+/// archive buffer dies with the job when the walk completes.
+pub struct BookJob {
+    archive: Archive,
+    package: Package,
+    walker: crate::doc::html::Walker,
+    next: usize,
+    jobs: Vec<DecodeJob>,
+    seen: std::collections::HashSet<String>,
+}
+
+impl BookJob {
+    pub fn has_chapters(&self) -> bool {
+        self.next < self.package.spine.len()
+    }
+
+    /// Decode jobs queued since the last take.
+    pub fn take_jobs(&mut self) -> Vec<DecodeJob> {
+        std::mem::take(&mut self.jobs)
+    }
+
+    /// Walks the next spine item and queues what it referenced: plain
+    /// images as their archive bytes, inline svgs with their archive
+    /// references inlined as data URIs so resvg can resolve them.
+    fn step(&mut self) {
+        let position = self.next;
+        self.next += 1;
+        if position > 0 {
+            self.walker.chapter_break(position);
+        }
+        let item = self.package.spine[position];
+        let path = resolve(&self.package.root, &self.package.manifest[item].href);
+        let base = match path.rfind('/') {
+            Some(slash) => path[..slash].to_string(),
+            None => String::new(),
+        };
+        self.walker.set_chapter_base(&base);
+        let Some(bytes) = self.archive.read(&path) else {
+            return;
+        };
+        self.walker.walk_chapter(&decode(&bytes));
+
+        for src in self.walker.take_images() {
+            if src.starts_with("http") || !self.seen.insert(src.clone()) {
+                continue;
+            }
+            if let Some(bytes) = self.archive.read(&src) {
+                self.jobs.push(DecodeJob::Raster { key: src, bytes });
+            }
+        }
+        for svg in self.walker.take_svgs() {
+            let mut markup = svg.markup;
+            for href in &svg.refs {
+                let target = crate::doc::html::join_href(&base, href);
+                if let Some(raw) = self.archive.read(&target) {
+                    use base64::Engine;
+                    let data = format!(
+                        "\"data:{};base64,{}\"",
+                        media_type_of(&target),
+                        base64::engine::general_purpose::STANDARD.encode(raw)
+                    );
+                    markup = markup.replace(&format!("\"{href}\""), &data);
+                }
+            }
+            self.jobs.push(DecodeJob::Svg {
+                key: svg.key,
+                markup,
+            });
+        }
+    }
+}
+
+/// Opens a book to its prefix: whole spine items until the parse-prefix
+/// target is crossed, no image decoded. The continuation carries the
+/// rest; None means a small book with no images at all.
+pub fn open_prefix(bytes: Vec<u8>) -> anyhow::Result<(Document, Option<BookJob>)> {
     let mut archive = Archive::open(bytes)?;
     let package = read_package(&mut archive)?;
     let mut table = crate::doc::html::EmphasisTable::default();
@@ -287,74 +367,147 @@ pub fn open_book(bytes: Vec<u8>) -> anyhow::Result<Book> {
     }
     let mut walker = crate::doc::html::Walker::new();
     walker.set_emphasis(table);
-    let mut images = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    for (position, &item) in package.spine.iter().enumerate() {
-        if position > 0 {
-            walker.chapter_break(position);
-        }
-        let path = resolve(&package.root, &package.manifest[item].href);
-        let base = match path.rfind('/') {
-            Some(slash) => path[..slash].to_string(),
-            None => String::new(),
-        };
-        walker.set_chapter_base(&base);
-        let Some(bytes) = archive.read(&path) else {
-            continue;
-        };
-        walker.walk_chapter(&decode(&bytes));
-        chapter_images(&mut archive, &base, &mut walker, &mut seen, &mut images);
+    let mut job = BookJob {
+        archive,
+        package,
+        walker,
+        next: 0,
+        jobs: Vec::new(),
+        seen: std::collections::HashSet::new(),
+    };
+    while job.has_chapters() && job.walker.source_len() < crate::doc::stream::PREFIX_TARGET {
+        job.step();
     }
+    let (blocks, source, details) = job.walker.snapshot();
+    let document = Document {
+        blocks,
+        source: Arc::from(source),
+        details,
+        title: job.package.title.clone(),
+    };
+    let job = (job.has_chapters() || !job.jobs.is_empty()).then_some(job);
+    Ok((document, job))
+}
+
+/// Continues the book on the parse worker: remaining chapters walk and
+/// their decode jobs feed the pool as they appear, so pixels arrive
+/// while the text is still growing. The delivery is the full model over
+/// the grown source; a bail between chapters delivers nothing.
+pub fn run(
+    mut job: BookJob,
+    bail: &dyn Fn() -> bool,
+    sink: crate::doc::images::ImageSink,
+) -> Option<crate::doc::stream::Delivered> {
+    let pool = DecodePool::spawn(sink);
+    pool.send(job.take_jobs());
+    while job.has_chapters() {
+        if bail() {
+            return None;
+        }
+        job.step();
+        pool.send(job.take_jobs());
+    }
+    let BookJob { walker, .. } = job;
     let (blocks, source, details) = walker.finish();
+    Some(crate::doc::stream::Delivered {
+        blocks,
+        details,
+        source: Some(Arc::from(source)),
+    })
+}
+
+/// Decodes a book's queued images on the pool without a walk; the small
+/// book whose chapters all fit the prefix.
+pub fn spawn_decodes(jobs: Vec<DecodeJob>, sink: crate::doc::images::ImageSink) {
+    if jobs.is_empty() {
+        return;
+    }
+    let pool = DecodePool::spawn(sink);
+    pool.send(jobs);
+}
+
+/// A handful of decode threads behind one queue. Dropping the pool
+/// closes the queue; workers drain what remains and exit on their own.
+struct DecodePool {
+    sender: std::sync::mpsc::Sender<DecodeJob>,
+}
+
+impl DecodePool {
+    fn spawn(sink: crate::doc::images::ImageSink) -> DecodePool {
+        let (sender, receiver) = std::sync::mpsc::channel::<DecodeJob>();
+        let receiver = Arc::new(std::sync::Mutex::new(receiver));
+        let workers = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+            .clamp(2, 8);
+        for _ in 0..workers {
+            let receiver = Arc::clone(&receiver);
+            let sink = Arc::clone(&sink);
+            std::thread::spawn(move || loop {
+                let job = receiver.lock().expect("decode queue").recv();
+                match job {
+                    Ok(job) => {
+                        let (key, image) = run_decode(job);
+                        sink(key, image);
+                    }
+                    Err(_) => break,
+                }
+            });
+        }
+        DecodePool { sender }
+    }
+
+    fn send(&self, jobs: Vec<DecodeJob>) {
+        for job in jobs {
+            let _ = self.sender.send(job);
+        }
+    }
+}
+
+fn run_decode(job: DecodeJob) -> (String, Option<image::RgbaImage>) {
+    match job {
+        DecodeJob::Raster { key, bytes } => {
+            let image = crate::doc::images::decode(&bytes);
+            (key, image)
+        }
+        DecodeJob::Svg { key, markup } => (key, crate::doc::images::decode(markup.as_bytes())),
+    }
+}
+
+/// The whole book, synchronously: the prefix, the remaining chapters,
+/// and every image decoded in place. The tests' and the export path's
+/// view of the same pipeline the app streams through.
+pub fn open_book(bytes: Vec<u8>) -> anyhow::Result<Book> {
+    let (document, job) = open_prefix(bytes)?;
+    let Some(mut job) = job else {
+        return Ok(Book {
+            document,
+            images: Vec::new(),
+        });
+    };
+    while job.has_chapters() {
+        job.step();
+    }
+    let jobs = job.take_jobs();
+    let title = job.package.title.clone();
+    let BookJob { walker, .. } = job;
+    let (blocks, source, details) = walker.finish();
+    let images = jobs
+        .into_iter()
+        .filter_map(|job| {
+            let (key, image) = run_decode(job);
+            image.map(|image| (key, image))
+        })
+        .collect();
     Ok(Book {
         document: Document {
             blocks,
             source: Arc::from(source),
             details,
-            title: package.title,
+            title,
         },
         images,
     })
-}
-
-/// Extracts and decodes what one chapter referenced: plain images by
-/// their archive path, inline svgs with their archive references
-/// inlined as data URIs so resvg can resolve them.
-fn chapter_images(
-    archive: &mut Archive,
-    base: &str,
-    walker: &mut crate::doc::html::Walker,
-    seen: &mut std::collections::HashSet<String>,
-    images: &mut Vec<(String, image::RgbaImage)>,
-) {
-    for src in walker.take_images() {
-        if src.starts_with("http") || !seen.insert(src.clone()) {
-            continue;
-        }
-        if let Some(bytes) = archive.read(&src) {
-            if let Some(decoded) = crate::doc::images::decode(&bytes) {
-                images.push((src, decoded));
-            }
-        }
-    }
-    for svg in walker.take_svgs() {
-        let mut markup = svg.markup;
-        for href in &svg.refs {
-            let target = crate::doc::html::join_href(base, href);
-            if let Some(raw) = archive.read(&target) {
-                use base64::Engine;
-                let data = format!(
-                    "\"data:{};base64,{}\"",
-                    media_type_of(&target),
-                    base64::engine::general_purpose::STANDARD.encode(raw)
-                );
-                markup = markup.replace(&format!("\"{href}\""), &data);
-            }
-        }
-        if let Some(decoded) = crate::doc::images::decode(markup.as_bytes()) {
-            images.push((svg.key, decoded));
-        }
-    }
 }
 
 fn media_type_of(path: &str) -> &'static str {

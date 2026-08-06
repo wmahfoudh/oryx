@@ -77,6 +77,10 @@ fn load_svg(bytes: &[u8]) -> Option<RgbaImage> {
 /// Wakes the event loop when a background fetch lands.
 pub type Waker = Arc<dyn Fn() + Send + Sync>;
 
+/// Where background decodes land: a key and its pixels, None for a
+/// failure that should pin a placeholder.
+pub type ImageSink = Arc<dyn Fn(String, Option<RgbaImage>) + Send + Sync>;
+
 /// Decodes fetched bytes: SVG when the head looks like XML, raster
 /// otherwise.
 pub fn decode(bytes: &[u8]) -> Option<RgbaImage> {
@@ -224,10 +228,19 @@ impl MediaCache {
         self.originals.get(src).and_then(|o| o.as_ref())
     }
 
-    /// Decoded pixels under a caller-chosen key; the book path, whose
-    /// sources live in an archive rather than beside the document.
-    pub fn insert_original(&mut self, key: String, image: RgbaImage) {
-        self.originals.insert(key, Some(image));
+    /// A sink feeding this cache's arrivals queue and waking the loop,
+    /// for the book decode pool. Arrivals fold in through
+    /// `drain_remote` like any fetched image; a sink outliving the
+    /// cache feeds a dead queue harmlessly.
+    pub fn feeder(&self) -> ImageSink {
+        let arrivals = Arc::clone(&self.arrivals);
+        let waker = self.waker.clone();
+        Arc::new(move |key, image| {
+            arrivals.lock().expect("arrivals lock").push((key, image));
+            if let Some(wake) = &waker {
+                wake();
+            }
+        })
     }
 
     /// Natural pixel dimensions, or None when the image cannot load.

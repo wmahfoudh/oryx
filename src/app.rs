@@ -3,9 +3,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use oryx::doc::epub;
 use oryx::doc::images::{MediaCache, Waker};
 use oryx::doc::load;
-use oryx::doc::model::{Block, BlockKind, DetailsGroup, Document};
+use oryx::doc::model::{BlockKind, Document};
 use oryx::doc::stream::{self, ParseWorker};
 use oryx::export::{self, ExportPass, ExportSettings};
 use oryx::input::{
@@ -49,12 +50,17 @@ const RECOLOR_WAVE: Duration = Duration::from_millis(400);
 const ICON_64: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/icon_64.rgba"));
 
 pub fn run(path: Option<PathBuf>, theme_name: Option<String>) -> anyhow::Result<()> {
-    let (document, pending, streamed) = match &path {
+    let (document, pending, streamed, book) = match &path {
         Some(p) => {
             let opened = load::open(p, Some(Instant::now() + load::OPEN_BUDGET))?;
-            (opened.document, opened.pending, opened.streamed)
+            (
+                opened.document,
+                opened.pending,
+                opened.streamed,
+                opened.book,
+            )
         }
-        None => (Document::default(), Vec::new(), false),
+        None => (Document::default(), Vec::new(), false, None),
     };
     // Absolute from here on: a bare relative name like `README.md` has the
     // empty string as parent, which breaks the sidebar root and the dialog.
@@ -79,7 +85,9 @@ pub fn run(path: Option<PathBuf>, theme_name: Option<String>) -> anyhow::Result<
         highlighter.start(pending, move || waker());
     }
     let mut parser = ParseWorker::new();
-    if streamed {
+    // A book starts its worker through `start_book` once the app owns
+    // the media cache; only the markdown prefix starts here.
+    if streamed && book.is_none() {
         let waker = waker.clone();
         parser.start(document.source.clone(), move || waker());
     }
@@ -166,6 +174,9 @@ pub fn run(path: Option<PathBuf>, theme_name: Option<String>) -> anyhow::Result<
         last_query: String::new(),
         pending_band_for: None,
     };
+    if let Some(job) = book {
+        app.start_book(job);
+    }
     event_loop.run_app(&mut app)?;
     Ok(())
 }
@@ -829,22 +840,37 @@ impl App {
             .start(self.document.source.clone(), move || waker());
     }
 
+    /// Continues a book past its prefix on the parse worker, its images
+    /// decoding on the pool and arriving through the media cache. A
+    /// book whose chapters all fit the prefix only owes decodes.
+    fn start_book(&mut self, mut job: epub::BookJob) {
+        let sink = self.media.feeder();
+        if job.has_chapters() {
+            self.parse_pending = true;
+            let waker = self.waker.clone();
+            self.parser
+                .start_with(move |bail| epub::run(job, bail, sink), move || waker());
+        } else {
+            epub::spawn_decodes(job.take_jobs(), sink);
+        }
+    }
+
     /// Lands a parked parse delivery. Deferred while any drag is live: a
     /// replace would pull the layout out from under it.
     fn fold_parse(&mut self) {
         if self.sel_anchor.is_some() || self.drag.is_some() {
             return;
         }
-        if let Some((blocks, details)) = self.parser.drain() {
-            self.land_parse(blocks, details);
+        if let Some(delivered) = self.parser.drain() {
+            self.land_parse(delivered);
         }
     }
 
     /// Joins the parse worker and lands its document now, for the
     /// completions that need the whole model.
     fn finish_parse(&mut self) {
-        if let Some((blocks, details)) = self.parser.finish() {
-            self.land_parse(blocks, details);
+        if let Some(delivered) = self.parser.finish() {
+            self.land_parse(delivered);
         }
     }
 
@@ -853,11 +879,21 @@ impl App {
     /// replace swaps the model and relayouts from scratch with the scroll
     /// held. Either way the highlight worker restarts over the whole
     /// document.
-    fn land_parse(&mut self, blocks: Vec<Block>, details: Vec<DetailsGroup>) {
+    fn land_parse(&mut self, delivered: stream::Delivered) {
         // Owed recolors index the pre-swap model; they apply while every
         // index is still valid.
         self.flush_recolor();
         self.parse_pending = false;
+        let stream::Delivered {
+            blocks,
+            details,
+            source,
+        } = delivered;
+        // A book's delivery grows the source; the prefix is its head bit
+        // for bit, so every kept range stays valid on the longer text.
+        if let Some(source) = source {
+            self.document.source = source;
+        }
         let spliced = match stream::swap(&self.document.blocks, blocks) {
             stream::Swap::Splice(tail) => {
                 self.document.blocks.extend(tail);
@@ -1216,15 +1252,17 @@ impl App {
         let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         let loaded = load::open(&path, Some(Instant::now() + load::OPEN_BUDGET));
         let opened = loaded.is_ok();
-        let mut book_images = Vec::new();
+        let mut book_job = None;
         match loaded {
             Ok(o) => {
                 self.document = o.document;
-                book_images = o.images;
+                book_job = o.book;
                 self.start_highlight(o.pending);
-                if o.streamed {
+                if o.streamed && book_job.is_none() {
                     self.start_parse();
                 } else {
+                    // A book's worker starts through `start_book` below,
+                    // once the fresh media cache exists for its sink.
                     self.parser.cancel();
                     self.parse_pending = false;
                 }
@@ -1248,8 +1286,8 @@ impl App {
         }
         self.media = MediaCache::new(dir.clone());
         self.media.set_waker(self.waker.clone());
-        for (key, image) in book_images {
-            self.media.insert_original(key, image);
+        if let Some(job) = book_job {
+            self.start_book(job);
         }
         self.scroll_y = 0.0;
         self.selection = None;

@@ -83,9 +83,9 @@ pub struct Opened {
     /// True when the document holds only a parsed prefix and the parse
     /// worker owes the rest; the blocks cover the source up to the cut.
     pub streamed: bool,
-    /// A book's decoded images for the media cache; empty for files,
-    /// whose images load from disk beside the document.
-    pub images: Vec<(String, image::RgbaImage)>,
+    /// A book's continuation: the walk past the prefix and the images
+    /// not yet decoded. The app starts it once the media cache exists.
+    pub book: Option<super::epub::BookJob>,
 }
 
 pub fn open(path: &Path, deadline: Option<Instant>) -> anyhow::Result<Opened> {
@@ -93,13 +93,14 @@ pub fn open(path: &Path, deadline: Option<Instant>) -> anyhow::Result<Opened> {
         std::fs::read(path).map_err(|e| anyhow::anyhow!("cannot open {}: {e}", path.display()))?;
     // A book is a zip and full of NUL bytes; it routes before the sniff.
     if detect(path) == FileKind::Epub {
-        let mut book = super::epub::open_book(bytes)?;
-        let pending = apply_budget(&mut book.document, deadline);
+        let (mut document, book) = super::epub::open_prefix(bytes)?;
+        let pending = apply_budget(&mut document, deadline);
+        let streamed = book.as_ref().is_some_and(|job| job.has_chapters());
         return Ok(Opened {
-            document: book.document,
+            document,
             pending,
-            streamed: false,
-            images: book.images,
+            streamed,
+            book,
         });
     }
     if is_binary(&bytes) {
@@ -138,7 +139,7 @@ pub fn open(path: &Path, deadline: Option<Instant>) -> anyhow::Result<Opened> {
         document,
         pending,
         streamed,
-        images: Vec::new(),
+        book: None,
     })
 }
 
