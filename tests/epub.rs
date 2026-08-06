@@ -356,7 +356,8 @@ fn the_delivery_extends_the_prefix_bit_for_bit() {
     let (doc, _, job) = epub::open_prefix(six_fat_chapters()).unwrap();
     let job = job.expect("a continuation");
     let (sink, _) = collecting_sink();
-    let delivered = epub::run(job, &|| false, sink).expect("an unbailed run delivers");
+    let delivered = epub::run(job, &|| false, sink, std::sync::Arc::new(|_| {}))
+        .expect("an unbailed run delivers");
 
     let full = delivered.source.expect("a book delivery swaps the source");
     assert!(
@@ -389,7 +390,7 @@ fn images_decode_through_the_sink_not_at_open() {
     );
 
     let (sink, seen) = collecting_sink();
-    epub::spawn_decodes(job.take_jobs(), sink);
+    oryx::doc::images::spawn_decodes(job.take_jobs(), sink);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     while seen.lock().unwrap().len() < 2 && std::time::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(5));
@@ -400,11 +401,40 @@ fn images_decode_through_the_sink_not_at_open() {
     assert!(seen.iter().any(|(k, _)| k == "OEBPS/images/one.png"));
 }
 
+/// Sizes cross to the store ahead of any pixel: the job probes each
+/// image's header as its chapter walks, so layout knows every size
+/// before the decode pool has produced anything.
+#[test]
+fn sources_arrive_with_header_dimensions_ahead_of_pixels() {
+    let bytes = book()
+        .image("images/one.png", png_bytes(8, 4))
+        .image("images/two.png", png_bytes(6, 3))
+        .chapter(
+            "one.xhtml",
+            "<html><body><p><img src=\"../images/one.png\"/><img src=\"../images/two.png\"/></p></body></html>",
+        )
+        .build();
+    let (_, _, job) = epub::open_prefix(bytes).unwrap();
+    let mut job = job.expect("images leave a job");
+    let sources = job.take_sources();
+    let shape: Vec<(&str, Option<(u32, u32)>)> = sources
+        .iter()
+        .map(|(key, _, dims)| (key.as_str(), *dims))
+        .collect();
+    assert_eq!(
+        shape,
+        [
+            ("OEBPS/images/one.png", Some((8, 4))),
+            ("OEBPS/images/two.png", Some((6, 3))),
+        ]
+    );
+}
+
 #[test]
 fn a_bailed_run_delivers_nothing() {
     let (_, _, job) = epub::open_prefix(six_fat_chapters()).unwrap();
     let (sink, _) = collecting_sink();
-    assert!(epub::run(job.unwrap(), &|| true, sink).is_none());
+    assert!(epub::run(job.unwrap(), &|| true, sink, std::sync::Arc::new(|_| {})).is_none());
 }
 
 #[test]
@@ -663,7 +693,7 @@ fn the_outline_resolves_toc_entries_as_the_worker_delivers() {
     );
 
     let (sink, _) = collecting_sink();
-    let delivered = epub::run(job.unwrap(), &|| false, sink).unwrap();
+    let delivered = epub::run(job.unwrap(), &|| false, sink, std::sync::Arc::new(|_| {})).unwrap();
     let full = Document {
         blocks: delivered.blocks,
         source: delivered.source.unwrap(),
@@ -840,6 +870,64 @@ fn a_toc_target_lands_on_its_chapter_heading() {
             doc.blocks[block].kind
         );
     }
+}
+
+/// Scratch probe: the image ledger of a real book, sizes and decode
+/// times. ORYX_BOOK=<path> cargo test --release --test epub image_probe -- --ignored --nocapture
+#[test]
+#[ignore]
+fn image_probe() {
+    let path = std::env::var("ORYX_BOOK").expect("set ORYX_BOOK");
+    let bytes = std::fs::read(&path).unwrap();
+    let mut archive = Archive::open(bytes).unwrap();
+    let package = epub::read_package(&mut archive).unwrap();
+    let images: Vec<_> = package
+        .manifest
+        .iter()
+        .filter(|item| item.media_type.starts_with("image/"))
+        .map(|item| epub::resolve(&package.root, &item.href))
+        .collect();
+    let (mut compressed, mut rgba, mut decode_ms, mut max_ms, mut dims_ms) =
+        (0u64, 0u64, 0.0f64, 0.0f64, 0.0f64);
+    let mut count = 0u32;
+    for src in &images {
+        let Some(bytes) = archive.read(src) else {
+            continue;
+        };
+        count += 1;
+        compressed += bytes.len() as u64;
+        let t = std::time::Instant::now();
+        let dims = image::ImageReader::new(std::io::Cursor::new(&bytes))
+            .with_guessed_format()
+            .ok()
+            .and_then(|r| r.into_dimensions().ok());
+        dims_ms += t.elapsed().as_secs_f64() * 1000.0;
+        let t = std::time::Instant::now();
+        let decoded = oryx::doc::images::decode(&bytes);
+        let ms = t.elapsed().as_secs_f64() * 1000.0;
+        decode_ms += ms;
+        max_ms = max_ms.max(ms);
+        if let Some(img) = &decoded {
+            rgba += (img.width() * img.height() * 4) as u64;
+        }
+        if let (Some(img), Some(d)) = (&decoded, dims) {
+            assert_eq!(img.dimensions(), d, "header dims match decode for {src}");
+        }
+    }
+    println!(
+        "{count} images, {:.1}MB compressed, {:.1}MB rgba, decode {decode_ms:.0}ms total / {max_ms:.1}ms max, header dims {dims_ms:.1}ms total",
+        compressed as f64 / 1e6,
+        rgba as f64 / 1e6
+    );
+    let t = std::time::Instant::now();
+    let book = epub::open_book(std::fs::read(&path).unwrap()).unwrap();
+    println!(
+        "open_book {:.0}ms, {} blocks, source {:.1}MB, {} decoded images",
+        t.elapsed().as_secs_f64() * 1000.0,
+        book.document.blocks.len(),
+        book.document.source.len() as f64 / 1e6,
+        book.images.len()
+    );
 }
 
 #[test]

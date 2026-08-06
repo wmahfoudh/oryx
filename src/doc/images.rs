@@ -81,16 +81,121 @@ pub type Waker = Arc<dyn Fn() + Send + Sync>;
 /// failure that should pin a placeholder.
 pub type ImageSink = Arc<dyn Fn(String, Option<RgbaImage>) + Send + Sync>;
 
-/// Decodes fetched bytes: SVG when the head looks like XML, raster
-/// otherwise.
-pub fn decode(bytes: &[u8]) -> Option<RgbaImage> {
+/// A book image's stored source: bytes still encoded, markup still
+/// text, enough to decode on demand.
+#[derive(Clone, Debug)]
+pub enum BookSource {
+    Raster(Vec<u8>),
+    Svg(String),
+}
+
+/// Decodes a stored source into pixels.
+pub fn decode_source(source: &BookSource) -> Option<RgbaImage> {
+    match source {
+        BookSource::Raster(bytes) => decode(bytes),
+        BookSource::Svg(markup) => decode(markup.as_bytes()),
+    }
+}
+
+/// Pixel dimensions from a source's header alone, no pixel decoded:
+/// the raster header for image files, the parsed tree for svg. The svg
+/// parse takes no font database; the canvas size never depends on text.
+pub fn probe_source(source: &BookSource) -> Option<(u32, u32)> {
+    fn svg_size(bytes: &[u8]) -> Option<(u32, u32)> {
+        let options = resvg::usvg::Options::default();
+        let tree = resvg::usvg::Tree::from_data(bytes, &options).ok()?;
+        let size = tree.size().to_int_size();
+        Some((size.width().max(1), size.height().max(1)))
+    }
+    match source {
+        BookSource::Svg(markup) => svg_size(markup.as_bytes()),
+        BookSource::Raster(bytes) if looks_svg(bytes) => svg_size(bytes),
+        BookSource::Raster(bytes) => image::ImageReader::new(std::io::Cursor::new(bytes))
+            .with_guessed_format()
+            .ok()?
+            .into_dimensions()
+            .ok(),
+    }
+}
+
+/// What a drained batch of arrivals asks of the caller; a batch takes
+/// the strongest answer among its arrivals.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
+pub enum Folded {
+    Nothing,
+    /// Pixels for sizes already known: the band repaints.
+    Repaint,
+    /// A size that was unknown until now: layout runs again.
+    Relayout,
+}
+
+/// One stored book image: its encoded source and header dimensions.
+struct BookImage {
+    source: BookSource,
+    dims: (u32, u32),
+}
+
+/// Decodes queued book images on a small pool feeding the sink.
+pub fn spawn_decodes(jobs: Vec<(String, BookSource)>, sink: ImageSink) {
+    if jobs.is_empty() {
+        return;
+    }
+    let pool = DecodePool::spawn(sink);
+    pool.send(jobs);
+}
+
+/// A handful of decode threads behind one queue. Dropping the pool
+/// closes the queue; workers drain what remains and exit on their own.
+struct DecodePool {
+    sender: std::sync::mpsc::Sender<(String, BookSource)>,
+}
+
+impl DecodePool {
+    fn spawn(sink: ImageSink) -> DecodePool {
+        let (sender, receiver) = std::sync::mpsc::channel::<(String, BookSource)>();
+        let receiver = Arc::new(Mutex::new(receiver));
+        let workers = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+            .clamp(2, 8);
+        for _ in 0..workers {
+            let receiver = Arc::clone(&receiver);
+            let sink = Arc::clone(&sink);
+            std::thread::spawn(move || loop {
+                let job = receiver.lock().expect("decode queue").recv();
+                match job {
+                    Ok((key, source)) => {
+                        let image = decode_source(&source);
+                        sink(key, image);
+                    }
+                    Err(_) => break,
+                }
+            });
+        }
+        DecodePool { sender }
+    }
+
+    fn send(&self, jobs: Vec<(String, BookSource)>) {
+        for job in jobs {
+            let _ = self.sender.send(job);
+        }
+    }
+}
+
+/// Whether bytes read as markup rather than a raster header.
+fn looks_svg(bytes: &[u8]) -> bool {
     let head = &bytes[..bytes.len().min(512)];
-    let looks_svg = std::str::from_utf8(head).is_ok_and(|t| {
+    std::str::from_utf8(head).is_ok_and(|t| {
         t.trim_start_matches('\u{feff}')
             .trim_start()
             .starts_with('<')
-    });
-    if looks_svg {
+    })
+}
+
+/// Decodes fetched bytes: SVG when the head looks like XML, raster
+/// otherwise.
+pub fn decode(bytes: &[u8]) -> Option<RgbaImage> {
+    if looks_svg(bytes) {
         load_svg(bytes)
     } else {
         image::load_from_memory(bytes)
@@ -105,9 +210,23 @@ enum RemoteState {
     Failed,
 }
 
-/// Fetch results queued by background threads until the main thread
-/// folds them in.
-type Arrivals = Arc<Mutex<Vec<(String, Option<RgbaImage>)>>>;
+/// A book image source with its key and header dimensions, as the
+/// walker hands them over.
+pub type SourceEntry = (String, BookSource, Option<(u32, u32)>);
+
+/// Where the walker's image sources land, ahead of any pixel.
+pub type SourceSink = Arc<dyn Fn(Vec<SourceEntry>) + Send + Sync>;
+
+/// One queued arrival from a background thread, folded in by the main
+/// thread in queue order, so a source always lands before its pixels.
+enum Arrival {
+    Pixels(String, Option<RgbaImage>),
+    Sources(Vec<SourceEntry>),
+}
+
+/// Results queued by background threads until the main thread folds
+/// them in.
+type Arrivals = Arc<Mutex<Vec<Arrival>>>;
 
 pub struct MediaCache {
     doc_dir: PathBuf,
@@ -115,6 +234,14 @@ pub struct MediaCache {
     originals: HashMap<String, Option<RgbaImage>>,
     scaled: HashMap<(String, u32, u32), Vec<u8>>,
     remote: HashMap<String, RemoteState>,
+    /// Book image sources by key: sizes answer from here, pixels decode
+    /// on demand.
+    book: HashMap<String, BookImage>,
+    /// Book keys with a decode in flight, so a repaint asks only once.
+    decoding: std::collections::HashSet<String>,
+    /// The on-demand decode pool, spawned on first use and living with
+    /// the cache; dropping the cache closes its queue.
+    pool: Option<DecodePool>,
     arrivals: Arrivals,
     waker: Option<Waker>,
 }
@@ -133,6 +260,9 @@ impl MediaCache {
             originals: HashMap::new(),
             scaled: HashMap::new(),
             remote: HashMap::new(),
+            book: HashMap::new(),
+            decoding: std::collections::HashSet::new(),
+            pool: None,
             arrivals: Arc::new(Mutex::new(Vec::new())),
             waker: None,
         }
@@ -142,25 +272,78 @@ impl MediaCache {
         self.waker = Some(waker);
     }
 
-    /// Folds arrived fetches into the cache; true when anything landed.
-    pub fn drain_remote(&mut self) -> bool {
+    /// Adopts book image sources: bytes and header dimensions per key.
+    /// A source whose header did not read pins the placeholder.
+    pub fn adopt(&mut self, sources: Vec<SourceEntry>) {
+        for (key, source, dims) in sources {
+            match dims {
+                Some(dims) => {
+                    self.book.insert(key, BookImage { source, dims });
+                }
+                None => {
+                    self.originals.insert(key, None);
+                }
+            }
+        }
+    }
+
+    /// Queues a stored source on the pool once; the arrival folds in
+    /// through the queue like any decoded image.
+    fn queue_decode(&mut self, src: &str) {
+        if self.decoding.contains(src) {
+            return;
+        }
+        let Some(entry) = self.book.get(src) else {
+            return;
+        };
+        let job = (src.to_string(), entry.source.clone());
+        self.decoding.insert(src.to_string());
+        let sink = self.feeder();
+        self.pool
+            .get_or_insert_with(|| DecodePool::spawn(sink))
+            .send(vec![job]);
+    }
+
+    /// Folds arrived results into the cache, answering what changed. A
+    /// book image's size was known from its header, so its pixels only
+    /// repaint; a remote fetch's size lands with it, so layout reruns.
+    /// A sources batch registers sizes for blocks not yet laid out and
+    /// asks nothing by itself.
+    pub fn drain_remote(&mut self) -> Folded {
         let arrived: Vec<_> = {
             let mut arrivals = self.arrivals.lock().expect("arrivals lock");
             arrivals.drain(..).collect()
         };
-        let changed = !arrived.is_empty();
-        for (url, image) in arrived {
+        let mut folded = Folded::Nothing;
+        for arrival in arrived {
+            let (url, image) = match arrival {
+                Arrival::Sources(sources) => {
+                    self.adopt(sources);
+                    continue;
+                }
+                Arrival::Pixels(url, image) => (url, image),
+            };
+            self.decoding.remove(&url);
+            let book = self.book.contains_key(&url);
+            folded = folded.max(if book {
+                Folded::Repaint
+            } else {
+                Folded::Relayout
+            });
             match image {
                 Some(image) => {
                     self.originals.insert(url.clone(), Some(image));
                     self.remote.remove(&url);
+                }
+                None if book => {
+                    self.originals.insert(url, None);
                 }
                 None => {
                     self.remote.insert(url, RemoteState::Failed);
                 }
             }
         }
-        changed
+        folded
     }
 
     fn is_remote(src: &str) -> bool {
@@ -210,7 +393,10 @@ impl MediaCache {
                 let _ = std::fs::write(dir.join(fetch::key(&url)), bytes);
             }
             let image = bytes.as_deref().and_then(decode);
-            arrivals.lock().expect("arrivals lock").push((url, image));
+            arrivals
+                .lock()
+                .expect("arrivals lock")
+                .push(Arrival::Pixels(url, image));
             if let Some(wake) = waker {
                 wake();
             }
@@ -222,6 +408,12 @@ impl MediaCache {
             return self.remote_original(src);
         }
         if !self.originals.contains_key(src) {
+            // A book image decodes on demand: queue it and answer the
+            // placeholder until the pixels fold in.
+            if self.book.contains_key(src) {
+                self.queue_decode(src);
+                return None;
+            }
             let loaded = load(&self.doc_dir, src);
             self.originals.insert(src.to_string(), loaded);
         }
@@ -236,15 +428,41 @@ impl MediaCache {
         let arrivals = Arc::clone(&self.arrivals);
         let waker = self.waker.clone();
         Arc::new(move |key, image| {
-            arrivals.lock().expect("arrivals lock").push((key, image));
+            arrivals
+                .lock()
+                .expect("arrivals lock")
+                .push(Arrival::Pixels(key, image));
             if let Some(wake) = &waker {
                 wake();
             }
         })
     }
 
-    /// Natural pixel dimensions, or None when the image cannot load.
+    /// The sources counterpart of `feeder`: the walker hands each
+    /// chapter's image sources over ahead of any decode of them.
+    pub fn source_sink(&self) -> SourceSink {
+        let arrivals = Arc::clone(&self.arrivals);
+        let waker = self.waker.clone();
+        Arc::new(move |sources| {
+            if sources.is_empty() {
+                return;
+            }
+            arrivals
+                .lock()
+                .expect("arrivals lock")
+                .push(Arrival::Sources(sources));
+            if let Some(wake) = &waker {
+                wake();
+            }
+        })
+    }
+
+    /// Natural pixel dimensions, or None when the image cannot load. A
+    /// book image answers from its stored header without any decode.
     pub fn dimensions(&mut self, src: &str) -> Option<(u32, u32)> {
+        if let Some(entry) = self.book.get(src) {
+            return Some(entry.dims);
+        }
         self.original(src).map(|img| img.dimensions())
     }
 
@@ -397,6 +615,64 @@ mod tests {
         assert_eq!(media.dimensions(url), None);
         assert_eq!(media.dimensions(url), None);
         let _ = std::fs::remove_dir_all(&cache);
+    }
+
+    #[test]
+    fn a_stored_book_source_answers_dimensions_without_pixels() {
+        let mut media = MediaCache::new(temp_dir());
+        let source = BookSource::Raster(png_bytes(8, 4));
+        let dims = probe_source(&source);
+        assert_eq!(dims, Some((8, 4)), "the header answers the size");
+        media.adopt(vec![("book/pic.png".to_string(), source, dims)]);
+        assert_eq!(media.dimensions("book/pic.png"), Some((8, 4)));
+        assert!(media.originals.is_empty(), "no pixel decoded");
+    }
+
+    /// An svg answers from its parsed attributes, both as inline markup
+    /// and as raster bytes that turn out to be svg, the `<img
+    /// src="x.svg">` case.
+    #[test]
+    fn an_svg_source_answers_its_intrinsic_size() {
+        let markup = r##"<svg xmlns="http://www.w3.org/2000/svg" width="60" height="30">
+            <rect width="60" height="30" fill="#c87137"/></svg>"##;
+        assert_eq!(
+            probe_source(&BookSource::Svg(markup.to_string())),
+            Some((60, 30))
+        );
+        assert_eq!(
+            probe_source(&BookSource::Raster(markup.as_bytes().to_vec())),
+            Some((60, 30))
+        );
+    }
+
+    /// A source whose header does not read pins the placeholder the way
+    /// a failed load always has.
+    #[test]
+    fn an_unreadable_source_pins_the_placeholder() {
+        let mut media = MediaCache::new(temp_dir());
+        let source = BookSource::Raster(b"not an image".to_vec());
+        media.adopt(vec![("book/bad.bin".to_string(), source, None)]);
+        assert_eq!(media.dimensions("book/bad.bin"), None);
+        assert!(
+            matches!(media.originals.get("book/bad.bin"), Some(None)),
+            "the placeholder is pinned"
+        );
+    }
+
+    /// A book image's size is known from its header, so its pixels only
+    /// repaint; a remote fetch's size is unknown until it lands, so it
+    /// still relayouts.
+    #[test]
+    fn a_book_arrival_repaints_a_remote_one_relayouts() {
+        let mut media = MediaCache::new(temp_dir());
+        let source = BookSource::Raster(png_bytes(8, 4));
+        media.adopt(vec![("book/pic.png".to_string(), source, Some((8, 4)))]);
+        let sink = media.feeder();
+        sink("book/pic.png".to_string(), Some(RgbaImage::new(8, 4)));
+        assert_eq!(media.drain_remote(), Folded::Repaint);
+        sink("https://x/y.png".to_string(), Some(RgbaImage::new(2, 2)));
+        assert_eq!(media.drain_remote(), Folded::Relayout);
+        assert_eq!(media.drain_remote(), Folded::Nothing);
     }
 
     #[test]

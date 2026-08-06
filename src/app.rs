@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use oryx::doc::epub;
-use oryx::doc::images::{MediaCache, Waker};
+use oryx::doc::images::{self, MediaCache, Waker};
 use oryx::doc::load;
 use oryx::doc::model::{BlockKind, Document};
 use oryx::doc::stream::{self, ParseWorker};
@@ -865,17 +865,23 @@ impl App {
     }
 
     /// Continues a book past its prefix on the parse worker, its images
-    /// decoding on the pool and arriving through the media cache. A
-    /// book whose chapters all fit the prefix only owes decodes.
+    /// decoding on the pool and arriving through the media cache. The
+    /// prefix's image sources adopt here, before the first layout, so
+    /// every prefix size is known from the first frame. A book whose
+    /// chapters all fit the prefix only owes decodes.
     fn start_book(&mut self, mut job: epub::BookJob) {
+        self.media.adopt(job.take_sources());
         let sink = self.media.feeder();
         if job.has_chapters() {
+            let sources = self.media.source_sink();
             self.parse_pending = true;
             let waker = self.waker.clone();
-            self.parser
-                .start_with(move |bail| epub::run(job, bail, sink), move || waker());
+            self.parser.start_with(
+                move |bail| epub::run(job, bail, sink, sources),
+                move || waker(),
+            );
         } else {
-            epub::spawn_decodes(job.take_jobs(), sink);
+            images::spawn_decodes(job.take_jobs(), sink);
         }
     }
 
@@ -2294,10 +2300,17 @@ impl ApplicationHandler for App {
     /// it in. Fetches relayout; highlights only recolor. The parse lands
     /// first so a stale highlight generation dies before it recolors.
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, _event: ()) {
-        if self.media.drain_remote() {
-            self.layout = None;
-            self.band = None;
-            self.request_redraw();
+        match self.media.drain_remote() {
+            images::Folded::Relayout => {
+                self.layout = None;
+                self.band = None;
+                self.request_redraw();
+            }
+            images::Folded::Repaint => {
+                self.band = None;
+                self.request_redraw();
+            }
+            images::Folded::Nothing => {}
         }
         self.fold_parse();
         self.fold_highlights();
