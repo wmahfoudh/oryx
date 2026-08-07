@@ -242,6 +242,24 @@ mod tests {
     }
 
     #[test]
+    fn book_page_sizes_round_trip() {
+        for page in [PageSize::A5, PageSize::SixByNine, PageSize::FiveByEight] {
+            let path = temp_path("trim.toml");
+            let config = Config {
+                export: Some(ExportSettings {
+                    page,
+                    ..ExportSettings::default()
+                }),
+                ..Config::default()
+            };
+            save_to(&path, &config);
+            let loaded = load_from(&path);
+            std::fs::remove_file(&path).unwrap();
+            assert_eq!(loaded, config, "{page:?}");
+        }
+    }
+
+    #[test]
     fn justify_defaults_on() {
         assert!(
             Config::default().justify,

@@ -382,7 +382,14 @@ fn step_size(size: f32, delta: f32) -> f32 {
 }
 
 fn cycle_page(page: PageSize, delta: i32) -> PageSize {
-    let order = [PageSize::A4, PageSize::Letter, PageSize::Legal];
+    let order = [
+        PageSize::A4,
+        PageSize::Letter,
+        PageSize::Legal,
+        PageSize::A5,
+        PageSize::SixByNine,
+        PageSize::FiveByEight,
+    ];
     let at = order.iter().position(|p| *p == page).unwrap_or(0) as i32;
     let next = (at + delta).rem_euclid(order.len() as i32) as usize;
     order[next]
@@ -657,6 +664,30 @@ mod tests {
     }
 
     #[test]
+    fn the_page_row_cycles_office_then_book_sizes() {
+        let mut page = PageSize::A4;
+        let seen: Vec<PageSize> = (0..6)
+            .map(|_| {
+                let here = page;
+                page = cycle_page(page, 1);
+                here
+            })
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                PageSize::A4,
+                PageSize::Letter,
+                PageSize::Legal,
+                PageSize::A5,
+                PageSize::SixByNine,
+                PageSize::FiveByEight,
+            ]
+        );
+        assert_eq!(page, PageSize::A4, "six steps come back around");
+    }
+
+    #[test]
     fn the_justify_row_appears_only_for_books() {
         assert!(!dialog().rows.contains(&Row::Justify));
         assert!(book_dialog().rows.contains(&Row::Justify));
@@ -741,7 +772,7 @@ mod tests {
         d.right();
         assert_eq!(d.settings().page, PageSize::Legal);
         d.right();
-        assert_eq!(d.settings().page, PageSize::A4, "wraps round");
+        assert_eq!(d.settings().page, PageSize::A5, "the book sizes follow");
         d.left();
         assert_eq!(d.settings().page, PageSize::Legal, "and the other way");
     }

@@ -1047,3 +1047,32 @@ fn a_markdown_export_never_justifies() {
         "the setting has no effect outside books"
     );
 }
+
+#[test]
+fn book_trim_media_boxes_match_their_points() {
+    let doc = markdown::parse("Short.");
+    let cases = [
+        (PageSize::A5, 419.53, 595.28),
+        (PageSize::SixByNine, 432.0, 648.0),
+        (PageSize::FiveByEight, 360.0, 576.0),
+    ];
+    for (page, w, h) in cases {
+        let bytes = export_to_bytes(&doc, page);
+        let pdf = Pdf::load_mem(&bytes).unwrap();
+        let (_, first) = pdf.get_pages().into_iter().next().unwrap();
+        let media = pdf
+            .get_object(first)
+            .unwrap()
+            .as_dict()
+            .unwrap()
+            .get(b"MediaBox")
+            .unwrap();
+        let sizes: Vec<f32> = media
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_float().unwrap())
+            .collect();
+        assert_eq!(sizes, vec![0.0, 0.0, w, h], "{page:?}");
+    }
+}

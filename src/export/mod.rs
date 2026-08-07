@@ -41,16 +41,26 @@ pub enum PageSize {
     A4,
     Letter,
     Legal,
+    A5,
+    #[serde(rename = "6x9")]
+    SixByNine,
+    #[serde(rename = "5x8")]
+    FiveByEight,
 }
 
 impl PageSize {
     /// Sheet size in PDF points. One point is one layout unit, so the
-    /// engine lays a page out the way it lays a window out.
+    /// engine lays a page out the way it lays a window out. The office
+    /// sizes came first; the book trim sizes joined for native-size
+    /// book exports, 6 by 9 the common print-on-demand trade format.
     pub fn points(self) -> (f32, f32) {
         match self {
             PageSize::A4 => (595.28, 841.89),
             PageSize::Letter => (612.0, 792.0),
             PageSize::Legal => (612.0, 1008.0),
+            PageSize::A5 => (419.53, 595.28),
+            PageSize::SixByNine => (432.0, 648.0),
+            PageSize::FiveByEight => (360.0, 576.0),
         }
     }
 
@@ -59,6 +69,9 @@ impl PageSize {
             PageSize::A4 => "A4",
             PageSize::Letter => "Letter",
             PageSize::Legal => "Legal",
+            PageSize::A5 => "A5",
+            PageSize::SixByNine => "6 x 9 in",
+            PageSize::FiveByEight => "5 x 8 in",
         }
     }
 }
