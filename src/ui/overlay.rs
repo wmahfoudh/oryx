@@ -40,6 +40,8 @@ pub enum OverlayResult {
     /// Dismiss is not implied: the overlay stays open while the app
     /// performs the action.
     Apply(Action),
+    /// Perform the action, then dismiss: the confirm that also closes.
+    ApplyAndClose(Action),
 }
 
 /// Whether a point falls inside a rect given as origin, width and height.

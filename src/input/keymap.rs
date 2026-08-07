@@ -26,6 +26,9 @@ pub enum Command {
     FindPrev,
     LineUp,
     LineDown,
+    PaneLeft,
+    PaneRight,
+    SidebarTab,
     PageUp,
     PageDown,
     Top,
@@ -35,7 +38,7 @@ pub enum Command {
 
 impl Command {
     /// Every variant; the coverage test checks each one against the table.
-    pub const ALL: [Command; 24] = [
+    pub const ALL: [Command; 27] = [
         Command::OpenFile,
         Command::Reload,
         Command::Sidebar,
@@ -55,6 +58,9 @@ impl Command {
         Command::FindPrev,
         Command::LineUp,
         Command::LineDown,
+        Command::PaneLeft,
+        Command::PaneRight,
+        Command::SidebarTab,
         Command::PageUp,
         Command::PageDown,
         Command::Top,
@@ -74,6 +80,8 @@ enum Binding {
     Named(NamedKey),
     /// A named key with Shift held.
     ShiftNamed(NamedKey),
+    /// A named key with Ctrl held; tried before the plain named form.
+    CtrlNamed(NamedKey),
 }
 
 /// One help-table row: display labels plus the chords the row covers.
@@ -171,10 +179,29 @@ pub const SHORTCUTS: &[Shortcut] = &[
     },
     Shortcut {
         keys: "Up / Down",
-        action: "Scroll by line",
+        action: "Scroll by line, or move the sidebar selection",
         bindings: &[
             (Binding::Named(NamedKey::ArrowUp), Command::LineUp),
             (Binding::Named(NamedKey::ArrowDown), Command::LineDown),
+        ],
+    },
+    Shortcut {
+        keys: "Left / Right",
+        action: "Toggle between sidebar and document",
+        bindings: &[
+            (Binding::Named(NamedKey::ArrowLeft), Command::PaneLeft),
+            (Binding::Named(NamedKey::ArrowRight), Command::PaneRight),
+        ],
+    },
+    Shortcut {
+        keys: "Ctrl+Left / Ctrl+Right",
+        action: "Toggle the sidebar tab",
+        bindings: &[
+            (Binding::CtrlNamed(NamedKey::ArrowLeft), Command::SidebarTab),
+            (
+                Binding::CtrlNamed(NamedKey::ArrowRight),
+                Command::SidebarTab,
+            ),
         ],
     },
     Shortcut {
@@ -202,13 +229,15 @@ pub const SHORTCUTS: &[Shortcut] = &[
     },
 ];
 
-/// Resolves a key event against the table. Chords that require Shift are
-/// tried first so Ctrl+Shift+C never falls through to Ctrl+C.
+/// Resolves a key event against the table. Chords that require a
+/// modifier are tried first, so Ctrl+Shift+C never falls through to
+/// Ctrl+C and Ctrl+Left never falls through to plain Left.
 pub fn command(key: &Key, ctrl: bool, shift: bool) -> Option<Command> {
     let bindings = || SHORTCUTS.iter().flat_map(|row| row.bindings.iter());
     let shifted = bindings().find(|(binding, _)| match binding {
         Binding::CtrlShift(c) => ctrl && shift && is_char(key, c),
         Binding::ShiftNamed(n) => shift && is_named(key, n),
+        Binding::CtrlNamed(n) => ctrl && is_named(key, n),
         _ => false,
     });
     let plain = || {
@@ -345,6 +374,32 @@ mod tests {
         assert_eq!(
             command(&Key::Named(NamedKey::F3), false, true),
             Some(Command::FindPrev)
+        );
+    }
+
+    #[test]
+    fn plain_arrows_hand_the_panes() {
+        let named = |n| Key::Named(n);
+        assert_eq!(
+            command(&named(NamedKey::ArrowLeft), false, false),
+            Some(Command::PaneLeft)
+        );
+        assert_eq!(
+            command(&named(NamedKey::ArrowRight), false, false),
+            Some(Command::PaneRight)
+        );
+    }
+
+    #[test]
+    fn ctrl_arrows_toggle_the_sidebar_tab() {
+        let named = |n| Key::Named(n);
+        assert_eq!(
+            command(&named(NamedKey::ArrowLeft), true, false),
+            Some(Command::SidebarTab)
+        );
+        assert_eq!(
+            command(&named(NamedKey::ArrowRight), true, false),
+            Some(Command::SidebarTab)
         );
     }
 

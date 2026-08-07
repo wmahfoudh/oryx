@@ -175,6 +175,7 @@ pub fn run(path: Option<PathBuf>, theme_name: Option<String>) -> anyhow::Result<
         pre_browse: None,
         overlay_canvas: None,
         sidebar: None,
+        key_pane: KeyPane::Document,
         outline,
         sidebar_canvas: None,
         search: None,
@@ -369,6 +370,8 @@ struct App {
     view_dirty: bool,
     /// Folder sidebar while open; the document lays out beside it.
     sidebar: Option<Sidebar>,
+    /// The pane Up, Down, and Enter act on: the pane last acted on.
+    key_pane: KeyPane,
     /// The document's heading outline, behind the sidebar's second tab.
     /// Rebuilt with the document, extended as the parse worker delivers.
     outline: OutlineTree,
@@ -384,6 +387,50 @@ struct App {
     /// at. Interactive frames (drag, live resize) paint the viewport
     /// directly; the expensive band builds one frame later, once stable.
     pending_band_for: Option<(u32, u32)>,
+}
+
+/// The pane owning Up, Down, and Enter. There is no focus system: the
+/// owner is the pane last acted on, and every ownership-moving event
+/// funnels through `owner_after`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyPane {
+    Document,
+    Sidebar,
+}
+
+/// An act that can move key ownership.
+#[derive(Debug, Clone, Copy)]
+enum PaneAct {
+    OpenSidebar,
+    CloseSidebar,
+    ClickSidebar,
+    ClickDocument,
+    WheelSidebar,
+    WheelDocument,
+    /// The keyboard tab switch, an act on the panel.
+    SwitchTab,
+    /// Activation inside the sidebar; navigation flows keep their keys.
+    Enter,
+    /// The explicit transfer keys. Left claims only an existing sidebar.
+    Left,
+    Right,
+}
+
+/// The owner after an act. Pure, so the transition table is testable on
+/// its own.
+fn owner_after(owner: KeyPane, act: PaneAct, sidebar_open: bool) -> KeyPane {
+    match act {
+        PaneAct::OpenSidebar
+        | PaneAct::ClickSidebar
+        | PaneAct::WheelSidebar
+        | PaneAct::SwitchTab => KeyPane::Sidebar,
+        PaneAct::CloseSidebar
+        | PaneAct::ClickDocument
+        | PaneAct::WheelDocument
+        | PaneAct::Right => KeyPane::Document,
+        PaneAct::Left if sidebar_open => KeyPane::Sidebar,
+        PaneAct::Left | PaneAct::Enter => owner,
+    }
 }
 
 /// A pointer gesture on the app's own chrome.
@@ -470,6 +517,9 @@ impl App {
             Command::FindPrev => self.step_search(false),
             Command::LineUp => self.scroll_by(-self.line_step()),
             Command::LineDown => self.scroll_by(self.line_step()),
+            Command::PaneLeft => self.move_ownership(PaneAct::Left),
+            Command::PaneRight => self.move_ownership(PaneAct::Right),
+            Command::SidebarTab => self.switch_sidebar_tab(),
             Command::PageUp => self.scroll_by(-self.page_step()),
             Command::PageDown => self.scroll_by(self.page_step()),
             Command::Top => self.scroll_to(0.0),
@@ -1170,6 +1220,24 @@ impl App {
         self.request_redraw();
     }
 
+    /// Toggles the sidebar between its two tabs, the caption click's
+    /// keyboard twin: same persistence, and the act takes the keys for
+    /// the panel. A closed sidebar stays closed.
+    fn switch_sidebar_tab(&mut self) {
+        let Some(side) = self.sidebar.as_mut() else {
+            return;
+        };
+        let tab = match side.tab() {
+            sidebar::Tab::Files => sidebar::Tab::Outline,
+            sidebar::Tab::Outline => sidebar::Tab::Files,
+        };
+        side.set_tab(tab);
+        self.config.sidebar_tab = tab;
+        config::save(&self.config);
+        self.move_ownership(PaneAct::SwitchTab);
+        self.request_redraw();
+    }
+
     /// Moves the active tab's keyboard selection.
     fn sidebar_move(&mut self, delta: i32) {
         let Some(side) = self.sidebar.as_mut() else {
@@ -1270,8 +1338,30 @@ impl App {
     }
 
     fn toggle_sidebar(&mut self) {
-        self.open_sidebar(self.sidebar.is_none());
+        let opening = self.sidebar.is_none();
+        self.open_sidebar(opening);
+        self.move_ownership(if opening {
+            PaneAct::OpenSidebar
+        } else {
+            PaneAct::CloseSidebar
+        });
         self.save_sidebar_state();
+    }
+
+    /// Whether the sidebar owns Up, Down, and Enter right now.
+    fn sidebar_owns_keys(&self) -> bool {
+        self.key_pane == KeyPane::Sidebar && self.sidebar.is_some()
+    }
+
+    /// Feeds an ownership-moving act through the transition table. A
+    /// change re-renders the panel, whose live marks dim with ownership.
+    fn move_ownership(&mut self, act: PaneAct) {
+        let owner = owner_after(self.key_pane, act, self.sidebar.is_some());
+        if owner != self.key_pane {
+            self.key_pane = owner;
+            self.sidebar_canvas = None;
+            self.request_redraw();
+        }
     }
 
     /// Opens or closes the panel, restoring the persisted width when it
@@ -1574,6 +1664,12 @@ impl App {
     fn overlay_result(&mut self, result: OverlayResult) {
         match result {
             OverlayResult::Open => {}
+            // The apply moves the revert point forward, so the close
+            // that follows restores nothing.
+            OverlayResult::ApplyAndClose(action) => {
+                self.overlay_result(OverlayResult::Apply(action));
+                self.overlay_result(OverlayResult::Close);
+            }
             OverlayResult::Close => {
                 self.overlay = None;
                 if self.view_dirty {
@@ -2205,6 +2301,7 @@ impl App {
             };
             scrollbar::draw(&mut buffer, size.width, size.height, thumb, color);
         }
+        let owns_keys = self.key_pane == KeyPane::Sidebar;
         if let Some(side) = self.sidebar.as_mut() {
             let current = outline_current(&mut self.outline, side, lay, self.scroll_y);
             let fits = self
@@ -2217,7 +2314,13 @@ impl App {
             }
             if let Some((canvas, stale)) = self.sidebar_canvas.as_mut() {
                 let mut painter = Painter::new(canvas, &mut self.fonts, stale.take());
-                side.draw(&mut painter, &self.theme, &mut self.outline, current);
+                side.draw(
+                    &mut painter,
+                    &self.theme,
+                    &mut self.outline,
+                    current,
+                    owns_keys,
+                );
                 painter.composite(&mut buffer, size.width);
                 *stale = painter.dirty();
             }
@@ -2402,13 +2505,13 @@ impl ApplicationHandler for App {
                         self.overlay_result(result);
                     }
                     _ if self.search_key(&logical_key, ctrl, shift) => {}
-                    Some(Command::LineUp) if self.sidebar.is_some() => {
+                    Some(Command::LineUp) if self.sidebar_owns_keys() => {
                         self.sidebar_move(-1);
                     }
-                    Some(Command::LineDown) if self.sidebar.is_some() => {
+                    Some(Command::LineDown) if self.sidebar_owns_keys() => {
                         self.sidebar_move(1);
                     }
-                    None if self.sidebar.is_some()
+                    None if self.sidebar_owns_keys()
                         && matches!(logical_key, Key::Named(NamedKey::Enter)) =>
                     {
                         let outline_tab = self
@@ -2422,6 +2525,9 @@ impl ApplicationHandler for App {
                         } else {
                             self.sidebar_action(|side| side.enter());
                         }
+                        // Activation keeps the keys: the table says Enter
+                        // holds, so arrow-and-enter stepping stays a flow.
+                        self.move_ownership(PaneAct::Enter);
                     }
                     Some(cmd) => self.run_command(cmd, event_loop),
                     None => {}
@@ -2438,9 +2544,11 @@ impl ApplicationHandler for App {
                     self.overlay_result(result);
                 } else if let Some(side) = self.sidebar.as_mut().filter(|_| over_sidebar) {
                     side.wheel(lines * 3.0, &mut self.outline);
+                    self.move_ownership(PaneAct::WheelSidebar);
                     self.request_redraw();
                 } else {
                     self.scroll_by(lines * 3.0 * self.line_step());
+                    self.move_ownership(PaneAct::WheelDocument);
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
@@ -2476,7 +2584,9 @@ impl ApplicationHandler for App {
                     } else if (self.cursor.x as f32) < self.inset() && self.sidebar.is_some() {
                         let (x, y) = (self.cursor.x as f32, self.cursor.y as f32);
                         self.sidebar_click(x, y);
+                        self.move_ownership(PaneAct::ClickSidebar);
                     } else {
+                        self.move_ownership(PaneAct::ClickDocument);
                         self.scrollbar_press();
                         if self.drag.is_none() {
                             match self.register_click() {
@@ -2568,6 +2678,61 @@ impl ApplicationHandler for App {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn key_ownership_follows_the_last_touched_pane() {
+        use super::{owner_after, KeyPane, PaneAct};
+        let d = KeyPane::Document;
+        let s = KeyPane::Sidebar;
+        assert_eq!(owner_after(d, PaneAct::OpenSidebar, true), s, "open grants");
+        assert_eq!(
+            owner_after(s, PaneAct::CloseSidebar, false),
+            d,
+            "close returns"
+        );
+        assert_eq!(
+            owner_after(s, PaneAct::ClickDocument, true),
+            d,
+            "a document click returns"
+        );
+        assert_eq!(
+            owner_after(d, PaneAct::ClickSidebar, true),
+            s,
+            "a sidebar click grants"
+        );
+        assert_eq!(
+            owner_after(s, PaneAct::WheelDocument, true),
+            d,
+            "a wheel over the text returns"
+        );
+        assert_eq!(
+            owner_after(d, PaneAct::WheelSidebar, true),
+            s,
+            "a wheel over the panel grants"
+        );
+        assert_eq!(owner_after(s, PaneAct::Enter, true), s, "enter holds");
+        assert_eq!(
+            owner_after(d, PaneAct::Enter, true),
+            d,
+            "enter holds for the document too"
+        );
+        assert_eq!(
+            owner_after(d, PaneAct::Left, true),
+            s,
+            "left claims an open sidebar"
+        );
+        assert_eq!(
+            owner_after(d, PaneAct::Left, false),
+            d,
+            "left without a sidebar does nothing"
+        );
+        assert_eq!(owner_after(s, PaneAct::Right, true), d, "right hands back");
+        assert_eq!(
+            owner_after(d, PaneAct::SwitchTab, true),
+            s,
+            "a tab switch grants"
+        );
+    }
+
     #[test]
     fn file_links_resolve_against_the_document_folder() {
         use std::path::{Path, PathBuf};

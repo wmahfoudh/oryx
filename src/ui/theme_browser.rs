@@ -571,7 +571,10 @@ impl Overlay for ThemeBrowser {
             }
             Key::Named(NamedKey::Enter) => {
                 if let Some(row) = self.rows.get(self.selected) {
-                    return OverlayResult::Apply(Action::SetTheme(row.path.clone()));
+                    // The confirm is the reader's last word here: apply,
+                    // persist, and close in the one keypress. The click
+                    // path keeps the browser open for comparing.
+                    return OverlayResult::ApplyAndClose(Action::SetTheme(row.path.clone()));
                 }
             }
             _ => {}
@@ -757,6 +760,25 @@ mod tests {
             matches!(pinned, OverlayResult::Open),
             "a step against the end moves nothing and previews nothing"
         );
+    }
+
+    #[test]
+    fn enter_confirms_and_closes() {
+        let dir = temp_dir("confirm");
+        std::fs::write(
+            dir.join("alpha-dark.toml"),
+            "[surface]\nbackground = \"#282a36\"\n",
+        )
+        .unwrap();
+        let mut browser = ThemeBrowser::new(vec![dir.clone()], "alpha-dark");
+        let result = browser.key(&Key::Named(NamedKey::Enter), false, false);
+        std::fs::remove_dir_all(&dir).unwrap();
+        match result {
+            OverlayResult::ApplyAndClose(Action::SetTheme(path)) => {
+                assert_eq!(path.file_name().unwrap(), "alpha-dark.toml");
+            }
+            _ => panic!("enter chooses the theme and closes the browser"),
+        }
     }
 
     #[test]

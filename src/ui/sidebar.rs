@@ -415,12 +415,15 @@ impl Sidebar {
 
     /// Draws the panel: captions, then the active tab's list. `current`
     /// is the outline entry carrying the reading-position highlight.
+    /// `owns_keys` is key ownership: while the panel does not own Up,
+    /// Down, and Enter, its live marks render dimmed.
     pub fn draw(
         &mut self,
         painter: &mut Painter,
         theme: &Theme,
         outline: &mut OutlineTree,
         current: Option<usize>,
+        owns_keys: bool,
     ) {
         let h = painter.height();
         let ui = &theme.ui;
@@ -428,14 +431,14 @@ impl Sidebar {
         painter.fill(0.0, 0.0, width, h, 0.0, ui.sidebar_bg);
         self.list_h = h - 2.0 * PAD - CAPTION_H;
         match self.tab {
-            Tab::Files => self.draw_files(painter, theme),
-            Tab::Outline => self.draw_outline(painter, theme, outline, current),
+            Tab::Files => self.draw_files(painter, theme, owns_keys),
+            Tab::Outline => self.draw_outline(painter, theme, outline, current, owns_keys),
         }
         // Masks cover row overflow above and below the list viewport; the
         // captions and the border paint over them.
         painter.fill(0.0, 0.0, width, PAD + CAPTION_H, 0.0, ui.sidebar_bg);
         painter.fill(0.0, h - PAD, width, PAD, 0.0, ui.sidebar_bg);
-        self.draw_captions(painter, theme);
+        self.draw_captions(painter, theme, owns_keys);
         painter.line(
             width - 0.5,
             0.0,
@@ -448,8 +451,9 @@ impl Sidebar {
 
     /// The two tab captions: a small icon beside a text label, the
     /// active one in full color over an underline, the other dimmed the
-    /// way dot entries are. Captions truncate; icons never do.
-    fn draw_captions(&self, painter: &mut Painter, theme: &Theme) {
+    /// way dot entries are. The active caption dims too while the panel
+    /// does not own the keys. Captions truncate; icons never do.
+    fn draw_captions(&self, painter: &mut Painter, theme: &Theme, owns_keys: bool) {
         let ui = &theme.ui;
         let mid = self.width / 2.0;
         let zones = [
@@ -458,7 +462,7 @@ impl Sidebar {
         ];
         for (tab, x0, x1) in zones {
             let active = tab == self.tab;
-            let color = if active {
+            let color = if active && owns_keys {
                 ui.sidebar_fg
             } else {
                 dim(ui.sidebar_fg)
@@ -499,6 +503,7 @@ impl Sidebar {
         theme: &Theme,
         outline: &mut OutlineTree,
         current: Option<usize>,
+        owns_keys: bool,
     ) {
         let ui = &theme.ui;
         let h = painter.height();
@@ -532,14 +537,12 @@ impl Sidebar {
             slot += 1;
             let row = rows[index];
             if index == outline.selected {
-                painter.fill(
-                    3.0,
-                    ry,
-                    self.width - 8.0,
-                    ROW_H - 2.0,
-                    5.0,
-                    ui.overlay_highlight,
-                );
+                let hi = if owns_keys {
+                    ui.overlay_highlight
+                } else {
+                    dim(ui.overlay_highlight)
+                };
+                painter.fill(3.0, ry, self.width - 8.0, ROW_H - 2.0, 5.0, hi);
             }
             let x = PAD + row.depth as f32 * INDENT;
             // An unresolved book entry dims like a dot file and jumps
@@ -571,7 +574,7 @@ impl Sidebar {
         }
     }
 
-    fn draw_files(&mut self, painter: &mut Painter, theme: &Theme) {
+    fn draw_files(&mut self, painter: &mut Painter, theme: &Theme, owns_keys: bool) {
         let h = painter.height();
         let ui = &theme.ui;
         let width = self.width;
@@ -588,7 +591,12 @@ impl Sidebar {
             slot += 1;
             let entry = &self.entries[index];
             if index == self.selected {
-                painter.fill(3.0, ry, width - 8.0, ROW_H - 2.0, 5.0, ui.overlay_highlight);
+                let hi = if owns_keys {
+                    ui.overlay_highlight
+                } else {
+                    dim(ui.overlay_highlight)
+                };
+                painter.fill(3.0, ry, width - 8.0, ROW_H - 2.0, 5.0, hi);
             }
             let x = PAD + entry.depth as f32 * INDENT;
             let mut color = if entry.is_dir {
@@ -701,7 +709,7 @@ mod tests {
         let (w, h) = (260usize, 300usize);
         let mut pixmap = Pixmap::new(w as u32, h as u32).unwrap();
         let mut painter = Painter::new(&mut pixmap, fonts, None);
-        side.draw(&mut painter, theme, outline, None);
+        side.draw(&mut painter, theme, outline, None, true);
         let row = w * 4;
         let top = (PAD + CAPTION_H) as usize;
         let bottom = h - PAD as usize;
