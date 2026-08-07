@@ -62,6 +62,8 @@ The command vocabulary is KaTeX compatible: Greek, binary operators, relations a
 
 Oryx opens EPUB books and renders them as one continuous document, in the active theme rather than the book's own styling. The book keeps its structure: chapter headings, italics and bold (including the ones its stylesheet sets), images and the cover, tables and highlighted code. The first chapters display immediately and the rest of the book loads in the background.
 
+Book text is justified: lines end at the same right edge, and the last line of each paragraph stays ragged, like print. `Ctrl+J` turns justification off and on (books only).
+
 The sidebar's Outline tab shows the book's own table of contents, follows the reading position and jumps on a click. Links inside the book work, so a footnote reference jumps to its note and back. Unlike markdown files, which open at the top, ebooks reopen where reading stopped.
 
 DRM-protected books and fixed-layout books (usually comics and picture books) are not supported. The [examples](examples/) folder installed with Oryx includes *The Adventures of Sherlock Holmes* to try it on.
@@ -80,7 +82,7 @@ DRM-protected books and fixed-layout books (usually comics and picture books) ar
 
 Thirty-one themes ship with Oryx. Editable TOML files with **51 color roles**, so every possible markdown element can be colored separately.
 
-Press `Ctrl+T` to open the theme browser. Arrow keys move through the list and preview the selected theme, `Enter` validates, and `Escape` restores the previous one (cancels):
+Press `Ctrl+T` to open the theme browser. Arrow keys move through the list and preview the selected theme, `Enter` validates and closes the browser, and `Escape` restores the previous one (cancels):
 
 <p align="center">
   <img src="screenshots/themes.png" alt="The theme browser">
@@ -96,7 +98,7 @@ Nine themes are original designs: `oryx-light` and its dark twin `oryx-dark`, `o
 
 ## Export to PDF
 
-`Ctrl+Shift+P` opens the export settings: theme, body font and size, code font and size, page size, orientation and page numbers. The export settings are kept separate from the app's own appearance and remembered between runs. The idea is that reading in a dark theme at 22 points and exporting in a light one at 11 should not need switching back and forth each time we need an export.
+`Ctrl+Shift+P` opens the export settings: theme, body font and size, code font and size, page size, orientation and page numbers. Six page sizes are available: A4, Letter and Legal, and the book trim sizes A5, 6 x 9 in and 5 x 8 in, so a book can export at its print size. When the document is a book, a justify toggle is also present. The export settings are kept separate from the app's own appearance and remembered between runs. The idea is that reading in a dark theme at 22 points and exporting in a light one at 11 should not need switching back and forth each time we need an export.
 
 `Ctrl+P` exports the document using the configured export settings. Markdown headings are converted to PDF outlines, and the fonts are embedded. Emoji render in the PDF as images. A book exports with each chapter starting on a new page, and its table of contents becomes the PDF outline.
 
@@ -152,24 +154,34 @@ oryx --version          # print the version
 
 | Shortcut | Action |
 |---|---|
-| `Ctrl+O` | Open file |
-| `Ctrl+,` | Settings |
-| `Ctrl+T` | Theme browser |
-| `Ctrl+B` | Folder/Outline sidebar |
-| `Ctrl+P` | Export to PDF |
-| `Ctrl+Shift+P` | Export settings |
-| `F1` | Shortcuts help |
+| **Files** | |
+| `Ctrl+O` | Open a file |
 | `F5` / `Ctrl+R` | Reload from disk |
-| `Ctrl+Plus` / `Ctrl+Minus` | Zoom in / out |
-| `Ctrl+0` | Reset zoom |
+| **Navigation** | |
+| `Up` / `Down` | Scroll by line, or move the sidebar selection |
+| `Page Up` / `Page Down`, `Space` / `Shift+Space` | Scroll by page |
+| `Home` / `End` | Jump to top / bottom |
+| `Ctrl+B` | Toggle sidebar (files and outline) |
+| `Left` / `Right` | Toggle between sidebar and document |
+| `Ctrl+Left` / `Ctrl+Right` | Toggle the sidebar tab |
+| **Find** | |
+| `Ctrl+F` | Find in document |
+| `F3` / `Shift+F3` | Next / previous match |
+| **Selection** | |
 | `Ctrl+A` | Select all |
 | `Ctrl+C` | Copy selection as text |
 | `Ctrl+Shift+C` | Copy selection as markdown |
-| `Ctrl+F` | Find in document |
-| `F3` / `Shift+F3` | Next / previous match |
-| `Up` / `Down` | Scroll by line |
-| `Page Up` / `Page Down`, `Space` / `Shift+Space` | Scroll by page |
-| `Home` / `End` | Jump to top / bottom |
+| **View** | |
+| `Ctrl+T` | Choose a theme |
+| `Ctrl+,` | Change fonts and sizes |
+| `Ctrl+Plus` / `Ctrl+Minus` | Zoom in / out |
+| `Ctrl+0` | Reset zoom |
+| `Ctrl+J` | Justify book text (EPUB only) |
+| **Export** | |
+| `Ctrl+P` | Export to PDF |
+| `Ctrl+Shift+P` | Choose export settings, then export |
+| **Help** | |
+| `F1` | Show the shortcuts help |
 | `Escape` | Close overlay or sidebar, quit |
 
 `Ctrl` is `Cmd` on macOS.
