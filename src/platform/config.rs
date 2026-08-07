@@ -226,6 +226,22 @@ mod tests {
     }
 
     #[test]
+    fn export_justify_round_trips() {
+        let path = temp_path("justify.toml");
+        let config = Config {
+            export: Some(ExportSettings {
+                justify: false,
+                ..ExportSettings::default()
+            }),
+            ..Config::default()
+        };
+        save_to(&path, &config);
+        let loaded = load_from(&path);
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(loaded, config);
+    }
+
+    #[test]
     fn justify_defaults_on() {
         assert!(
             Config::default().justify,
@@ -357,6 +373,7 @@ mod tests {
                 page: PageSize::Letter,
                 orientation: Orientation::Landscape,
                 page_numbers: false,
+                justify: true,
             }),
             window: Some(WindowState {
                 width: 1280,

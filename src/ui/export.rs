@@ -149,8 +149,8 @@ impl Overlay for ExportProgress {
     }
 }
 
-/// One row of the export dialog. The seven settings, then the row that
-/// starts the export.
+/// One row of the export dialog: the settings, then the row that starts
+/// the export. The justify row exists only when the document is a book.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Row {
     Theme,
@@ -161,6 +161,7 @@ pub enum Row {
     Page,
     Orientation,
     PageNumbers,
+    Justify,
     Export,
 }
 
@@ -187,6 +188,7 @@ impl Row {
             Row::Page => "page",
             Row::Orientation => "orientation",
             Row::PageNumbers => "page numbers",
+            Row::Justify => "justify (EPUB)",
             Row::Export => "Export",
         }
     }
@@ -207,6 +209,9 @@ pub struct ExportDialog {
     settings: ExportSettings,
     themes: Vec<(String, Option<(Rgba, Rgba)>)>,
     families: Vec<String>,
+    /// The rows this dialog shows: the base table, with the justify row
+    /// inserted before Export when the document is a book.
+    rows: Vec<Row>,
     row: usize,
     pick: Option<Pick>,
     /// Panel rectangle from the last draw, for hit testing.
@@ -224,11 +229,17 @@ impl ExportDialog {
         settings: ExportSettings,
         families: Vec<String>,
         themes: Vec<(String, Option<(Rgba, Rgba)>)>,
+        book: bool,
     ) -> ExportDialog {
+        let mut rows: Vec<Row> = ROWS.to_vec();
+        if book {
+            rows.insert(rows.len() - 1, Row::Justify);
+        }
         ExportDialog {
             settings,
             themes,
             families,
+            rows,
             row: 0,
             pick: None,
             geometry: (0.0, 0.0, 0.0, 0.0),
@@ -244,11 +255,11 @@ impl ExportDialog {
     }
 
     pub fn select(&mut self, row: Row) {
-        self.row = ROWS.iter().position(|r| *r == row).unwrap_or(0);
+        self.row = self.rows.iter().position(|r| *r == row).unwrap_or(0);
     }
 
     fn current(&self) -> Row {
-        ROWS[self.row.min(ROWS.len() - 1)]
+        self.rows[self.row.min(self.rows.len() - 1)]
     }
 
     /// Left and Right: sizes step by one, the page size cycles.
@@ -268,6 +279,7 @@ impl ExportDialog {
                 }
             }
             Row::PageNumbers => self.settings.page_numbers = !self.settings.page_numbers,
+            Row::Justify => self.settings.justify = !self.settings.justify,
             _ => {}
         }
     }
@@ -281,8 +293,10 @@ impl ExportDialog {
     }
 
     pub fn toggle(&mut self) {
-        if self.current() == Row::PageNumbers {
-            self.settings.page_numbers = !self.settings.page_numbers;
+        match self.current() {
+            Row::PageNumbers => self.settings.page_numbers = !self.settings.page_numbers,
+            Row::Justify => self.settings.justify = !self.settings.justify,
+            _ => {}
         }
     }
 
@@ -351,6 +365,13 @@ impl ExportDialog {
                     "off".to_string()
                 }
             }
+            Row::Justify => {
+                if self.settings.justify {
+                    "on".to_string()
+                } else {
+                    "off".to_string()
+                }
+            }
             Row::Export => String::from("Enter"),
         }
     }
@@ -378,7 +399,7 @@ impl Overlay for ExportDialog {
     fn draw(&mut self, painter: &mut Painter, theme: &Theme) {
         let (w, h) = (painter.width(), painter.height());
         let ui = &theme.ui;
-        let panel_h = DIALOG_HEADER_H + ROWS.len() as f32 * DIALOG_ROW_H + DIALOG_PAD;
+        let panel_h = DIALOG_HEADER_H + self.rows.len() as f32 * DIALOG_ROW_H + DIALOG_PAD;
         let center = (
             ((w - DIALOG_W) / 2.0).floor(),
             ((h - panel_h) / 2.0).floor(),
@@ -418,7 +439,7 @@ impl Overlay for ExportDialog {
             ui.overlay_fg,
         );
 
-        for (index, row) in ROWS.iter().enumerate() {
+        for (index, row) in self.rows.iter().enumerate() {
             let ry = py + DIALOG_HEADER_H + index as f32 * DIALOG_ROW_H;
             if index == self.row {
                 painter.fill(
@@ -546,7 +567,7 @@ impl Overlay for ExportDialog {
         }
         match key {
             Key::Named(NamedKey::ArrowUp) => self.row = self.row.saturating_sub(1),
-            Key::Named(NamedKey::ArrowDown) => self.row = (self.row + 1).min(ROWS.len() - 1),
+            Key::Named(NamedKey::ArrowDown) => self.row = (self.row + 1).min(self.rows.len() - 1),
             Key::Named(NamedKey::ArrowLeft) => self.left(),
             Key::Named(NamedKey::ArrowRight) => self.right(),
             Key::Named(NamedKey::Space) => self.toggle(),
@@ -578,7 +599,7 @@ impl Overlay for ExportDialog {
             return OverlayResult::Open;
         }
         let row = ((y - py - DIALOG_HEADER_H) / DIALOG_ROW_H).floor();
-        if row >= 0.0 && (row as usize) < ROWS.len() {
+        if row >= 0.0 && (row as usize) < self.rows.len() {
             self.row = row as usize;
             if self.current() == Row::Export {
                 return OverlayResult::Apply(Action::Export(Box::new(self.settings.clone())));
@@ -622,7 +643,34 @@ mod tests {
             settings(),
             vec!["DejaVu Sans".to_string(), "Courier Prime".to_string()],
             vec![("oryx-light".to_string(), None), ("nord".to_string(), None)],
+            false,
         )
+    }
+
+    fn book_dialog() -> ExportDialog {
+        ExportDialog::new(
+            settings(),
+            vec!["DejaVu Sans".to_string(), "Courier Prime".to_string()],
+            vec![("oryx-light".to_string(), None), ("nord".to_string(), None)],
+            true,
+        )
+    }
+
+    #[test]
+    fn the_justify_row_appears_only_for_books() {
+        assert!(!dialog().rows.contains(&Row::Justify));
+        assert!(book_dialog().rows.contains(&Row::Justify));
+    }
+
+    #[test]
+    fn the_justify_row_toggles_the_setting() {
+        let mut d = book_dialog();
+        d.select(Row::Justify);
+        assert!(d.settings().justify, "on by default");
+        d.toggle();
+        assert!(!d.settings().justify);
+        d.right();
+        assert!(d.settings().justify, "left and right flip it too");
     }
 
     fn press(dialog: &mut ExportDialog, key: NamedKey) -> OverlayResult {

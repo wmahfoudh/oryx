@@ -950,3 +950,100 @@ fn the_showcase_collection_exports() {
         &text[text.len().saturating_sub(200)..]
     );
 }
+
+#[test]
+fn a_book_export_justifies_when_asked() {
+    let body = format!(
+        "<html><body><p>{}end.</p></body></html>",
+        "justify word ".repeat(60)
+    );
+    let bytes = epub_common::book().chapter("one.xhtml", &body).build();
+    let book = oryx::doc::epub::open_book(bytes).unwrap();
+    let pdf_for = |justify: bool| {
+        let settings = ExportSettings {
+            justify,
+            body_size: 11.0,
+            code_size: 9.0,
+            ..ExportSettings::default()
+        };
+        let target =
+            std::env::temp_dir().join(format!("oryx-justify-{justify}-{}.pdf", std::process::id()));
+        let mut fonts = FontStore::new();
+        let mut media = MediaCache::new(PathBuf::from("tests/fixtures"));
+        let mut pass = ExportPass::new(&settings, Theme::default_dark(), target.clone());
+        while !pass.is_done() {
+            pass.step(
+                Instant::now() + Duration::from_millis(30),
+                &book.document,
+                &mut fonts,
+                &mut media,
+                false,
+                None,
+            );
+        }
+        pass.finish(&book.document, &fonts)
+            .expect("the export lands");
+        let out = std::fs::read(&target).expect("the exported file");
+        std::fs::remove_file(&target).ok();
+        out
+    };
+    let just = pdf_for(true);
+    let plain = pdf_for(false);
+    let content = |bytes: &[u8]| {
+        let pdf = Pdf::load_mem(bytes).unwrap();
+        let page = *pdf.get_pages().get(&1).unwrap();
+        pdf.get_page_content(page)
+    };
+    assert_ne!(
+        content(&just),
+        content(&plain),
+        "justification moves the page's text positions"
+    );
+    let text = Pdf::load_mem(&just).unwrap().extract_text(&[1]).unwrap();
+    assert!(
+        text.contains("justify") && text.contains("word"),
+        "the words survive: {text}"
+    );
+}
+
+#[test]
+fn a_markdown_export_never_justifies() {
+    let doc = markdown::parse(format!("{}end.\n", "justify word ".repeat(40)));
+    let pdf_for = |justify: bool| {
+        let settings = ExportSettings {
+            justify,
+            body_size: 11.0,
+            code_size: 9.0,
+            ..ExportSettings::default()
+        };
+        let target =
+            std::env::temp_dir().join(format!("oryx-md-just-{justify}-{}.pdf", std::process::id()));
+        let mut fonts = FontStore::new();
+        let mut media = MediaCache::new(PathBuf::from("tests/fixtures"));
+        let mut pass = ExportPass::new(&settings, Theme::default_dark(), target.clone());
+        while !pass.is_done() {
+            pass.step(
+                Instant::now() + Duration::from_millis(30),
+                &doc,
+                &mut fonts,
+                &mut media,
+                false,
+                None,
+            );
+        }
+        pass.finish(&doc, &fonts).expect("the export lands");
+        let out = std::fs::read(&target).expect("the exported file");
+        std::fs::remove_file(&target).ok();
+        out
+    };
+    let content = |bytes: &[u8]| {
+        let pdf = Pdf::load_mem(bytes).unwrap();
+        let page = *pdf.get_pages().get(&1).unwrap();
+        pdf.get_page_content(page)
+    };
+    assert_eq!(
+        content(&pdf_for(true)),
+        content(&pdf_for(false)),
+        "the setting has no effect outside books"
+    );
+}
