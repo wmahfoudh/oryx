@@ -29,6 +29,8 @@ pub struct Config {
     pub sidebar_width: f32,
     /// The panel tab last active, so the sidebar reopens where it was.
     pub sidebar_tab: crate::ui::sidebar::Tab,
+    /// Whether book text justifies; Ctrl+J flips it, EPUB display only.
+    pub justify: bool,
     /// How the reader last exported; None until the first export, which
     /// seeds it from the fields above. A table, so it follows the plain
     /// values and precedes the window.
@@ -86,6 +88,7 @@ impl Default for Config {
             sidebar_open: false,
             sidebar_width: crate::ui::sidebar::DEFAULT_WIDTH,
             sidebar_tab: crate::ui::sidebar::Tab::Files,
+            justify: true,
             export: None,
             window: None,
         }
@@ -223,6 +226,14 @@ mod tests {
     }
 
     #[test]
+    fn justify_defaults_on() {
+        assert!(
+            Config::default().justify,
+            "book text justifies out of the box"
+        );
+    }
+
+    #[test]
     fn browse_dir_takes_the_first_folder_that_still_exists() {
         let real = std::env::temp_dir();
         let gone = real.join("oryx-no-such-folder-ever");
@@ -268,6 +279,7 @@ mod tests {
             sidebar_open: true,
             sidebar_width: 320.0,
             sidebar_tab: crate::ui::sidebar::Tab::Outline,
+            justify: false,
             export: None,
             window: None,
         };

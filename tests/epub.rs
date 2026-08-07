@@ -919,3 +919,41 @@ fn open_yields_both_chapters_in_order() {
     assert_eq!(opened.document.title.as_deref(), Some("Test Book"));
     assert!(!opened.streamed);
 }
+
+#[test]
+fn book_paragraphs_justify_to_the_content_width() {
+    use oryx::doc::images::MediaCache;
+    use oryx::layout::{layout, ViewConfig};
+    use oryx::style::fonts::FontStore;
+    use oryx::style::theme::Theme;
+    use std::path::PathBuf;
+
+    let body = format!(
+        "<html><body><p>{}end.</p></body></html>",
+        "justify word ".repeat(40)
+    );
+    let bytes = book().chapter("one.xhtml", &body).build();
+    let doc = epub::open_book(bytes).unwrap().document;
+    let mut fonts = FontStore::new();
+    let mut media = MediaCache::new(PathBuf::from("."));
+    let theme = Theme::default_dark();
+    let plain_cfg = ViewConfig::default();
+    let plain = layout(&doc, &theme, &mut fonts, &mut media, &plain_cfg, 700.0);
+    let just_cfg = ViewConfig {
+        justify: true,
+        ..ViewConfig::default()
+    };
+    let just = layout(&doc, &theme, &mut fonts, &mut media, &just_cfg, 700.0);
+    let first_y = plain.runs.iter().map(|r| r.y).fold(f32::MAX, f32::min);
+    let right = |l: &oryx::layout::LayoutDoc| {
+        l.runs
+            .iter()
+            .filter(|r| (r.y - first_y).abs() < 0.5)
+            .map(|r| r.x + r.width)
+            .fold(f32::MIN, f32::max)
+    };
+    assert!(
+        right(&just) > right(&plain) + 1.0,
+        "a book paragraph fills its line when justified"
+    );
+}

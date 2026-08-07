@@ -251,6 +251,7 @@ impl ExportPass {
                 body_size: settings.body_size,
                 code_size: settings.code_size,
                 zoom: 1.0,
+                justify: false,
             },
             geometry,
             target,

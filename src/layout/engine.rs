@@ -4,7 +4,7 @@
 use std::ops::Range;
 use std::time::{Duration, Instant};
 
-use cosmic_text::{Attrs, Buffer, Family, Metrics, Shaping, Style, Weight};
+use cosmic_text::{Align, Attrs, Buffer, Family, Metrics, Shaping, Style, Weight};
 
 use super::metrics;
 use crate::doc::images::MediaCache;
@@ -24,6 +24,10 @@ pub struct ViewConfig {
     pub code_size: f32,
     /// Session zoom multiplier, never persisted.
     pub zoom: f32,
+    /// Stretch prose to the content width, book typography. The app sets
+    /// it only for EPUB documents; paragraphs, list items, and quote
+    /// text justify, everything else keeps its natural width.
+    pub justify: bool,
 }
 
 impl Default for ViewConfig {
@@ -34,6 +38,7 @@ impl Default for ViewConfig {
             body_size: 22.0,
             code_size: 20.0,
             zoom: 1.0,
+            justify: false,
         }
     }
 }
@@ -1824,6 +1829,7 @@ pub(crate) fn shape_kind(
                 },
                 bold: heading.is_some(),
                 block_index,
+                justify: heading.is_none() && cfg.justify,
             };
             flow_or_shape(
                 fonts, theme, cfg, source, media, spans, &base, x_base, 0.0, avail, scratch,
@@ -2661,6 +2667,7 @@ fn shape_alert_title(
         color: alert_color(theme, kind),
         bold: true,
         block_index,
+        justify: false,
     };
     let title_h = shape_block(
         fonts, theme, cfg, source, &title, false, &base, x_base, 0.0, avail, scratch,
@@ -2879,6 +2886,9 @@ struct BlockStyle {
     color: Rgba,
     bold: bool,
     block_index: usize,
+    /// Justify this block's segments; runs then split per word so paint
+    /// can re-shape each at its stretched position.
+    justify: bool,
 }
 
 fn heading_color(theme: &Theme, level: u8) -> Rgba {
@@ -3108,6 +3118,13 @@ fn shape_segment(
         Shaping::Advanced,
         None,
     );
+    // Book typography: spaces stretch to the content width, the last
+    // visual line of each paragraph stays natural.
+    if base.justify {
+        for line in buffer.lines.iter_mut() {
+            line.set_align(Some(Align::Justified));
+        }
+    }
     buffer.shape_until_scroll(&mut fonts.font_system, false);
 
     // Byte offset of each segment member inside the shaped line, so a
@@ -3140,7 +3157,17 @@ fn shape_segment(
         while g < glyphs.len() {
             let span_index = glyphs[g].metadata;
             let mut end = g + 1;
-            while end < glyphs.len() && glyphs[end].metadata == span_index {
+            // A justified run must hold no stretched space inside it,
+            // since paint re-shapes runs naturally: cut after each space
+            // so every word paints at its own recorded x. The space
+            // stays with the word before it, keeping byte ranges
+            // contiguous.
+            while end < glyphs.len()
+                && glyphs[end].metadata == span_index
+                && !(base.justify
+                    && glyph_is_space(line_text, &glyphs[end - 1])
+                    && !glyph_is_space(line_text, &glyphs[end]))
+            {
                 end += 1;
             }
             let first = &glyphs[g];
@@ -3248,6 +3275,7 @@ fn layout_summary(
         color: theme.text.body,
         bold: false,
         block_index,
+        justify: false,
     };
     let h = flow_or_shape(
         fonts, theme, cfg, source, media, spans, &base, text_x, 0.0, text_w, scratch,
@@ -3326,6 +3354,7 @@ fn layout_list_item(
         color: theme.text.body,
         bold: false,
         block_index,
+        justify: cfg.justify,
     };
     let height = flow_or_shape(
         fonts, theme, cfg, source, media, spans, &base, text_x, y0, text_w, out,
@@ -3368,6 +3397,7 @@ fn layout_table(
             color: theme.text.body,
             bold,
             block_index,
+            justify: false,
         };
         shape_block(
             fonts, theme, cfg, source, spans, true, &base, 0.0, 0.0, 100_000.0, &mut tmp,
@@ -3448,6 +3478,7 @@ fn layout_table(
                 color: theme.text.body,
                 bold: *is_header,
                 block_index,
+                justify: false,
             };
             let h = shape_block(
                 fonts,
@@ -3589,6 +3620,7 @@ fn layout_image(
         color: theme.blocks.frontmatter_fg,
         bold: false,
         block_index,
+        justify: false,
     };
     let rects_mark = out.rects.len();
     let text_h = shape_block(
@@ -3835,6 +3867,7 @@ fn layout_frontmatter(
         color: theme.blocks.frontmatter_fg,
         bold: false,
         block_index,
+        justify: false,
     };
     let runs_mark = out.runs.len();
     let rects_mark = out.rects.len();
@@ -4074,6 +4107,7 @@ fn layout_footnote_def(
         color: theme.text.link,
         bold: true,
         block_index,
+        justify: false,
     };
     let runs_mark = out.runs.len();
     shape_block(
@@ -4100,6 +4134,7 @@ fn layout_footnote_def(
         color: theme.text.body,
         bold: false,
         block_index,
+        justify: false,
     };
     let text_h = shape_block(
         fonts,
@@ -5098,6 +5133,12 @@ fn role_color(theme: &Theme, role: SyntaxRole) -> Rgba {
 }
 
 /// Drops line-trailing whitespace glyphs so run widths match visible text.
+/// Whether a glyph draws only a stretchable space, U+0020 or U+00A0,
+/// the characters justification widens.
+fn glyph_is_space(line_text: &str, glyph: &cosmic_text::LayoutGlyph) -> bool {
+    matches!(&line_text[glyph.start..glyph.end], " " | "\u{a0}")
+}
+
 fn trim_trailing_spaces<'a>(
     glyphs: &'a [cosmic_text::LayoutGlyph],
     line_text: &str,

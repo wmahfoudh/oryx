@@ -745,13 +745,19 @@ fn rects_for(
     indices: impl Iterator<Item = usize>,
 ) -> Vec<(f32, f32, f32, f32)> {
     let (a, b) = sel.ordered();
-    let mut out = Vec::new();
+    let mut out: Vec<(f32, f32, f32, f32)> = Vec::new();
+    // The previous box's interval end and line top, kept while that box
+    // reached its run's right edge, so a byte-contiguous neighbor on the
+    // same line can bridge the gap justification stretched between them.
+    let mut prev: Option<(ModelPos, f32)> = None;
     for index in indices {
         let run = &lay.runs[index];
         let Some((iv_start, iv_end)) = run_interval(run) else {
+            prev = None;
             continue;
         };
         if iv_end <= a || b <= iv_start {
+            prev = None;
             continue;
         }
         let text = lay.run_text(doc, run);
@@ -776,6 +782,7 @@ fn rects_for(
             run.x + run.width
         };
         if x1 <= x0 {
+            prev = None;
             continue;
         }
         let (head, tail) = lay.runs_in(run.y, run.y);
@@ -785,6 +792,22 @@ fn rects_for(
             .filter(|r| r.block == run.block && r.y == run.y)
             .map(|r| metrics::LINE_HEIGHT * r.size)
             .fold(metrics::LINE_HEIGHT * run.size, f32::max);
+        // Justified lines split words into separate runs with stretched
+        // gaps between them; when the selection covers the seam on both
+        // sides, this box merges into the previous one, so a selected
+        // line highlights as one unbroken box.
+        let seam = prev;
+        prev = (b >= iv_end).then_some((iv_end, run.y));
+        if let Some((prev_end, prev_y)) = seam {
+            if prev_y == run.y && prev_end == iv_start && a <= iv_start {
+                if let Some(last) = out.last_mut() {
+                    if last.1 == run.y {
+                        last.2 = (x1 - last.0).max(last.2);
+                        continue;
+                    }
+                }
+            }
+        }
         out.push((x0, run.y, x1 - x0, height));
     }
     out
@@ -904,6 +927,33 @@ mod tests {
 
     fn select_all(doc: &Document) -> Selection {
         all(doc).expect("document has selectable content")
+    }
+
+    #[test]
+    fn justified_selection_bridges_word_gaps() {
+        let doc = markdown::parse(format!("{}end.\n", "justify word ".repeat(30)));
+        let mut fonts = FontStore::new();
+        let mut media = MediaCache::new(PathBuf::from("."));
+        let l = layout(
+            &doc,
+            &Theme::default_dark(),
+            &mut fonts,
+            &mut media,
+            &ViewConfig {
+                justify: true,
+                ..ViewConfig::default()
+            },
+            700.0,
+        );
+        let sel = select_all(&doc);
+        let boxes = rects(&sel, &l, &doc, &mut fonts);
+        let mut ys: Vec<i32> = boxes.iter().map(|b| b.1.round() as i32).collect();
+        ys.dedup();
+        assert_eq!(
+            boxes.len(),
+            ys.len(),
+            "a fully selected justified line is one unbroken box"
+        );
     }
 
     #[test]

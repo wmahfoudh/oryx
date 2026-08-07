@@ -8,7 +8,7 @@ use oryx::doc::model::{BlockKind, Document, SpanScript};
 use oryx::doc::stream::{self, Swap};
 use oryx::layout::{
     layout, layout_begin, layout_extend, layout_more, layout_step, metrics, recolor_batch,
-    recolor_code_lines, window_to, DecoRect, LayoutDoc, ShapePool, TextRun, ViewConfig,
+    recolor_code_lines, window_to, DecoRect, LayoutDoc, ShapePool, TextRef, TextRun, ViewConfig,
 };
 use oryx::style::fonts::{FontStore, CODE_FAMILY};
 use oryx::style::highlight::{self, Arrival};
@@ -2965,5 +2965,125 @@ fn flow_lines_stay_ordered_after_a_row_break() {
                 }
             }
         }
+    }
+}
+
+#[test]
+fn justified_paragraph_fills_the_line_and_leaves_the_last_natural() {
+    let doc = markdown::parse(format!("{}end.\n", "justify word ".repeat(30)));
+    let mut fonts = fonts();
+    let plain = lay_doc(&doc, 700.0, &mut fonts);
+    let mut media = MediaCache::new(PathBuf::from("."));
+    let just_cfg = ViewConfig {
+        justify: true,
+        ..cfg()
+    };
+    let just = layout(
+        &doc,
+        &Theme::default_dark(),
+        &mut fonts,
+        &mut media,
+        &just_cfg,
+        700.0,
+    );
+    let first_y = plain.runs.iter().map(|r| r.y).fold(f32::MAX, f32::min);
+    let last_y = plain.runs.iter().map(|r| r.y).fold(f32::MIN, f32::max);
+    let right = |l: &LayoutDoc, y: f32| {
+        l.runs
+            .iter()
+            .filter(|r| (r.y - y).abs() < 0.5)
+            .map(|r| r.x + r.width)
+            .fold(f32::MIN, f32::max)
+    };
+    assert!(
+        right(&just, first_y) > right(&plain, first_y) + 1.0,
+        "a justified line reaches past the ragged edge: {} vs {}",
+        right(&just, first_y),
+        right(&plain, first_y)
+    );
+    assert!(
+        (right(&just, last_y) - right(&plain, last_y)).abs() < 0.5,
+        "the paragraph's last line stays natural"
+    );
+}
+
+#[test]
+fn justified_word_runs_stay_byte_contiguous() {
+    let doc = markdown::parse(format!("{}end.\n", "justify word ".repeat(30)));
+    let mut fonts = fonts();
+    let mut media = MediaCache::new(PathBuf::from("."));
+    let just_cfg = ViewConfig {
+        justify: true,
+        ..cfg()
+    };
+    let laid = layout(
+        &doc,
+        &Theme::default_dark(),
+        &mut fonts,
+        &mut media,
+        &just_cfg,
+        700.0,
+    );
+    let first_y = laid.runs.iter().map(|r| r.y).fold(f32::MAX, f32::min);
+    let mut line: Vec<&TextRun> = laid
+        .runs
+        .iter()
+        .filter(|r| (r.y - first_y).abs() < 0.5)
+        .collect();
+    line.sort_by(|a, b| a.x.partial_cmp(&b.x).unwrap());
+    assert!(line.len() > 1, "a justified line splits into word runs");
+    for pair in line.windows(2) {
+        let (TextRef::Model { start: s0, len: l0 }, TextRef::Model { start: s1, .. }) =
+            (pair[0].text, pair[1].text)
+        else {
+            panic!("prose runs reference the model");
+        };
+        assert_eq!(s0 + l0, s1, "each space stays with the word before it");
+    }
+}
+
+#[test]
+fn justify_leaves_headings_and_code_natural() {
+    let src = "# A heading long enough to wrap over the narrow width laid against here\n\n\
+               Body words fill this paragraph so that it wraps and justifies over lines.\n\n\
+               ```\nlet code = \"stays put\";\n```\n";
+    let doc = markdown::parse(src);
+    let mut fonts = fonts();
+    let plain = lay_doc(&doc, 500.0, &mut fonts);
+    let mut media = MediaCache::new(PathBuf::from("."));
+    let just_cfg = ViewConfig {
+        justify: true,
+        ..cfg()
+    };
+    let just = layout(
+        &doc,
+        &Theme::default_dark(),
+        &mut fonts,
+        &mut media,
+        &just_cfg,
+        500.0,
+    );
+    let untouched: Vec<usize> = doc
+        .blocks
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| {
+            matches!(
+                b.kind,
+                BlockKind::Heading { .. } | BlockKind::CodeBlock { .. }
+            )
+        })
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(untouched.len(), 2, "the fixture has a heading and a fence");
+    for index in untouched {
+        let geo = |l: &LayoutDoc| -> Vec<(f32, f32, f32)> {
+            l.runs
+                .iter()
+                .filter(|r| r.block == index)
+                .map(|r| (r.x, r.y, r.width))
+                .collect()
+        };
+        assert_eq!(geo(&plain), geo(&just), "block {index} keeps its geometry");
     }
 }

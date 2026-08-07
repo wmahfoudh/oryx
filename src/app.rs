@@ -105,6 +105,7 @@ pub fn run(path: Option<PathBuf>, theme_name: Option<String>) -> anyhow::Result<
         code_family: config.code_family.clone(),
         body_size: config.body_size,
         code_size: config.code_size,
+        justify: config.justify && document.book_id.is_some(),
         ..ViewConfig::default()
     };
     let theme_choice = theme_name.as_deref().unwrap_or(&config.theme);
@@ -509,6 +510,7 @@ impl App {
                 self.set_zoom(settings::step_zoom(self.cfg.zoom, -settings::ZOOM_STEP));
             }
             Command::ZoomReset => self.set_zoom(1.0),
+            Command::Justify => self.toggle_justify(),
             Command::SelectAll => self.select_all(),
             Command::CopyText => self.copy_selection(false),
             Command::CopyMarkdown => self.copy_selection(true),
@@ -1452,6 +1454,7 @@ impl App {
         self.selection = None;
         self.sel_anchor = None;
         self.pending_recolor.clear();
+        self.cfg.justify = self.config.justify && self.document.book_id.is_some();
         self.layout = None;
         self.band = None;
         // Both hold targets in the old document's coordinates; left
@@ -1655,6 +1658,20 @@ impl App {
         }
         self.scroll_y *= zoom / self.cfg.zoom;
         self.cfg.zoom = zoom;
+        self.layout = None;
+        self.band = None;
+        self.request_redraw();
+    }
+
+    /// Flips book justification and relayouts, a no-op outside books;
+    /// the preference persists across sessions.
+    fn toggle_justify(&mut self) {
+        if self.document.book_id.is_none() {
+            return;
+        }
+        self.config.justify = !self.config.justify;
+        config::save(&self.config);
+        self.cfg.justify = self.config.justify;
         self.layout = None;
         self.band = None;
         self.request_redraw();

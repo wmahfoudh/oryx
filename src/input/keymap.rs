@@ -18,6 +18,7 @@ pub enum Command {
     ZoomIn,
     ZoomOut,
     ZoomReset,
+    Justify,
     SelectAll,
     CopyText,
     CopyMarkdown,
@@ -38,7 +39,7 @@ pub enum Command {
 
 impl Command {
     /// Every variant; the coverage test checks each one against the table.
-    pub const ALL: [Command; 27] = [
+    pub const ALL: [Command; 28] = [
         Command::OpenFile,
         Command::Reload,
         Command::Sidebar,
@@ -50,6 +51,7 @@ impl Command {
         Command::ZoomIn,
         Command::ZoomOut,
         Command::ZoomReset,
+        Command::Justify,
         Command::SelectAll,
         Command::CopyText,
         Command::CopyMarkdown,
@@ -148,6 +150,11 @@ pub const SHORTCUTS: &[Shortcut] = &[
         keys: "Ctrl+0",
         action: "Reset zoom",
         bindings: &[(Binding::Ctrl("0"), Command::ZoomReset)],
+    },
+    Shortcut {
+        keys: "Ctrl+J",
+        action: "Justify text (EPUB books only)",
+        bindings: &[(Binding::Ctrl("j"), Command::Justify)],
     },
     Shortcut {
         keys: "Ctrl+A",
@@ -342,6 +349,11 @@ mod tests {
             "reserved for the editing phase's view toggle"
         );
         assert_eq!(command(&chr("E"), true, true), None);
+    }
+
+    #[test]
+    fn ctrl_j_toggles_justify() {
+        assert_eq!(command(&chr("j"), true, false), Some(Command::Justify));
     }
 
     #[test]
