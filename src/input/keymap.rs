@@ -87,133 +87,44 @@ enum Binding {
 }
 
 /// One help-table row: display labels plus the chords the row covers.
+/// Rows sharing a section sit together; the help overlay draws a caption
+/// where the section changes.
 pub struct Shortcut {
     pub keys: &'static str,
     pub action: &'static str,
+    pub section: &'static str,
     bindings: &'static [(Binding, Command)],
 }
 
 pub const SHORTCUTS: &[Shortcut] = &[
     Shortcut {
         keys: "Ctrl+O",
-        action: "Open file",
+        action: "Open a file",
+        section: "Files",
         bindings: &[(Binding::Ctrl("o"), Command::OpenFile)],
-    },
-    Shortcut {
-        keys: "Ctrl+,",
-        action: "Settings",
-        bindings: &[(Binding::Ctrl(","), Command::Settings)],
-    },
-    Shortcut {
-        keys: "Ctrl+T",
-        action: "Theme browser",
-        bindings: &[(Binding::Ctrl("t"), Command::ThemeBrowser)],
-    },
-    Shortcut {
-        keys: "Ctrl+B",
-        action: "Folder sidebar",
-        bindings: &[(Binding::Ctrl("b"), Command::Sidebar)],
-    },
-    Shortcut {
-        keys: "Ctrl+P",
-        action: "Export to PDF",
-        bindings: &[(Binding::Ctrl("p"), Command::Export)],
-    },
-    Shortcut {
-        keys: "Ctrl+Shift+P",
-        action: "Export settings",
-        bindings: &[(Binding::CtrlShift("p"), Command::ExportSettings)],
-    },
-    Shortcut {
-        keys: "F1",
-        action: "Shortcuts help",
-        bindings: &[(Binding::Named(NamedKey::F1), Command::Help)],
     },
     Shortcut {
         keys: "F5 / Ctrl+R",
         action: "Reload from disk",
+        section: "Files",
         bindings: &[
             (Binding::Named(NamedKey::F5), Command::Reload),
             (Binding::Ctrl("r"), Command::Reload),
         ],
     },
     Shortcut {
-        keys: "Ctrl+Plus / Ctrl+Minus",
-        action: "Zoom in / out",
-        bindings: &[
-            (Binding::Ctrl("+"), Command::ZoomIn),
-            (Binding::Ctrl("="), Command::ZoomIn),
-            (Binding::Ctrl("-"), Command::ZoomOut),
-        ],
-    },
-    Shortcut {
-        keys: "Ctrl+0",
-        action: "Reset zoom",
-        bindings: &[(Binding::Ctrl("0"), Command::ZoomReset)],
-    },
-    Shortcut {
-        keys: "Ctrl+J",
-        action: "Justify text (EPUB books only)",
-        bindings: &[(Binding::Ctrl("j"), Command::Justify)],
-    },
-    Shortcut {
-        keys: "Ctrl+A",
-        action: "Select all",
-        bindings: &[(Binding::Ctrl("a"), Command::SelectAll)],
-    },
-    Shortcut {
-        keys: "Ctrl+C",
-        action: "Copy selection as text",
-        bindings: &[(Binding::Ctrl("c"), Command::CopyText)],
-    },
-    Shortcut {
-        keys: "Ctrl+Shift+C",
-        action: "Copy selection as markdown",
-        bindings: &[(Binding::CtrlShift("c"), Command::CopyMarkdown)],
-    },
-    Shortcut {
-        keys: "Ctrl+F",
-        action: "Find in document",
-        bindings: &[(Binding::Ctrl("f"), Command::Find)],
-    },
-    Shortcut {
-        keys: "F3 / Shift+F3",
-        action: "Next / previous match",
-        bindings: &[
-            (Binding::ShiftNamed(NamedKey::F3), Command::FindPrev),
-            (Binding::Named(NamedKey::F3), Command::FindNext),
-        ],
-    },
-    Shortcut {
         keys: "Up / Down",
         action: "Scroll by line, or move the sidebar selection",
+        section: "Navigation",
         bindings: &[
             (Binding::Named(NamedKey::ArrowUp), Command::LineUp),
             (Binding::Named(NamedKey::ArrowDown), Command::LineDown),
         ],
     },
     Shortcut {
-        keys: "Left / Right",
-        action: "Toggle between sidebar and document",
-        bindings: &[
-            (Binding::Named(NamedKey::ArrowLeft), Command::PaneLeft),
-            (Binding::Named(NamedKey::ArrowRight), Command::PaneRight),
-        ],
-    },
-    Shortcut {
-        keys: "Ctrl+Left / Ctrl+Right",
-        action: "Toggle the sidebar tab",
-        bindings: &[
-            (Binding::CtrlNamed(NamedKey::ArrowLeft), Command::SidebarTab),
-            (
-                Binding::CtrlNamed(NamedKey::ArrowRight),
-                Command::SidebarTab,
-            ),
-        ],
-    },
-    Shortcut {
         keys: "Page Up / Page Down, Space / Shift+Space",
         action: "Scroll by page",
+        section: "Navigation",
         bindings: &[
             (Binding::Named(NamedKey::PageUp), Command::PageUp),
             (Binding::Named(NamedKey::PageDown), Command::PageDown),
@@ -224,14 +135,128 @@ pub const SHORTCUTS: &[Shortcut] = &[
     Shortcut {
         keys: "Home / End",
         action: "Jump to top / bottom",
+        section: "Navigation",
         bindings: &[
             (Binding::Named(NamedKey::Home), Command::Top),
             (Binding::Named(NamedKey::End), Command::Bottom),
         ],
     },
     Shortcut {
+        keys: "Ctrl+B",
+        action: "Toggle sidebar (files and outline)",
+        section: "Navigation",
+        bindings: &[(Binding::Ctrl("b"), Command::Sidebar)],
+    },
+    Shortcut {
+        keys: "Left / Right",
+        action: "Toggle between sidebar and document",
+        section: "Navigation",
+        bindings: &[
+            (Binding::Named(NamedKey::ArrowLeft), Command::PaneLeft),
+            (Binding::Named(NamedKey::ArrowRight), Command::PaneRight),
+        ],
+    },
+    Shortcut {
+        keys: "Ctrl+Left / Ctrl+Right",
+        action: "Toggle the sidebar tab",
+        section: "Navigation",
+        bindings: &[
+            (Binding::CtrlNamed(NamedKey::ArrowLeft), Command::SidebarTab),
+            (
+                Binding::CtrlNamed(NamedKey::ArrowRight),
+                Command::SidebarTab,
+            ),
+        ],
+    },
+    Shortcut {
+        keys: "Ctrl+F",
+        action: "Find in document",
+        section: "Find",
+        bindings: &[(Binding::Ctrl("f"), Command::Find)],
+    },
+    Shortcut {
+        keys: "F3 / Shift+F3",
+        action: "Next / previous match",
+        section: "Find",
+        bindings: &[
+            (Binding::ShiftNamed(NamedKey::F3), Command::FindPrev),
+            (Binding::Named(NamedKey::F3), Command::FindNext),
+        ],
+    },
+    Shortcut {
+        keys: "Ctrl+A",
+        action: "Select all",
+        section: "Selection",
+        bindings: &[(Binding::Ctrl("a"), Command::SelectAll)],
+    },
+    Shortcut {
+        keys: "Ctrl+C",
+        action: "Copy selection as text",
+        section: "Selection",
+        bindings: &[(Binding::Ctrl("c"), Command::CopyText)],
+    },
+    Shortcut {
+        keys: "Ctrl+Shift+C",
+        action: "Copy selection as markdown",
+        section: "Selection",
+        bindings: &[(Binding::CtrlShift("c"), Command::CopyMarkdown)],
+    },
+    Shortcut {
+        keys: "Ctrl+T",
+        action: "Choose a theme",
+        section: "View",
+        bindings: &[(Binding::Ctrl("t"), Command::ThemeBrowser)],
+    },
+    Shortcut {
+        keys: "Ctrl+,",
+        action: "Change fonts and sizes",
+        section: "View",
+        bindings: &[(Binding::Ctrl(","), Command::Settings)],
+    },
+    Shortcut {
+        keys: "Ctrl+Plus / Ctrl+Minus",
+        action: "Zoom in / out",
+        section: "View",
+        bindings: &[
+            (Binding::Ctrl("+"), Command::ZoomIn),
+            (Binding::Ctrl("="), Command::ZoomIn),
+            (Binding::Ctrl("-"), Command::ZoomOut),
+        ],
+    },
+    Shortcut {
+        keys: "Ctrl+0",
+        action: "Reset zoom",
+        section: "View",
+        bindings: &[(Binding::Ctrl("0"), Command::ZoomReset)],
+    },
+    Shortcut {
+        keys: "Ctrl+J",
+        action: "Justify book text (EPUB only)",
+        section: "View",
+        bindings: &[(Binding::Ctrl("j"), Command::Justify)],
+    },
+    Shortcut {
+        keys: "Ctrl+P",
+        action: "Export to PDF",
+        section: "Export",
+        bindings: &[(Binding::Ctrl("p"), Command::Export)],
+    },
+    Shortcut {
+        keys: "Ctrl+Shift+P",
+        action: "Choose export settings, then export",
+        section: "Export",
+        bindings: &[(Binding::CtrlShift("p"), Command::ExportSettings)],
+    },
+    Shortcut {
+        keys: "F1",
+        action: "Show this help",
+        section: "Help",
+        bindings: &[(Binding::Named(NamedKey::F1), Command::Help)],
+    },
+    Shortcut {
         keys: "Escape",
         action: "Close overlay or sidebar / quit",
+        section: "Help",
         bindings: &[(Binding::Named(NamedKey::Escape), Command::Quit)],
     },
 ];
@@ -284,6 +309,22 @@ mod tests {
 
     fn chr(s: &str) -> Key {
         Key::Character(s.into())
+    }
+
+    #[test]
+    fn sections_group_contiguously() {
+        let mut seen: Vec<&str> = Vec::new();
+        for row in SHORTCUTS {
+            if seen.last() != Some(&row.section) {
+                assert!(
+                    !seen.contains(&row.section),
+                    "section {} appears in two places",
+                    row.section
+                );
+                seen.push(row.section);
+            }
+        }
+        assert!(seen.len() > 1, "the table carries named sections");
     }
 
     #[test]

@@ -9,14 +9,15 @@ use crate::style::fonts::{BODY_FAMILY, CODE_FAMILY};
 use crate::style::theme::{Rgba, Theme};
 use crate::ui::overlay::{Overlay, OverlayResult};
 
-const ROW_H: f32 = 34.0;
+const ROW_H: f32 = 29.0;
+const SECTION_H: f32 = 22.0;
 const PAD: f32 = 14.0;
-const HEADER_H: f32 = 46.0;
-const FOOTER_H: f32 = 32.0;
+const HEADER_H: f32 = 42.0;
+const FOOTER_H: f32 = 28.0;
 const COLUMN_GAP: f32 = 40.0;
 const RADIUS: f32 = 8.0;
-const KEYS_SIZE: f32 = 16.0;
-const ACTION_SIZE: f32 = 15.0;
+const KEYS_SIZE: f32 = 15.0;
+const ACTION_SIZE: f32 = 14.0;
 
 #[derive(Default, Clone, Copy)]
 struct Geometry {
@@ -52,7 +53,23 @@ impl Overlay for Help {
             .map(|s| painter.measure(s.action, BODY_FAMILY, ACTION_SIZE, 400))
             .fold(0.0, f32::max);
         let panel_w = (PAD + keys_w + COLUMN_GAP + action_w + PAD).min(w - 40.0);
-        let panel_h = HEADER_H + PAD + rows.len() as f32 * ROW_H + PAD + FOOTER_H;
+        let sections = {
+            let mut count = 0;
+            let mut last = "";
+            for row in rows {
+                if row.section != last {
+                    count += 1;
+                    last = row.section;
+                }
+            }
+            count
+        };
+        let panel_h = HEADER_H
+            + PAD
+            + rows.len() as f32 * ROW_H
+            + sections as f32 * SECTION_H
+            + PAD
+            + FOOTER_H;
         let center = (((w - panel_w) / 2.0).floor(), ((h - panel_h) / 2.0).floor());
         let px = (center.0 + self.offset.0).clamp(60.0 - panel_w, w - 60.0);
         let py = (center.1 + self.offset.1).clamp(-8.0, h - HEADER_H);
@@ -82,20 +99,33 @@ impl Overlay for Help {
         let title_w = painter.measure(title, BODY_FAMILY, 17.0, 700);
         painter.text(
             px + (panel_w - title_w) / 2.0,
-            py + 13.0,
+            py + 11.0,
             title,
             BODY_FAMILY,
             17.0,
             700,
             ui.overlay_fg,
         );
-        let rows_top = py + HEADER_H + PAD;
         let action_x = px + PAD + keys_w + COLUMN_GAP;
+        let mut ry = py + HEADER_H + PAD;
+        let mut section = "";
         for (index, row) in rows.iter().enumerate() {
-            let ry = rows_top + index as f32 * ROW_H;
+            if row.section != section {
+                section = row.section;
+                painter.text(
+                    px + PAD,
+                    ry + 6.0,
+                    section,
+                    BODY_FAMILY,
+                    12.0,
+                    700,
+                    theme.blocks.frontmatter_fg,
+                );
+                ry += SECTION_H;
+            }
             painter.text(
                 px + PAD,
-                ry + 6.0,
+                ry + 5.0,
                 &keymap::display(row.keys),
                 CODE_FAMILY,
                 KEYS_SIZE,
@@ -104,14 +134,19 @@ impl Overlay for Help {
             );
             painter.text(
                 action_x,
-                ry + 6.0,
+                ry + 5.0,
                 row.action,
                 BODY_FAMILY,
                 ACTION_SIZE,
                 400,
                 ui.overlay_fg,
             );
-            if index + 1 < rows.len() {
+            // Hairlines separate rows inside a section; the caption is
+            // the separation at a boundary.
+            let boundary = !rows
+                .get(index + 1)
+                .is_some_and(|next| next.section == section);
+            if !boundary {
                 painter.line(
                     px + PAD,
                     ry + ROW_H - 1.0,
@@ -121,6 +156,7 @@ impl Overlay for Help {
                     theme.blocks.table_border,
                 );
             }
+            ry += ROW_H;
         }
         painter.text(
             px + PAD,
