@@ -2,63 +2,61 @@
 
 ![Oryx: a fast, native viewer for markdown, code and books](screenshots/hero.png)
 
-![Version](https://img.shields.io/badge/Version-0.14.0-purple)
+![Version](https://img.shields.io/github/v/release/wmahfoudh/oryx?label=Version&color=purple)
 ![Made with Rust](https://img.shields.io/badge/Made%20with-Rust-orange?logo=rust&logoColor=white)
 
-[What it renders](#what-it-renders) •
+[What Oryx reads](#what-oryx-reads) •
 [Books](#books-epub) •
 [Themes](#themes) •
-[PDF export](#export-to-pdf) •
+[Export to PDF](#export-to-pdf) •
 [Install](#install) •
-[How to use Oryx](#how-to-use-oryx) •
+[Using Oryx](#using-oryx) •
 [Performance](#performance)
 
 </div>
 
-## Intro
-
-Oryx started as a personal project. I work with a lot of markdown files and did not find a (very) fast tool that could render them beautifully on the desktop without the need for a browser. Exporting to PDF would be a plus. That was the first version of the functional specs. Today Oryx has evolved, adding many features with a steady focus on performance. The latest addition is EPUB: Oryx opens a book like any other document and renders it in its own themes. Editing markdown is a tempting feature, but not on the roadmap at this stage.
+Oryx started as a personal project. I work with a lot of markdown files and did not find a (very) fast tool that could render them beautifully on the desktop without the need for a browser. Exporting to PDF would be a plus. That was the first version of the functional specs. Oryx has grown a lot since, and it stayed fast. The latest addition is EPUB: Oryx opens a book like any other document and renders it in the Oryx themes. Editing markdown is a tempting feature, but not on the roadmap at this stage.
 
 - **Instant**: A document is on screen in well under 100 ms from cold, even an 8 MB file.
 - **Light**: Memory stays flat as you scroll, whatever the file size.
 - **Distraction-free**: No panes, no toolbars, no menus. `F1` lists the shortcuts, `Esc` closes whatever is open.
-- **Beautiful**: 31 themes addressing 51 color roles, for reading and for PDF export alike.
+- **Beautiful**: 31 themes, each defining all 51 color roles, for reading and for PDF export alike.
 - **Self-contained**: One binary and a folder of themes. No browser engine, no runtime, no GPU requirement.
-- **Runs anywhere**: Performs the same on any desktop: a new laptop or an old machine with no graphics card.
+- **Runs anywhere**: The same speed on a new laptop or an old machine with no graphics card.
 
-## What it renders
+## What Oryx reads
 
-The complete recognized syntax, markdown and embedded HTML, is listed in [SYNTAX.md](SYNTAX.md). The [examples](examples/) folder is installed with Oryx and shows some real implementations.
+The complete recognized syntax, markdown and embedded HTML, is listed in [SYNTAX.md](SYNTAX.md). The [examples](examples/) folder is installed with Oryx and shows the syntax on real documents.
 
-### Markdown, the whole set
+### Markdown
 
 Headings, bold, italic, strikethrough, inline code, links and bare URLs (a link to another file opens it in Oryx), nested blockquotes, horizontal rules, smart quotes and dashes, and emoji shortcodes like `:tada:` :tada:. Ordered, unordered and task lists nest as deep as needed. A lot of care was given to details: for example, a wrapped line aligns with the text above it, not with the bullet, and tables keep per-column alignment, shade alternating rows and wrap long cells, so a wide table does not run off the page.
 
-### Code, highlighted
+### Source code
 
-Fenced blocks get a bordered panel and syntax colors for code, and a line too long for the panel wraps inside it. Oryx also opens source files directly and renders them as one highlighted document. Over a hundred extensions are supported, from Rust and Python through TypeScript, Kotlin, Swift, Terraform and Zig. A `Dockerfile` or a `Makefile` is recognized by its name. Any other text file opens in the code font. Binary files are refused.
+Fenced blocks get a bordered panel and syntax colors for code, and a line too long for the panel wraps inside it. Oryx also opens source files directly and renders them as one highlighted document. Over a hundred extensions are supported, from Rust and Python to Terraform and Zig. A `Dockerfile` or a `Makefile` is recognized by its name. Any other text file opens in the code font. Binary files are refused.
 
 ![Oryx rendering highlighted code](screenshots/code.png)
 
 ### GitHub flavor and more
 
-The five GitHub alerts are styled, each with its own color and title. YAML frontmatter headers are supported and become a small metadata panel above the document. Footnote markers appear raised in the text and link to their definitions, gathered at the foot of the document.
+The five GitHub alerts are styled, each with its own color and title. Oryx shows a YAML frontmatter header as a small metadata panel above the document. Footnote markers appear raised in the text and link to their definitions, gathered at the foot of the document.
 
-**Images and badges**: Supported formats are PNG, JPEG, GIF, WebP or SVG. Remote images are fetched in the background and cached on disk, so a README covered in badges comes up immediately the second time it is opened, and keeps working offline. If a path is broken, images are replaced by a placeholder with the alt text.
+**Images and badges**: Supported formats are PNG, JPEG, GIF, WebP or SVG. Remote images are fetched in the background and cached on disk, so a README covered in badges comes up immediately the second time it is opened, and keeps working offline. If a path is broken, the image is replaced by a placeholder with the alt text.
 
 **Embedded HTML** covers what GitHub renders: tables with or without a header row, collapsible `<details>` sections, HTML headings, lists and quotes, definition lists, centered blocks, images at a set width or height, rows of clickable badges, and the inline tags down to `mark`, `kbd` and `small`. Search sees into a closed section, and jumping to a match unfolds it.
 
 ![Oryx rendering a GitHub style README](screenshots/github.png)
 
-### Math, typeset
+### Math
 
 Oryx typesets TeX math in the STIX Two Math font: fractions, radicals, matrices, stretched delimiters and stacked limits. It recognizes all four GitHub notations: `$...$`, `$$...$$`, a `math` fence, and the backtick form ``$`...`$``. Oryx infers whether a dollar sign is a currency or a math delimiter, so prices like `$5-$10` stay text.
 
-The command vocabulary is KaTeX compatible: Greek, binary operators, relations and their negations, arrows, accents, the seven math alphabets, operator names, spacing, the matrix environments, and `\newcommand` macros. If Oryx encounters an unknown command, it will render it as its literal source, and the rest of the equation renders normally. An equation wider than the window shrinks to fit (to a reasonable extent). PDF export includes the typeset math, and text copied from the PDF reads back as the equation's characters. The supported commands are listed in [SYNTAX.md](SYNTAX.md#math), and [examples/sample-math.md](examples/sample-math.md) shows many implementations in the same document.
+The command vocabulary is KaTeX compatible: Greek, binary operators, relations and their negations, arrows, accents, the seven math alphabets, operator names, spacing, the matrix environments, and `\newcommand` macros. If Oryx encounters an unknown command, it will render it as its literal source, and the rest of the equation renders normally. An equation wider than the window shrinks to fit (to a reasonable extent). PDF export includes the typeset math, and text copied from the PDF reads back as the equation's characters. The supported commands are listed in [SYNTAX.md](SYNTAX.md#math), and [examples/sample-math.md](examples/sample-math.md) shows many of them in one document.
 
 ![Typeset math in Oryx](screenshots/math.png)
 
-### Books (EPUB)
+## Books (EPUB)
 
 Oryx opens EPUB books and renders them as one continuous document, in the active theme rather than the book's own styling. The book keeps its structure: chapter headings, italics and bold (including the ones its stylesheet sets), images and the cover, tables and highlighted code. The first chapters display immediately and the rest of the book loads in the background.
 
@@ -76,7 +74,7 @@ DRM-protected books and fixed-layout books (usually comics and picture books) ar
 - **Open file**: `Ctrl+O` opens the native file dialog.
 - **Live reload**: `F5` reloads a file being edited elsewhere.
 - **Zoom**: `Ctrl+Plus` (in) and `Ctrl+Minus` (out).
-- **Display scale**: Oryx follows the display's scale, so text and controls render at the intended size on a scaled screen (a laptop at 200%, for example). An `interface scale` entry in the settings (`Ctrl+,`) adjusts the size around the detected value, from -50% to +100%, and the adjustment is saved with the other settings.
+- **Display scale**: Oryx follows the display's scale, so text and controls render at the intended size on a scaled screen (a laptop at 200%, for example). An `interface scale` entry in the settings (`Ctrl+,`) adjusts the size around the detected value, from -50% to +100%, and is remembered.
 - **Touch**: On a touch screen, swiping scrolls the document, the sidebar and the dialogs. A swipe released while moving keeps the document scrolling with momentum. Tapping clicks, and a two-finger pinch zooms the document.
 - **Persistence**: Window geometry, the active theme, the sidebar and the last folder are all saved and restored at every start.
 
@@ -106,10 +104,10 @@ Nine themes are original designs: `oryx-light` and its dark twin `oryx-dark`, `o
 
 **Oryx tries its best so that**:
 
-- Page breaks don't happen through a line,
-- Headings are not left alone at the foot of a page,
-- Images are not cut,
-- Table rows are not split between pages unless the row is taller than the page itself.
+- Page breaks don't happen through a line
+- Headings are not left alone at the foot of a page
+- Images are not cut
+- Table rows are not split between pages unless the row is taller than the page itself
 
 ## Install
 
@@ -138,9 +136,9 @@ make install
 > [!TIP]
 > Use a release build for everyday reading, because a debug build is noticeably slower on code-heavy documents.
 
-## How to use Oryx
+## Using Oryx
 
-After installing, simply open Oryx from the launcher and navigate folders and files through the sidebar.
+After installing, open Oryx from the launcher and browse folders and files through the sidebar.
 
 > [!NOTE]
 > There are no menus. **Press `F1`** for the complete shortcut list, `Esc` to close a panel or quit.
@@ -190,11 +188,13 @@ oryx --version          # print the version
 
 ## Performance
 
-Performance is one of the reasons Oryx was created. Most markdown viewers start struggling above one megabyte of file size, without even offering decent theming. Oryx has been architected to address this problem: a beautiful and seamless user experience whatever the file size and whatever the hardware on which it runs. Here is how it works:
+Performance is one of the reasons Oryx was created. Most markdown viewers start struggling above one megabyte of file size, without even offering decent theming. Oryx was built to remove that ceiling: the same reading, whatever the file size and whatever the machine. Here is how it works:
 
-For a big markdown file, Oryx parses only its first screens before the first paint and the rest arrives from a background thread. It uses all CPU cores to build the layout, for the wash-in below the first screens as well as every zoom or resize. Only the part of the document around the reading position is kept in drawn form; scrolling rebuilds the landing from recorded positions in about a millisecond, so memory stays flat however long the document is. Painting covers a band around the viewport, a couple of screens either side, and scrolling inside that band is a memory copy, so the cost of a scroll frame does not depend on how long the document is. Syntax highlighting and the layout below follow in the background, a slice at a time, without moving anything already on screen. A PDF export streams pages to disk as they are laid out, so even a five-thousand-page export runs in a few megabytes of working memory. A book opens the same way: the first chapters parse before the first paint, and the rest of the book arrives in the background, images included. The event loop wakes only for input, and an idle window uses **no CPU at all**.
+For a big markdown file, Oryx parses only its first screens before the first paint and the rest arrives from a background thread. It uses all CPU cores to build the layout, for the wash-in below the first screens as well as every zoom or resize. Only the part of the document around the reading position is kept in drawn form, and scrolling rebuilds the landing from recorded positions in about a millisecond; memory stays flat however long the document is. Painting covers a band around the viewport, a couple of screens either side, and scrolling inside that band is a memory copy: the cost of a scroll frame does not depend on the document's length. Syntax highlighting and the layout below follow in the background, a slice at a time, without moving anything already on screen.
 
-Measured on a 2019 laptop (Linux OS), release build. First frame is cold launch to first paint; the export column is the export itself, measured after syntax highlighting has settled:
+A PDF export streams pages to disk as they are laid out, and even a five-thousand-page export runs in a few megabytes of working memory. A book opens the same way: the first chapters parse before the first paint, and the rest of the book arrives in the background, images included. The event loop wakes only for input, and an idle window uses **no CPU at all**.
+
+Measured on a 2019 Linux laptop, release build. First frame is cold launch to first paint; the export column is the export itself, measured after syntax highlighting has settled:
 
 | Document | First frame | PDF export |
 |---|---|---|
@@ -206,7 +206,7 @@ Measured on a 2019 laptop (Linux OS), release build. First frame is cold launch 
 The 8 MB markdown export writes a 9219-page file. While open, the 8 MB markdown file reads in about 200 MB of memory and the 8 MB source file in about 90 MB. The sample book, *The Adventures of Sherlock Holmes*, parses its first chapters in 9 ms and exports its 211 pages in 0.8 s. Performance tests in the repository check the startup, relayout, paint and export timings and the memory figures.
 
 > [!NOTE]
-> Oryx is not a markdown-to-PDF converter. Its export reproduces the page you read, pixel for pixel: the theme, every shaped glyph, syntax colors for close to a hundred languages, images, links, the outline and the embedded fonts, at a millisecond or two per finished page whatever the document size. Raw conversion without any of that is far faster, a few milliseconds for a whole small file, and it is a different job.
+> Oryx is not a markdown-to-PDF converter. Its export reproduces the page you read, pixel for pixel: the theme, every shaped glyph, syntax colors for close to a hundred languages, images, links, the outline and the embedded fonts, at a millisecond or two per finished page whatever the document size. Raw conversion without any of that is a different, far faster job: a few milliseconds for a whole small file.
 
 ## Limits
 
