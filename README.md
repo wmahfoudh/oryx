@@ -76,6 +76,8 @@ DRM-protected books and fixed-layout books (usually comics and picture books) ar
 - **Open file**: `Ctrl+O` opens the native file dialog.
 - **Live reload**: `F5` reloads a file being edited elsewhere.
 - **Zoom**: `Ctrl+Plus` (in) and `Ctrl+Minus` (out).
+- **Display scale**: Oryx follows the display's scale, so text and controls render at the intended size on a scaled screen (a laptop at 200%, for example). An `interface scale` entry in the settings (`Ctrl+,`) adjusts the size around the detected value, from -50% to +100%, and the adjustment is saved with the other settings.
+- **Touch**: On a touch screen, swiping scrolls the document, the sidebar and the dialogs. A swipe released while moving keeps the document scrolling with momentum. Tapping clicks, and a two-finger pinch zooms the document.
 - **Persistence**: Window geometry, the active theme, the sidebar and the last folder are all saved and restored at every start.
 
 ## Themes
