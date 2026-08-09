@@ -708,7 +708,7 @@ mod tests {
     ) -> Vec<u8> {
         let (w, h) = (260usize, 300usize);
         let mut pixmap = Pixmap::new(w as u32, h as u32).unwrap();
-        let mut painter = Painter::new(&mut pixmap, fonts, None);
+        let mut painter = Painter::new(&mut pixmap, fonts, None, 1.0);
         side.draw(&mut painter, theme, outline, None, true);
         let row = w * 4;
         let top = (PAD + CAPTION_H) as usize;

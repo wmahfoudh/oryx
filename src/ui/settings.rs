@@ -17,7 +17,13 @@ const FOOTER_H: f32 = 30.0;
 const PANEL_W: f32 = 420.0;
 const RADIUS: f32 = 8.0;
 
-const ROWS: [&str; 4] = ["body font", "code font", "body size", "code size"];
+const ROWS: [&str; 5] = [
+    "body font",
+    "code font",
+    "body size",
+    "code size",
+    "interface scale",
+];
 
 /// Font size bounds for both families.
 pub const SIZE_MIN: f32 = 8.0;
@@ -28,12 +34,33 @@ pub const ZOOM_MIN: f32 = 0.5;
 pub const ZOOM_MAX: f32 = 3.0;
 pub const ZOOM_STEP: f32 = 0.1;
 
+/// Manual interface scale bounds and step, a factor over the display's
+/// detected baseline of 1.0.
+pub const UI_SCALE_MIN: f32 = 0.5;
+pub const UI_SCALE_MAX: f32 = 2.0;
+pub const UI_SCALE_STEP: f32 = 0.05;
+
 pub fn step_size(size: f32, delta: f32) -> f32 {
     (size + delta).clamp(SIZE_MIN, SIZE_MAX)
 }
 
 pub fn step_zoom(zoom: f32, delta: f32) -> f32 {
     (zoom + delta).clamp(ZOOM_MIN, ZOOM_MAX)
+}
+
+pub fn step_ui_scale(scale: f32, delta: f32) -> f32 {
+    (scale + delta).clamp(UI_SCALE_MIN, UI_SCALE_MAX)
+}
+
+/// The scale as a signed percent around the detected baseline, "0" at
+/// the baseline itself.
+pub fn ui_scale_label(scale: f32) -> String {
+    let percent = ((scale - 1.0) * 100.0).round() as i32;
+    match percent {
+        0 => "0".to_string(),
+        p if p > 0 => format!("+{p}"),
+        p => p.to_string(),
+    }
 }
 
 /// Family list open for one of the two font rows.
@@ -59,6 +86,7 @@ pub struct Settings {
     code_family: String,
     body_size: f32,
     code_size: f32,
+    ui_scale: f32,
     row: usize,
     pick: Option<Pick>,
     moving: bool,
@@ -74,6 +102,7 @@ impl Settings {
         code_family: String,
         body_size: f32,
         code_size: f32,
+        ui_scale: f32,
     ) -> Settings {
         Settings {
             families,
@@ -81,6 +110,7 @@ impl Settings {
             code_family,
             body_size,
             code_size,
+            ui_scale,
             row: 0,
             pick: None,
             moving: false,
@@ -96,6 +126,7 @@ impl Settings {
             code_family: self.code_family.clone(),
             body_size: self.body_size,
             code_size: self.code_size,
+            ui_scale: self.ui_scale,
         })
     }
 
@@ -133,6 +164,7 @@ impl Settings {
         match self.row {
             2 => self.body_size = step_size(self.body_size, delta),
             3 => self.code_size = step_size(self.code_size, delta),
+            4 => self.ui_scale = step_ui_scale(self.ui_scale, delta * UI_SCALE_STEP),
             _ => return OverlayResult::Open,
         }
         self.view_change()
@@ -188,7 +220,7 @@ impl Overlay for Settings {
         let panel_w = PANEL_W.min(w - 40.0);
         let panel_h = match &self.pick {
             Some(_) => (h * 0.7).max(HEADER_H + 4.0 * LIST_ROW_H + FOOTER_H),
-            None => HEADER_H + PAD + 4.0 * ROW_H + PAD + FOOTER_H,
+            None => HEADER_H + PAD + ROWS.len() as f32 * ROW_H + PAD + FOOTER_H,
         };
         let center = (((w - panel_w) / 2.0).floor(), ((h - panel_h) / 2.0).floor());
         let px = (center.0 + self.offset.0).clamp(60.0 - panel_w, w - 60.0);
@@ -339,12 +371,12 @@ impl Overlay for Settings {
                             );
                         }
                         _ => {
-                            let size = if index == 2 {
-                                self.body_size
-                            } else {
-                                self.code_size
+                            let value = match index {
+                                2 => format!("{}", self.body_size as i32),
+                                3 => format!("{}", self.code_size as i32),
+                                _ => format!("{}%", ui_scale_label(self.ui_scale)),
                             };
-                            let text = format!("\u{2039}  {}  \u{203A}", size as i32);
+                            let text = format!("\u{2039}  {value}  \u{203A}");
                             painter.text(
                                 value_x,
                                 ry + 8.0,
@@ -360,7 +392,7 @@ impl Overlay for Settings {
                 painter.text(
                     px + PAD,
                     py + panel_h - FOOTER_H + 6.0,
-                    "enter: change font \u{00B7} \u{2190}/\u{2192}: size \u{00B7} esc: close",
+                    "enter: change font \u{00B7} \u{2190}/\u{2192}: adjust \u{00B7} esc: close",
                     BODY_FAMILY,
                     12.0,
                     400,
@@ -501,6 +533,7 @@ mod tests {
             "Courier Prime".to_string(),
             22.0,
             20.0,
+            1.0,
         )
     }
 
@@ -535,5 +568,44 @@ mod tests {
             panic!("expected a view change");
         };
         assert!(near(body_size, 22.0));
+    }
+
+    #[test]
+    fn ui_scale_steps_and_clamps() {
+        assert!(near(step_ui_scale(1.0, UI_SCALE_STEP), 1.05));
+        assert!(near(
+            step_ui_scale(UI_SCALE_MAX, UI_SCALE_STEP),
+            UI_SCALE_MAX
+        ));
+        assert!(near(
+            step_ui_scale(UI_SCALE_MIN, -UI_SCALE_STEP),
+            UI_SCALE_MIN
+        ));
+    }
+
+    #[test]
+    fn ui_scale_labels_center_on_zero() {
+        assert_eq!(ui_scale_label(1.0), "0");
+        assert_eq!(ui_scale_label(1.05), "+5");
+        assert_eq!(ui_scale_label(1.3), "+30");
+        assert_eq!(ui_scale_label(0.85), "-15");
+    }
+
+    #[test]
+    fn scale_row_steps_and_emits_view_change() {
+        let mut s = settings();
+        for _ in 0..4 {
+            press(&mut s, NamedKey::ArrowDown);
+        }
+        let result = press(&mut s, NamedKey::ArrowRight);
+        let OverlayResult::Apply(Action::SetView { ui_scale, .. }) = result else {
+            panic!("expected a view change");
+        };
+        assert!(near(ui_scale, 1.05));
+        let result = press(&mut s, NamedKey::ArrowLeft);
+        let OverlayResult::Apply(Action::SetView { ui_scale, .. }) = result else {
+            panic!("expected a view change");
+        };
+        assert!(near(ui_scale, 1.0));
     }
 }

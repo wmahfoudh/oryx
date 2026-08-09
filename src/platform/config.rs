@@ -31,6 +31,9 @@ pub struct Config {
     pub sidebar_tab: crate::ui::sidebar::Tab,
     /// Whether book text justifies; Ctrl+J flips it, EPUB display only.
     pub justify: bool,
+    /// Manual interface scale on top of the display's own factor, 1.0
+    /// at the detected baseline. Adjusted in the settings dialog.
+    pub ui_scale: f32,
     /// How the reader last exported; None until the first export, which
     /// seeds it from the fields above. A table, so it follows the plain
     /// values and precedes the window.
@@ -89,6 +92,7 @@ impl Default for Config {
             sidebar_width: crate::ui::sidebar::DEFAULT_WIDTH,
             sidebar_tab: crate::ui::sidebar::Tab::Files,
             justify: true,
+            ui_scale: 1.0,
             export: None,
             window: None,
         }
@@ -314,6 +318,7 @@ mod tests {
             sidebar_width: 320.0,
             sidebar_tab: crate::ui::sidebar::Tab::Outline,
             justify: false,
+            ui_scale: 1.15,
             export: None,
             window: None,
         };
@@ -321,6 +326,15 @@ mod tests {
         let loaded = load_from(&path);
         std::fs::remove_file(&path).unwrap();
         assert_eq!(loaded, config);
+    }
+
+    #[test]
+    fn a_config_without_the_ui_scale_sits_at_the_baseline() {
+        let path = temp_path("scaleless.toml");
+        std::fs::write(&path, "theme = \"nord\"\n").unwrap();
+        let loaded = load_from(&path);
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(loaded.ui_scale, 1.0);
     }
 
     #[test]

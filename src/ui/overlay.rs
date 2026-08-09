@@ -22,12 +22,13 @@ pub enum Action {
     PreviewTheme(Box<Theme>),
     /// Persist the export settings, then export with them.
     Export(Box<crate::export::ExportSettings>),
-    /// Apply and persist font families and sizes.
+    /// Apply and persist font families, sizes, and the interface scale.
     SetView {
         body_family: String,
         code_family: String,
         body_size: f32,
         code_size: f32,
+        ui_scale: f32,
     },
 }
 

@@ -1,6 +1,10 @@
 //! Overlay painter: rounded panels and single-line text drawn into a
 //! transparent pixmap, composited over the finished frame. Text assumes an
 //! opaque panel beneath it; glyphs over transparent pixels are undefined.
+//!
+//! Callers draw in logical units; the painter multiplies by the display
+//! scale, so chrome code never sees the monitor's density. Text is shaped
+//! at the physical size, never upscaled from a smaller raster.
 
 use cosmic_text::{Attrs, Buffer, Family, Metrics, Shaping, Weight};
 use tiny_skia::{PathBuilder, Pixmap, Transform};
@@ -11,17 +15,22 @@ use crate::style::theme::Rgba;
 pub struct Painter<'a> {
     pixmap: &'a mut Pixmap,
     fonts: &'a mut FontStore,
-    /// Bounds of everything painted, so composite touches only those rows.
+    /// Bounds of everything painted, in physical pixels, so composite
+    /// touches only those rows.
     dirty: Option<(f32, f32, f32, f32)>,
+    /// Physical pixels per logical unit.
+    scale: f32,
 }
 
 impl<'a> Painter<'a> {
     /// Wraps a reused canvas; `stale` is the region the previous frame
-    /// painted, wiped back to transparent before drawing starts.
+    /// painted, in physical pixels, wiped back to transparent before
+    /// drawing starts.
     pub fn new(
         pixmap: &'a mut Pixmap,
         fonts: &'a mut FontStore,
         stale: Option<(f32, f32, f32, f32)>,
+        scale: f32,
     ) -> Painter<'a> {
         if let Some((x0, y0, x1, y1)) = stale {
             let width = pixmap.width() as usize;
@@ -40,6 +49,7 @@ impl<'a> Painter<'a> {
             pixmap,
             fonts,
             dirty: None,
+            scale,
         }
     }
 
@@ -49,11 +59,11 @@ impl<'a> Painter<'a> {
     }
 
     pub fn width(&self) -> f32 {
-        self.pixmap.width() as f32
+        self.pixmap.width() as f32 / self.scale
     }
 
     pub fn height(&self) -> f32 {
-        self.pixmap.height() as f32
+        self.pixmap.height() as f32 / self.scale
     }
 
     fn mark(&mut self, x: f32, y: f32, w: f32, h: f32) {
@@ -70,6 +80,8 @@ impl<'a> Painter<'a> {
     }
 
     pub fn fill(&mut self, x: f32, y: f32, w: f32, h: f32, radius: f32, color: Rgba) {
+        let s = self.scale;
+        let (x, y, w, h, radius) = (x * s, y * s, w * s, h * s, radius * s);
         let Some(path) = round_rect(x, y, w, h, radius) else {
             return;
         };
@@ -87,6 +99,8 @@ impl<'a> Painter<'a> {
 
     #[allow(clippy::too_many_arguments)]
     pub fn stroke(&mut self, x: f32, y: f32, w: f32, h: f32, radius: f32, line: f32, color: Rgba) {
+        let s = self.scale;
+        let (x, y, w, h, radius, line) = (x * s, y * s, w * s, h * s, radius * s, line * s);
         let Some(path) = round_rect(x, y, w, h, radius) else {
             return;
         };
@@ -102,6 +116,8 @@ impl<'a> Painter<'a> {
     }
 
     pub fn line(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, width: f32, color: Rgba) {
+        let s = self.scale;
+        let (x0, y0, x1, y1, width) = (x0 * s, y0 * s, x1 * s, y1 * s, width * s);
         let mut pb = PathBuilder::new();
         pb.move_to(x0, y0);
         pb.line_to(x1, y1);
@@ -131,6 +147,8 @@ impl<'a> Painter<'a> {
     /// Fills a rectangle from a per-pixel callback over coordinates
     /// normalized to [0, 1]; the result is opaque.
     pub fn shade(&mut self, x: f32, y: f32, w: f32, h: f32, f: impl Fn(f32, f32) -> Rgba) {
+        let s = self.scale;
+        let (x, y, w, h) = (x * s, y * s, w * s, h * s);
         if w <= 0.0 || h <= 0.0 {
             return;
         }
@@ -158,12 +176,13 @@ impl<'a> Painter<'a> {
     }
 
     pub fn measure(&mut self, text: &str, family: &str, size: f32, weight: u16) -> f32 {
-        let buffer = self.shape(text, family, size, weight);
+        let buffer = self.shape(text, family, size * self.scale, weight);
         buffer
             .layout_runs()
             .next()
             .and_then(|run| run.glyphs.last().map(|g| g.x + g.w))
             .unwrap_or(0.0)
+            / self.scale
     }
 
     /// Draws one line with its top at `y`; returns the advance width.
@@ -178,6 +197,8 @@ impl<'a> Painter<'a> {
         weight: u16,
         color: Rgba,
     ) -> f32 {
+        let s = self.scale;
+        let (x, y, size) = (x * s, y * s, size * s);
         let buffer = self.shape(text, family, size, weight);
         let width = self.pixmap.width() as i32;
         let height = self.pixmap.height() as i32;
@@ -214,7 +235,7 @@ impl<'a> Painter<'a> {
                 }
             },
         );
-        advance
+        advance / s
     }
 
     /// Blends the painted region onto an opaque 0RGB frame buffer; only
@@ -295,4 +316,77 @@ fn round_rect(x: f32, y: f32, w: f32, h: f32, radius: f32) -> Option<tiny_skia::
 /// Source-over blend of one channel against an opaque destination.
 fn blend(src: u8, dst: u8, alpha: u32) -> u8 {
     ((src as u32 * alpha + dst as u32 * (255 - alpha)) / 255) as u8
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::style::fonts::BODY_FAMILY;
+
+    const RED: Rgba = Rgba {
+        r: 255,
+        g: 0,
+        b: 0,
+        a: 255,
+    };
+
+    fn painted(pixmap: &Pixmap, x: u32, y: u32) -> bool {
+        pixmap
+            .pixel(x, y)
+            .is_some_and(|p| p.alpha() > 0 || p.red() > 0)
+    }
+
+    #[test]
+    fn scale_reports_the_canvas_in_logical_units() {
+        let mut pixmap = Pixmap::new(200, 100).unwrap();
+        let mut fonts = FontStore::new();
+        let painter = Painter::new(&mut pixmap, &mut fonts, None, 2.0);
+        assert_eq!(painter.width(), 100.0);
+        assert_eq!(painter.height(), 50.0);
+    }
+
+    #[test]
+    fn scale_paints_fills_at_physical_pixels() {
+        let mut pixmap = Pixmap::new(200, 100).unwrap();
+        let mut fonts = FontStore::new();
+        let mut painter = Painter::new(&mut pixmap, &mut fonts, None, 2.0);
+        painter.fill(10.0, 10.0, 30.0, 20.0, 0.0, RED);
+        assert!(painted(&pixmap, 25, 25), "inside the scaled rect");
+        assert!(painted(&pixmap, 75, 55), "still inside near the far corner");
+        assert!(!painted(&pixmap, 15, 25), "left of the scaled rect");
+        assert!(!painted(&pixmap, 85, 25), "right of the scaled rect");
+    }
+
+    #[test]
+    fn scale_keeps_dirty_bounds_physical() {
+        let mut pixmap = Pixmap::new(200, 100).unwrap();
+        let mut fonts = FontStore::new();
+        let mut painter = Painter::new(&mut pixmap, &mut fonts, None, 2.0);
+        painter.fill(10.0, 10.0, 30.0, 20.0, 0.0, RED);
+        let (x0, y0, x1, y1) = painter.dirty().unwrap();
+        assert_eq!((x0, y0, x1, y1), (20.0, 20.0, 80.0, 60.0));
+    }
+
+    #[test]
+    fn scale_leaves_measured_widths_logical() {
+        let mut pixmap = Pixmap::new(400, 100).unwrap();
+        let mut fonts = FontStore::new();
+        let plain = Painter::new(&mut pixmap, &mut fonts, None, 1.0).measure(
+            "Shortcuts",
+            BODY_FAMILY,
+            15.0,
+            400,
+        );
+        let scaled = Painter::new(&mut pixmap, &mut fonts, None, 2.0).measure(
+            "Shortcuts",
+            BODY_FAMILY,
+            15.0,
+            400,
+        );
+        assert!(plain > 10.0, "the sample text has width");
+        assert!(
+            (plain - scaled).abs() < 0.5,
+            "logical width holds under scale: {plain} vs {scaled}"
+        );
+    }
 }

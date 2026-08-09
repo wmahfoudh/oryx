@@ -12,6 +12,7 @@ use oryx::export::{self, ExportPass, ExportSettings};
 use oryx::input::{
     self,
     keymap::{self, Command},
+    touch,
 };
 use oryx::layout::{
     layout_begin, layout_extend, layout_more, metrics, recolor_batch, window_to, DecoRect,
@@ -38,13 +39,22 @@ use oryx::ui::theme_browser::ThemeBrowser;
 use oryx::ui::theme_editor::ThemeEditor;
 use winit::application::ApplicationHandler;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
-use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::event::{
+    ElementState, KeyEvent, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent,
+};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{CursorIcon, Window, WindowId};
 
 /// How often owed recolors land while highlights wash in.
 const RECOLOR_WAVE: Duration = Duration::from_millis(400);
+
+/// How often a fling advances the scroll.
+const FLING_TICK: Duration = Duration::from_millis(16);
+
+/// How long after a touch pan the emulated mouse stays ignored, long
+/// enough to cover the click Windows synthesizes behind a lifted finger.
+const MOUSE_MUTE: Duration = Duration::from_millis(150);
 
 /// The window icon raster produced by the build script.
 const ICON_64: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/icon_64.rgba"));
@@ -155,6 +165,14 @@ pub fn run(path: Option<PathBuf>, theme_name: Option<String>) -> anyhow::Result<
         book_toc,
         positions: config::Positions::load(),
         layout_width: 0.0,
+        scale: 1.0,
+        os_scale: 1.0,
+        user_zoom: 1.0,
+        touch: touch::Tracker::new(1.0),
+        pan_target: PanTarget::Document,
+        fling: None,
+        mute_mouse_until: None,
+        pinch_base: 1.0,
         band: None,
         scroll_y: 0.0,
         modifiers: ModifiersState::empty(),
@@ -326,6 +344,25 @@ struct App {
     /// Where reading stopped per book, written on switch and close.
     positions: config::Positions,
     layout_width: f32,
+    /// Physical pixels per logical unit: the monitor's factor times the
+    /// configured manual adjustment. The chrome multiplies by it in the
+    /// painter; the document folds it into the zoom product.
+    scale: f32,
+    /// The display's own factor as winit reported it.
+    os_scale: f32,
+    /// The reader's own zoom step, 1.0 at rest. What the layout sees is
+    /// always `user_zoom * scale`.
+    user_zoom: f32,
+    /// Touch gesture state: pans, taps, pinches.
+    touch: touch::Tracker,
+    /// Which pane the active touch pan scrolls.
+    pan_target: PanTarget,
+    /// A running fling: its velocity and when it last stepped.
+    fling: Option<(f32, Instant)>,
+    /// Emulated mouse events are dropped until then after a touch pan.
+    mute_mouse_until: Option<Instant>,
+    /// The reader zoom captured when a pinch began.
+    pinch_base: f32,
     band: Option<BandCache>,
     scroll_y: f32,
     modifiers: ModifiersState,
@@ -447,6 +484,14 @@ fn drag_is_edge(drag: Drag) -> bool {
     matches!(drag, Drag::SidebarEdge(_))
 }
 
+/// Which pane a touch pan scrolls, fixed where the gesture began.
+#[derive(Clone, Copy, PartialEq)]
+enum PanTarget {
+    Document,
+    Sidebar,
+    Overlay,
+}
+
 struct Gfx {
     window: Arc<Window>,
     surface: softbuffer::Surface<Arc<Window>, Arc<Window>>,
@@ -504,12 +549,17 @@ impl App {
             Command::Settings => self.toggle_settings(),
             Command::ThemeBrowser => self.toggle_theme_browser(),
             Command::ZoomIn => {
-                self.set_zoom(settings::step_zoom(self.cfg.zoom, settings::ZOOM_STEP));
+                self.user_zoom = settings::step_zoom(self.user_zoom, settings::ZOOM_STEP);
+                self.apply_zoom();
             }
             Command::ZoomOut => {
-                self.set_zoom(settings::step_zoom(self.cfg.zoom, -settings::ZOOM_STEP));
+                self.user_zoom = settings::step_zoom(self.user_zoom, -settings::ZOOM_STEP);
+                self.apply_zoom();
             }
-            Command::ZoomReset => self.set_zoom(1.0),
+            Command::ZoomReset => {
+                self.user_zoom = 1.0;
+                self.apply_zoom();
+            }
             Command::Justify => self.toggle_justify(),
             Command::SelectAll => self.select_all(),
             Command::CopyText => self.copy_selection(false),
@@ -783,7 +833,7 @@ impl App {
 
     fn thumb(&self) -> Option<(f32, f32)> {
         let vh = self.viewport_h();
-        scrollbar::thumb(self.doc_height(), vh, self.scroll_y, vh)
+        scrollbar::thumb(self.doc_height(), vh, self.scroll_y, vh, self.scale)
     }
 
     fn drag_to(&mut self, cursor_y: f32) {
@@ -799,7 +849,9 @@ impl App {
     /// Advances the multi-click chain for a document-area press and
     /// answers the click count it reached.
     fn register_click(&mut self) -> u8 {
-        let (x, y) = (self.cursor.x as f32, self.cursor.y as f32);
+        // Logical coordinates keep the chain's slop radius the same
+        // size on every display.
+        let (x, y) = self.ui_cursor();
         let now = Instant::now();
         let prev = self.last_click.map(|(t, px, py, count)| {
             (
@@ -897,6 +949,181 @@ impl App {
             self.link_press();
         }
         self.fold_highlights();
+    }
+
+    /// A left button press at the current cursor, from the mouse or a
+    /// synthesized tap.
+    fn left_press(&mut self) {
+        if let Some(overlay) = self.overlay.as_mut() {
+            self.overlay_mouse = true;
+            let (x, y) = (
+                self.cursor.x as f32 / self.scale,
+                self.cursor.y as f32 / self.scale,
+            );
+            let result = overlay.click(x, y);
+            self.overlay_result(result);
+        } else if self.sidebar_edge_press() {
+        } else if (self.cursor.x as f32) < self.inset() && self.sidebar.is_some() {
+            let (x, y) = self.ui_cursor();
+            self.sidebar_click(x, y);
+            self.move_ownership(PaneAct::ClickSidebar);
+        } else {
+            self.move_ownership(PaneAct::ClickDocument);
+            self.scrollbar_press();
+            if self.drag.is_none() {
+                match self.register_click() {
+                    2 => self.select_unit(false),
+                    3 => self.select_unit(true),
+                    _ => self.begin_selection(),
+                }
+            }
+        }
+    }
+
+    /// The matching release.
+    fn left_release(&mut self) {
+        self.overlay_mouse = false;
+        if let Some(overlay) = self.overlay.as_mut() {
+            overlay.release();
+        } else if let Some(drag) = self.drag.take() {
+            if drag_is_edge(drag) {
+                self.save_sidebar_state();
+            }
+            if let Some(gfx) = self.gfx.as_ref() {
+                gfx.window.request_redraw();
+            }
+        } else {
+            self.end_selection();
+        }
+        // The gesture held the pass off, and possibly a parked parse
+        // delivery. A release that changed nothing else still has to
+        // hand the loop back to them.
+        self.fold_parse();
+        if self.layout_pending() {
+            self.request_redraw();
+        }
+    }
+
+    /// Emulated mouse events shadowing an active or just-finished touch
+    /// pan are dropped; a tap's emulated click passes through.
+    fn mouse_muted(&self) -> bool {
+        self.touch.panning()
+            || self
+                .mute_mouse_until
+                .is_some_and(|until| Instant::now() < until)
+    }
+
+    /// Routes a raw touch event: a swipe scrolls the pane under the
+    /// gesture's origin, a pinch drives the reader zoom, and a tap
+    /// clicks where the platform does not emulate one.
+    fn on_touch(&mut self, event: winit::event::Touch) {
+        let phase = match event.phase {
+            TouchPhase::Started => touch::Phase::Started,
+            TouchPhase::Moved => touch::Phase::Moved,
+            TouchPhase::Ended => touch::Phase::Ended,
+            TouchPhase::Cancelled => touch::Phase::Cancelled,
+        };
+        if matches!(phase, touch::Phase::Started) {
+            // A landing finger catches a flinging page.
+            self.fling = None;
+        }
+        let (x, y) = (event.location.x as f32, event.location.y as f32);
+        let act = self.touch.on(event.id, phase, x, y, Instant::now());
+        match act {
+            touch::Act::None => {}
+            touch::Act::PanStart => {
+                let start_x = self.touch.start().map_or(x, |(sx, _)| sx);
+                self.pan_target = if self.overlay.is_some() {
+                    PanTarget::Overlay
+                } else if self.sidebar.is_some() && start_x < self.inset() {
+                    PanTarget::Sidebar
+                } else {
+                    PanTarget::Document
+                };
+                // The pre-slop tail of the gesture may have pressed the
+                // emulated mouse button; a swipe selects nothing.
+                self.sel_anchor = None;
+                self.drag = None;
+                match self.pan_target {
+                    PanTarget::Sidebar => self.move_ownership(PaneAct::WheelSidebar),
+                    PanTarget::Document => self.move_ownership(PaneAct::WheelDocument),
+                    PanTarget::Overlay => {}
+                }
+            }
+            touch::Act::Pan { dy } => match self.pan_target {
+                PanTarget::Document => self.scroll_by(dy),
+                PanTarget::Sidebar => {
+                    let lines = dy / (sidebar::ROW_H * self.scale);
+                    if let Some(side) = self.sidebar.as_mut() {
+                        side.wheel(lines, &mut self.outline);
+                        self.request_redraw();
+                    }
+                }
+                PanTarget::Overlay => {
+                    let lines = dy / self.line_step();
+                    if let Some(overlay) = self.overlay.as_mut() {
+                        let result = overlay.scroll(lines);
+                        self.overlay_result(result);
+                    }
+                }
+            },
+            touch::Act::Tap { x, y } => {
+                // Windows emulates a mouse click for every tap;
+                // synthesizing another would double it. Linux delivers
+                // only the touch, so the tap clicks here.
+                #[cfg(windows)]
+                let _ = (x, y);
+                #[cfg(not(windows))]
+                {
+                    self.cursor = PhysicalPosition::new(x as f64, y as f64);
+                    self.left_press();
+                    self.left_release();
+                }
+            }
+            touch::Act::Fling { velocity } => {
+                if self.pan_target == PanTarget::Document {
+                    self.fling = Some((velocity, Instant::now()));
+                }
+                self.mute_mouse_until = Some(Instant::now() + MOUSE_MUTE);
+            }
+            touch::Act::PinchStart => {
+                self.pinch_base = self.user_zoom;
+                self.sel_anchor = None;
+                self.drag = None;
+            }
+            touch::Act::Pinch { factor } => {
+                if self.overlay.is_none() {
+                    self.user_zoom =
+                        (self.pinch_base * factor).clamp(settings::ZOOM_MIN, settings::ZOOM_MAX);
+                    self.apply_zoom();
+                }
+            }
+            touch::Act::End => {
+                self.mute_mouse_until = Some(Instant::now() + MOUSE_MUTE);
+            }
+        }
+    }
+
+    /// Advances a running fling and keeps the loop ticking while it
+    /// lasts. Friction or the document's edge retires it.
+    fn step_fling(&mut self, event_loop: &ActiveEventLoop) {
+        let Some((velocity, at)) = self.fling else {
+            return;
+        };
+        let now = Instant::now();
+        let dt = now.duration_since(at).as_secs_f32();
+        if dt > 0.0 {
+            let (delta, next) = touch::fling_step(velocity, dt);
+            let before = self.scroll_y;
+            self.scroll_by(delta);
+            let walled = delta.abs() >= 0.5 && self.scroll_y == before;
+            if touch::fling_done(next, self.scale) || walled {
+                self.fling = None;
+                return;
+            }
+            self.fling = Some((next, now));
+        }
+        event_loop.set_control_flow(ControlFlow::WaitUntil(now + FLING_TICK));
     }
 
     /// Hands pending highlight work to the worker. An empty list still
@@ -1115,6 +1342,7 @@ impl App {
                 self.cfg.code_family.clone(),
                 self.cfg.body_size,
                 self.cfg.code_size,
+                self.config.ui_scale,
             )));
             self.request_redraw();
         }
@@ -1124,7 +1352,7 @@ impl App {
     /// restores the default width on a double click. Reports whether the
     /// press belonged to the edge.
     fn sidebar_edge_press(&mut self) -> bool {
-        let (Some(side), x) = (self.sidebar.as_ref(), self.cursor.x as f32) else {
+        let (Some(side), x) = (self.sidebar.as_ref(), self.cursor.x as f32 / self.scale) else {
             return false;
         };
         if !sidebar::on_edge(side.width(), x) {
@@ -1147,12 +1375,13 @@ impl App {
         true
     }
 
-    /// Applies a dragged width and relays out the document under it.
+    /// Applies a dragged width, in logical units, and relays out the
+    /// document under it.
     fn resize_sidebar(&mut self, want: f32) {
         let window_w = self
             .gfx
             .as_ref()
-            .map(|g| g.window.inner_size().width as f32)
+            .map(|g| g.window.inner_size().width as f32 / self.scale)
             .unwrap_or(want + sidebar::MIN_WIDTH);
         let before = self.inset();
         if let Some(side) = self.sidebar.as_mut() {
@@ -1334,9 +1563,20 @@ impl App {
         config::save(&self.config);
     }
 
-    /// Document area x offset: the sidebar width while it is open.
+    /// Document area x offset in physical pixels: the sidebar width
+    /// while it is open. The sidebar itself thinks in logical units.
     fn inset(&self) -> f32 {
-        self.sidebar.as_ref().map_or(0.0, |side| side.width())
+        self.sidebar
+            .as_ref()
+            .map_or(0.0, |side| side.width() * self.scale)
+    }
+
+    /// The cursor in the chrome's logical coordinates.
+    fn ui_cursor(&self) -> (f32, f32) {
+        (
+            self.cursor.x as f32 / self.scale,
+            self.cursor.y as f32 / self.scale,
+        )
     }
 
     fn toggle_sidebar(&mut self) {
@@ -1379,7 +1619,7 @@ impl App {
             let window_w = self
                 .gfx
                 .as_ref()
-                .map(|g| g.window.inner_size().width as f32)
+                .map(|g| g.window.inner_size().width as f32 / self.scale)
                 .unwrap_or(f32::MAX);
             side.set_width(self.config.sidebar_width, window_w);
             self.sidebar = Some(side);
@@ -1656,6 +1896,42 @@ impl App {
         }
     }
 
+    /// Adopts the display's own factor, as reported at window creation
+    /// or when the window changes monitors.
+    fn rescale(&mut self, os_scale: f32) {
+        self.os_scale = os_scale;
+        self.refresh_scale();
+    }
+
+    /// Recomputes the effective scale from the display factor and the
+    /// configured manual adjustment: the chrome painter picks it up on
+    /// the next frame, the document folds it into the zoom product.
+    fn refresh_scale(&mut self) {
+        let manual = self
+            .config
+            .ui_scale
+            .clamp(settings::UI_SCALE_MIN, settings::UI_SCALE_MAX);
+        let scale = self.os_scale * manual;
+        if (scale - self.scale).abs() < 0.001 {
+            return;
+        }
+        self.scale = scale;
+        self.touch = touch::Tracker::new(scale);
+        self.band = None;
+        self.sidebar_canvas = None;
+        self.search_canvas = None;
+        self.overlay_canvas = None;
+        self.apply_zoom();
+        self.request_redraw();
+    }
+
+    /// What the layout sees is always the reader's zoom step times the
+    /// display scale, so Ctrl+0 lands on the display's density, not
+    /// under it.
+    fn apply_zoom(&mut self) {
+        self.set_zoom(self.user_zoom * self.scale);
+    }
+
     /// Session zoom around the current scroll position; never persisted.
     fn set_zoom(&mut self, zoom: f32) {
         if (zoom - self.cfg.zoom).abs() < f32::EPSILON {
@@ -1761,6 +2037,7 @@ impl App {
                 code_family,
                 body_size,
                 code_size,
+                ui_scale,
             }) => {
                 self.cfg.body_family = body_family.clone();
                 self.cfg.code_family = code_family.clone();
@@ -1770,6 +2047,8 @@ impl App {
                 self.config.code_family = code_family;
                 self.config.body_size = body_size;
                 self.config.code_size = code_size;
+                self.config.ui_scale = ui_scale;
+                self.refresh_scale();
                 // A held arrow key repeats this apply dozens of times a
                 // second; the disk write waits for the dialog to close.
                 self.view_dirty = true;
@@ -1937,7 +2216,7 @@ impl App {
         let on_edge = self
             .sidebar
             .as_ref()
-            .is_some_and(|side| sidebar::on_edge(side.width(), self.cursor.x as f32));
+            .is_some_and(|side| sidebar::on_edge(side.width(), self.cursor.x as f32 / self.scale));
         let x = self.cursor.x as f32 - self.inset();
         let y = self.cursor.y as f32 + self.scroll_y;
         let hovering = !on_edge
@@ -1971,7 +2250,7 @@ impl App {
             .as_ref()
             .map(|g| g.window.inner_size().width as f32)
             .unwrap_or(0.0);
-        if x < width - scrollbar::STRIP_WIDTH {
+        if x < width - scrollbar::STRIP_WIDTH * self.scale {
             return;
         }
         if y >= thumb_y && y <= thumb_y + thumb_h {
@@ -2315,13 +2594,21 @@ impl App {
             size.height as f32,
             self.scroll_y,
             size.height as f32,
+            self.scale,
         ) {
             let color = if matches!(self.drag, Some(Drag::Scrollbar(_))) {
                 self.theme.ui.scrollbar_hover
             } else {
                 self.theme.ui.scrollbar
             };
-            scrollbar::draw(&mut buffer, size.width, size.height, thumb, color);
+            scrollbar::draw(
+                &mut buffer,
+                size.width,
+                size.height,
+                thumb,
+                color,
+                self.scale,
+            );
         }
         let owns_keys = self.key_pane == KeyPane::Sidebar;
         if let Some(side) = self.sidebar.as_mut() {
@@ -2335,7 +2622,7 @@ impl App {
                     tiny_skia::Pixmap::new(size.width, size.height).map(|pixmap| (pixmap, None));
             }
             if let Some((canvas, stale)) = self.sidebar_canvas.as_mut() {
-                let mut painter = Painter::new(canvas, &mut self.fonts, stale.take());
+                let mut painter = Painter::new(canvas, &mut self.fonts, stale.take(), self.scale);
                 side.draw(
                     &mut painter,
                     &self.theme,
@@ -2357,8 +2644,13 @@ impl App {
                     tiny_skia::Pixmap::new(size.width, size.height).map(|pixmap| (pixmap, None));
             }
             if let Some((canvas, stale)) = self.search_canvas.as_mut() {
-                let mut painter = Painter::new(canvas, &mut self.fonts, stale.take());
-                search::draw_bar(&mut painter, &self.theme, state, size.width as f32);
+                let mut painter = Painter::new(canvas, &mut self.fonts, stale.take(), self.scale);
+                search::draw_bar(
+                    &mut painter,
+                    &self.theme,
+                    state,
+                    size.width as f32 / self.scale,
+                );
                 painter.composite(&mut buffer, size.width);
                 *stale = painter.dirty();
             }
@@ -2373,7 +2665,7 @@ impl App {
                     tiny_skia::Pixmap::new(size.width, size.height).map(|pixmap| (pixmap, None));
             }
             if let Some((canvas, stale)) = self.overlay_canvas.as_mut() {
-                let mut painter = Painter::new(canvas, &mut self.fonts, stale.take());
+                let mut painter = Painter::new(canvas, &mut self.fonts, stale.take(), self.scale);
                 overlay.draw(&mut painter, &self.theme);
                 painter.composite(&mut buffer, size.width);
                 *stale = painter.dirty();
@@ -2401,18 +2693,20 @@ impl ApplicationHandler for App {
                 event_loop.set_control_flow(ControlFlow::WaitUntil(due));
             }
         }
-        let Some(at) = self.settle_at else {
-            return;
-        };
-        if Instant::now() < at {
-            event_loop.set_control_flow(ControlFlow::WaitUntil(at));
-            return;
+        if let Some(at) = self.settle_at {
+            if Instant::now() < at {
+                event_loop.set_control_flow(ControlFlow::WaitUntil(at));
+            } else {
+                self.settle_at = None;
+                self.layout = None;
+                self.pass = None;
+                event_loop.set_control_flow(ControlFlow::Wait);
+                self.request_redraw();
+            }
         }
-        self.settle_at = None;
-        self.layout = None;
-        self.pass = None;
-        event_loop.set_control_flow(ControlFlow::Wait);
-        self.request_redraw();
+        // Last, so its near tick wins the wake; an early wake costs the
+        // timers above nothing.
+        self.step_fling(event_loop);
     }
 
     /// A background fetch, parse delivery or highlight chunk landed: fold
@@ -2484,7 +2778,9 @@ impl ApplicationHandler for App {
         let context = softbuffer::Context::new(window.clone()).expect("display context failed");
         let surface =
             softbuffer::Surface::new(&context, window.clone()).expect("surface creation failed");
+        let scale = window.scale_factor() as f32;
         self.gfx = Some(Gfx { window, surface });
+        self.rescale(scale);
         // The panel comes back the way it was left, at its saved width.
         if self.config.sidebar_open {
             self.open_sidebar(true);
@@ -2507,6 +2803,7 @@ impl ApplicationHandler for App {
                     },
                 ..
             } => {
+                self.fling = None;
                 let ctrl = self.modifiers.control_key();
                 let shift = self.modifiers.shift_key();
                 // The overlay toggles stay global so their chord closes the
@@ -2556,6 +2853,7 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
+                self.fling = None;
                 let lines = match delta {
                     MouseScrollDelta::LineDelta(_, lines) => -lines,
                     MouseScrollDelta::PixelDelta(p) => -p.y as f32 / self.line_step(),
@@ -2574,15 +2872,21 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
+                if self.mouse_muted() {
+                    return;
+                }
                 self.cursor = position;
                 if self.overlay.is_some() {
                     if self.overlay_mouse {
-                        let (x, y) = (position.x as f32, position.y as f32);
+                        let (x, y) = (
+                            position.x as f32 / self.scale,
+                            position.y as f32 / self.scale,
+                        );
                         let result = self.overlay.as_mut().expect("overlay open").drag(x, y);
                         self.overlay_result(result);
                     }
                 } else if let Some(Drag::SidebarEdge(grab)) = self.drag {
-                    self.resize_sidebar(position.x as f32 - grab);
+                    self.resize_sidebar(position.x as f32 / self.scale - grab);
                 } else if self.drag.is_some() {
                     self.drag_to(position.y as f32);
                 } else if self.sel_anchor.is_some() {
@@ -2595,53 +2899,18 @@ impl ApplicationHandler for App {
                 state,
                 button: MouseButton::Left,
                 ..
-            } => match state {
-                ElementState::Pressed => {
-                    if let Some(overlay) = self.overlay.as_mut() {
-                        self.overlay_mouse = true;
-                        let (x, y) = (self.cursor.x as f32, self.cursor.y as f32);
-                        let result = overlay.click(x, y);
-                        self.overlay_result(result);
-                    } else if self.sidebar_edge_press() {
-                    } else if (self.cursor.x as f32) < self.inset() && self.sidebar.is_some() {
-                        let (x, y) = (self.cursor.x as f32, self.cursor.y as f32);
-                        self.sidebar_click(x, y);
-                        self.move_ownership(PaneAct::ClickSidebar);
-                    } else {
-                        self.move_ownership(PaneAct::ClickDocument);
-                        self.scrollbar_press();
-                        if self.drag.is_none() {
-                            match self.register_click() {
-                                2 => self.select_unit(false),
-                                3 => self.select_unit(true),
-                                _ => self.begin_selection(),
-                            }
-                        }
-                    }
+            } => {
+                if self.mouse_muted() {
+                    return;
                 }
-                ElementState::Released => {
-                    self.overlay_mouse = false;
-                    if let Some(overlay) = self.overlay.as_mut() {
-                        overlay.release();
-                    } else if let Some(drag) = self.drag.take() {
-                        if drag_is_edge(drag) {
-                            self.save_sidebar_state();
-                        }
-                        if let Some(gfx) = self.gfx.as_ref() {
-                            gfx.window.request_redraw();
-                        }
-                    } else {
-                        self.end_selection();
+                match state {
+                    ElementState::Pressed => {
+                        self.fling = None;
+                        self.left_press();
                     }
-                    // The gesture held the pass off, and possibly a parked
-                    // parse delivery. A release that changed nothing else
-                    // still has to hand the loop back to them.
-                    self.fold_parse();
-                    if self.layout_pending() {
-                        self.request_redraw();
-                    }
+                    ElementState::Released => self.left_release(),
                 }
-            },
+            }
             WindowEvent::Resized(size) => {
                 // A drag delivers a width per frame. When a full pass
                 // outlasts a slice, restarting it on each one would strand
@@ -2669,6 +2938,10 @@ impl ApplicationHandler for App {
                         win.y = Some(position.y);
                     }
                 }
+            }
+            WindowEvent::Touch(t) => self.on_touch(t),
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                self.rescale(scale_factor as f32);
             }
             WindowEvent::RedrawRequested => self.redraw(),
             _ => {}
