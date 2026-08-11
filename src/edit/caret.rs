@@ -18,8 +18,8 @@ pub struct Caret {
     pub goal: Option<f32>,
 }
 
-/// The motion set: the bare keys, plus the document jumps every editor
-/// puts on Ctrl+Home and Ctrl+End.
+/// The motion set: the bare keys, plus the document and word jumps
+/// every editor puts on the Ctrl chords.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Motion {
     Left,
@@ -32,6 +32,68 @@ pub enum Motion {
     PageDown,
     DocStart,
     DocEnd,
+    WordLeft,
+    WordRight,
+}
+
+fn word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// The file's final newline is a terminator, not a line: stepping past
+/// it would land on a row that does not exist, so the step holds.
+fn clamp_final(doc: &Document, from: usize, target: usize) -> usize {
+    if target == doc.source.len() && doc.source.ends_with('\n') {
+        from
+    } else {
+        target
+    }
+}
+
+/// The next word boundary to the right: whitespace is skipped, then one
+/// run of word characters or one run of symbols, newlines crossed like
+/// any other whitespace.
+pub fn word_right(text: &str, at: usize) -> usize {
+    let mut pos = at;
+    for c in text[at..].chars() {
+        if !c.is_whitespace() {
+            break;
+        }
+        pos += c.len_utf8();
+    }
+    let Some(first) = text[pos..].chars().next() else {
+        return pos;
+    };
+    let class = word_char(first);
+    for c in text[pos..].chars() {
+        if c.is_whitespace() || word_char(c) != class {
+            break;
+        }
+        pos += c.len_utf8();
+    }
+    pos
+}
+
+/// The mirror boundary to the left.
+pub fn word_left(text: &str, at: usize) -> usize {
+    let mut pos = at;
+    for c in text[..at].chars().rev() {
+        if !c.is_whitespace() {
+            break;
+        }
+        pos -= c.len_utf8();
+    }
+    let Some(last) = text[..pos].chars().next_back() else {
+        return pos;
+    };
+    let class = word_char(last);
+    for c in text[..pos].chars().rev() {
+        if c.is_whitespace() || word_char(c) != class {
+            break;
+        }
+        pos -= c.len_utf8();
+    }
+    pos
 }
 
 /// The caret's bar on the page, in document space.
@@ -249,44 +311,63 @@ impl Caret {
             Motion::DocEnd => {
                 return Caret::at(lines.last().map_or(self.offset, |l| l.end));
             }
+            Motion::WordLeft => return Caret::at(word_left(&doc.source, self.offset)),
+            Motion::WordRight => return Caret::at(word_right(&doc.source, self.offset)),
             _ => {}
         }
         let Some(li) = locate(&lines, self.offset) else {
-            return self;
+            // Between lines, on a blank row: arrows step by source
+            // character so blank lines stay reachable and leavable.
+            return match motion {
+                Motion::Left if self.offset > 0 => {
+                    let prev = doc.source[..self.offset]
+                        .chars()
+                        .next_back()
+                        .map_or(self.offset, |c| self.offset - c.len_utf8());
+                    Caret::at(prev)
+                }
+                Motion::Right if self.offset < doc.source.len() => {
+                    let step = doc.source[self.offset..]
+                        .chars()
+                        .next()
+                        .map_or(0, |c| c.len_utf8());
+                    Caret::at(clamp_final(doc, self.offset, self.offset + step))
+                }
+                _ => self,
+            };
         };
         let line = &lines[li];
         match motion {
+            // Horizontal steps are source characters: inside the line
+            // they walk its glyphs, at its edges they cross the line
+            // ending onto the neighboring line or a blank row.
             Motion::Left => {
-                if self.offset > line.start {
-                    let text = &doc.source[line.start..line.end];
-                    let local = self.offset - line.start;
-                    let prev = text[..local]
+                if self.offset > 0 {
+                    let prev = doc.source[..self.offset]
                         .chars()
                         .next_back()
-                        .map(|c| local - c.len_utf8())
-                        .unwrap_or(0);
-                    Caret::at(line.start + prev)
-                } else if li > 0 {
-                    Caret::at(lines[li - 1].end)
+                        .map_or(self.offset, |c| self.offset - c.len_utf8());
+                    Caret::at(prev)
                 } else {
                     Caret::at(self.offset)
                 }
             }
             Motion::Right => {
-                if self.offset < line.end {
-                    let text = &doc.source[line.start..line.end];
-                    let local = self.offset - line.start;
-                    let step = text[local..].chars().next().map_or(0, |c| c.len_utf8());
-                    Caret::at(line.start + local + step)
-                } else if li + 1 < lines.len() {
-                    Caret::at(lines[li + 1].start)
+                if self.offset < doc.source.len() {
+                    let step = doc.source[self.offset..]
+                        .chars()
+                        .next()
+                        .map_or(0, |c| c.len_utf8());
+                    Caret::at(clamp_final(doc, self.offset, self.offset + step))
                 } else {
                     Caret::at(self.offset)
                 }
             }
             Motion::Home => Caret::at(line.start),
             Motion::End => Caret::at(line.end),
-            Motion::DocStart | Motion::DocEnd => unreachable!("returned before the line lookup"),
+            Motion::DocStart | Motion::DocEnd | Motion::WordLeft | Motion::WordRight => {
+                unreachable!("returned before the line lookup")
+            }
             Motion::Up | Motion::Down | Motion::PageUp | Motion::PageDown => {
                 let Some(run) = run_at(line, self.offset) else {
                     return self;
@@ -331,13 +412,29 @@ impl Caret {
         fonts: &mut FontStore,
     ) -> Option<CaretBox> {
         let lines = lines_of(lay, doc);
-        let li = locate(&lines, self.offset)?;
+        if let Some(li) = locate(&lines, self.offset) {
+            let line = &lines[li];
+            let run = run_at(line, self.offset)?;
+            let x = run.x + x_of(fonts, lay, doc, run, self.offset);
+            return Some(CaretBox {
+                x,
+                y: line.y,
+                h: line.h,
+            });
+        }
+        // A line with no glyphs, just opened by Enter or blank between
+        // paragraphs: the caret stands at the line start, below the
+        // nearest text line above, one advance per blank row.
+        let li = lines.iter().rposition(|l| l.end < self.offset)?;
         let line = &lines[li];
-        let run = run_at(line, self.offset)?;
-        let x = run.x + x_of(fonts, lay, doc, run, self.offset);
+        let gap = doc.source.get(line.end..self.offset)?.matches('\n').count();
+        if gap == 0 {
+            return None;
+        }
+        let x = line.runs.first().map_or(0.0, |r| r.x);
         Some(CaretBox {
             x,
-            y: line.y,
+            y: line.y + line.h * gap as f32,
             h: line.h,
         })
     }
@@ -546,6 +643,61 @@ mod tests {
         assert_eq!(c.offset, short_end);
         let c = step(c, Motion::Up, &l, &doc, &mut fonts);
         assert_eq!(c.offset, 8, "the goal column survives the round trip");
+    }
+
+    #[test]
+    fn the_caret_stands_on_a_just_opened_empty_line() {
+        let doc = code_doc("a\n\nb\n");
+        let (l, mut fonts) = lay_of(&doc);
+        let a = run(&l, &doc, "a");
+        let b = run(&l, &doc, "b");
+        let void = Caret::at(2)
+            .geometry(&l, &doc, &mut fonts)
+            .expect("an empty line still seats the caret");
+        assert_eq!(void.x, a.x, "the empty line starts where lines start");
+        let advance = b.y - a.y;
+        assert_eq!(
+            void.y,
+            a.y + advance / 2.0,
+            "the empty line sits between its neighbors"
+        );
+        let doc = text_doc("alpha\n\n");
+        let (l, mut fonts) = lay_of(&doc);
+        let alpha = run(&l, &doc, "alpha");
+        let tail = Caret::at(6)
+            .geometry(&l, &doc, &mut fonts)
+            .expect("the line opened past the text seats the caret");
+        assert_eq!(tail.x, alpha.x);
+        assert!(tail.y > alpha.y, "the new line stands below the last text");
+    }
+
+    #[test]
+    fn arrows_walk_through_blank_lines() {
+        let doc = code_doc("a\n\nb\n");
+        let (l, mut fonts) = lay_of(&doc);
+        let c = step(Caret::at(1), Motion::Right, &l, &doc, &mut fonts);
+        assert_eq!(c.offset, 2, "right from a line end enters the blank line");
+        let c = step(c, Motion::Right, &l, &doc, &mut fonts);
+        assert_eq!(c.offset, 3, "right from the blank line reaches the next");
+        let c = step(c, Motion::Left, &l, &doc, &mut fonts);
+        assert_eq!(c.offset, 2);
+        let c = step(c, Motion::Left, &l, &doc, &mut fonts);
+        assert_eq!(c.offset, 1);
+    }
+
+    #[test]
+    fn word_jumps_hop_words_symbols_and_lines() {
+        let text = "let x = a1_b;\n";
+        assert_eq!(word_right(text, 0), 3, "a word run is one hop");
+        assert_eq!(word_right(text, 3), 5, "the space before x is skipped");
+        assert_eq!(word_right(text, 5), 7, "a symbol run is one hop");
+        assert_eq!(word_right(text, 7), 12);
+        assert_eq!(word_right(text, 12), 13);
+        assert_eq!(word_right(text, 13), 14, "the jump clamps at the end");
+        assert_eq!(word_left(text, 12), 8, "back to the word start");
+        assert_eq!(word_left(text, 8), 6, "back over the symbol");
+        assert_eq!(word_left(text, 4), 0);
+        assert_eq!(word_left(text, 0), 0);
     }
 
     #[test]

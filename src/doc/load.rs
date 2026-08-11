@@ -101,6 +101,10 @@ pub struct Opened {
     /// replacement. Editing refuses such a file: byte fidelity cannot
     /// be promised back to disk over a lossy read.
     pub lossy: bool,
+    /// Offsets in the normalized text of each newline that was CRLF in
+    /// the file bytes. The splice ledger restores them on save, so the
+    /// normalization the viewer needs never reaches the disk.
+    pub crlf: Vec<u32>,
 }
 
 pub fn open(path: &Path, deadline: Option<Instant>) -> anyhow::Result<Opened> {
@@ -129,6 +133,7 @@ pub fn open(path: &Path, deadline: Option<Instant>) -> anyhow::Result<Opened> {
             book,
             toc,
             lossy: false,
+            crlf: Vec::new(),
         });
     }
     if is_binary(&bytes) {
@@ -138,11 +143,23 @@ pub fn open(path: &Path, deadline: Option<Instant>) -> anyhow::Result<Opened> {
     let lossy = matches!(text, std::borrow::Cow::Owned(_));
     // Windows files carry CRLF; the plain-text path strips returns per
     // line, and everything downstream (offsets, rendering, copy as
-    // markdown) assumes the source is clean of them.
-    let text = if text.contains("\r\n") {
-        std::borrow::Cow::Owned(text.replace("\r\n", "\n"))
+    // markdown) assumes the source is clean of them. Each stripped
+    // return leaves its normalized offset behind, so the splice ledger
+    // can put every untouched ending back verbatim on save.
+    let (text, crlf) = if text.contains("\r\n") {
+        let mut out = String::with_capacity(text.len());
+        let mut crlf = Vec::new();
+        let mut rest = &*text;
+        while let Some(i) = rest.find("\r\n") {
+            out.push_str(&rest[..i]);
+            crlf.push(out.len() as u32);
+            out.push('\n');
+            rest = &rest[i + 2..];
+        }
+        out.push_str(rest);
+        (std::borrow::Cow::Owned(out), crlf)
     } else {
-        text
+        (text, Vec::new())
     };
     let mut streamed = false;
     let mut document = match detect(path) {
@@ -172,6 +189,7 @@ pub fn open(path: &Path, deadline: Option<Instant>) -> anyhow::Result<Opened> {
         book: None,
         toc: Vec::new(),
         lossy,
+        crlf,
     })
 }
 
@@ -507,6 +525,26 @@ mod tests {
         };
         assert!(err.to_string().contains("PDF"), "{err}");
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn crlf_positions_are_recorded_for_the_ledger() {
+        let dir = std::env::temp_dir().join(format!("oryx-crlf-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mixed = dir.join("mixed.txt");
+        std::fs::write(&mixed, b"alpha\r\nbeta\ngamma\r\n").unwrap();
+        let opened = open(&mixed, None).unwrap();
+        assert_eq!(&*opened.document.source, "alpha\nbeta\ngamma\n");
+        assert_eq!(
+            opened.crlf,
+            vec![5, 16],
+            "each normalized newline is on record at its text offset"
+        );
+        let clean = dir.join("clean.txt");
+        std::fs::write(&clean, "alpha\nbeta\n").unwrap();
+        let opened = open(&clean, None).unwrap();
+        assert!(opened.crlf.is_empty());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

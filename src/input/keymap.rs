@@ -159,16 +159,10 @@ pub const SHORTCUTS: &[Shortcut] = &[
         ],
     },
     Shortcut {
-        keys: "Ctrl+Left / Ctrl+Right",
+        keys: "Ctrl+Tab",
         action: "Toggle the sidebar tab",
         section: "Navigation",
-        bindings: &[
-            (Binding::CtrlNamed(NamedKey::ArrowLeft), Command::SidebarTab),
-            (
-                Binding::CtrlNamed(NamedKey::ArrowRight),
-                Command::SidebarTab,
-            ),
-        ],
+        bindings: &[(Binding::CtrlNamed(NamedKey::Tab), Command::SidebarTab)],
     },
     Shortcut {
         keys: "Ctrl+F",
@@ -464,15 +458,22 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_arrows_toggle_the_sidebar_tab() {
+    fn ctrl_tab_toggles_the_sidebar_tab() {
         let named = |n| Key::Named(n);
         assert_eq!(
-            command(&named(NamedKey::ArrowLeft), true, false),
+            command(&named(NamedKey::Tab), true, false),
             Some(Command::SidebarTab)
+        );
+        // Ctrl on the bare arrows falls through to the pane transfer,
+        // like every shifted chord; the caret's word jumps intercept
+        // upstream while editing.
+        assert_eq!(
+            command(&named(NamedKey::ArrowLeft), true, false),
+            Some(Command::PaneLeft)
         );
         assert_eq!(
             command(&named(NamedKey::ArrowRight), true, false),
-            Some(Command::SidebarTab)
+            Some(Command::PaneRight)
         );
     }
 

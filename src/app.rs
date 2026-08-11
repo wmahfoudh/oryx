@@ -12,6 +12,7 @@ use oryx::doc::stream::{self, ParseWorker};
 use oryx::edit::{
     self,
     caret::{self, Caret, CaretBox, Motion},
+    splice::Ledger,
 };
 use oryx::export::{self, ExportPass, ExportSettings};
 use oryx::input::{
@@ -70,7 +71,7 @@ const MOUSE_MUTE: Duration = Duration::from_millis(150);
 const ICON_64: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/icon_64.rgba"));
 
 pub fn run(path: Option<PathBuf>, theme_name: Option<String>) -> anyhow::Result<()> {
-    let (document, pending, streamed, book, book_toc, lossy) = match &path {
+    let (document, pending, streamed, book, book_toc, lossy, opened_crlf) = match &path {
         Some(p) => {
             let opened = load::open(p, Some(Instant::now() + load::OPEN_BUDGET))?;
             (
@@ -80,6 +81,7 @@ pub fn run(path: Option<PathBuf>, theme_name: Option<String>) -> anyhow::Result<
                 opened.book,
                 opened.toc,
                 opened.lossy,
+                opened.crlf,
             )
         }
         None => (
@@ -89,6 +91,7 @@ pub fn run(path: Option<PathBuf>, theme_name: Option<String>) -> anyhow::Result<
             None,
             Vec::new(),
             false,
+            Vec::new(),
         ),
     };
     // Absolute from here on: a bare relative name like `README.md` has the
@@ -223,6 +226,9 @@ pub fn run(path: Option<PathBuf>, theme_name: Option<String>) -> anyhow::Result<
         caret: None,
         lossy,
         edit_marks: HashMap::new(),
+        ledger: None,
+        crlf: opened_crlf,
+        caret_snap: false,
         blink_visible: true,
         blink_flip: Instant::now(),
         notice: None,
@@ -311,10 +317,12 @@ fn draw_caret(
 }
 
 /// A book's `dc:title` wins over the file name; files have no title.
-fn window_title(book: Option<&str>, path: Option<&Path>) -> String {
+/// A dirty buffer carries the leading asterisk.
+fn window_title(book: Option<&str>, path: Option<&Path>, dirty: bool) -> String {
     let name = book.or_else(|| path.and_then(|p| p.file_name()).and_then(|n| n.to_str()));
+    let star = if dirty { "*" } else { "" };
     match name {
-        Some(name) => format!("{name} \u{00B7} oryx"),
+        Some(name) => format!("{star}{name} \u{00B7} oryx"),
         None => "oryx".to_string(),
     }
 }
@@ -490,6 +498,15 @@ struct App {
     /// Caret offsets remembered per file for this session, feeding the
     /// landing precedence on re-entry.
     edit_marks: HashMap<PathBuf, usize>,
+    /// The splice ledger, from the first edit-mode entry until the file
+    /// closes or saves; unsaved edits survive mode flips inside it.
+    ledger: Option<Ledger>,
+    /// Normalized-text offsets of the open file's CRLF endings, for the
+    /// ledger's byte-exact emission.
+    crlf: Vec<u32>,
+    /// A typing edit or caret motion moved content under a stale
+    /// layout; the next placed frame snaps the view to the caret.
+    caret_snap: bool,
     /// The blink's current half and when it flips, driven by the timer;
     /// every caret action restarts the visible half.
     blink_visible: bool,
@@ -715,6 +732,11 @@ impl App {
         };
         self.mode = edit::Mode::Edit;
         self.caret = Some(Caret::at(offset));
+        // The first entry fixes the baseline; re-entry keeps the ledger
+        // and the unsaved edits inside it.
+        if self.ledger.is_none() {
+            self.ledger = Some(Ledger::new(self.document.source.clone(), self.crlf.clone()));
+        }
         // The caret owns the keys; a sidebar holding them would strand
         // the arrows. Same funnel as the Right key's explicit handoff.
         self.move_ownership(PaneAct::Right);
@@ -772,18 +794,42 @@ impl App {
     /// inert until the splice ledger arrives. Escape stays a command so
     /// the ladder handles it, and the function keys keep their rows.
     fn edit_key(&mut self, key: &Key, ctrl: bool) -> bool {
+        // Alt chords belong to the desktop, never to typing.
+        if self.modifiers.alt_key() {
+            return false;
+        }
         if ctrl {
-            // The document jumps are the one chord pair the caret
-            // answers; Top and Bottom would otherwise move the view
-            // and strand it.
+            // The familiar editor chords the caret answers: document
+            // jumps, word jumps, and word deletion. Everything else
+            // keeps its app-wide meaning.
             let jump = match key {
                 Key::Named(NamedKey::Home) => Some(Motion::DocStart),
                 Key::Named(NamedKey::End) => Some(Motion::DocEnd),
+                Key::Named(NamedKey::ArrowLeft) => Some(Motion::WordLeft),
+                Key::Named(NamedKey::ArrowRight) => Some(Motion::WordRight),
                 _ => None,
             };
             if let Some(jump) = jump {
                 self.step_caret(jump);
                 return true;
+            }
+            let at = self.caret.map(|c| c.offset);
+            match (key, at) {
+                (Key::Named(NamedKey::Backspace), Some(at)) => {
+                    let to = caret::word_left(&self.document.source, at);
+                    if to < at {
+                        self.type_edit(to..at, "");
+                    }
+                    return true;
+                }
+                (Key::Named(NamedKey::Delete), Some(at)) => {
+                    let to = caret::word_right(&self.document.source, at);
+                    if to > at {
+                        self.type_edit(at..to, "");
+                    }
+                    return true;
+                }
+                _ => {}
             }
             return false;
         }
@@ -802,17 +848,120 @@ impl App {
             self.step_caret(motion);
             return true;
         }
-        matches!(
-            key,
-            Key::Character(_)
-                | Key::Named(
-                    NamedKey::Space
-                        | NamedKey::Enter
-                        | NamedKey::Backspace
-                        | NamedKey::Delete
-                        | NamedKey::Tab
-                )
-        )
+        let Some(at) = self.caret.map(|c| c.offset) else {
+            return false;
+        };
+        match key {
+            Key::Named(NamedKey::Enter) => {
+                self.type_edit(at..at, "\n");
+                true
+            }
+            Key::Named(NamedKey::Tab) => {
+                self.type_edit(at..at, "\t");
+                true
+            }
+            Key::Named(NamedKey::Space) => {
+                self.type_edit(at..at, " ");
+                true
+            }
+            Key::Named(NamedKey::Backspace) => {
+                let prev = self.document.source[..at]
+                    .chars()
+                    .next_back()
+                    .map(|c| at - c.len_utf8());
+                if let Some(prev) = prev {
+                    self.type_edit(prev..at, "");
+                }
+                true
+            }
+            Key::Named(NamedKey::Delete) => {
+                let next = self.document.source[at..]
+                    .chars()
+                    .next()
+                    .map(|c| at + c.len_utf8());
+                if let Some(next) = next {
+                    self.type_edit(at..next, "");
+                }
+                true
+            }
+            Key::Character(s) if !s.chars().any(char::is_control) && !s.is_empty() => {
+                let text = s.clone();
+                self.type_edit(at..at, &text);
+                true
+            }
+            Key::Character(_) => true,
+            _ => false,
+        }
+    }
+
+    /// One typing edit: the ledger records it, the document reparses
+    /// from the current text with its highlight prefix carried, the
+    /// touched tail re-highlights in the background, and the next
+    /// placed frame snaps the view to the caret.
+    fn type_edit(&mut self, range: std::ops::Range<usize>, text: &str) {
+        let Some(path) = self.path.clone() else {
+            return;
+        };
+        let Some(ledger) = self.ledger.as_mut() else {
+            return;
+        };
+        let removed = self
+            .document
+            .source
+            .get(range.clone())
+            .map_or(0, |cut| cut.matches('\n').count());
+        let touched = ledger.edit(range.clone(), text);
+        let old_touched = touched.start..touched.start + removed + 1;
+        let current = ledger.current();
+        self.document = edit::reparse(
+            load::detect(&path),
+            &current,
+            &self.document,
+            old_touched,
+            touched,
+        );
+        self.outline = OutlineTree::build(&self.document);
+        // Every row kept its colors through the reparse, so nothing is
+        // pending by count; the worker re-runs the block outright and
+        // its arrivals correct the stale rows.
+        let rehighlight = match self.document.blocks.first().map(|b| &b.kind) {
+            Some(BlockKind::CodeBlock {
+                language, lines, ..
+            }) => vec![PendingBlock {
+                block: 0,
+                language: language.clone(),
+                source: self.document.source.clone(),
+                lines: lines.clone(),
+            }],
+            _ => Vec::new(),
+        };
+        self.start_highlight(rehighlight);
+        self.selection = None;
+        self.sel_anchor = None;
+        // The match set holds positions of the text that just changed;
+        // the next frame recomputes it against the reparse.
+        if let Some(state) = self.search.as_mut() {
+            state.matches.clear();
+            state.rects.clear();
+            state.stale = true;
+        }
+        self.caret = Some(Caret::at(range.start + text.len()));
+        self.wake_caret();
+        self.caret_snap = true;
+        self.refresh_title();
+        self.restart_layout();
+    }
+
+    /// Repaints the title; the asterisk follows the dirty ledger.
+    fn refresh_title(&mut self) {
+        let dirty = self.ledger.as_ref().is_some_and(Ledger::is_dirty);
+        if let (Some(gfx), Some(path)) = (self.gfx.as_ref(), self.path.as_deref()) {
+            gfx.window.set_title(&window_title(
+                self.document.title.as_deref(),
+                Some(path),
+                dirty,
+            ));
+        }
     }
 
     /// A click while editing places the caret at the character.
@@ -1901,6 +2050,7 @@ impl App {
         if self.mode == edit::Mode::Edit {
             self.leave_edit();
         }
+        self.ledger = None;
         self.notice = None;
         let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         let loaded = load::open(&path, Some(Instant::now() + load::OPEN_BUDGET));
@@ -1911,6 +2061,7 @@ impl App {
             Ok(o) => {
                 self.document = o.document;
                 self.lossy = o.lossy;
+                self.crlf = o.crlf;
                 book_job = o.book;
                 self.book_toc = o.toc;
                 self.start_highlight(o.pending);
@@ -1928,6 +2079,7 @@ impl App {
                 // The message document is not the file's bytes; branding
                 // it lossy keeps the editing door shut on it.
                 self.lossy = true;
+                self.crlf = Vec::new();
                 self.start_highlight(Vec::new());
                 self.parser.cancel();
                 self.parse_pending = false;
@@ -1978,8 +2130,11 @@ impl App {
             side.set_current(&path);
         }
         if let Some(gfx) = self.gfx.as_ref() {
-            gfx.window
-                .set_title(&window_title(self.document.title.as_deref(), Some(&path)));
+            gfx.window.set_title(&window_title(
+                self.document.title.as_deref(),
+                Some(&path),
+                false,
+            ));
         }
         self.request_redraw();
     }
@@ -2735,6 +2890,18 @@ impl App {
         let before_search = self.scroll_y;
         self.sync_search();
         self.settle_search_anchor();
+        // A typing edit landed under a fresh layout: snap the view to
+        // the caret once its line is placed, inside the same re-window
+        // the search landing uses.
+        if self.caret_snap {
+            if let (Some(c), Some(lay)) = (self.caret, self.layout.as_ref()) {
+                if let Some(cb) = c.geometry(lay, &self.document, &mut self.fonts) {
+                    let target = caret::snap(self.scroll_y, size.height as f32, cb);
+                    self.scroll_y = scroll::clamp(target, lay.height, size.height as f32);
+                    self.caret_snap = false;
+                }
+            }
+        }
         // A search step that scrolled re-slides the window so this
         // frame paints the landing, not a cold viewport; the match
         // rects recompute over what just materialized.
@@ -3075,6 +3242,7 @@ impl ApplicationHandler for App {
             .with_title(window_title(
                 self.document.title.as_deref(),
                 self.path.as_deref(),
+                false,
             ))
             .with_window_icon(icon);
         // Reopen as last closed: size, position when it still lands on a
@@ -3414,17 +3582,26 @@ mod tests {
     fn window_title_carries_the_file_name() {
         use std::path::Path;
         assert_eq!(
-            super::window_title(None, Some(Path::new("/docs/notes/README.md"))),
+            super::window_title(None, Some(Path::new("/docs/notes/README.md")), false),
             "README.md · oryx"
         );
-        assert_eq!(super::window_title(None, None), "oryx");
+        assert_eq!(super::window_title(None, None, false), "oryx");
+    }
+
+    #[test]
+    fn a_dirty_buffer_carries_the_asterisk() {
+        use std::path::Path;
+        assert_eq!(
+            super::window_title(None, Some(Path::new("/docs/notes.txt")), true),
+            "*notes.txt · oryx"
+        );
     }
 
     #[test]
     fn window_title_prefers_the_book_title() {
         use std::path::Path;
         assert_eq!(
-            super::window_title(Some("Test Book"), Some(Path::new("/books/b.epub"))),
+            super::window_title(Some("Test Book"), Some(Path::new("/books/b.epub")), false),
             "Test Book · oryx"
         );
     }
