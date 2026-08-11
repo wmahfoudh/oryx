@@ -1480,7 +1480,7 @@ fn pool_top_up(doc: &Document, pass: &mut LayoutPass) {
             // Mirrors open_code: the pad and wrap width the assembler
             // will place the line against.
             let (x_base, avail) = block_geometry(block, pass.margin, pass.content_width, &ctx.cfg);
-            let size = ctx.cfg.code_size * ctx.cfg.zoom;
+            let size = code_face(doc.plain_file, &ctx.cfg).1 * ctx.cfg.zoom;
             let pad = if code_framed(doc) {
                 metrics::CODE_PAD * ctx.cfg.zoom
             } else {
@@ -1499,6 +1499,7 @@ fn pool_top_up(doc: &Document, pass: &mut LayoutPass) {
                     size,
                     line_height: metrics::LINE_HEIGHT * size,
                     wrap_width: (avail - 2.0 * pad).max(40.0),
+                    prose: doc.plain_file,
                 },
             });
         } else {
@@ -1508,7 +1509,8 @@ fn pool_top_up(doc: &Document, pass: &mut LayoutPass) {
             if !poolable(block) {
                 continue;
             }
-            let Some((heading, _, base_size)) = block_metrics(block, &ctx.cfg) else {
+            let Some((heading, _, base_size)) = block_metrics(block, &ctx.cfg, doc.plain_file)
+            else {
                 continue;
             };
             let (x_base, avail) = block_geometry(block, pass.margin, pass.content_width, &ctx.cfg);
@@ -1544,7 +1546,7 @@ fn poolable(block: &Block) -> bool {
 
 /// The block's own metrics: heading level, list flag, base size. None
 /// when the block emits nothing, a styled kind with no spans.
-fn block_metrics(block: &Block, cfg: &ViewConfig) -> Option<(Option<u8>, bool, f32)> {
+fn block_metrics(block: &Block, cfg: &ViewConfig, plain: bool) -> Option<(Option<u8>, bool, f32)> {
     let heading = match &block.kind {
         BlockKind::Heading { level, .. } => Some(*level),
         _ => None,
@@ -1561,7 +1563,7 @@ fn block_metrics(block: &Block, cfg: &ViewConfig) -> Option<(Option<u8>, bool, f
         }
         // A summary row renders its chevron even with no text.
         BlockKind::Summary { .. } => cfg.body_size * cfg.zoom,
-        BlockKind::CodeBlock { .. } => cfg.code_size * cfg.zoom,
+        BlockKind::CodeBlock { .. } => code_face(plain, cfg).1 * cfg.zoom,
         BlockKind::Rule
         | BlockKind::Table { .. }
         | BlockKind::Image { .. }
@@ -1655,7 +1657,7 @@ fn place_block(
         out.table.notes_rule = Some((position, pass.cursor));
         pass.cursor += (1.0 * cfg.zoom).max(1.0);
     }
-    let Some((heading, is_list, base_size)) = block_metrics(block, cfg) else {
+    let Some((heading, is_list, base_size)) = block_metrics(block, cfg, doc.plain_file) else {
         out.table.push(
             block_index,
             BlockEntry {
@@ -1766,6 +1768,7 @@ fn place_block(
             frame,
             counts,
             code_framed(doc),
+            doc.plain_file,
             out,
             pass,
         );
@@ -2293,9 +2296,10 @@ fn seed_plan(
                     block_index: entry.block as usize,
                     line_index: line,
                     x0: x_base + entry.pad,
-                    size: ctx.cfg.code_size * ctx.cfg.zoom,
+                    size: code_face(doc.plain_file, &ctx.cfg).1 * ctx.cfg.zoom,
                     line_height: entry.line_height,
                     wrap_width: (avail - 2.0 * entry.pad).max(40.0),
+                    prose: doc.plain_file,
                 },
             });
         }
@@ -2323,7 +2327,7 @@ fn seed_plan(
         if !poolable(block) {
             continue;
         }
-        let Some((heading, _, base_size)) = block_metrics(block, &ctx.cfg) else {
+        let Some((heading, _, base_size)) = block_metrics(block, &ctx.cfg, doc.plain_file) else {
             continue;
         };
         let (x_base, avail) = block_geometry(block, table.margin, table.content_width, &ctx.cfg);
@@ -2449,7 +2453,7 @@ fn replay_position(
     }
     let block = &doc.blocks[entry.block as usize];
     let (heading, _, base_size) =
-        block_metrics(block, cfg).expect("a non-silent entry has metrics");
+        block_metrics(block, cfg, doc.plain_file).expect("a non-silent entry has metrics");
     let (x_base, avail) = block_geometry(block, table.margin, table.content_width, cfg);
     let run_mark = out.runs.len();
     let rect_mark = out.rects.len();
@@ -2601,6 +2605,7 @@ fn replay_code_lines(
                         size,
                         entry.line_height,
                         wrap_width,
+                        doc.plain_file,
                         &mut scratch,
                     );
                     out.splice(&mut scratch, top);
@@ -2750,12 +2755,22 @@ fn quote_decoration(
 }
 
 /// Whether code blocks in this document draw the panel frame. A code
-/// file is a page that is code, not a page containing code: its lines
-/// draw on the page itself, no panel, no border, no inner pad, the
-/// full width to wrap in. A markdown fence always keeps the panel,
-/// even when the fence is the whole file.
+/// or text file is a page that is its lines, not a page containing
+/// code: the lines draw on the page itself, no panel, no border, no
+/// inner pad, the full width to wrap in. A markdown fence always keeps
+/// the panel, even when the fence is the whole file.
 fn code_framed(doc: &Document) -> bool {
-    !doc.code_file
+    !(doc.code_file || doc.plain_file)
+}
+
+/// The face code lines draw in: a plain text file's lines are prose
+/// and keep the body face and color; every other code line is code.
+fn code_face(plain: bool, cfg: &ViewConfig) -> (&str, f32) {
+    if plain {
+        (&cfg.body_family, cfg.body_size)
+    } else {
+        (&cfg.code_family, cfg.code_size)
+    }
 }
 
 /// Opens a code block: the panel and border take their final index with a
@@ -2769,10 +2784,11 @@ fn open_code(
     frame: Frame,
     counts: ElementCounts,
     framed: bool,
+    plain: bool,
     out: &mut LayoutDoc,
     pass: &LayoutPass,
 ) -> OpenCode {
-    let size = cfg.code_size * cfg.zoom;
+    let size = code_face(plain, cfg).1 * cfg.zoom;
     let line_height = metrics::LINE_HEIGHT * size;
     let pad = if framed {
         metrics::CODE_PAD * cfg.zoom
@@ -2885,6 +2901,7 @@ fn place_code_line(
                     open.size,
                     open.line_height,
                     open.wrap_width,
+                    doc.plain_file,
                     &mut scratch,
                 );
                 (advance, scratch)
@@ -4974,6 +4991,7 @@ pub fn recolor_batch(
                 record.size,
                 record.line_height,
                 record.wrap_width,
+                doc.plain_file,
                 &mut scratch,
             );
             Some(())
@@ -5052,6 +5070,7 @@ pub(crate) fn shape_code_line_step(
     size: f32,
     line_height: f32,
     wrap_width: f32,
+    prose: bool,
     scratch: &mut LayoutDoc,
 ) -> f32 {
     let advance = shape_code_line(
@@ -5067,6 +5086,7 @@ pub(crate) fn shape_code_line_step(
         size,
         line_height,
         wrap_width,
+        prose,
         scratch,
     );
     scratch.code_lines.push(CodeLine {
@@ -5098,6 +5118,7 @@ fn shape_code_line(
     size: f32,
     line_height: f32,
     wrap_width: f32,
+    prose: bool,
     out: &mut LayoutDoc,
 ) -> f32 {
     let whole_line = [(0..line.len(), SyntaxRole::Plain)];
@@ -5106,19 +5127,18 @@ fn shape_code_line(
     } else {
         segments
     };
+    let face = code_face(prose, cfg).0;
     let mut buffer = Buffer::new(&mut fonts.font_system, Metrics::new(size, line_height));
     buffer.set_size(&mut fonts.font_system, Some(wrap_width), None);
     let rich: Vec<(&str, Attrs)> = segments
         .iter()
         .enumerate()
         .map(|(index, (range, _))| {
-            let attrs = Attrs::new()
-                .family(Family::Name(&cfg.code_family))
-                .metadata(index);
+            let attrs = Attrs::new().family(Family::Name(face)).metadata(index);
             (&line[range.clone()], attrs)
         })
         .collect();
-    let default_attrs = Attrs::new().family(Family::Name(&cfg.code_family));
+    let default_attrs = Attrs::new().family(Family::Name(face));
     buffer.set_rich_text(
         &mut fonts.font_system,
         rich,
@@ -5146,7 +5166,7 @@ fn shape_code_line(
             let role = segments[segment_index].1;
             // The rich pieces cover the line contiguously, so an offset
             // into their concatenation is an offset into the line.
-            let family = out.family_id(&cfg.code_family);
+            let family = out.family_id(face);
             out.runs.push(TextRun {
                 text: TextRef::Model {
                     start: start_byte as u32,
@@ -5160,7 +5180,11 @@ fn shape_code_line(
                 family,
                 weight: Weight::NORMAL.0,
                 italic: false,
-                color: role_color(theme, role),
+                color: if prose {
+                    theme.text.body
+                } else {
+                    role_color(theme, role)
+                },
                 block: block_index,
                 span: line_index,
             });
@@ -5254,6 +5278,37 @@ mod tests {
         assert!(
             (three - 3.0 * one).abs() < 0.5,
             "two blank lines are two rows: single advance {one}, with blanks {three}"
+        );
+    }
+
+    #[test]
+    fn a_text_file_draws_prose_lines_in_the_body_face() {
+        let doc = load::text_document("alpha\n\nbeta\n");
+        let l = lay_of(&doc);
+        let cfg = ViewConfig::default();
+        let alpha = l
+            .runs
+            .iter()
+            .find(|r| l.run_text(&doc, r) == "alpha")
+            .expect("alpha placed");
+        assert_eq!(
+            l.run_family(alpha),
+            cfg.body_family,
+            "prose lines keep the body face"
+        );
+        assert_eq!(alpha.size, cfg.body_size, "prose lines keep the body size");
+        let blocks = &Theme::default_dark().blocks;
+        assert!(
+            l.rects
+                .iter()
+                .all(|r| r.color != blocks.code_bg && r.color != blocks.code_border),
+            "a text file carries no panel"
+        );
+        let advance = run_y(&l, &doc, "beta") - run_y(&l, &doc, "alpha");
+        let line = metrics::LINE_HEIGHT * cfg.body_size;
+        assert!(
+            (advance - 2.0 * line).abs() < 0.5,
+            "the blank line is one row: {advance} vs {line}"
         );
     }
 

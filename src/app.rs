@@ -923,11 +923,12 @@ impl App {
         self.outline = OutlineTree::build(&self.document);
         // Every row kept its colors through the reparse, so nothing is
         // pending by count; the worker re-runs the block outright and
-        // its arrivals correct the stale rows.
+        // its arrivals correct the stale rows. Prose has no colors and
+        // skips the worker.
         let rehighlight = match self.document.blocks.first().map(|b| &b.kind) {
             Some(BlockKind::CodeBlock {
                 language, lines, ..
-            }) => vec![PendingBlock {
+            }) if !self.document.plain_file => vec![PendingBlock {
                 block: 0,
                 language: language.clone(),
                 source: self.document.source.clone(),

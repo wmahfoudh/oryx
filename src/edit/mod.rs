@@ -71,7 +71,7 @@ pub fn reparse(
     let mut new = match kind {
         FileKind::Code(token) => load::code_document(Some(token), current),
         FileKind::Unknown => load::code_document(None, current),
-        _ => load::plain_document(current),
+        _ => load::text_document(current),
     };
     let empty = Vec::new();
     let old_high = match old.blocks.first().map(|b| &b.kind) {
@@ -281,10 +281,15 @@ mod tests {
     }
 
     #[test]
-    fn reparse_of_a_text_file_stays_plain() {
-        let old = load::plain_document("hello\n");
+    fn reparse_of_a_text_file_stays_line_oriented_prose() {
+        let old = load::text_document("hello\n");
         let new = reparse(FileKind::Text, "hello world\n", &old, 0..1, 0..1);
-        assert!(matches!(new.blocks[0].kind, BlockKind::Paragraph { .. }));
+        assert!(matches!(
+            new.blocks[0].kind,
+            BlockKind::CodeBlock { language: None, .. }
+        ));
+        assert!(new.plain_file);
+        assert!(!new.code_file);
         assert_eq!(&*new.source, "hello world\n");
     }
 

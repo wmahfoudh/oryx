@@ -654,7 +654,7 @@ mod tests {
     }
 
     fn text_doc(source: &str) -> Document {
-        load::plain_document(source)
+        load::text_document(source)
     }
 
     /// Code lines shape in the monospace face, so columns align exactly

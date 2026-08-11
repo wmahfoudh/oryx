@@ -75,6 +75,8 @@ pub(crate) enum Work {
         size: f32,
         line_height: f32,
         wrap_width: f32,
+        /// A plain text file's line: body face and body color.
+        prose: bool,
     },
     Text {
         runs: Vec<TextJob>,
@@ -323,6 +325,7 @@ fn worker(shared: Arc<Shared>, mut fonts: crate::style::fonts::FontStore) {
                 size,
                 line_height,
                 wrap_width,
+                prose,
             } => super::engine::shape_code_line_step(
                 &mut fonts,
                 &job.ctx.theme,
@@ -335,6 +338,7 @@ fn worker(shared: Arc<Shared>, mut fonts: crate::style::fonts::FontStore) {
                 *size,
                 *line_height,
                 *wrap_width,
+                *prose,
                 &mut scratch,
             ),
             Work::Text { runs } => {

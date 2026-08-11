@@ -20,7 +20,7 @@ pub enum FileKind {
     Markdown,
     /// Carries the syntax token used for highlighting (`"rust"`, `"python"`).
     Code(&'static str),
-    /// Prose, laid out as wrapped paragraphs.
+    /// Prose, line-oriented like code, drawn in the body face.
     Text,
     /// An EPUB book; a zip, so it never meets the binary sniff.
     Epub,
@@ -176,7 +176,7 @@ pub fn open(path: &Path, deadline: Option<Instant>) -> anyhow::Result<Opened> {
             None => super::markdown::parse(&*text),
         },
         FileKind::Code(token) => code_document(Some(token), &text),
-        FileKind::Text => plain_document(&text),
+        FileKind::Text => text_document(&text),
         FileKind::Epub => unreachable!("books returned before the sniff"),
         FileKind::Undisplayable => unreachable!("refused before the sniff"),
         FileKind::Unknown => code_document(None, &text),
@@ -285,19 +285,22 @@ pub fn recognized_extensions() -> Vec<&'static str> {
         .collect()
 }
 
+fn source_lines(text: &str) -> Vec<Range<u32>> {
+    let base = text.as_ptr() as usize;
+    text.lines()
+        .map(|line| {
+            let start = (line.as_ptr() as usize - base) as u32;
+            start..start + line.len() as u32
+        })
+        .collect()
+}
+
 /// The whole file as a single code block; the budget pass highlights it.
 /// No token means no grammar, so the block renders in the code font
 /// unstyled. The lines are ranges into the source: a code file was two
 /// full copies of itself before layout ran, now it is one.
 pub(crate) fn code_document(token: Option<&str>, text: &str) -> Document {
-    let base = text.as_ptr() as usize;
-    let mut lines: Vec<Range<u32>> = text
-        .lines()
-        .map(|line| {
-            let start = (line.as_ptr() as usize - base) as u32;
-            start..start + line.len() as u32
-        })
-        .collect();
+    let mut lines = source_lines(text);
     while lines.last().is_some_and(|l| l.is_empty()) {
         lines.pop();
     }
@@ -311,6 +314,25 @@ pub(crate) fn code_document(token: Option<&str>, text: &str) -> Document {
         blocks: vec![block],
         source: Arc::from(text),
         code_file: true,
+        ..Document::default()
+    }
+}
+
+/// The whole file as one line-oriented block, like a code file, drawn
+/// as prose: the body face, the page background, no panel, no
+/// highlighting. Every line is a row, trailing blank lines included,
+/// so editing sees exactly the lines the file has.
+pub(crate) fn text_document(text: &str) -> Document {
+    let mut block = Block::plain(BlockKind::CodeBlock {
+        language: None,
+        lines: CodeBody::verbatim(source_lines(text)),
+        highlights: Vec::new(),
+    });
+    block.range = 0..text.len();
+    Document {
+        blocks: vec![block],
+        source: Arc::from(text),
+        plain_file: true,
         ..Document::default()
     }
 }
@@ -549,6 +571,31 @@ mod tests {
         };
         assert!(err.to_string().contains("PDF"), "{err}");
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn a_text_file_is_one_block_of_prose_lines() {
+        let dir = std::env::temp_dir().join(format!("oryx-textdoc-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("notes.txt");
+        std::fs::write(&path, "alpha\n\nbeta\n\n").unwrap();
+        let d = open(&path, None).unwrap().document;
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(d.plain_file, "a text file is a plain file");
+        assert!(!d.code_file, "a text file keeps the page background");
+        assert_eq!(d.blocks.len(), 1, "the whole file is one block");
+        let BlockKind::CodeBlock {
+            language, lines, ..
+        } = &d.blocks[0].kind
+        else {
+            panic!("a text file is line-oriented");
+        };
+        assert!(language.is_none());
+        assert_eq!(
+            lines.len(),
+            4,
+            "every line is a row, the trailing blank included"
+        );
     }
 
     #[test]
@@ -944,10 +991,8 @@ mod tests {
     }
 
     #[test]
-    fn plain_file_splits_paragraphs_on_blank_lines() {
-        let path = temp_file("t.txt", "line one\nline two\n\nsecond para\n");
-        let d = open(&path, None).unwrap().document;
-        std::fs::remove_file(&path).unwrap();
+    fn a_message_document_splits_paragraphs_on_blank_lines() {
+        let d = plain_document("line one\nline two\n\nsecond para\n");
         assert_eq!(d.blocks.len(), 2);
         let BlockKind::Paragraph { spans } = &d.blocks[0].kind else {
             panic!()
