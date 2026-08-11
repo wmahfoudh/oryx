@@ -18,7 +18,8 @@ pub struct Caret {
     pub goal: Option<f32>,
 }
 
-/// The motion set. Bare keys only; every chord keeps its app meaning.
+/// The motion set: the bare keys, plus the document jumps every editor
+/// puts on Ctrl+Home and Ctrl+End.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Motion {
     Left,
@@ -29,6 +30,8 @@ pub enum Motion {
     End,
     PageUp,
     PageDown,
+    DocStart,
+    DocEnd,
 }
 
 /// The caret's bar on the page, in document space.
@@ -279,6 +282,8 @@ impl Caret {
             }
             Motion::Home => Caret::at(line.start),
             Motion::End => Caret::at(line.end),
+            Motion::DocStart => Caret::at(lines.first().map_or(self.offset, |l| l.start)),
+            Motion::DocEnd => Caret::at(lines.last().map_or(self.offset, |l| l.end)),
             Motion::Up | Motion::Down | Motion::PageUp | Motion::PageDown => {
                 let Some(run) = run_at(line, self.offset) else {
                     return self;
@@ -538,6 +543,18 @@ mod tests {
         assert_eq!(c.offset, short_end);
         let c = step(c, Motion::Up, &l, &doc, &mut fonts);
         assert_eq!(c.offset, 8, "the goal column survives the round trip");
+    }
+
+    #[test]
+    fn the_document_jumps_reach_both_ends() {
+        let doc = code_doc("alpha alpha\nx\nbeta beta\n");
+        let (l, mut fonts) = lay_of(&doc);
+        let mid = at(&doc, "x");
+        let c = step(Caret::at(mid), Motion::DocStart, &l, &doc, &mut fonts);
+        assert_eq!(c.offset, 0, "the jump lands on the first text position");
+        let end = at(&doc, "beta beta") + "beta beta".len();
+        let c = step(Caret::at(mid), Motion::DocEnd, &l, &doc, &mut fonts);
+        assert_eq!(c.offset, end, "the jump lands past the last character");
     }
 
     #[test]

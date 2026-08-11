@@ -770,6 +770,18 @@ impl App {
     /// the ladder handles it, and the function keys keep their rows.
     fn edit_key(&mut self, key: &Key, ctrl: bool) -> bool {
         if ctrl {
+            // The document jumps are the one chord pair the caret
+            // answers; Top and Bottom would otherwise move the view
+            // and strand it.
+            let jump = match key {
+                Key::Named(NamedKey::Home) => Some(Motion::DocStart),
+                Key::Named(NamedKey::End) => Some(Motion::DocEnd),
+                _ => None,
+            };
+            if let Some(jump) = jump {
+                self.step_caret(jump);
+                return true;
+            }
             return false;
         }
         let motion = match key {
