@@ -220,6 +220,17 @@ pub fn plain_text(sel: &Selection, doc: &Document) -> String {
                         }
                     }
                     if from >= to {
+                        // The selection's end sits at this piece's
+                        // start: the separator before it was crossed
+                        // and belongs to the copy, the line break of a
+                        // line selected whole.
+                        if index == b.block && span == b.span && to == 0 {
+                            if let Some(sep) = pending_sep.take() {
+                                if !block_text.is_empty() {
+                                    block_text.push_str(&sep);
+                                }
+                            }
+                        }
                         continue;
                     }
                     let slice = &text[floor_boundary(&text, from)..floor_boundary(&text, to)];
@@ -927,6 +938,28 @@ mod tests {
 
     fn select_all(doc: &Document) -> Selection {
         all(doc).expect("document has selectable content")
+    }
+
+    #[test]
+    fn a_line_selected_with_its_break_copies_the_break() {
+        let doc = markdown::parse("```\nalpha\nbeta\n```\n");
+        let sel = Selection {
+            start: ModelPos {
+                block: 0,
+                span: 0,
+                byte: 0,
+            },
+            end: ModelPos {
+                block: 0,
+                span: 1,
+                byte: 0,
+            },
+        };
+        assert_eq!(
+            plain_text(&sel, &doc),
+            "alpha\n",
+            "a selection reaching the next line's start covers the break"
+        );
     }
 
     #[test]

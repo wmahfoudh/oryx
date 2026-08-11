@@ -165,8 +165,62 @@ fn run_source(doc: &Document, run: &TextRun) -> Option<(usize, usize)> {
 }
 
 /// A model position's source byte offset, for verbatim content.
-fn model_offset(doc: &Document, pos: &ModelPos) -> Option<usize> {
+pub fn model_offset(doc: &Document, pos: &ModelPos) -> Option<usize> {
     Some(span_base(doc, pos.block, pos.span)? + pos.byte)
+}
+
+/// The model position a source offset stands at, for verbatim content;
+/// the inverse of `model_offset`.
+pub fn model_pos(doc: &Document, offset: usize) -> Option<ModelPos> {
+    for (bi, block) in doc.blocks.iter().enumerate() {
+        match &block.kind {
+            BlockKind::CodeBlock { lines, .. } => {
+                for li in 0..lines.len() {
+                    let range = lines.line_range(li)?;
+                    if range.start <= offset && offset <= range.end {
+                        return Some(ModelPos {
+                            block: bi,
+                            span: li,
+                            byte: offset - range.start,
+                        });
+                    }
+                }
+            }
+            kind => {
+                for (si, span) in block_spans(kind)?.iter().enumerate() {
+                    if !span.is_verbatim() || span.range.is_empty() {
+                        continue;
+                    }
+                    let (start, end) = (span.range.start as usize, span.range.end as usize);
+                    if start <= offset && offset <= end {
+                        return Some(ModelPos {
+                            block: bi,
+                            span: si,
+                            byte: offset - start,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// A selection between two source offsets, `caret` as the active end,
+/// speaking the model so the rects and both copies work unchanged.
+pub fn span_selection(doc: &Document, anchor: usize, caret: usize) -> Option<Selection> {
+    Some(Selection {
+        start: model_pos(doc, anchor)?,
+        end: model_pos(doc, caret)?,
+    })
+}
+
+/// The ordered source range a selection covers.
+pub fn selection_range(doc: &Document, sel: &Selection) -> Option<std::ops::Range<usize>> {
+    let (start, end) = sel.ordered();
+    let a = model_offset(doc, &start)?;
+    let b = model_offset(doc, &end)?;
+    Some(a.min(b)..a.max(b))
 }
 
 /// The visual lines of every mappable run, in reading order.
@@ -785,6 +839,46 @@ mod tests {
             .expect("the line opened past the text seats the caret");
         assert_eq!(tail.x, alpha.x);
         assert!(tail.y > alpha.y, "the new line stands below the last text");
+    }
+
+    #[test]
+    fn offsets_round_trip_through_model_positions() {
+        let doc = text_doc("alpha\n\nbeta é x\n");
+        for offset in [0, 3, 5, 6, 7, 12, 16] {
+            let pos = model_pos(&doc, offset)
+                .unwrap_or_else(|| panic!("offset {offset} has a model position"));
+            assert_eq!(
+                model_offset(&doc, &pos),
+                Some(offset),
+                "offset {offset} survives the round trip"
+            );
+        }
+    }
+
+    #[test]
+    fn a_selection_spans_source_offsets_in_either_direction() {
+        let doc = text_doc("alpha\nbeta\n");
+        let back = span_selection(&doc, 8, 2).expect("a selection");
+        assert_eq!(selection_range(&doc, &back), Some(2..8));
+        assert_eq!(
+            model_offset(&doc, &back.end),
+            Some(2),
+            "the caret side stays the active end"
+        );
+        let fwd = span_selection(&doc, 2, 8).expect("a selection");
+        assert_eq!(selection_range(&doc, &fwd), Some(2..8));
+        assert_eq!(
+            selection::plain_text(&fwd, &doc),
+            "pha\nbe",
+            "the existing copy machinery reads it character-exact"
+        );
+    }
+
+    #[test]
+    fn select_all_covers_the_text_and_keeps_the_terminator() {
+        let doc = text_doc("alpha\nbeta\n");
+        let sel = selection::all(&doc).expect("selectable content");
+        assert_eq!(selection_range(&doc, &sel), Some(0..10));
     }
 
     #[test]

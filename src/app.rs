@@ -667,6 +667,8 @@ impl App {
             Command::Top => self.scroll_to(0.0),
             Command::Bottom => self.scroll_to(self.doc_height()),
             Command::Edit => self.toggle_edit(),
+            Command::Cut => self.cut_selection(),
+            Command::Paste => self.paste_clipboard(),
             // The Escape ladder, innermost out. The overlay branch
             // catches it upstream; the find bar rung is normally spent
             // there too and stands here for totality.
@@ -793,15 +795,16 @@ impl App {
     /// keep their app-wide meaning; the typing keys are consumed and
     /// inert until the splice ledger arrives. Escape stays a command so
     /// the ladder handles it, and the function keys keep their rows.
-    fn edit_key(&mut self, key: &Key, ctrl: bool) -> bool {
+    fn edit_key(&mut self, key: &Key, ctrl: bool, shift: bool) -> bool {
         // Alt chords belong to the desktop, never to typing.
         if self.modifiers.alt_key() {
             return false;
         }
         if ctrl {
             // The familiar editor chords the caret answers: document
-            // jumps, word jumps, and word deletion. Everything else
-            // keeps its app-wide meaning.
+            // jumps, word jumps, and word deletion, growing the
+            // selection under Shift. Everything else keeps its
+            // app-wide meaning.
             let jump = match key {
                 Key::Named(NamedKey::Home) => Some(Motion::DocStart),
                 Key::Named(NamedKey::End) => Some(Motion::DocEnd),
@@ -810,22 +813,26 @@ impl App {
                 _ => None,
             };
             if let Some(jump) = jump {
-                self.step_caret(jump);
+                self.move_caret(jump, shift);
                 return true;
             }
             let at = self.caret.map(|c| c.offset);
             match (key, at) {
                 (Key::Named(NamedKey::Backspace), Some(at)) => {
-                    let to = caret::word_left(&self.document.source, at);
-                    if to < at {
-                        self.type_edit(to..at, "");
+                    if !self.delete_selection() {
+                        let to = caret::word_left(&self.document.source, at);
+                        if to < at {
+                            self.type_edit(to..at, "");
+                        }
                     }
                     return true;
                 }
                 (Key::Named(NamedKey::Delete), Some(at)) => {
-                    let to = caret::word_right(&self.document.source, at);
-                    if to > at {
-                        self.type_edit(at..to, "");
+                    if !self.delete_selection() {
+                        let to = caret::word_right(&self.document.source, at);
+                        if to > at {
+                            self.type_edit(at..to, "");
+                        }
                     }
                     return true;
                 }
@@ -845,7 +852,7 @@ impl App {
             _ => None,
         };
         if let Some(motion) = motion {
-            self.step_caret(motion);
+            self.move_caret(motion, shift);
             return true;
         }
         let Some(at) = self.caret.map(|c| c.offset) else {
@@ -853,40 +860,44 @@ impl App {
         };
         match key {
             Key::Named(NamedKey::Enter) => {
-                self.type_edit(at..at, "\n");
+                self.type_over("\n");
                 true
             }
             Key::Named(NamedKey::Tab) => {
-                self.type_edit(at..at, "\t");
+                self.type_over("\t");
                 true
             }
             Key::Named(NamedKey::Space) => {
-                self.type_edit(at..at, " ");
+                self.type_over(" ");
                 true
             }
             Key::Named(NamedKey::Backspace) => {
-                let prev = self.document.source[..at]
-                    .chars()
-                    .next_back()
-                    .map(|c| at - c.len_utf8());
-                if let Some(prev) = prev {
-                    self.type_edit(prev..at, "");
+                if !self.delete_selection() {
+                    let prev = self.document.source[..at]
+                        .chars()
+                        .next_back()
+                        .map(|c| at - c.len_utf8());
+                    if let Some(prev) = prev {
+                        self.type_edit(prev..at, "");
+                    }
                 }
                 true
             }
             Key::Named(NamedKey::Delete) => {
-                let next = self.document.source[at..]
-                    .chars()
-                    .next()
-                    .map(|c| at + c.len_utf8());
-                if let Some(next) = next {
-                    self.type_edit(at..next, "");
+                if !self.delete_selection() {
+                    let next = self.document.source[at..]
+                        .chars()
+                        .next()
+                        .map(|c| at + c.len_utf8());
+                    if let Some(next) = next {
+                        self.type_edit(at..next, "");
+                    }
                 }
                 true
             }
             Key::Character(s) if !s.chars().any(char::is_control) && !s.is_empty() => {
                 let text = s.clone();
-                self.type_edit(at..at, &text);
+                self.type_over(&text);
                 true
             }
             Key::Character(_) => true,
@@ -962,6 +973,130 @@ impl App {
                 Some(path),
                 dirty,
             ));
+        }
+    }
+
+    /// The source range the standing selection covers, when one does.
+    fn selection_source_range(&self) -> Option<std::ops::Range<usize>> {
+        let sel = self.selection.filter(|s| !s.is_empty())?;
+        caret::selection_range(&self.document, &sel)
+    }
+
+    /// The anchor a growing selection keeps: its non-active end.
+    fn selection_anchor_offset(&self) -> Option<usize> {
+        let sel = self.selection.filter(|s| !s.is_empty())?;
+        caret::model_offset(&self.document, &sel.start)
+    }
+
+    /// Typing consumes the selection when one stands, else the caret
+    /// point.
+    fn type_over(&mut self, text: &str) {
+        let range = self.selection_source_range().unwrap_or_else(|| {
+            let at = self.caret.map_or(0, |c| c.offset);
+            at..at
+        });
+        self.type_edit(range, text);
+    }
+
+    /// Deletes the standing selection; false when there is none.
+    fn delete_selection(&mut self) -> bool {
+        match self.selection_source_range() {
+            Some(range) => {
+                self.type_edit(range, "");
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Seats the caret at an offset, blink restarted, view snapped.
+    fn place_caret_at(&mut self, offset: usize) {
+        let view_h = self.viewport_h();
+        self.caret = Some(Caret::at(offset));
+        self.wake_caret();
+        if let (Some(c), Some(lay)) = (self.caret, self.layout.as_ref()) {
+            if let Some(b) = c.geometry(lay, &self.document, &mut self.fonts) {
+                let target = caret::snap(self.scroll_y, view_h, b);
+                if target != self.scroll_y {
+                    self.scroll_to(target);
+                }
+            }
+        }
+        self.request_redraw();
+    }
+
+    /// One caret motion: growing the selection while Shift holds, and
+    /// otherwise collapsing it, plain Left and Right to its edges the
+    /// way every editor does.
+    fn move_caret(&mut self, motion: Motion, shift: bool) {
+        if shift {
+            let anchor = self
+                .selection_anchor_offset()
+                .or_else(|| self.caret.map(|c| c.offset));
+            self.step_caret(motion);
+            let caret_off = self.caret.map(|c| c.offset);
+            self.selection = match (anchor, caret_off) {
+                (Some(a), Some(c)) if a != c => caret::span_selection(&self.document, a, c),
+                _ => None,
+            };
+            self.band = None;
+            self.request_redraw();
+            return;
+        }
+        if let Some(range) = self.selection_source_range() {
+            self.selection = None;
+            self.sel_anchor = None;
+            self.band = None;
+            match motion {
+                Motion::Left => self.place_caret_at(range.start),
+                Motion::Right => self.place_caret_at(range.end),
+                _ => self.step_caret(motion),
+            }
+        } else {
+            self.step_caret(motion);
+        }
+    }
+
+    /// After a mouse selection, the caret takes the active end.
+    fn caret_to_selection_edge(&mut self) {
+        if let Some(sel) = self.selection {
+            if let Some(off) = caret::model_offset(&self.document, &sel.end) {
+                self.place_caret_at(off);
+            }
+        }
+    }
+
+    /// Cut is copy plus a delete splice; inert outside edit mode.
+    fn cut_selection(&mut self) {
+        if self.mode != edit::Mode::Edit {
+            return;
+        }
+        let Some(range) = self.selection_source_range() else {
+            return;
+        };
+        self.copy_selection(false);
+        self.type_edit(range, "");
+    }
+
+    /// Pastes the clipboard as source bytes at the caret, replacing the
+    /// selection when one stands; inert outside edit mode.
+    fn paste_clipboard(&mut self) {
+        if self.mode != edit::Mode::Edit {
+            return;
+        }
+        if self.clipboard.is_none() {
+            self.clipboard = arboard::Clipboard::new()
+                .map_err(|err| eprintln!("oryx: no clipboard: {err}"))
+                .ok();
+        }
+        let Some(text) = self.clipboard.as_mut().and_then(|c| c.get_text().ok()) else {
+            return;
+        };
+        // Clipboard line endings normalize like the load; the ledger
+        // writes the file's own ending back on save.
+        let text = text.replace("\r\n", "\n");
+        if !text.is_empty() {
+            self.type_over(&text);
         }
     }
 
@@ -1335,6 +1470,10 @@ impl App {
     fn end_selection(&mut self) {
         self.sel_anchor = None;
         if self.selection.is_some_and(|s| !s.is_empty()) {
+            // The drag's release point is where editing continues.
+            if self.mode == edit::Mode::Edit {
+                self.caret_to_selection_edge();
+            }
             if let Some(gfx) = self.gfx.as_ref() {
                 gfx.window.request_redraw();
             }
@@ -1370,7 +1509,20 @@ impl App {
             self.scrollbar_press();
             if self.drag.is_none() {
                 if self.mode == edit::Mode::Edit {
-                    self.place_caret();
+                    match self.register_click() {
+                        2 => {
+                            self.select_unit(false);
+                            self.caret_to_selection_edge();
+                        }
+                        3 => {
+                            self.select_unit(true);
+                            self.caret_to_selection_edge();
+                        }
+                        _ => {
+                            self.place_caret();
+                            self.begin_selection();
+                        }
+                    }
                 } else {
                     match self.register_click() {
                         2 => self.select_unit(false),
@@ -3328,7 +3480,8 @@ impl ApplicationHandler for App {
                         self.overlay_result(result);
                     }
                     _ if self.search_key(&logical_key, ctrl, shift) => {}
-                    _ if self.mode == edit::Mode::Edit && self.edit_key(&logical_key, ctrl) => {}
+                    _ if self.mode == edit::Mode::Edit
+                        && self.edit_key(&logical_key, ctrl, shift) => {}
                     Some(Command::LineUp) if self.sidebar_owns_keys() => {
                         self.sidebar_move(-1);
                     }

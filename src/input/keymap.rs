@@ -35,12 +35,14 @@ pub enum Command {
     Top,
     Bottom,
     Edit,
+    Cut,
+    Paste,
     Quit,
 }
 
 impl Command {
     /// Every variant; the coverage test checks each one against the table.
-    pub const ALL: [Command; 29] = [
+    pub const ALL: [Command; 31] = [
         Command::OpenFile,
         Command::Reload,
         Command::Sidebar,
@@ -69,6 +71,8 @@ impl Command {
         Command::Top,
         Command::Bottom,
         Command::Edit,
+        Command::Cut,
+        Command::Paste,
         Command::Quit,
     ];
 }
@@ -202,6 +206,18 @@ pub const SHORTCUTS: &[Shortcut] = &[
         action: "Edit the document",
         section: "Edit",
         bindings: &[(Binding::Ctrl("e"), Command::Edit)],
+    },
+    Shortcut {
+        keys: "Ctrl+X",
+        action: "Cut the selection (editing)",
+        section: "Edit",
+        bindings: &[(Binding::Ctrl("x"), Command::Cut)],
+    },
+    Shortcut {
+        keys: "Ctrl+V",
+        action: "Paste at the caret (editing)",
+        section: "Edit",
+        bindings: &[(Binding::Ctrl("v"), Command::Paste)],
     },
     Shortcut {
         keys: "Ctrl+T",
@@ -394,6 +410,12 @@ mod tests {
         // every shifted Ctrl chord; the block lens claims it later with
         // a CtrlShift binding, which the shifted pass resolves first.
         assert_eq!(command(&chr("E"), true, true), Some(Command::Edit));
+    }
+
+    #[test]
+    fn cut_and_paste_resolve() {
+        assert_eq!(command(&chr("x"), true, false), Some(Command::Cut));
+        assert_eq!(command(&chr("v"), true, false), Some(Command::Paste));
     }
 
     #[test]
