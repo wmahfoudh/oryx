@@ -292,6 +292,7 @@ pub(crate) fn code_document(token: Option<&str>, text: &str) -> Document {
     Document {
         blocks: vec![block],
         source: Arc::from(text),
+        code_file: true,
         ..Document::default()
     }
 }

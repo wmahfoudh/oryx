@@ -25,6 +25,10 @@ pub struct Document {
     /// The key position memory files a book under: `dc:identifier`, or
     /// the canonical path when the metadata has none. None for files.
     pub book_id: Option<String>,
+    /// True for code and unknown files, whose single block is the whole
+    /// source. Layout shows such a page as code, not as a page
+    /// containing code: the block draws without its panel.
+    pub code_file: bool,
 }
 
 impl Default for Document {
@@ -36,6 +40,7 @@ impl Default for Document {
             title: None,
             anchors: std::collections::HashMap::new(),
             book_id: None,
+            code_file: false,
         }
     }
 }

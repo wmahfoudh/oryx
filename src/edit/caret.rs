@@ -73,45 +73,38 @@ fn block_spans(kind: &BlockKind) -> Option<&[Span]> {
     }
 }
 
-/// The source range a run displays, when display bytes equal source
-/// bytes; None for markers, synthesized text, and transformed spans.
+/// The source offset a span's display text starts at, when display
+/// bytes equal source bytes: a code line's range start, or a sealed
+/// span's range start. None for markers and transformed spans.
+fn span_base(doc: &Document, block: usize, span: usize) -> Option<usize> {
+    if span == MARKER_SPAN {
+        return None;
+    }
+    let block = doc.blocks.get(block)?;
+    match &block.kind {
+        BlockKind::CodeBlock { lines, .. } => Some(lines.line_range(span)?.start),
+        kind => {
+            let span = block_spans(kind)?.get(span)?;
+            if !span.is_verbatim() || span.range.is_empty() {
+                return None;
+            }
+            Some(span.range.start as usize)
+        }
+    }
+}
+
+/// The source range a run displays; None for synthesized text.
 fn run_source(doc: &Document, run: &TextRun) -> Option<(usize, usize)> {
     let TextRef::Model { start, len } = run.text else {
         return None;
     };
-    if run.span == MARKER_SPAN {
-        return None;
-    }
-    let block = doc.blocks.get(run.block)?;
-    let base = match &block.kind {
-        BlockKind::CodeBlock { lines, .. } => lines.line_range(run.span)?.start,
-        kind => {
-            let span = block_spans(kind)?.get(run.span)?;
-            if !span.is_verbatim() || span.range.is_empty() {
-                return None;
-            }
-            span.range.start as usize
-        }
-    };
+    let base = span_base(doc, run.block, run.span)?;
     Some((base + start as usize, len as usize))
 }
 
 /// A model position's source byte offset, for verbatim content.
 fn model_offset(doc: &Document, pos: &ModelPos) -> Option<usize> {
-    if pos.span == MARKER_SPAN {
-        return None;
-    }
-    let block = doc.blocks.get(pos.block)?;
-    match &block.kind {
-        BlockKind::CodeBlock { lines, .. } => Some(lines.line_range(pos.span)?.start + pos.byte),
-        kind => {
-            let span = block_spans(kind)?.get(pos.span)?;
-            if !span.is_verbatim() || span.range.is_empty() {
-                return None;
-            }
-            Some(span.range.start as usize + pos.byte)
-        }
-    }
+    Some(span_base(doc, pos.block, pos.span)? + pos.byte)
 }
 
 /// The visual lines of every mappable run, in reading order.
@@ -247,6 +240,17 @@ impl Caret {
         page_h: f32,
     ) -> Caret {
         let lines = lines_of(lay, doc);
+        // The document jumps need no current line, so they work even
+        // from an offset the placed window no longer holds.
+        match motion {
+            Motion::DocStart => {
+                return Caret::at(lines.first().map_or(self.offset, |l| l.start));
+            }
+            Motion::DocEnd => {
+                return Caret::at(lines.last().map_or(self.offset, |l| l.end));
+            }
+            _ => {}
+        }
         let Some(li) = locate(&lines, self.offset) else {
             return self;
         };
@@ -282,8 +286,7 @@ impl Caret {
             }
             Motion::Home => Caret::at(line.start),
             Motion::End => Caret::at(line.end),
-            Motion::DocStart => Caret::at(lines.first().map_or(self.offset, |l| l.start)),
-            Motion::DocEnd => Caret::at(lines.last().map_or(self.offset, |l| l.end)),
+            Motion::DocStart | Motion::DocEnd => unreachable!("returned before the line lookup"),
             Motion::Up | Motion::Down | Motion::PageUp | Motion::PageDown => {
                 let Some(run) = run_at(line, self.offset) else {
                     return self;

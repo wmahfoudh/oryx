@@ -715,6 +715,9 @@ impl App {
         };
         self.mode = edit::Mode::Edit;
         self.caret = Some(Caret::at(offset));
+        // The caret owns the keys; a sidebar holding them would strand
+        // the arrows. Same funnel as the Right key's explicit handoff.
+        self.move_ownership(PaneAct::Right);
         self.wake_caret();
         self.request_redraw();
     }
@@ -1187,7 +1190,11 @@ impl App {
             }
         } else {
             self.selection = None;
-            self.link_press();
+            // While editing, a click already placed the caret; a link
+            // never follows.
+            if self.mode == edit::Mode::Read {
+                self.link_press();
+            }
         }
         self.fold_highlights();
     }
@@ -2881,7 +2888,10 @@ impl App {
                 }
             }
         }
-        let owns_keys = self.key_pane == KeyPane::Sidebar;
+        // While editing the caret owns every bare key, so the panel's
+        // live marks stay dimmed whatever the recorded owner; the
+        // ownership machine is a read-mode concept.
+        let owns_keys = self.key_pane == KeyPane::Sidebar && self.mode == edit::Mode::Read;
         if let Some(side) = self.sidebar.as_mut() {
             let current = outline_current(&mut self.outline, side, lay, self.scroll_y);
             let fits = self

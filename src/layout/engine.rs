@@ -816,7 +816,9 @@ impl LayoutPass {
     /// may drop.
     pub(crate) fn rebase(&mut self, rects: usize) {
         if let Some(open) = &mut self.open {
-            open.panel -= rects;
+            if open.framed {
+                open.panel -= rects;
+            }
         }
     }
 
@@ -1265,8 +1267,12 @@ struct OpenCode {
     /// The block's order position, the key its line steps pool under.
     position: usize,
     frame: Frame,
-    /// Panel background rect; the border rect follows it.
+    /// Panel background rect; the border rect follows it. Meaningless
+    /// while `framed` is false, when no rects were pushed.
     panel: usize,
+    /// Whether the block draws its panel; a whole-file code document
+    /// does not.
+    framed: bool,
     y0: f32,
     pad: f32,
     size: f32,
@@ -1471,7 +1477,11 @@ fn pool_top_up(doc: &Document, pass: &mut LayoutPass) {
             // will place the line against.
             let (x_base, avail) = block_geometry(block, pass.margin, pass.content_width, &ctx.cfg);
             let size = ctx.cfg.code_size * ctx.cfg.zoom;
-            let pad = metrics::CODE_PAD * ctx.cfg.zoom;
+            let pad = if code_framed(doc) {
+                metrics::CODE_PAD * ctx.cfg.zoom
+            } else {
+                0.0
+            };
             pool.submit(Job {
                 generation: pass.pool_generation,
                 key: StepKey::step(pass.seed_position, line_index),
@@ -1728,7 +1738,7 @@ fn place_block(
             } else {
                 0.0
             },
-            pad: if is_code {
+            pad: if is_code && code_framed(doc) {
                 metrics::CODE_PAD * cfg.zoom
             } else {
                 0.0
@@ -1742,7 +1752,16 @@ fn place_block(
     // over as many steps as the slice budget allows.
     if is_code {
         pass.scratch = scratch;
-        let open = open_code(theme, cfg, block_index, frame, counts, out, pass);
+        let open = open_code(
+            theme,
+            cfg,
+            block_index,
+            frame,
+            counts,
+            code_framed(doc),
+            out,
+            pass,
+        );
         place_code_line(doc, theme, fonts, cfg, open, out, pass);
         return;
     }
@@ -2446,8 +2465,10 @@ fn replay_position(
     }
     let mut lines = 0..0;
     if entry.flags & ENTRY_CODE != 0 {
-        for rect in code_panel_rects(theme, cfg, x_base, avail, entry.content_y, entry.height) {
-            out.rects.push(rect);
+        if code_framed(doc) {
+            for rect in code_panel_rects(theme, cfg, x_base, avail, entry.content_y, entry.height) {
+                out.rects.push(rect);
+            }
         }
         let total = code_line_count(doc, entry.block as usize);
         lines = table.lines_over(position, total, fill);
@@ -2716,28 +2737,46 @@ fn quote_decoration(
     decoration
 }
 
+/// Whether code blocks in this document draw the panel frame. A code
+/// file is a page that is code, not a page containing code: its lines
+/// draw on the page itself, no panel, no border, no inner pad, the
+/// full width to wrap in. A markdown fence always keeps the panel,
+/// even when the fence is the whole file.
+fn code_framed(doc: &Document) -> bool {
+    !doc.code_file
+}
+
 /// Opens a code block: the panel and border take their final index with a
-/// provisional height, so later lines only grow them.
+/// provisional height, so later lines only grow them. A frameless block
+/// pushes no rects and pads nothing.
+#[allow(clippy::too_many_arguments)]
 fn open_code(
     theme: &Theme,
     cfg: &ViewConfig,
     block_index: usize,
     frame: Frame,
     counts: ElementCounts,
+    framed: bool,
     out: &mut LayoutDoc,
     pass: &LayoutPass,
 ) -> OpenCode {
     let size = cfg.code_size * cfg.zoom;
     let line_height = metrics::LINE_HEIGHT * size;
-    let pad = metrics::CODE_PAD * cfg.zoom;
+    let pad = if framed {
+        metrics::CODE_PAD * cfg.zoom
+    } else {
+        0.0
+    };
     // Long lines wrap inside the panel instead of overflowing it, so the
     // panel height follows the shaped lines.
     let wrap_width = (frame.avail - 2.0 * pad).max(40.0);
     let y0 = pass.cursor;
     let panel = out.rects.len();
     let height = 2.0 * pad;
-    for rect in code_panel_rects(theme, cfg, frame.x_base, frame.avail, y0, height) {
-        out.rects.push(rect);
+    if framed {
+        for rect in code_panel_rects(theme, cfg, frame.x_base, frame.avail, y0, height) {
+            out.rects.push(rect);
+        }
     }
     OpenCode {
         block: block_index,
@@ -2745,6 +2784,7 @@ fn open_code(
         position: pass.position - 1,
         frame,
         panel,
+        framed,
         y0,
         pad,
         size,
@@ -2875,9 +2915,11 @@ fn place_code_line(
     }
     open.line += 1;
 
-    let height = open.line_top() - open.y0 + open.pad;
-    out.rects[open.panel].height = height;
-    out.rects[open.panel + 1].height = height;
+    if open.framed {
+        let height = open.line_top() - open.y0 + open.pad;
+        out.rects[open.panel].height = height;
+        out.rects[open.panel + 1].height = height;
+    }
     pass.open = Some(open);
 }
 
@@ -5158,9 +5200,57 @@ fn trim_trailing_spaces<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::doc::images::MediaCache;
+    use crate::doc::{load, markdown};
+    use crate::style::fonts::FontStore;
+    use crate::style::theme::Theme;
+    use std::path::PathBuf;
 
     fn seg(text: &str, script: Script) -> (String, Script) {
         (text.to_string(), script)
+    }
+
+    fn lay_of(doc: &Document) -> LayoutDoc {
+        let mut fonts = FontStore::new();
+        let mut media = MediaCache::new(PathBuf::from("."));
+        layout(
+            doc,
+            &Theme::default_dark(),
+            &mut fonts,
+            &mut media,
+            &ViewConfig::default(),
+            800.0,
+        )
+    }
+
+    #[test]
+    fn a_whole_file_code_document_draws_frameless_at_the_page_margin() {
+        let doc = load::code_document(Some("rust"), "fn main() {}\nlet x = 1;\n");
+        let lay = lay_of(&doc);
+        let blocks = &Theme::default_dark().blocks;
+        assert!(
+            lay.rects
+                .iter()
+                .all(|r| r.color != blocks.code_bg && r.color != blocks.code_border),
+            "a page that is code carries no panel"
+        );
+        let plain = load::plain_document("hello\n");
+        let plain_lay = lay_of(&plain);
+        assert_eq!(
+            lay.runs[0].x, plain_lay.runs[0].x,
+            "code lines start where body text starts"
+        );
+    }
+
+    #[test]
+    fn fenced_code_inside_markdown_keeps_its_panel() {
+        let doc = markdown::parse("text\n\n```rust\nlet x = 1;\n```\n");
+        let lay = lay_of(&doc);
+        let blocks = &Theme::default_dark().blocks;
+        assert!(
+            lay.rects.iter().any(|r| r.color == blocks.code_bg),
+            "embedded code keeps the panel"
+        );
     }
 
     #[test]

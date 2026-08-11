@@ -26,7 +26,13 @@ pub fn band(
     height: u32,
 ) -> Vec<u32> {
     let mut pixmap = Pixmap::new(width.max(1), height.max(1)).expect("pixmap allocation");
-    let bg = theme.surface.background;
+    // A code file's page is code: the theme's code background becomes
+    // the paper, edge to edge, where the dropped panel used to carry it.
+    let bg = if doc.code_file {
+        theme.blocks.code_bg
+    } else {
+        theme.surface.background
+    };
     pixmap.fill(tiny_skia::Color::from_rgba8(bg.r, bg.g, bg.b, 255));
     let band_bottom = y_top + height as f32;
 
@@ -324,4 +330,49 @@ fn draw_math_glyph(pixmap: &mut Pixmap, fonts: &mut FontStore, g: &MathGlyph, y_
 /// Source-over blend of one channel; the destination is always opaque.
 fn blend(src: u8, dst: u8, alpha: u32) -> u8 {
     ((src as u32 * alpha + dst as u32 * (255 - alpha)) / 255) as u8
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::doc::load;
+    use crate::layout::{layout, ViewConfig};
+    use crate::style::theme::Rgba;
+    use std::path::PathBuf;
+
+    fn packed(c: Rgba) -> u32 {
+        ((c.r as u32) << 16) | ((c.g as u32) << 8) | c.b as u32
+    }
+
+    fn corner_pixel(doc: &Document) -> u32 {
+        let theme = Theme::default_dark();
+        let mut fonts = FontStore::new();
+        let mut media = MediaCache::new(PathBuf::from("."));
+        let lay = layout(
+            doc,
+            &theme,
+            &mut fonts,
+            &mut media,
+            &ViewConfig::default(),
+            400.0,
+        );
+        band(&lay, doc, &theme, &mut fonts, &mut media, &[], 0.0, 40, 40)[0]
+    }
+
+    #[test]
+    fn a_code_file_paints_the_page_in_the_code_background() {
+        let theme = Theme::default_dark();
+        let doc = load::code_document(Some("rust"), "let x = 1;\n");
+        assert_eq!(
+            corner_pixel(&doc),
+            packed(theme.blocks.code_bg),
+            "a page that is code keeps the theme's code background"
+        );
+        let prose = load::plain_document("hello\n");
+        assert_eq!(
+            corner_pixel(&prose),
+            packed(theme.surface.background),
+            "prose keeps the page background"
+        );
+    }
 }
