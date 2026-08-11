@@ -813,7 +813,7 @@ fn rects_for(
     out
 }
 
-fn byte_of_char(text: &str, ch: usize) -> usize {
+pub(crate) fn byte_of_char(text: &str, ch: usize) -> usize {
     text.char_indices()
         .nth(ch)
         .map(|(i, _)| i)
@@ -821,7 +821,7 @@ fn byte_of_char(text: &str, ch: usize) -> usize {
 }
 
 /// Shapes a run exactly as paint does, single line at its own metrics.
-fn shape_run(fonts: &mut FontStore, run: &TextRun, text: &str, family: &str) -> Buffer {
+pub(crate) fn shape_run(fonts: &mut FontStore, run: &TextRun, text: &str, family: &str) -> Buffer {
     let line_height = metrics::LINE_HEIGHT * run.size;
     let mut buffer = Buffer::new(&mut fonts.font_system, Metrics::new(run.size, line_height));
     buffer.set_size(&mut fonts.font_system, None, None);
@@ -844,7 +844,7 @@ fn shape_run(fonts: &mut FontStore, run: &TextRun, text: &str, family: &str) -> 
 
 /// The character boundary nearest to an x offset inside a run, by glyph
 /// midpoints.
-fn char_index_at(
+pub(crate) fn char_index_at(
     fonts: &mut FontStore,
     run: &TextRun,
     text: &str,

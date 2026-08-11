@@ -34,12 +34,13 @@ pub enum Command {
     PageDown,
     Top,
     Bottom,
+    Edit,
     Quit,
 }
 
 impl Command {
     /// Every variant; the coverage test checks each one against the table.
-    pub const ALL: [Command; 28] = [
+    pub const ALL: [Command; 29] = [
         Command::OpenFile,
         Command::Reload,
         Command::Sidebar,
@@ -67,6 +68,7 @@ impl Command {
         Command::PageDown,
         Command::Top,
         Command::Bottom,
+        Command::Edit,
         Command::Quit,
     ];
 }
@@ -142,10 +144,10 @@ pub const SHORTCUTS: &[Shortcut] = &[
         ],
     },
     Shortcut {
-        keys: "Ctrl+B",
+        keys: "Ctrl+Shift+B",
         action: "Toggle sidebar (files and outline)",
         section: "Navigation",
-        bindings: &[(Binding::Ctrl("b"), Command::Sidebar)],
+        bindings: &[(Binding::CtrlShift("b"), Command::Sidebar)],
     },
     Shortcut {
         keys: "Left / Right",
@@ -200,6 +202,12 @@ pub const SHORTCUTS: &[Shortcut] = &[
         action: "Copy selection as markdown",
         section: "Selection",
         bindings: &[(Binding::CtrlShift("c"), Command::CopyMarkdown)],
+    },
+    Shortcut {
+        keys: "Ctrl+E",
+        action: "Edit the document",
+        section: "Edit",
+        bindings: &[(Binding::Ctrl("e"), Command::Edit)],
     },
     Shortcut {
         keys: "Ctrl+T",
@@ -369,7 +377,6 @@ mod tests {
     #[test]
     fn ctrl_chords_resolve() {
         assert_eq!(command(&chr("o"), true, false), Some(Command::OpenFile));
-        assert_eq!(command(&chr("b"), true, false), Some(Command::Sidebar));
         assert_eq!(command(&chr("t"), true, false), Some(Command::ThemeBrowser));
         assert_eq!(command(&chr("T"), true, true), Some(Command::ThemeBrowser));
         assert_eq!(command(&chr(","), true, false), Some(Command::Settings));
@@ -378,18 +385,31 @@ mod tests {
     }
 
     #[test]
-    fn the_print_pair_exports_and_the_e_chords_are_free() {
+    fn the_print_pair_exports() {
         assert_eq!(command(&chr("p"), true, false), Some(Command::Export));
         assert_eq!(
             command(&chr("P"), true, true),
             Some(Command::ExportSettings)
         );
+    }
+
+    #[test]
+    fn ctrl_e_toggles_the_editor() {
+        assert_eq!(command(&chr("e"), true, false), Some(Command::Edit));
+        // Ctrl+Shift+E falls through to the same command for now, like
+        // every shifted Ctrl chord; the block lens claims it later with
+        // a CtrlShift binding, which the shifted pass resolves first.
+        assert_eq!(command(&chr("E"), true, true), Some(Command::Edit));
+    }
+
+    #[test]
+    fn the_sidebar_re_homes_and_ctrl_b_falls_silent() {
+        assert_eq!(command(&chr("B"), true, true), Some(Command::Sidebar));
         assert_eq!(
-            command(&chr("e"), true, false),
+            command(&chr("b"), true, false),
             None,
-            "reserved for the editing phase's view toggle"
+            "freed for bold in the input-method milestone"
         );
-        assert_eq!(command(&chr("E"), true, true), None);
     }
 
     #[test]

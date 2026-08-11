@@ -1,4 +1,5 @@
 pub mod doc;
+pub mod edit;
 pub mod export;
 pub mod input;
 pub mod layout;

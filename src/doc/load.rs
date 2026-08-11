@@ -97,6 +97,10 @@ pub struct Opened {
     pub book: Option<super::epub::BookJob>,
     /// A book's table of contents as authored; empty for files.
     pub toc: Vec<super::epub::TocEntry>,
+    /// True when the bytes decoded only through lossy UTF-8
+    /// replacement. Editing refuses such a file: byte fidelity cannot
+    /// be promised back to disk over a lossy read.
+    pub lossy: bool,
 }
 
 pub fn open(path: &Path, deadline: Option<Instant>) -> anyhow::Result<Opened> {
@@ -124,12 +128,14 @@ pub fn open(path: &Path, deadline: Option<Instant>) -> anyhow::Result<Opened> {
             streamed,
             book,
             toc,
+            lossy: false,
         });
     }
     if is_binary(&bytes) {
         anyhow::bail!("{} is not a text file", path.display());
     }
     let text = String::from_utf8_lossy(&bytes);
+    let lossy = matches!(text, std::borrow::Cow::Owned(_));
     // Windows files carry CRLF; the plain-text path strips returns per
     // line, and everything downstream (offsets, rendering, copy as
     // markdown) assumes the source is clean of them.
@@ -165,6 +171,7 @@ pub fn open(path: &Path, deadline: Option<Instant>) -> anyhow::Result<Opened> {
         streamed,
         book: None,
         toc: Vec::new(),
+        lossy,
     })
 }
 
@@ -264,7 +271,7 @@ pub fn recognized_extensions() -> Vec<&'static str> {
 /// No token means no grammar, so the block renders in the code font
 /// unstyled. The lines are ranges into the source: a code file was two
 /// full copies of itself before layout ran, now it is one.
-fn code_document(token: Option<&str>, text: &str) -> Document {
+pub(crate) fn code_document(token: Option<&str>, text: &str) -> Document {
     let base = text.as_ptr() as usize;
     let mut lines: Vec<Range<u32>> = text
         .lines()
@@ -291,7 +298,7 @@ fn code_document(token: Option<&str>, text: &str) -> Document {
 
 /// Paragraphs split on blank lines; line breaks inside a paragraph are
 /// preserved as newline spans so the lines sit flush in layout.
-fn plain_document(text: &str) -> Document {
+pub(crate) fn plain_document(text: &str) -> Document {
     let mut blocks = Vec::new();
     let mut spans: Vec<Span> = Vec::new();
     let mut offset = 0;
@@ -499,6 +506,22 @@ mod tests {
         };
         assert!(err.to_string().contains("PDF"), "{err}");
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn a_lossy_decode_is_recorded_and_a_clean_one_is_not() {
+        let dir = std::env::temp_dir().join(format!("oryx-lossy-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let latin = dir.join("latin.txt");
+        std::fs::write(&latin, b"caf\xE9 au lait\n").unwrap();
+        let opened = open(&latin, None).unwrap();
+        assert!(opened.lossy, "an invalid byte forces the lossy read");
+        assert!(opened.document.source.contains('\u{FFFD}'));
+        let clean = dir.join("clean.txt");
+        std::fs::write(&clean, "café au lait\n").unwrap();
+        let opened = open(&clean, None).unwrap();
+        assert!(!opened.lossy, "a clean file is not branded lossy");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

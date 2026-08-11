@@ -243,6 +243,16 @@ impl CodeBody {
         slice(base, &self.lines[index])
     }
 
+    /// The source byte range of a line, only when the body slices the
+    /// source directly; an owned body has no source coordinates.
+    pub fn line_range(&self, index: usize) -> Option<Range<usize>> {
+        if self.owned.is_some() {
+            return None;
+        }
+        let range = &self.lines[index];
+        Some(range.start as usize..range.end as usize)
+    }
+
     pub fn iter<'a>(&'a self, source: &'a str) -> impl Iterator<Item = &'a str> {
         let base = self.owned.as_deref().unwrap_or(source);
         self.lines.iter().map(move |range| slice(base, range))

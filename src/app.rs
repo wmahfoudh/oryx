@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -8,6 +9,10 @@ use oryx::doc::images::{self, MediaCache, Waker};
 use oryx::doc::load;
 use oryx::doc::model::{BlockKind, Document};
 use oryx::doc::stream::{self, ParseWorker};
+use oryx::edit::{
+    self,
+    caret::{self, Caret, CaretBox, Motion},
+};
 use oryx::export::{self, ExportPass, ExportSettings};
 use oryx::input::{
     self,
@@ -27,6 +32,7 @@ use oryx::style::highlight::{Highlighter, PendingBlock};
 use oryx::style::theme::{self, Rgba, Theme};
 use oryx::ui::export::{ExportDialog, ExportProgress};
 use oryx::ui::help::Help;
+use oryx::ui::notice::{self, Notice};
 use oryx::ui::outline::OutlineTree;
 use oryx::ui::overlay::{Action, Overlay, OverlayResult};
 use oryx::ui::scrollbar;
@@ -52,6 +58,10 @@ const RECOLOR_WAVE: Duration = Duration::from_millis(400);
 /// How often a fling advances the scroll.
 const FLING_TICK: Duration = Duration::from_millis(16);
 
+/// The caret's blink half-period; every caret action restarts the
+/// visible half.
+const CARET_BLINK: Duration = Duration::from_millis(530);
+
 /// How long after a touch pan the emulated mouse stays ignored, long
 /// enough to cover the click Windows synthesizes behind a lifted finger.
 const MOUSE_MUTE: Duration = Duration::from_millis(150);
@@ -60,7 +70,7 @@ const MOUSE_MUTE: Duration = Duration::from_millis(150);
 const ICON_64: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/icon_64.rgba"));
 
 pub fn run(path: Option<PathBuf>, theme_name: Option<String>) -> anyhow::Result<()> {
-    let (document, pending, streamed, book, book_toc) = match &path {
+    let (document, pending, streamed, book, book_toc, lossy) = match &path {
         Some(p) => {
             let opened = load::open(p, Some(Instant::now() + load::OPEN_BUDGET))?;
             (
@@ -69,9 +79,17 @@ pub fn run(path: Option<PathBuf>, theme_name: Option<String>) -> anyhow::Result<
                 opened.streamed,
                 opened.book,
                 opened.toc,
+                opened.lossy,
             )
         }
-        None => (Document::default(), Vec::new(), false, None, Vec::new()),
+        None => (
+            Document::default(),
+            Vec::new(),
+            false,
+            None,
+            Vec::new(),
+            false,
+        ),
     };
     // Absolute from here on: a bare relative name like `README.md` has the
     // empty string as parent, which breaks the sidebar root and the dialog.
@@ -201,6 +219,14 @@ pub fn run(path: Option<PathBuf>, theme_name: Option<String>) -> anyhow::Result<
         search_canvas: None,
         last_query: String::new(),
         pending_band_for: None,
+        mode: edit::Mode::Read,
+        caret: None,
+        lossy,
+        edit_marks: HashMap::new(),
+        blink_visible: true,
+        blink_flip: Instant::now(),
+        notice: None,
+        notice_canvas: None,
     };
     if let Some(job) = book {
         app.start_book(job);
@@ -253,6 +279,35 @@ fn file_link_target(target: &str, base: Option<&Path>) -> Option<(PathBuf, Optio
     }
     let path = base?.join(path_part.replace("%20", " "));
     path.is_file().then_some((path, fragment))
+}
+
+/// Fills the caret bar into a 0RGB frame, clipped to the viewport. The
+/// box arrives in document space; the frame starts at the sidebar inset
+/// and scrolls by `scroll_y`.
+#[allow(clippy::too_many_arguments)]
+fn draw_caret(
+    frame: &mut [u32],
+    width: u32,
+    height: u32,
+    inset: u32,
+    scroll_y: f32,
+    scale: f32,
+    caret: CaretBox,
+    color: Rgba,
+) {
+    let value = ((color.r as u32) << 16) | ((color.g as u32) << 8) | color.b as u32;
+    let bar = ((1.5 * scale).round() as u32).max(1);
+    let x0 = (caret.x.max(0.0) as u32).saturating_add(inset).min(width);
+    let x1 = x0.saturating_add(bar).min(width);
+    let top = caret.y - scroll_y;
+    let y0 = (top.max(0.0) as u32).min(height);
+    let y1 = ((top + caret.h).max(0.0) as u32).min(height);
+    for y in y0..y1 {
+        let row = (y * width) as usize;
+        for x in x0..x1 {
+            frame[row + x as usize] = value;
+        }
+    }
 }
 
 /// A book's `dc:title` wins over the file name; files have no title.
@@ -425,6 +480,24 @@ struct App {
     /// at. Interactive frames (drag, live resize) paint the viewport
     /// directly; the expensive band builds one frame later, once stable.
     pending_band_for: Option<(u32, u32)>,
+    /// Reading or editing; the door is Ctrl+E, through `edit::toggle`.
+    mode: edit::Mode,
+    /// The caret while editing, anchored to a source offset.
+    caret: Option<Caret>,
+    /// The open file decoded only through lossy UTF-8 replacement, so
+    /// the editing door refuses it.
+    lossy: bool,
+    /// Caret offsets remembered per file for this session, feeding the
+    /// landing precedence on re-entry.
+    edit_marks: HashMap<PathBuf, usize>,
+    /// The blink's current half and when it flips, driven by the timer;
+    /// every caret action restarts the visible half.
+    blink_visible: bool,
+    blink_flip: Instant,
+    /// The transient corner notice, while one holds or fades.
+    notice: Option<Notice>,
+    /// Reused notice canvas, mirroring the overlay canvas mechanics.
+    notice_canvas: Option<OverlayCanvas>,
 }
 
 /// The pane owning Up, Down, and Enter. There is no focus system: the
@@ -576,16 +649,172 @@ impl App {
             Command::PageDown => self.scroll_by(self.page_step()),
             Command::Top => self.scroll_to(0.0),
             Command::Bottom => self.scroll_to(self.doc_height()),
-            // Escape cascades: the overlay branch catches it first, then
-            // an open sidebar absorbs it, then it quits.
+            Command::Edit => self.toggle_edit(),
+            // The Escape ladder, innermost out. The overlay branch
+            // catches it upstream; the find bar rung is normally spent
+            // there too and stands here for totality.
             Command::Quit => {
-                if self.sidebar.is_some() {
-                    self.toggle_sidebar();
-                } else {
-                    self.remember_position();
-                    event_loop.exit();
+                let act = edit::escape(
+                    self.mode,
+                    self.search.is_some(),
+                    self.selection.is_some_and(|s| !s.is_empty()),
+                    self.sidebar.is_some(),
+                );
+                match act {
+                    edit::EscapeAct::CloseFind => self.close_search(),
+                    edit::EscapeAct::ClearSelection => {
+                        self.selection = None;
+                        self.sel_anchor = None;
+                        self.band = None;
+                        self.request_redraw();
+                    }
+                    edit::EscapeAct::LeaveEdit => self.leave_edit(),
+                    edit::EscapeAct::CloseSidebar => self.toggle_sidebar(),
+                    edit::EscapeAct::Quit => {
+                        self.remember_position();
+                        event_loop.exit();
+                    }
                 }
             }
+        }
+    }
+
+    /// Answers Ctrl+E through the door table; a refusal shows the
+    /// notice instead of the mode.
+    fn toggle_edit(&mut self) {
+        let Some(path) = self.path.clone() else {
+            return;
+        };
+        match edit::toggle(self.mode, load::detect(&path), self.lossy) {
+            Ok(edit::Mode::Edit) => self.enter_edit(),
+            Ok(edit::Mode::Read) => self.leave_edit(),
+            Err(refusal) => self.show_notice(refusal.message()),
+        }
+    }
+
+    /// Entry changes nothing on the page: the caret lands by the
+    /// precedence order and appears, and that is all.
+    fn enter_edit(&mut self) {
+        let view_h = self.viewport_h();
+        let remembered = self
+            .path
+            .as_ref()
+            .and_then(|p| self.edit_marks.get(p))
+            .copied();
+        let sel = self.selection.filter(|s| !s.is_empty());
+        let offset = match self.layout.as_ref() {
+            Some(lay) => caret::landing(
+                lay,
+                &self.document,
+                sel.as_ref(),
+                remembered,
+                self.scroll_y,
+                view_h,
+            ),
+            None => remembered.unwrap_or(0),
+        };
+        self.mode = edit::Mode::Edit;
+        self.caret = Some(Caret::at(offset));
+        self.wake_caret();
+        self.request_redraw();
+    }
+
+    /// Back to reading; the caret offset is remembered for this file so
+    /// re-entry lands where editing stopped.
+    fn leave_edit(&mut self) {
+        if let (Some(path), Some(c)) = (self.path.clone(), self.caret) {
+            self.edit_marks.insert(path, c.offset);
+        }
+        self.mode = edit::Mode::Read;
+        self.caret = None;
+        self.request_redraw();
+    }
+
+    /// Restarts the blink at full visibility, as every caret action
+    /// does, so the caret never blinks away mid-motion.
+    fn wake_caret(&mut self) {
+        self.blink_visible = true;
+        self.blink_flip = Instant::now() + CARET_BLINK;
+    }
+
+    fn show_notice(&mut self, text: &str) {
+        self.notice = Some(Notice::new(text, Instant::now()));
+        self.request_redraw();
+    }
+
+    /// One caret motion: step through the runs, restart the blink, and
+    /// snap the view back to the caret.
+    fn step_caret(&mut self, motion: Motion) {
+        let page = self.page_step();
+        let view_h = self.viewport_h();
+        let (Some(caret), Some(lay)) = (self.caret, self.layout.as_ref()) else {
+            return;
+        };
+        let stepped = caret.step(motion, lay, &self.document, &mut self.fonts, page);
+        let snapped = stepped
+            .geometry(lay, &self.document, &mut self.fonts)
+            .map(|b| caret::snap(self.scroll_y, view_h, b));
+        self.caret = Some(stepped);
+        self.wake_caret();
+        if let Some(target) = snapped {
+            if target != self.scroll_y {
+                self.scroll_to(target);
+            }
+        }
+        self.request_redraw();
+    }
+
+    /// Bare keys the caret owns while editing. Chords fall through and
+    /// keep their app-wide meaning; the typing keys are consumed and
+    /// inert until the splice ledger arrives. Escape stays a command so
+    /// the ladder handles it, and the function keys keep their rows.
+    fn edit_key(&mut self, key: &Key, ctrl: bool) -> bool {
+        if ctrl {
+            return false;
+        }
+        let motion = match key {
+            Key::Named(NamedKey::ArrowLeft) => Some(Motion::Left),
+            Key::Named(NamedKey::ArrowRight) => Some(Motion::Right),
+            Key::Named(NamedKey::ArrowUp) => Some(Motion::Up),
+            Key::Named(NamedKey::ArrowDown) => Some(Motion::Down),
+            Key::Named(NamedKey::Home) => Some(Motion::Home),
+            Key::Named(NamedKey::End) => Some(Motion::End),
+            Key::Named(NamedKey::PageUp) => Some(Motion::PageUp),
+            Key::Named(NamedKey::PageDown) => Some(Motion::PageDown),
+            _ => None,
+        };
+        if let Some(motion) = motion {
+            self.step_caret(motion);
+            return true;
+        }
+        matches!(
+            key,
+            Key::Character(_)
+                | Key::Named(
+                    NamedKey::Space
+                        | NamedKey::Enter
+                        | NamedKey::Backspace
+                        | NamedKey::Delete
+                        | NamedKey::Tab
+                )
+        )
+    }
+
+    /// A click while editing places the caret at the character.
+    fn place_caret(&mut self) {
+        let x = self.cursor.x as f32 - self.inset();
+        let y = self.cursor.y as f32 + self.scroll_y;
+        let Some(lay) = self.layout.as_ref() else {
+            return;
+        };
+        if let Some(placed) = caret::place(lay, &self.document, &mut self.fonts, x, y) {
+            self.caret = Some(placed);
+            if self.selection.take().is_some() {
+                self.band = None;
+            }
+            self.sel_anchor = None;
+            self.wake_caret();
+            self.request_redraw();
         }
     }
 
@@ -971,10 +1200,14 @@ impl App {
             self.move_ownership(PaneAct::ClickDocument);
             self.scrollbar_press();
             if self.drag.is_none() {
-                match self.register_click() {
-                    2 => self.select_unit(false),
-                    3 => self.select_unit(true),
-                    _ => self.begin_selection(),
+                if self.mode == edit::Mode::Edit {
+                    self.place_caret();
+                } else {
+                    match self.register_click() {
+                        2 => self.select_unit(false),
+                        3 => self.select_unit(true),
+                        _ => self.begin_selection(),
+                    }
                 }
             }
         }
@@ -1644,6 +1877,12 @@ impl App {
         }
         self.export_warning = None;
         self.remember_position();
+        // The mark is stored against the outgoing path, which `leave_edit`
+        // reads before the new one lands below.
+        if self.mode == edit::Mode::Edit {
+            self.leave_edit();
+        }
+        self.notice = None;
         let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         let loaded = load::open(&path, Some(Instant::now() + load::OPEN_BUDGET));
         let opened = loaded.is_ok();
@@ -1652,6 +1891,7 @@ impl App {
         match loaded {
             Ok(o) => {
                 self.document = o.document;
+                self.lossy = o.lossy;
                 book_job = o.book;
                 self.book_toc = o.toc;
                 self.start_highlight(o.pending);
@@ -1666,6 +1906,9 @@ impl App {
             }
             Err(err) => {
                 self.document = load::message(&err.to_string());
+                // The message document is not the file's bytes; branding
+                // it lossy keeps the editing door shut on it.
+                self.lossy = true;
                 self.start_highlight(Vec::new());
                 self.parser.cancel();
                 self.parse_pending = false;
@@ -2610,6 +2853,22 @@ impl App {
                 self.scale,
             );
         }
+        if self.mode == edit::Mode::Edit && self.blink_visible {
+            if let Some(c) = self.caret {
+                if let Some(b) = c.geometry(lay, &self.document, &mut self.fonts) {
+                    draw_caret(
+                        &mut buffer,
+                        size.width,
+                        size.height,
+                        inset,
+                        self.scroll_y,
+                        self.scale,
+                        b,
+                        self.theme.text.body,
+                    );
+                }
+            }
+        }
         let owns_keys = self.key_pane == KeyPane::Sidebar;
         if let Some(side) = self.sidebar.as_mut() {
             let current = outline_current(&mut self.outline, side, lay, self.scroll_y);
@@ -2650,6 +2909,35 @@ impl App {
                     &self.theme,
                     state,
                     size.width as f32 / self.scale,
+                );
+                painter.composite(&mut buffer, size.width);
+                *stale = painter.dirty();
+            }
+        }
+        if let Some(alpha) = self
+            .notice
+            .as_ref()
+            .and_then(|notice| notice.alpha(Instant::now()))
+        {
+            let fits = self
+                .notice_canvas
+                .as_ref()
+                .is_some_and(|(p, _)| p.width() == size.width && p.height() == size.height);
+            if !fits {
+                self.notice_canvas =
+                    tiny_skia::Pixmap::new(size.width, size.height).map(|pixmap| (pixmap, None));
+            }
+            if let (Some((canvas, stale)), Some(n)) =
+                (self.notice_canvas.as_mut(), self.notice.as_ref())
+            {
+                let mut painter = Painter::new(canvas, &mut self.fonts, stale.take(), self.scale);
+                notice::draw(
+                    &mut painter,
+                    &self.theme,
+                    n.text(),
+                    alpha,
+                    size.width as f32 / self.scale,
+                    size.height as f32 / self.scale,
                 );
                 painter.composite(&mut buffer, size.width);
                 *stale = painter.dirty();
@@ -2702,6 +2990,31 @@ impl ApplicationHandler for App {
                 self.pass = None;
                 event_loop.set_control_flow(ControlFlow::Wait);
                 self.request_redraw();
+            }
+        }
+        if self.mode == edit::Mode::Edit && self.caret.is_some() {
+            let now = Instant::now();
+            if now >= self.blink_flip {
+                self.blink_visible = !self.blink_visible;
+                self.blink_flip = now + CARET_BLINK;
+                self.request_redraw();
+            }
+            event_loop.set_control_flow(ControlFlow::WaitUntil(self.blink_flip));
+        }
+        if let Some(notice) = self.notice.as_ref() {
+            let now = Instant::now();
+            match notice.alpha(now) {
+                None => {
+                    self.notice = None;
+                    event_loop.set_control_flow(ControlFlow::Wait);
+                    self.request_redraw();
+                }
+                Some(alpha) => {
+                    event_loop.set_control_flow(ControlFlow::WaitUntil(notice.wake(now)));
+                    if alpha < 1.0 {
+                        self.request_redraw();
+                    }
+                }
             }
         }
         // Last, so its near tick wins the wake; an early wake costs the
@@ -2824,6 +3137,7 @@ impl ApplicationHandler for App {
                         self.overlay_result(result);
                     }
                     _ if self.search_key(&logical_key, ctrl, shift) => {}
+                    _ if self.mode == edit::Mode::Edit && self.edit_key(&logical_key, ctrl) => {}
                     Some(Command::LineUp) if self.sidebar_owns_keys() => {
                         self.sidebar_move(-1);
                     }
