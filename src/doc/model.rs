@@ -29,6 +29,10 @@ pub struct Document {
     /// source. Layout shows such a page as code, not as a page
     /// containing code: the block draws without its panel.
     pub code_file: bool,
+    /// True for plain text files. Their rows are uniform: blank lines
+    /// are real rows inside the blocks, and layout adds no gap between
+    /// blocks.
+    pub plain_file: bool,
 }
 
 impl Default for Document {
@@ -41,6 +45,7 @@ impl Default for Document {
             anchors: std::collections::HashMap::new(),
             book_id: None,
             code_file: false,
+            plain_file: false,
         }
     }
 }

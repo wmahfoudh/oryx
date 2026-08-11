@@ -759,6 +759,9 @@ pub struct LayoutPass {
     prev_alert: Option<AlertKind>,
     prev_is_list: bool,
     prev_space_below: f32,
+    /// A plain text file: rows are uniform and blocks meet with no
+    /// added gap or trailing space.
+    plain: bool,
     margin: f32,
     content_width: f32,
     vertical_margin: f32,
@@ -1341,6 +1344,7 @@ pub fn layout_begin(
         prev_alert: None,
         prev_is_list: false,
         prev_space_below: 0.0,
+        plain: doc.plain_file,
         margin,
         content_width,
         vertical_margin,
@@ -1672,6 +1676,9 @@ fn place_block(
     if pass.first {
         pass.cursor = pass.vertical_margin;
         pass.first = false;
+    } else if doc.plain_file {
+        // A plain file's rows are uniform: blank lines are real rows
+        // inside the blocks, so blocks meet with no added gap.
     } else if is_list && pass.prev_is_list {
         gap = 0.25 * base_size;
         pass.cursor += gap;
@@ -2660,11 +2667,16 @@ fn finish_block(
     }
     out.table.finish(height, deco_top);
 
-    pass.cursor += height + metrics::space_below(frame.base_size);
+    let below = if pass.plain {
+        0.0
+    } else {
+        metrics::space_below(frame.base_size)
+    };
+    pass.cursor += height + below;
     pass.prev_quote_depth = block.quote_depth;
     pass.prev_alert = block.alert;
     pass.prev_is_list = frame.is_list;
-    pass.prev_space_below = metrics::space_below(frame.base_size);
+    pass.prev_space_below = below;
 }
 
 /// Shapes an alert region's bold title line into the scratch; the runs
@@ -5221,6 +5233,28 @@ mod tests {
             &ViewConfig::default(),
             800.0,
         )
+    }
+
+    fn run_y(l: &LayoutDoc, doc: &Document, text: &str) -> f32 {
+        l.runs
+            .iter()
+            .find(|r| l.run_text(doc, r) == text)
+            .unwrap_or_else(|| panic!("no run shows {text:?}"))
+            .y
+    }
+
+    #[test]
+    fn a_plain_file_shows_blank_lines_as_rows() {
+        let doc = load::plain_document("alpha\nbeta\n");
+        let l = lay_of(&doc);
+        let one = run_y(&l, &doc, "beta") - run_y(&l, &doc, "alpha");
+        let doc = load::plain_document("alpha\n\n\nbeta\n");
+        let l = lay_of(&doc);
+        let three = run_y(&l, &doc, "beta") - run_y(&l, &doc, "alpha");
+        assert!(
+            (three - 3.0 * one).abs() < 0.5,
+            "two blank lines are two rows: single advance {one}, with blanks {three}"
+        );
     }
 
     #[test]

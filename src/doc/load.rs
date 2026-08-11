@@ -316,16 +316,39 @@ pub(crate) fn code_document(token: Option<&str>, text: &str) -> Document {
 }
 
 /// Paragraphs split on blank lines; line breaks inside a paragraph are
-/// preserved as newline spans so the lines sit flush in layout.
+/// preserved as newline spans so the lines sit flush in layout. A blank
+/// line is a row of its own, carried as a newline span on the open
+/// paragraph, so the page shows every line the file has; plain files
+/// draw with no added gap between blocks.
 pub(crate) fn plain_document(text: &str) -> Document {
     let mut blocks = Vec::new();
     let mut spans: Vec<Span> = Vec::new();
+    let mut trailing = false;
     let mut offset = 0;
     for raw in text.split('\n') {
         let line = raw.strip_suffix('\r').unwrap_or(raw);
         if line.trim().is_empty() {
-            flush_plain(&mut blocks, &mut spans);
+            // The final split fragment past the file's terminator is
+            // not a line; a real blank row always has its newline byte.
+            let term = offset + raw.len();
+            if term < text.len() {
+                // The layout consumes one newline span as the segment
+                // break after a text line; the blank's own row needs
+                // its separator first.
+                if !trailing && !spans.is_empty() {
+                    spans.push(Span::plain("\n"));
+                }
+                let mut span = Span::plain("\n");
+                span.range = term as u32..(term + 1) as u32;
+                span.seal(text);
+                spans.push(span);
+                trailing = true;
+            }
         } else {
+            if trailing {
+                flush_plain(&mut blocks, &mut spans);
+                trailing = false;
+            }
             if !spans.is_empty() {
                 spans.push(Span::plain("\n"));
             }
@@ -340,6 +363,7 @@ pub(crate) fn plain_document(text: &str) -> Document {
     Document {
         blocks,
         source: Arc::from(text),
+        plain_file: true,
         ..Document::default()
     }
 }
@@ -929,7 +953,10 @@ mod tests {
             panic!()
         };
         let joined: String = spans.iter().map(|s| s.text(&d.source)).collect();
-        assert_eq!(joined, "line one\nline two");
+        assert_eq!(
+            joined, "line one\nline two\n\n",
+            "the blank row rides the paragraph as its own line"
+        );
         assert!(matches!(&d.blocks[1].kind, BlockKind::Paragraph { .. }));
     }
 

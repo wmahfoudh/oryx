@@ -206,6 +206,16 @@ fn lines_of(lay: &LayoutDoc, doc: &Document) -> Vec<Line> {
             }),
         }
     }
+    // Layout trims trailing space glyphs, but their bytes are real and
+    // the caret must stand after them: each line's end extends over the
+    // whitespace up to its ending.
+    for line in &mut lines {
+        let tail = doc.source[line.end..]
+            .bytes()
+            .take_while(|b| *b == b' ' || *b == b'\t')
+            .count();
+        line.end += tail;
+    }
     lines
 }
 
@@ -227,7 +237,8 @@ fn run_at(line: &Line, offset: usize) -> Option<&MappedRun> {
         .iter()
         .find(|r| offset >= r.start && offset < r.start + r.len)
         .or_else(|| line.runs.iter().rev().find(|r| offset == r.start + r.len))
-        .or_else(|| line.runs.first())
+        // Past every run's text: the line's trimmed trailing whitespace.
+        .or_else(|| line.runs.last())
 }
 
 /// Advance x of an offset inside a run, shaped as paint shapes.
@@ -244,10 +255,23 @@ fn x_of(
     if byte == 0 {
         return 0.0;
     }
-    if byte >= text.len() {
+    let family = lay.run_family(text_run);
+    if byte > text.len() {
+        // Inside the trailing whitespace layout trimmed: shape the
+        // source slice so the caret advances past each space.
+        if let Some(slice) = doc.source.get(run.start..offset) {
+            let buffer = selection::shape_run(fonts, text_run, slice, family);
+            if let Some(line) = buffer.layout_runs().next() {
+                if let Some(glyph) = line.glyphs.last() {
+                    return glyph.x + glyph.w;
+                }
+            }
+        }
         return text_run.width;
     }
-    let family = lay.run_family(text_run);
+    if byte == text.len() {
+        return text_run.width;
+    }
     let buffer = selection::shape_run(fonts, text_run, text, family);
     if let Some(line) = buffer.layout_runs().next() {
         for glyph in line.glyphs {
@@ -301,20 +325,24 @@ impl Caret {
         fonts: &mut FontStore,
         page_h: f32,
     ) -> Caret {
-        let lines = lines_of(lay, doc);
-        // The document jumps need no current line, so they work even
-        // from an offset the placed window no longer holds.
+        // The document and word jumps are pure text rules: they need no
+        // layout, and they reach blank lines the layout has no runs for.
         match motion {
-            Motion::DocStart => {
-                return Caret::at(lines.first().map_or(self.offset, |l| l.start));
-            }
+            Motion::DocStart => return Caret::at(0),
             Motion::DocEnd => {
-                return Caret::at(lines.last().map_or(self.offset, |l| l.end));
+                let len = doc.source.len();
+                let end = if doc.source.ends_with('\n') {
+                    len - 1
+                } else {
+                    len
+                };
+                return Caret::at(end);
             }
             Motion::WordLeft => return Caret::at(word_left(&doc.source, self.offset)),
             Motion::WordRight => return Caret::at(word_right(&doc.source, self.offset)),
             _ => {}
         }
+        let lines = lines_of(lay, doc);
         let Some(li) = locate(&lines, self.offset) else {
             // Between lines, on a blank row: arrows step by source
             // character so blank lines stay reachable and leavable.
@@ -332,6 +360,41 @@ impl Caret {
                         .next()
                         .map_or(0, |c| c.len_utf8());
                     Caret::at(clamp_final(doc, self.offset, self.offset + step))
+                }
+                Motion::Up => {
+                    let Some(p) = doc.source[..self.offset].rfind('\n') else {
+                        return self;
+                    };
+                    // The row above ends at p; locating its end lands a
+                    // wrapped paragraph on its last visual line.
+                    let q = doc.source[..p].rfind('\n').map_or(0, |i| i + 1);
+                    let goal = self.goal.unwrap_or(0.0);
+                    let offset = match locate(&lines, p) {
+                        Some(above) => offset_at_x(fonts, lay, doc, &lines[above], goal),
+                        None => q,
+                    };
+                    Caret {
+                        offset,
+                        goal: Some(goal),
+                    }
+                }
+                Motion::Down => {
+                    let Some(n) = doc.source[self.offset..].find('\n') else {
+                        return self;
+                    };
+                    let r = self.offset + n + 1;
+                    if r == doc.source.len() && doc.source.ends_with('\n') {
+                        return self;
+                    }
+                    let goal = self.goal.unwrap_or(0.0);
+                    let offset = match locate(&lines, r) {
+                        Some(below) => offset_at_x(fonts, lay, doc, &lines[below], goal),
+                        None => r,
+                    };
+                    Caret {
+                        offset,
+                        goal: Some(goal),
+                    }
                 }
                 _ => self,
             };
@@ -376,10 +439,45 @@ impl Caret {
                     .goal
                     .unwrap_or_else(|| run.x + x_of(fonts, lay, doc, run, self.offset));
                 let target = match motion {
-                    Motion::Up if li == 0 => return self,
-                    Motion::Down if li + 1 >= lines.len() => return self,
-                    Motion::Up => li - 1,
-                    Motion::Down => li + 1,
+                    // A blank row between this line and its neighbor is
+                    // a stop of its own; the goal column rides along.
+                    Motion::Up => {
+                        if li == 0 {
+                            if line.start > 0 {
+                                return Caret {
+                                    offset: line.start - 1,
+                                    goal: Some(x),
+                                };
+                            }
+                            return self;
+                        }
+                        let prev = &lines[li - 1];
+                        let sep = doc.source.get(prev.end.min(line.start)..line.start);
+                        if sep.is_some_and(|s| s.matches('\n').count() >= 2) {
+                            return Caret {
+                                offset: line.start - 1,
+                                goal: Some(x),
+                            };
+                        }
+                        li - 1
+                    }
+                    Motion::Down => {
+                        let below = lines.get(li + 1).map_or(doc.source.len(), |l| l.start);
+                        let blanks = doc
+                            .source
+                            .get(line.end..below.max(line.end))
+                            .map_or(0, |s| s.matches('\n').count());
+                        if blanks >= 2 {
+                            return Caret {
+                                offset: line.end + 1,
+                                goal: Some(x),
+                            };
+                        }
+                        if li + 1 >= lines.len() {
+                            return self;
+                        }
+                        li + 1
+                    }
                     _ => {
                         let goal_y = if motion == Motion::PageUp {
                             line.y - page_h
@@ -423,19 +521,37 @@ impl Caret {
             });
         }
         // A line with no glyphs, just opened by Enter or blank between
-        // paragraphs: the caret stands at the line start, below the
-        // nearest text line above, one advance per blank row.
-        let li = lines.iter().rposition(|l| l.end < self.offset)?;
-        let line = &lines[li];
-        let gap = doc.source.get(line.end..self.offset)?.matches('\n').count();
+        // paragraphs: the caret stands at the line start, anchored to
+        // the nearest text line, one advance per blank row between.
+        if let Some(li) = lines.iter().rposition(|l| l.end < self.offset) {
+            let line = &lines[li];
+            let gap = doc.source.get(line.end..self.offset)?.matches('\n').count();
+            if gap == 0 {
+                return None;
+            }
+            let x = line.runs.first().map_or(0.0, |r| r.x);
+            return Some(CaretBox {
+                x,
+                y: line.y + line.h * gap as f32,
+                h: line.h,
+            });
+        }
+        // Nothing above: blank rows at the top of the file anchor to
+        // the first text line below instead.
+        let below = lines.iter().find(|l| l.start > self.offset)?;
+        let gap = doc
+            .source
+            .get(self.offset..below.start)?
+            .matches('\n')
+            .count();
         if gap == 0 {
             return None;
         }
-        let x = line.runs.first().map_or(0.0, |r| r.x);
+        let x = below.runs.first().map_or(0.0, |r| r.x);
         Some(CaretBox {
             x,
-            y: line.y + line.h * gap as f32,
-            h: line.h,
+            y: below.y - below.h * gap as f32,
+            h: below.h,
         })
     }
 }
@@ -669,6 +785,80 @@ mod tests {
             .expect("the line opened past the text seats the caret");
         assert_eq!(tail.x, alpha.x);
         assert!(tail.y > alpha.y, "the new line stands below the last text");
+    }
+
+    #[test]
+    fn the_caret_stands_after_a_trailing_space() {
+        for doc in [code_doc("word \nnext\n"), text_doc("word \nnext\n")] {
+            let (l, mut fonts) = lay_of(&doc);
+            let before = Caret::at(4)
+                .geometry(&l, &doc, &mut fonts)
+                .expect("the word end seats the caret");
+            let after = Caret::at(5)
+                .geometry(&l, &doc, &mut fonts)
+                .expect("the position after a trailing space seats the caret");
+            assert!(
+                after.x > before.x,
+                "the space advances the caret: {} then {}",
+                before.x,
+                after.x
+            );
+        }
+    }
+
+    #[test]
+    fn the_caret_shows_on_a_blank_first_line() {
+        let doc = text_doc("\nalpha\n");
+        let (l, mut fonts) = lay_of(&doc);
+        let alpha = run(&l, &doc, "alpha");
+        let first = Caret::at(0)
+            .geometry(&l, &doc, &mut fonts)
+            .expect("a blank first line seats the caret");
+        assert_eq!(first.x, alpha.x);
+        assert!(first.y < alpha.y, "the blank line stands above the text");
+    }
+
+    #[test]
+    fn the_document_jumps_include_leading_and_trailing_blanks() {
+        let doc = text_doc("\nalpha\n");
+        let (l, mut fonts) = lay_of(&doc);
+        let c = Caret::at(3).step(Motion::DocStart, &l, &doc, &mut fonts, 0.0);
+        assert_eq!(c.offset, 0, "the jump reaches the blank first line");
+        let doc = text_doc("alpha\n\n\n");
+        let (l, mut fonts) = lay_of(&doc);
+        let c = Caret::at(2).step(Motion::DocEnd, &l, &doc, &mut fonts, 0.0);
+        assert_eq!(c.offset, 7, "the jump reaches the last blank line");
+    }
+
+    #[test]
+    fn up_and_down_work_on_a_blank_line() {
+        let doc = code_doc("a\n\nb\n");
+        let (l, mut fonts) = lay_of(&doc);
+        let c = step(Caret::at(2), Motion::Up, &l, &doc, &mut fonts);
+        assert_eq!(c.offset, 0, "up from the blank line reaches the line above");
+        let c = step(Caret::at(2), Motion::Down, &l, &doc, &mut fonts);
+        assert_eq!(
+            c.offset, 3,
+            "down from the blank line reaches the line below"
+        );
+    }
+
+    #[test]
+    fn vertical_motion_stops_at_blank_lines_and_keeps_the_goal() {
+        let doc = code_doc("alpha\n\nbeta\n");
+        let (l, mut fonts) = lay_of(&doc);
+        let c = step(Caret::at(2), Motion::Down, &l, &doc, &mut fonts);
+        assert_eq!(c.offset, 6, "down lands on the blank row, not past it");
+        let c = step(c, Motion::Down, &l, &doc, &mut fonts);
+        assert_eq!(
+            c.offset,
+            at(&doc, "beta") + 2,
+            "the goal column survives the blank row"
+        );
+        let c = step(c, Motion::Up, &l, &doc, &mut fonts);
+        assert_eq!(c.offset, 6);
+        let c = step(c, Motion::Up, &l, &doc, &mut fonts);
+        assert_eq!(c.offset, 2, "the round trip lands home");
     }
 
     #[test]
