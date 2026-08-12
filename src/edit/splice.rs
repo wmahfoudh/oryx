@@ -159,50 +159,100 @@ impl Ledger {
         (base_offset as isize + delta) as usize
     }
 
+    /// Lines of the current text the splices touch, the save notice's
+    /// figure: the union of each splice's line span, so splices sharing
+    /// a line never count it twice.
+    pub fn touched_lines(&self) -> usize {
+        let mut count = 0;
+        let mut last: Option<usize> = None;
+        let (spans, _) = self.spans();
+        for (splice, span) in self.splices.iter().zip(spans) {
+            let start = self.newlines_before(span.start);
+            let end = start + splice.text.matches('\n').count();
+            let from = match last {
+                Some(l) if l >= start => l + 1,
+                _ => start,
+            };
+            count += (end + 1).saturating_sub(from);
+            last = Some(end.max(last.unwrap_or(0)));
+        }
+        count
+    }
+
+    /// Saves: the file bytes as `emit`, with the ledger re-fixed on the
+    /// written state, so the current text becomes the baseline, the
+    /// splices clear, and the new CRLF positions are exactly where the
+    /// emission wrote them.
+    pub fn commit(&mut self) -> Vec<u8> {
+        let (out, crlf) = self.render();
+        self.base = Arc::from(self.current());
+        self.crlf = crlf;
+        self.splices.clear();
+        out
+    }
+
     /// The file bytes the current text saves as: untouched baseline
     /// bytes verbatim, normalized line endings restored where they
     /// stood, and every newline inside a replacement written in the
     /// file's dominant ending.
     pub fn emit(&self) -> Vec<u8> {
+        self.render().0
+    }
+
+    /// The emission and, beside it, the current-text offsets of every
+    /// newline written as CRLF: the commit's new recording.
+    fn render(&self) -> (Vec<u8>, Vec<u32>) {
         let newlines = self.base.matches('\n').count();
-        let dominant: &[u8] = if self.crlf.len() * 2 > newlines {
-            b"\r\n"
-        } else {
-            b"\n"
-        };
+        let dominant_crlf = self.crlf.len() * 2 > newlines;
         let mut out = Vec::with_capacity(self.base.len() + self.crlf.len());
+        let mut written = Vec::with_capacity(self.crlf.len());
+        // The normalized position of the next byte, walked alongside
+        // the emission so CRLF positions record in current coordinates.
+        let mut cur = 0;
         let mut crlf = self.crlf.iter().map(|&p| p as usize).peekable();
-        let mut push_base = |range: Range<usize>, out: &mut Vec<u8>| {
-            let mut at = range.start;
-            while let Some(&p) = crlf.peek() {
-                if p >= range.end {
-                    break;
+        let mut push_base =
+            |range: Range<usize>, out: &mut Vec<u8>, written: &mut Vec<u32>, cur: &mut usize| {
+                let mut at = range.start;
+                while let Some(&p) = crlf.peek() {
+                    if p >= range.end {
+                        break;
+                    }
+                    if p >= at {
+                        out.extend_from_slice(self.base[at..p].as_bytes());
+                        out.extend_from_slice(b"\r\n");
+                        written.push((*cur + p - at) as u32);
+                        *cur += p - at + 1;
+                        at = p + 1;
+                    }
+                    crlf.next();
                 }
-                if p >= at {
-                    out.extend_from_slice(self.base[at..p].as_bytes());
-                    out.extend_from_slice(b"\r\n");
-                    at = p + 1;
-                }
-                crlf.next();
-            }
-            out.extend_from_slice(self.base[at..range.end].as_bytes());
-        };
+                out.extend_from_slice(self.base[at..range.end].as_bytes());
+                *cur += range.end - at;
+            };
         let mut base = 0;
         for s in &self.splices {
-            push_base(base..s.range.start, &mut out);
+            push_base(base..s.range.start, &mut out, &mut written, &mut cur);
             // Skip the replaced range's own normalized newlines.
             for line in s.text.split_inclusive('\n') {
                 if let Some(head) = line.strip_suffix('\n') {
                     out.extend_from_slice(head.as_bytes());
-                    out.extend_from_slice(dominant);
+                    cur += head.len();
+                    if dominant_crlf {
+                        out.extend_from_slice(b"\r\n");
+                        written.push(cur as u32);
+                    } else {
+                        out.push(b'\n');
+                    }
+                    cur += 1;
                 } else {
                     out.extend_from_slice(line.as_bytes());
+                    cur += line.len();
                 }
             }
             base = s.range.end;
         }
-        push_base(base..self.base.len(), &mut out);
-        out
+        push_base(base..self.base.len(), &mut out, &mut written, &mut cur);
+        (out, written)
     }
 }
 
@@ -339,6 +389,55 @@ mod tests {
             led.emit(),
             b"alpha\r\nbe\nta\ngamma\n",
             "the typed newline is LF, the untouched CRLF stays CRLF"
+        );
+    }
+
+    #[test]
+    fn touched_lines_counts_the_save_notice_figure() {
+        let mut led = ledger("aaa\nbbb\nccc\nddd\n");
+        assert_eq!(led.touched_lines(), 0, "a clean ledger touches nothing");
+        led.edit(1..1, "x");
+        assert_eq!(led.touched_lines(), 1);
+        led.edit(9..9, "y");
+        assert_eq!(led.touched_lines(), 2, "distant edits count their lines");
+        led.edit(5..5, "one\ntwo");
+        assert_eq!(
+            led.touched_lines(),
+            4,
+            "a splice spans its start line through its last"
+        );
+    }
+
+    #[test]
+    fn commit_rebases_the_ledger_on_the_written_bytes() {
+        // A CRLF-dominant file: the untouched ending stays LF, typed
+        // newlines adopt CRLF.
+        let mut led = Ledger::new(Arc::from("alpha\nbeta\ngamma\n"), vec![5, 10]);
+        led.edit(6..10, "BETA");
+        led.edit(8..8, "\n");
+        let bytes = led.commit();
+        assert_eq!(bytes, led.emit(), "commit writes what emit describes");
+        assert_eq!(bytes, b"alpha\r\nBE\r\nTA\r\ngamma\n");
+        assert!(!led.is_dirty(), "the written state is the baseline");
+        assert_eq!(led.current(), "alpha\nBE\nTA\ngamma\n");
+        // The re-fixed baseline: untouched endings emit as written,
+        // and a new edit's newline still adopts the dominant ending.
+        led.edit(3..3, "\n");
+        assert_eq!(
+            led.emit(),
+            b"alp\r\nha\r\nBE\r\nTA\r\ngamma\n",
+            "the committed endings are the new baseline's own"
+        );
+    }
+
+    #[test]
+    fn a_clean_commit_is_the_original_bytes() {
+        let mut led = Ledger::new(Arc::from("alpha\nbeta\n"), vec![5]);
+        assert_eq!(led.commit(), b"alpha\r\nbeta\n");
+        assert_eq!(
+            led.commit(),
+            b"alpha\r\nbeta\n",
+            "committing twice is stable"
         );
     }
 

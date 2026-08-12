@@ -39,12 +39,15 @@ pub enum Command {
     Paste,
     Undo,
     Redo,
+    Save,
+    SaveAs,
+    NewFile,
     Quit,
 }
 
 impl Command {
     /// Every variant; the coverage test checks each one against the table.
-    pub const ALL: [Command; 33] = [
+    pub const ALL: [Command; 36] = [
         Command::OpenFile,
         Command::Reload,
         Command::Sidebar,
@@ -77,6 +80,9 @@ impl Command {
         Command::Paste,
         Command::Undo,
         Command::Redo,
+        Command::Save,
+        Command::SaveAs,
+        Command::NewFile,
         Command::Quit,
     ];
 }
@@ -112,6 +118,24 @@ pub const SHORTCUTS: &[Shortcut] = &[
         action: "Open a file",
         section: "Files",
         bindings: &[(Binding::Ctrl("o"), Command::OpenFile)],
+    },
+    Shortcut {
+        keys: "Ctrl+N",
+        action: "New file",
+        section: "Files",
+        bindings: &[(Binding::Ctrl("n"), Command::NewFile)],
+    },
+    Shortcut {
+        keys: "Ctrl+S",
+        action: "Save (editing)",
+        section: "Files",
+        bindings: &[(Binding::Ctrl("s"), Command::Save)],
+    },
+    Shortcut {
+        keys: "Ctrl+Shift+S",
+        action: "Save as (editing)",
+        section: "Files",
+        bindings: &[(Binding::CtrlShift("s"), Command::SaveAs)],
     },
     Shortcut {
         keys: "F5 / Ctrl+R",
@@ -435,6 +459,13 @@ mod tests {
     fn cut_and_paste_resolve() {
         assert_eq!(command(&chr("x"), true, false), Some(Command::Cut));
         assert_eq!(command(&chr("v"), true, false), Some(Command::Paste));
+    }
+
+    #[test]
+    fn the_save_family_resolves() {
+        assert_eq!(command(&chr("s"), true, false), Some(Command::Save));
+        assert_eq!(command(&chr("S"), true, true), Some(Command::SaveAs));
+        assert_eq!(command(&chr("n"), true, false), Some(Command::NewFile));
     }
 
     #[test]

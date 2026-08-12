@@ -1,0 +1,56 @@
+//! Atomic file writes: the bytes land whole or not at all. The write
+//! goes to a sibling temp file, flushed, then renamed over the target;
+//! `std::fs::rename` replaces an existing file on every platform Oryx
+//! ships to.
+
+use std::io;
+use std::path::Path;
+
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    use std::io::Write;
+    let dir = path.parent().filter(|p| !p.as_os_str().is_empty());
+    let temp = dir
+        .unwrap_or_else(|| Path::new("."))
+        .join(format!(".oryx-save-{}", std::process::id()));
+    let mut file = std::fs::File::create(&temp)?;
+    let written = file.write_all(bytes).and_then(|()| file.sync_all());
+    drop(file);
+    if let Err(err) = written {
+        std::fs::remove_file(&temp).ok();
+        return Err(err);
+    }
+    std::fs::rename(&temp, path).inspect_err(|_| {
+        std::fs::remove_file(&temp).ok();
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_write_replaces_the_target_and_leaves_no_temp() {
+        let dir = std::env::temp_dir().join(format!("oryx-save-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("note.txt");
+        std::fs::write(&target, b"old contents").unwrap();
+        write_atomic(&target, b"new contents").expect("the write lands");
+        assert_eq!(std::fs::read(&target).unwrap(), b"new contents");
+        let entries: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(entries, vec!["note.txt"], "no temp file survives");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_write_creates_a_missing_target() {
+        let dir = std::env::temp_dir().join(format!("oryx-save-new-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("fresh.txt");
+        write_atomic(&target, b"born whole").expect("the write lands");
+        assert_eq!(std::fs::read(&target).unwrap(), b"born whole");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}

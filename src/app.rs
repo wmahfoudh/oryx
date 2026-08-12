@@ -29,9 +29,11 @@ use oryx::paint;
 use oryx::paint::painter::Painter;
 use oryx::paint::scroll::{self, BandCache};
 use oryx::platform::config::{self, Config, WindowState};
+use oryx::platform::save;
 use oryx::style::fonts::FontStore;
 use oryx::style::highlight::{Highlighter, PendingBlock};
 use oryx::style::theme::{self, Rgba, Theme};
+use oryx::ui::confirm;
 use oryx::ui::export::{ExportDialog, ExportProgress};
 use oryx::ui::help::Help;
 use oryx::ui::notice::{self, Notice};
@@ -235,6 +237,9 @@ pub fn run(path: Option<PathBuf>, theme_name: Option<String>) -> anyhow::Result<
         ledger: None,
         undo: None,
         rehighlight_at: None,
+        confirm: None,
+        disk_seen: None,
+        disk_check_at: Instant::now(),
         crlf: opened_crlf,
         caret_snap: false,
         blink_visible: true,
@@ -515,6 +520,14 @@ struct App {
     /// When the edited block re-highlights, set by each keystroke and
     /// fired once typing rests.
     rehighlight_at: Option<Instant>,
+    /// The unsaved-changes modal and the action it guards.
+    confirm: Option<confirm::Pending>,
+    /// The open file's on-disk identity at last read or write, for the
+    /// external-change check.
+    disk_seen: Option<(std::time::SystemTime, u64)>,
+    /// The earliest next disk check; the check runs on focus and on
+    /// interaction frames, never on a timer, so idle stays idle.
+    disk_check_at: Instant,
     /// Normalized-text offsets of the open file's CRLF endings, for the
     /// ledger's byte-exact emission.
     crlf: Vec<u32>,
@@ -685,6 +698,15 @@ impl App {
             Command::Paste => self.paste_clipboard(),
             Command::Undo => self.undo_edit(),
             Command::Redo => self.redo_edit(),
+            Command::Save => {
+                self.save();
+            }
+            Command::SaveAs => self.save_as(),
+            Command::NewFile => {
+                if self.guard_unsaved(confirm::Pending::New) {
+                    self.new_file();
+                }
+            }
             // The Escape ladder, innermost out. The overlay branch
             // catches it upstream; the find bar rung is normally spent
             // there too and stands here for totality.
@@ -706,8 +728,10 @@ impl App {
                     edit::EscapeAct::LeaveEdit => self.leave_edit(),
                     edit::EscapeAct::CloseSidebar => self.toggle_sidebar(),
                     edit::EscapeAct::Quit => {
-                        self.remember_position();
-                        event_loop.exit();
+                        if self.guard_unsaved(confirm::Pending::Quit) {
+                            self.remember_position();
+                            event_loop.exit();
+                        }
                     }
                 }
             }
@@ -1075,6 +1099,203 @@ impl App {
             state.stale = true;
         }
         true
+    }
+
+    /// Unsaved edits stand: the undo head is away from the save point,
+    /// or the ledger holds splices the stack cannot see.
+    fn edits_unsaved(&self) -> bool {
+        self.undo.as_ref().is_some_and(Undo::is_dirty)
+            || self.ledger.as_ref().is_some_and(Ledger::is_dirty)
+    }
+
+    /// Ctrl+S: the ledger's emission written atomically, the baseline
+    /// re-fixed on the written bytes, the save point marked, and the
+    /// receipt shown with its lines-changed figure. True when nothing
+    /// was left unsaved.
+    fn save(&mut self) -> bool {
+        let Some(path) = self.path.clone() else {
+            return false;
+        };
+        let Some(ledger) = self.ledger.as_ref() else {
+            return false;
+        };
+        if !self.edits_unsaved() {
+            self.show_notice("No unsaved changes");
+            return true;
+        }
+        let lines = ledger.touched_lines();
+        let bytes = ledger.emit();
+        match save::write_atomic(&path, &bytes) {
+            Ok(()) => {
+                if let Some(ledger) = self.ledger.as_mut() {
+                    ledger.commit();
+                }
+                if let Some(undo) = self.undo.as_mut() {
+                    undo.mark_saved();
+                }
+                self.note_disk_state();
+                self.refresh_title();
+                let figure = if lines == 1 {
+                    "1 line changed".to_string()
+                } else {
+                    format!("{lines} lines changed")
+                };
+                self.show_notice(&format!("Saved, {figure}"));
+                true
+            }
+            Err(err) => {
+                self.show_notice(&format!("Save failed: {err}"));
+                false
+            }
+        }
+    }
+
+    /// Ctrl+Shift+S: the current text written to a chosen path, which
+    /// becomes the open file; the mode survives the move.
+    fn save_as(&mut self) {
+        let Some(ledger) = self.ledger.as_ref() else {
+            return;
+        };
+        let bytes = ledger.emit();
+        let mut dialog = rfd::FileDialog::new();
+        if let Some(path) = self.path.as_deref() {
+            if let Some(dir) = path.parent() {
+                dialog = dialog.set_directory(dir);
+            }
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                dialog = dialog.set_file_name(name);
+            }
+        }
+        let Some(target) = dialog.save_file() else {
+            return;
+        };
+        match save::write_atomic(&target, &bytes) {
+            Ok(()) => {
+                let editing = self.mode == edit::Mode::Edit;
+                let scroll = self.scroll_y;
+                self.open_file(&target, false);
+                self.scroll_y = scroll;
+                if editing {
+                    self.toggle_edit();
+                }
+                self.show_notice("Saved");
+            }
+            Err(err) => self.show_notice(&format!("Save as failed: {err}")),
+        }
+    }
+
+    /// Ctrl+N: the save dialog first, name and extension choosing the
+    /// type, then the empty file created, opened with the sidebar moved
+    /// to its folder, and edit mode entered on the blank page.
+    fn new_file(&mut self) {
+        let mut dialog = rfd::FileDialog::new().set_file_name("untitled.txt");
+        if let Some(dir) = self.path.as_ref().and_then(|p| p.parent()) {
+            dialog = dialog.set_directory(dir);
+        }
+        let Some(target) = dialog.save_file() else {
+            return;
+        };
+        if let Err(err) = save::write_atomic(&target, b"") {
+            self.show_notice(&format!("Could not create the file: {err}"));
+            return;
+        }
+        self.open_file(&target, true);
+        self.toggle_edit();
+    }
+
+    /// Records the open file's on-disk identity after a read or a
+    /// write of our own, the reference the change check compares to.
+    fn note_disk_state(&mut self) {
+        self.disk_seen = self.path.as_deref().and_then(|path| {
+            let meta = std::fs::metadata(path).ok()?;
+            Some((meta.modified().ok()?, meta.len()))
+        });
+    }
+
+    /// The external-change check, run on focus and rate-limited on
+    /// interaction frames: a changed file reloads under a clean
+    /// document and reports through the notice over unsaved edits.
+    fn check_disk(&mut self) {
+        let now = Instant::now();
+        if now < self.disk_check_at {
+            return;
+        }
+        self.disk_check_at = now + Duration::from_secs(1);
+        let Some(seen) = self.disk_seen else {
+            return;
+        };
+        let Some(path) = self.path.clone() else {
+            return;
+        };
+        let state = std::fs::metadata(&path)
+            .ok()
+            .and_then(|meta| Some((meta.modified().ok()?, meta.len())));
+        let Some(state) = state else {
+            return;
+        };
+        if state == seen {
+            return;
+        }
+        self.disk_seen = Some(state);
+        if self.edits_unsaved() {
+            self.show_notice("The file changed on disk");
+        } else {
+            self.reload_now();
+        }
+    }
+
+    /// Guards an action that would discard unsaved edits behind the
+    /// confirm modal; answers whether the action may run now.
+    fn guard_unsaved(&mut self, pending: confirm::Pending) -> bool {
+        if !self.edits_unsaved() {
+            return true;
+        }
+        self.confirm = Some(pending);
+        self.request_redraw();
+        false
+    }
+
+    /// Runs the action the confirm was holding.
+    fn resolve_confirm(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(pending) = self.confirm.take() else {
+            return;
+        };
+        match pending {
+            confirm::Pending::Quit => {
+                self.remember_position();
+                event_loop.exit();
+            }
+            confirm::Pending::Reload => self.reload_now(),
+            confirm::Pending::Open(path, reroot) => self.open_file(&path, reroot),
+            confirm::Pending::New => self.new_file(),
+        }
+        self.request_redraw();
+    }
+
+    /// One key against the open confirm modal.
+    fn confirm_key(&mut self, key: &Key, event_loop: &ActiveEventLoop) {
+        match confirm::decide(key) {
+            confirm::Decision::Save => {
+                if self.save() {
+                    self.resolve_confirm(event_loop);
+                } else {
+                    self.confirm = None;
+                    self.request_redraw();
+                }
+            }
+            confirm::Decision::Discard => {
+                self.ledger = None;
+                self.undo = None;
+                self.rehighlight_at = None;
+                self.refresh_title();
+                self.resolve_confirm(event_loop);
+            }
+            confirm::Decision::Cancel => {
+                self.confirm = None;
+                self.request_redraw();
+            }
+            confirm::Decision::Hold => {}
+        }
     }
 
     /// Restarts the highlight worker over the edited block, the rest
@@ -2127,7 +2348,11 @@ impl App {
             self.remember_dir(&after);
         }
         match click {
-            sidebar::SideClick::Open(path) => self.open_file(&path, false),
+            sidebar::SideClick::Open(path) => {
+                if self.guard_unsaved(confirm::Pending::Open(path.clone(), false)) {
+                    self.open_file(&path, false);
+                }
+            }
             sidebar::SideClick::Jump(block) => self.jump_to_heading(block),
             sidebar::SideClick::Tab => {
                 self.config.sidebar_tab = tab;
@@ -2235,7 +2460,9 @@ impl App {
             self.remember_dir(&after);
         }
         if let Some(path) = opened {
-            self.open_file(&path, false);
+            if self.guard_unsaved(confirm::Pending::Open(path.clone(), false)) {
+                self.open_file(&path, false);
+            }
         }
         self.request_redraw();
     }
@@ -2379,6 +2606,7 @@ impl App {
             OutlineTree::from_toc(&self.book_toc, &self.document)
         };
         self.path = Some(path.to_path_buf());
+        self.note_disk_state();
         let dir = path
             .parent()
             .map(Path::to_path_buf)
@@ -2429,7 +2657,15 @@ impl App {
 
     /// Re-reads the open file from disk, keeping the scroll position, for
     /// documents being edited in parallel.
+    /// F5 and Ctrl+R: a reload discards the buffer, so unsaved edits
+    /// put the confirm in front of it.
     fn reload(&mut self) {
+        if self.guard_unsaved(confirm::Pending::Reload) {
+            self.reload_now();
+        }
+    }
+
+    fn reload_now(&mut self) {
         let Some(path) = self.path.clone() else {
             return;
         };
@@ -2587,7 +2823,9 @@ impl App {
         ]);
         dialog = dialog.set_directory(start);
         if let Some(path) = dialog.pick_file() {
-            self.open_file(&path, true);
+            if self.guard_unsaved(confirm::Pending::Open(path.clone(), true)) {
+                self.open_file(&path, true);
+            }
         }
     }
 
@@ -2892,9 +3130,11 @@ impl App {
             // in place, anything else goes to the system handler. A
             // fragment lands once the new document's layout reaches it.
             if load::is_text_file(&path) {
-                self.open_file(&path, false);
-                if let Some(fragment) = fragment {
-                    self.pending_anchor = Some(format!("#{fragment}"));
+                if self.guard_unsaved(confirm::Pending::Open(path.clone(), false)) {
+                    self.open_file(&path, false);
+                    if let Some(fragment) = fragment {
+                        self.pending_anchor = Some(format!("#{fragment}"));
+                    }
                 }
             } else if let Err(err) = open::that_detached(&path) {
                 eprintln!("oryx: cannot open {}: {err}", path.display());
@@ -3123,6 +3363,9 @@ impl App {
     }
 
     fn redraw(&mut self) {
+        // Frames mean interaction; idle draws nothing, so the disk
+        // check rides them without ever waking the loop itself.
+        self.check_disk();
         let inset = self.inset() as u32;
         let Some(size) = self.gfx.as_ref().map(|g| g.window.inner_size()) else {
             return;
@@ -3420,6 +3663,27 @@ impl App {
                 *stale = painter.dirty();
             }
         }
+        if self.confirm.is_some() {
+            let fits = self
+                .notice_canvas
+                .as_ref()
+                .is_some_and(|(p, _)| p.width() == size.width && p.height() == size.height);
+            if !fits {
+                self.notice_canvas =
+                    tiny_skia::Pixmap::new(size.width, size.height).map(|pixmap| (pixmap, None));
+            }
+            if let Some((canvas, stale)) = self.notice_canvas.as_mut() {
+                let mut painter = Painter::new(canvas, &mut self.fonts, stale.take(), self.scale);
+                confirm::draw(
+                    &mut painter,
+                    &self.theme,
+                    size.width as f32 / self.scale,
+                    size.height as f32 / self.scale,
+                );
+                painter.composite(&mut buffer, size.width);
+                *stale = painter.dirty();
+            }
+        }
         if let Some(overlay) = self.overlay.as_mut() {
             let fits = self
                 .overlay_canvas
@@ -3589,8 +3853,16 @@ impl ApplicationHandler for App {
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => {
-                self.remember_position();
-                event_loop.exit();
+                if self.guard_unsaved(confirm::Pending::Quit) {
+                    self.remember_position();
+                    event_loop.exit();
+                }
+            }
+            WindowEvent::Focused(true) => {
+                // Coming back to the window is when an external change
+                // is most likely to have landed.
+                self.disk_check_at = Instant::now();
+                self.check_disk();
             }
             WindowEvent::ModifiersChanged(m) => self.modifiers = m.state(),
             WindowEvent::KeyboardInput {
@@ -3603,6 +3875,12 @@ impl ApplicationHandler for App {
                 ..
             } => {
                 self.fling = None;
+                // The confirm modal owns the keyboard outright until a
+                // decision lands.
+                if self.confirm.is_some() {
+                    self.confirm_key(&logical_key, event_loop);
+                    return;
+                }
                 let ctrl = self.modifiers.control_key();
                 let shift = self.modifiers.shift_key();
                 // The overlay toggles stay global so their chord closes the
