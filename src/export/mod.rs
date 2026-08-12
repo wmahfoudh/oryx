@@ -107,8 +107,8 @@ pub struct ExportSettings {
     pub page: PageSize,
     pub orientation: Orientation,
     pub page_numbers: bool,
-    /// Justify book prose in the exported pages; EPUB documents only,
-    /// the pass clears it for anything else.
+    /// Justify prose in the exported pages, markdown and books; the
+    /// pass clears it for code and text files.
     pub justify: bool,
 }
 
@@ -343,9 +343,9 @@ impl ExportPass {
         highlighting: bool,
         pool: Option<&std::sync::Arc<crate::layout::ShapePool>>,
     ) -> Progress {
-        // Justification is book typography: whatever the setting says,
-        // anything that is not a book exports at natural width.
-        self.cfg.justify = self.settings.justify && doc.book_id.is_some();
+        // Justification is prose typography: whatever the setting says,
+        // code and text files export at natural width.
+        self.cfg.justify = self.settings.justify && doc.justifiable();
         if self.phase == Phase::Highlight {
             if highlighting {
                 return self.progress();

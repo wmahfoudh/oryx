@@ -150,7 +150,8 @@ impl Overlay for ExportProgress {
 }
 
 /// One row of the export dialog: the settings, then the row that starts
-/// the export. The justify row exists only when the document is a book.
+/// the export. The justify row exists only when the document is prose,
+/// markdown or a book.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Row {
     Theme,
@@ -188,7 +189,7 @@ impl Row {
             Row::Page => "page",
             Row::Orientation => "orientation",
             Row::PageNumbers => "page numbers",
-            Row::Justify => "justify (EPUB)",
+            Row::Justify => "justify",
             Row::Export => "Export",
         }
     }
@@ -210,7 +211,7 @@ pub struct ExportDialog {
     themes: Vec<(String, Option<(Rgba, Rgba)>)>,
     families: Vec<String>,
     /// The rows this dialog shows: the base table, with the justify row
-    /// inserted before Export when the document is a book.
+    /// inserted before Export when the document is prose.
     rows: Vec<Row>,
     row: usize,
     pick: Option<Pick>,
@@ -229,10 +230,10 @@ impl ExportDialog {
         settings: ExportSettings,
         families: Vec<String>,
         themes: Vec<(String, Option<(Rgba, Rgba)>)>,
-        book: bool,
+        prose: bool,
     ) -> ExportDialog {
         let mut rows: Vec<Row> = ROWS.to_vec();
-        if book {
+        if prose {
             rows.insert(rows.len() - 1, Row::Justify);
         }
         ExportDialog {

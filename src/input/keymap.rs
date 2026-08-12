@@ -292,7 +292,7 @@ pub const SHORTCUTS: &[Shortcut] = &[
     },
     Shortcut {
         keys: "Ctrl+J",
-        action: "Justify book text (EPUB only)",
+        action: "Justify prose (markdown and books)",
         section: "View",
         bindings: &[(Binding::Ctrl("j"), Command::Justify)],
     },

@@ -87,6 +87,13 @@ impl Document {
         after.checked_sub(1)
     }
 
+    /// Whether justification applies: prose documents, markdown and
+    /// books. Code and text files are line-oriented and ignore the
+    /// setting everywhere it is read.
+    pub fn justifiable(&self) -> bool {
+        !self.code_file && !self.plain_file
+    }
+
     /// Opens every closed group enclosing a block, answering whether
     /// anything changed. Navigation into a folded region calls this
     /// before scrolling there.
@@ -554,6 +561,21 @@ mod tests {
                 r.start as u32..r.end as u32
             })
             .collect()
+    }
+
+    #[test]
+    fn justification_applies_to_prose_documents() {
+        let md = crate::doc::markdown::parse("a paragraph of prose\n");
+        assert!(md.justifiable(), "markdown prose justifies");
+        let book = Document {
+            book_id: Some("book".into()),
+            ..Document::default()
+        };
+        assert!(book.justifiable(), "book prose justifies");
+        let code = crate::doc::load::code_document(Some("rust"), "let a = 1;\n");
+        assert!(!code.justifiable(), "a code file ignores the setting");
+        let text = crate::doc::load::text_document("plain lines\n");
+        assert!(!text.justifiable(), "a text file ignores the setting");
     }
 
     #[test]

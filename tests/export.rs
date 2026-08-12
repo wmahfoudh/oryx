@@ -233,8 +233,14 @@ fn export_cfg(
         page,
         orientation,
         page_numbers,
+        // The app seeds a markdown export from the viewer's markdown
+        // preference, ragged by default; the suite exports the same way.
+        justify: false,
         ..ExportSettings::default()
     };
+    // The one-shot reference mirrors the pass's own gate, so the pin
+    // against the streamed file compares like with like.
+    cfg.justify = settings.justify && doc.justifiable();
     let laid = layout(doc, &theme, &mut fonts, &mut media, &cfg, geometry.width);
     let pages = paginate(doc, &laid, &geometry);
     let job = pdf::Job {
@@ -705,6 +711,9 @@ fn stream_to(
         code_size: 9.0,
         page: PageSize::A4,
         page_numbers: true,
+        // The app seeds a markdown export from the viewer's markdown
+        // preference, ragged by default; the suite exports the same way.
+        justify: false,
         ..ExportSettings::default()
     };
     let mut fonts = FontStore::new();
@@ -1007,7 +1016,7 @@ fn a_book_export_justifies_when_asked() {
 }
 
 #[test]
-fn a_markdown_export_never_justifies() {
+fn a_markdown_export_justifies_on_request() {
     let doc = markdown::parse(format!("{}end.\n", "justify word ".repeat(40)));
     let pdf_for = |justify: bool| {
         let settings = ExportSettings {
@@ -1041,10 +1050,57 @@ fn a_markdown_export_never_justifies() {
         let page = *pdf.get_pages().get(&1).unwrap();
         pdf.get_page_content(page)
     };
+    assert_ne!(
+        content(&pdf_for(true)),
+        content(&pdf_for(false)),
+        "the setting justifies markdown prose"
+    );
+}
+
+#[test]
+fn a_code_file_export_ignores_justify() {
+    let path = std::env::temp_dir().join(format!("oryx-just-code-{}.rs", std::process::id()));
+    std::fs::write(&path, format!("// {}end\n", "justify word ".repeat(40))).unwrap();
+    let doc = oryx::doc::load::open(&path, None).unwrap().document;
+    std::fs::remove_file(&path).ok();
+    let pdf_for = |justify: bool| {
+        let settings = ExportSettings {
+            justify,
+            body_size: 11.0,
+            code_size: 9.0,
+            ..ExportSettings::default()
+        };
+        let target = std::env::temp_dir().join(format!(
+            "oryx-just-code-{justify}-{}.pdf",
+            std::process::id()
+        ));
+        let mut fonts = FontStore::new();
+        let mut media = MediaCache::new(PathBuf::from("tests/fixtures"));
+        let mut pass = ExportPass::new(&settings, Theme::default_dark(), target.clone());
+        while !pass.is_done() {
+            pass.step(
+                Instant::now() + Duration::from_millis(30),
+                &doc,
+                &mut fonts,
+                &mut media,
+                false,
+                None,
+            );
+        }
+        pass.finish(&doc, &fonts).expect("the export lands");
+        let out = std::fs::read(&target).expect("the exported file");
+        std::fs::remove_file(&target).ok();
+        out
+    };
+    let content = |bytes: &[u8]| {
+        let pdf = Pdf::load_mem(bytes).unwrap();
+        let page = *pdf.get_pages().get(&1).unwrap();
+        pdf.get_page_content(page)
+    };
     assert_eq!(
         content(&pdf_for(true)),
         content(&pdf_for(false)),
-        "the setting has no effect outside books"
+        "code files export at natural width whatever the setting says"
     );
 }
 

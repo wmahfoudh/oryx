@@ -144,7 +144,7 @@ pub fn run(path: Option<PathBuf>, theme_name: Option<String>) -> anyhow::Result<
         code_family: config.code_family.clone(),
         body_size: config.body_size,
         code_size: config.code_size,
-        justify: config.justify && document.book_id.is_some(),
+        justify: justify_pref(&config, &document),
         ..ViewConfig::default()
     };
     let theme_choice = theme_name.as_deref().unwrap_or(&config.theme);
@@ -331,6 +331,18 @@ fn draw_caret(
 
 /// A book's `dc:title` wins over the file name; files have no title.
 /// A dirty buffer carries the leading asterisk.
+/// The viewer's justification for a document: the book preference on a
+/// book, the markdown preference on other prose, never on code and
+/// text files.
+fn justify_pref(config: &Config, doc: &Document) -> bool {
+    doc.justifiable()
+        && if doc.book_id.is_some() {
+            config.justify
+        } else {
+            config.justify_markdown
+        }
+}
+
 fn window_title(book: Option<&str>, path: Option<&Path>, dirty: bool) -> String {
     let name = book.or_else(|| path.and_then(|p| p.file_name()).and_then(|n| n.to_str()));
     let star = if dirty { "*" } else { "" };
@@ -2624,7 +2636,7 @@ impl App {
         self.selection = None;
         self.sel_anchor = None;
         self.pending_recolor.clear();
-        self.cfg.justify = self.config.justify && self.document.book_id.is_some();
+        self.cfg.justify = justify_pref(&self.config, &self.document);
         self.layout = None;
         self.band = None;
         // Both hold targets in the old document's coordinates; left
@@ -2687,12 +2699,17 @@ impl App {
     }
 
     /// The saved export settings, or the ones seeded from the appearance
-    /// settings the first time anything is exported.
+    /// settings the first time anything is exported. Justification
+    /// follows the viewer's preference for the open document's kind, so
+    /// the page exports the way it reads.
     fn export_settings(&self) -> ExportSettings {
-        self.config
+        let mut settings = self
+            .config
             .export
             .clone()
-            .unwrap_or_else(|| ExportSettings::seeded_from(&self.config))
+            .unwrap_or_else(|| ExportSettings::seeded_from(&self.config));
+        settings.justify = justify_pref(&self.config, &self.document);
+        settings
     }
 
     /// Opens the export settings dialog on a working copy of them.
@@ -2721,7 +2738,7 @@ impl App {
             settings,
             self.fonts.families(),
             themes,
-            self.document.book_id.is_some(),
+            self.document.justifiable(),
         );
         self.overlay = Some(Box::new(dialog));
         self.request_redraw();
@@ -2887,15 +2904,22 @@ impl App {
         self.request_redraw();
     }
 
-    /// Flips book justification and relayouts, a no-op outside books;
-    /// the preference persists across sessions.
+    /// Flips prose justification and relayouts, a no-op on code and
+    /// text files. Books and markdown each remember their own choice,
+    /// and both persist across sessions.
     fn toggle_justify(&mut self) {
-        if self.document.book_id.is_none() {
+        if !self.document.justifiable() {
             return;
         }
-        self.config.justify = !self.config.justify;
+        let pref = if self.document.book_id.is_some() {
+            &mut self.config.justify
+        } else {
+            &mut self.config.justify_markdown
+        };
+        *pref = !*pref;
+        let value = *pref;
         config::save(&self.config);
-        self.cfg.justify = self.config.justify;
+        self.cfg.justify = value;
         self.layout = None;
         self.band = None;
         self.request_redraw();

@@ -60,7 +60,7 @@ The command vocabulary is KaTeX compatible: Greek, binary operators, relations a
 
 Oryx opens EPUB books and renders them as one continuous document, in the active theme rather than the book's own styling. The book keeps its structure: chapter headings, italics and bold (including the ones its stylesheet sets), images and the cover, tables and highlighted code. The first chapters display immediately and the rest of the book loads in the background.
 
-Book text is justified: lines end at the same right edge, and the last line of each paragraph stays ragged, like print. `Ctrl+J` turns justification off and on (books only).
+Book text is justified: lines end at the same right edge, and the last line of each paragraph stays ragged, like print. `Ctrl+J` turns justification off and on. Markdown files can justify too; they start ragged, and each kind remembers its own choice.
 
 The sidebar's Outline tab shows the book's own table of contents, follows the reading position and jumps on a click. Links inside the book work, so a footnote reference jumps to its note and back. Unlike markdown files, which open at the top, ebooks reopen where reading stopped.
 
@@ -196,7 +196,7 @@ oryx --version          # print the version
 | `Ctrl+,` | Change fonts and sizes |
 | `Ctrl+Plus` / `Ctrl+Minus` | Zoom in / out |
 | `Ctrl+0` | Reset zoom |
-| `Ctrl+J` | Justify book text (EPUB only) |
+| `Ctrl+J` | Justify prose (markdown and books) |
 | **Export** | |
 | `Ctrl+P` | Export to PDF |
 | `Ctrl+Shift+P` | Choose export settings, then export |

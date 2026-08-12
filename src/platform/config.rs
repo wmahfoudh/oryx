@@ -29,8 +29,12 @@ pub struct Config {
     pub sidebar_width: f32,
     /// The panel tab last active, so the sidebar reopens where it was.
     pub sidebar_tab: crate::ui::sidebar::Tab,
-    /// Whether book text justifies; Ctrl+J flips it, EPUB display only.
+    /// Whether book text justifies; Ctrl+J flips it on a book.
     pub justify: bool,
+    /// Whether markdown prose justifies; Ctrl+J flips it on a markdown
+    /// document. Remembered apart from books, whose justified default
+    /// suits their narrower measure.
+    pub justify_markdown: bool,
     /// Manual interface scale on top of the display's own factor, 1.0
     /// at the detected baseline. Adjusted in the settings dialog.
     pub ui_scale: f32,
@@ -92,6 +96,7 @@ impl Default for Config {
             sidebar_width: crate::ui::sidebar::DEFAULT_WIDTH,
             sidebar_tab: crate::ui::sidebar::Tab::Files,
             justify: true,
+            justify_markdown: false,
             ui_scale: 1.0,
             export: None,
             window: None,
@@ -272,6 +277,23 @@ mod tests {
     }
 
     #[test]
+    fn markdown_justify_defaults_off_and_round_trips() {
+        assert!(
+            !Config::default().justify_markdown,
+            "markdown reads ragged out of the box"
+        );
+        let path = temp_path("justify-md.toml");
+        let config = Config {
+            justify_markdown: true,
+            ..Config::default()
+        };
+        save_to(&path, &config);
+        let loaded = load_from(&path);
+        std::fs::remove_file(&path).unwrap();
+        assert!(loaded.justify_markdown, "the preference persists");
+    }
+
+    #[test]
     fn browse_dir_takes_the_first_folder_that_still_exists() {
         let real = std::env::temp_dir();
         let gone = real.join("oryx-no-such-folder-ever");
@@ -318,6 +340,7 @@ mod tests {
             sidebar_width: 320.0,
             sidebar_tab: crate::ui::sidebar::Tab::Outline,
             justify: false,
+            justify_markdown: true,
             ui_scale: 1.15,
             export: None,
             window: None,
