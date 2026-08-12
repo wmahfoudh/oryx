@@ -310,7 +310,7 @@ pub const SHORTCUTS: &[Shortcut] = &[
     },
     Shortcut {
         keys: "F1",
-        action: "Show this help",
+        action: "Open this help page, and close it",
         section: "Help",
         bindings: &[(Binding::Named(NamedKey::F1), Command::Help)],
     },

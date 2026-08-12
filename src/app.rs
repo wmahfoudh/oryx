@@ -35,7 +35,7 @@ use oryx::style::highlight::{Highlighter, PendingBlock};
 use oryx::style::theme::{self, Rgba, Theme};
 use oryx::ui::confirm;
 use oryx::ui::export::{ExportDialog, ExportProgress};
-use oryx::ui::help::Help;
+use oryx::ui::help;
 use oryx::ui::notice::{self, Notice};
 use oryx::ui::outline::OutlineTree;
 use oryx::ui::overlay::{Action, Overlay, OverlayResult};
@@ -238,6 +238,7 @@ pub fn run(path: Option<PathBuf>, theme_name: Option<String>) -> anyhow::Result<
         undo: None,
         rehighlight_at: None,
         confirm: None,
+        help_stash: None,
         disk_seen: None,
         disk_check_at: Instant::now(),
         crlf: opened_crlf,
@@ -331,6 +332,40 @@ fn draw_caret(
 
 /// A book's `dc:title` wins over the file name; files have no title.
 /// A dirty buffer carries the leading asterisk.
+/// Everything the help page displaces, moved back verbatim on return.
+struct Stash {
+    path: Option<PathBuf>,
+    document: Document,
+    ledger: Option<Ledger>,
+    undo: Option<Undo>,
+    crlf: Vec<u32>,
+    lossy: bool,
+    mode: edit::Mode,
+    caret: Option<Caret>,
+    scroll_y: f32,
+    layout: Option<LayoutDoc>,
+    pass: Option<LayoutPass>,
+    layout_width: f32,
+    media: MediaCache,
+    book_toc: Vec<epub::TocEntry>,
+    disk_seen: Option<(std::time::SystemTime, u64)>,
+    /// The selection anchors on the model, which returns untouched, so
+    /// it survives the trip whole.
+    selection: Option<Selection>,
+    /// The look the stashed layout was built under; a change while the
+    /// help page showed drops it on return.
+    zoom: f32,
+    theme: String,
+    /// A parse was still streaming at the swap, so the model is
+    /// partial; the return reopens from disk instead of restoring it.
+    reopen: bool,
+}
+
+/// The help document, parsed from the generated page.
+fn markdown_help() -> Document {
+    oryx::doc::markdown::parse(help::page())
+}
+
 /// The viewer's justification for a document: the book preference on a
 /// book, the markdown preference on other prose, never on code and
 /// text files.
@@ -534,6 +569,9 @@ struct App {
     rehighlight_at: Option<Instant>,
     /// The unsaved-changes modal and the action it guards.
     confirm: Option<confirm::Pending>,
+    /// The document stashed whole while the help page shows, edits and
+    /// layout included, so F1 out and back never touches the disk.
+    help_stash: Option<Box<Stash>>,
     /// The open file's on-disk identity at last read or write, for the
     /// external-change check.
     disk_seen: Option<(std::time::SystemTime, u64)>,
@@ -738,9 +776,16 @@ impl App {
                         self.request_redraw();
                     }
                     edit::EscapeAct::LeaveEdit => self.leave_edit(),
+                    // While the help page shows, Escape means leaving
+                    // it: the sidebar stays as the reader left it.
+                    edit::EscapeAct::CloseSidebar if self.help_stash.is_some() => {
+                        self.help_return();
+                    }
                     edit::EscapeAct::CloseSidebar => self.toggle_sidebar(),
                     edit::EscapeAct::Quit => {
-                        if self.guard_unsaved(confirm::Pending::Quit) {
+                        if self.help_stash.is_some() {
+                            self.help_return();
+                        } else if self.guard_unsaved(confirm::Pending::Quit) {
                             self.remember_position();
                             event_loop.exit();
                         }
@@ -1257,8 +1302,13 @@ impl App {
     }
 
     /// Guards an action that would discard unsaved edits behind the
-    /// confirm modal; answers whether the action may run now.
+    /// confirm modal; answers whether the action may run now. From
+    /// inside the help page the stash restores first, so the check and
+    /// the action both see the real document.
     fn guard_unsaved(&mut self, pending: confirm::Pending) -> bool {
+        if self.help_stash.is_some() {
+            self.help_return();
+        }
         if !self.edits_unsaved() {
             return true;
         }
@@ -2846,14 +2896,114 @@ impl App {
         }
     }
 
-    /// Opens the shortcuts help, or closes the active overlay.
+    /// F1: the help page in the document's place and back. The open
+    /// document is stashed whole, edits, undo and layout included, and
+    /// nothing touches the disk in either direction.
     fn toggle_help(&mut self) {
-        if self.overlay.is_some() {
-            self.overlay_result(OverlayResult::Close);
-        } else {
-            self.overlay = Some(Box::new(Help::new()));
-            self.request_redraw();
+        if self.help_stash.is_some() {
+            self.help_return();
+            return;
         }
+        // A parse still streaming would deliver into the help page's
+        // document; the return reopens from disk instead, where the
+        // position memory already knows the place.
+        let reopen = self.parse_pending;
+        if reopen {
+            self.parser.cancel();
+            self.parse_pending = false;
+        }
+        self.start_highlight(Vec::new());
+        self.rehighlight_at = None;
+        self.close_search();
+        self.sel_anchor = None;
+        self.remember_position();
+        let mode = std::mem::replace(&mut self.mode, edit::Mode::Read);
+        self.help_stash = Some(Box::new(Stash {
+            path: self.path.take(),
+            document: std::mem::take(&mut self.document),
+            ledger: self.ledger.take(),
+            undo: self.undo.take(),
+            crlf: std::mem::take(&mut self.crlf),
+            lossy: std::mem::replace(&mut self.lossy, false),
+            mode,
+            caret: self.caret.take(),
+            scroll_y: self.scroll_y,
+            layout: self.layout.take(),
+            pass: self.pass.take(),
+            layout_width: self.layout_width,
+            media: std::mem::replace(&mut self.media, MediaCache::new(PathBuf::from("."))),
+            book_toc: std::mem::take(&mut self.book_toc),
+            disk_seen: self.disk_seen.take(),
+            selection: self.selection.take(),
+            zoom: self.cfg.zoom,
+            theme: self.config.theme.clone(),
+            reopen,
+        }));
+        self.document = markdown_help();
+        self.outline = OutlineTree::build(&self.document);
+        self.cfg.justify = justify_pref(&self.config, &self.document);
+        self.scroll_y = 0.0;
+        self.band = None;
+        self.pending_band_for = None;
+        self.pending_scroll = None;
+        self.pending_anchor = None;
+        self.pending_offset = None;
+        self.pending_recolor.clear();
+        if let Some(gfx) = self.gfx.as_ref() {
+            gfx.window.set_title("Oryx help");
+        }
+        self.request_redraw();
+    }
+
+    /// Back from the help page: the stashed document returns exactly
+    /// as it was. A look changed while help showed (zoom, theme) drops
+    /// the stashed layout, and the streaming pass re-measures.
+    fn help_return(&mut self) {
+        let Some(stash) = self.help_stash.take() else {
+            return;
+        };
+        if stash.reopen {
+            if let Some(path) = stash.path {
+                self.open_file(&path, false);
+            }
+            return;
+        }
+        self.document = stash.document;
+        self.path = stash.path;
+        self.ledger = stash.ledger;
+        self.undo = stash.undo;
+        self.crlf = stash.crlf;
+        self.lossy = stash.lossy;
+        self.mode = stash.mode;
+        self.caret = stash.caret;
+        self.scroll_y = stash.scroll_y;
+        self.layout_width = stash.layout_width;
+        self.media = stash.media;
+        self.book_toc = stash.book_toc;
+        self.disk_seen = stash.disk_seen;
+        let same_look = self.cfg.zoom == stash.zoom && self.config.theme == stash.theme;
+        self.layout = stash.layout.filter(|_| same_look);
+        self.pass = stash.pass.filter(|_| same_look);
+        self.outline = if self.book_toc.is_empty() {
+            OutlineTree::build(&self.document)
+        } else {
+            OutlineTree::from_toc(&self.book_toc, &self.document)
+        };
+        self.cfg.justify = justify_pref(&self.config, &self.document);
+        self.selection = stash.selection;
+        self.sel_anchor = None;
+        self.band = None;
+        self.pending_band_for = None;
+        self.close_search();
+        self.start_highlight(load::pending(&self.document));
+        if self.mode == edit::Mode::Edit {
+            self.wake_caret();
+        }
+        if let (Some(side), Some(path)) = (self.sidebar.as_mut(), self.path.as_deref()) {
+            side.set_current(path);
+        }
+        self.refresh_title();
+        self.request_redraw();
     }
 
     /// Adopts the display's own factor, as reported at window creation
@@ -3913,7 +4063,6 @@ impl ApplicationHandler for App {
                     Some(
                         cmd @ (Command::ThemeBrowser
                         | Command::Settings
-                        | Command::Help
                         | Command::Sidebar
                         | Command::OpenFile),
                     ) => {

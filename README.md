@@ -201,7 +201,7 @@ oryx --version          # print the version
 | `Ctrl+P` | Export to PDF |
 | `Ctrl+Shift+P` | Choose export settings, then export |
 | **Help** | |
-| `F1` | Show the shortcuts help |
+| `F1` | Open the help page, and close it |
 | `Escape` | Close overlay or sidebar, leave editing, quit |
 
 `Ctrl` is `Cmd` on macOS.
