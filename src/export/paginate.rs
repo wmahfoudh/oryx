@@ -457,6 +457,10 @@ pub struct Paginator {
     pending_rects: Vec<usize>,
     rects_seen: usize,
     open_rects: Vec<usize>,
+    /// Chapter-marker block indices, computed once: blocks never drain,
+    /// so the list holds for the whole export. Rebuilding it per page
+    /// attempt walked every block of the document each time.
+    markers: Option<Vec<usize>>,
     /// Images carried onto emitted pages, ready to drop.
     images_done: usize,
     /// Whether the document's first page has closed, whose top alone
@@ -578,8 +582,11 @@ impl Paginator {
         while j < self.settled && self.items[j].bottom - top <= content + SLACK {
             j += 1;
         }
-        let markers = marker_blocks(doc);
-        let forced = forced_break(&markers, layout, &self.items[..self.settled.max(i)], i, j);
+        if self.markers.is_none() {
+            self.markers = Some(marker_blocks(doc));
+        }
+        let markers = self.markers.as_deref().expect("just filled");
+        let forced = forced_break(markers, layout, &self.items[..self.settled.max(i)], i, j);
         if forced >= j && j >= self.settled && !complete {
             // Everything settled still fits; more may join the page.
             return None;
@@ -715,16 +722,42 @@ impl Paginator {
         bottom: f32,
         next_top: f32,
     ) -> Vec<DecoRect> {
-        for index in self.rects_seen..layout.rects.len() {
-            self.pending_rects.push(index);
+        // The pending list stays sorted by (y, index) as an invariant:
+        // new arrivals sort alone and merge in, so a page that brings
+        // none pays nothing. Re-sorting the whole list per page was
+        // quadratic once the pooled layout ran ahead of the writer and
+        // the list held most of the document's rects.
+        if self.rects_seen < layout.rects.len() {
+            let order = |&a: &usize, &b: &usize| {
+                layout.rects[a]
+                    .y
+                    .total_cmp(&layout.rects[b].y)
+                    .then(a.cmp(&b))
+            };
+            let mut arrived: Vec<usize> = (self.rects_seen..layout.rects.len()).collect();
+            self.rects_seen = layout.rects.len();
+            arrived.sort_by(order);
+            let mut merged = Vec::with_capacity(self.pending_rects.len() + arrived.len());
+            let mut old = std::mem::take(&mut self.pending_rects)
+                .into_iter()
+                .peekable();
+            let mut new = arrived.into_iter().peekable();
+            loop {
+                match (old.peek(), new.peek()) {
+                    (Some(a), Some(b)) => {
+                        if order(a, b).is_le() {
+                            merged.push(old.next().expect("peeked"));
+                        } else {
+                            merged.push(new.next().expect("peeked"));
+                        }
+                    }
+                    (Some(_), None) => merged.push(old.next().expect("peeked")),
+                    (None, Some(_)) => merged.push(new.next().expect("peeked")),
+                    (None, None) => break,
+                }
+            }
+            self.pending_rects = merged;
         }
-        self.rects_seen = layout.rects.len();
-        self.pending_rects.sort_by(|&a, &b| {
-            layout.rects[a]
-                .y
-                .total_cmp(&layout.rects[b].y)
-                .then(a.cmp(&b))
-        });
         let opening = self
             .pending_rects
             .partition_point(|&index| layout.rects[index].y < next_top);
