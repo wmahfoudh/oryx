@@ -1094,12 +1094,7 @@ impl App {
             self.pass.as_ref().is_some_and(LayoutPass::is_complete) && self.layout.is_some();
         let spliced = settled
             .then(|| {
-                edit::splice_document(
-                    &mut self.document,
-                    &current,
-                    old_touched.clone(),
-                    touched.clone(),
-                )
+                edit::splice_document(&mut self.document, &current, range.clone(), touched.clone())
             })
             .flatten();
         match spliced {

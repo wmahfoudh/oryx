@@ -115,6 +115,48 @@ pub fn reparse(
     new
 }
 
+/// Tiles a row from ordered, disjoint spans: every gap fills with
+/// Plain, adjacent Plain pieces merge, and the row covers its text to
+/// the end. The engine draws only spanned bytes, so a tiled row never
+/// loses text; only the bytes an edit introduced read plain until the
+/// worker colors them.
+fn tile_row(
+    spans: Vec<(std::ops::Range<usize>, SyntaxRole)>,
+    len: usize,
+) -> Vec<(std::ops::Range<usize>, SyntaxRole)> {
+    let mut out: Vec<(std::ops::Range<usize>, SyntaxRole)> = Vec::with_capacity(spans.len() + 2);
+    let push = |range: std::ops::Range<usize>,
+                role: SyntaxRole,
+                out: &mut Vec<(std::ops::Range<usize>, SyntaxRole)>| {
+        if range.is_empty() {
+            return;
+        }
+        if let Some((last, last_role)) = out.last_mut() {
+            if *last_role == role && last.end == range.start {
+                last.end = range.end;
+                return;
+            }
+        }
+        out.push((range, role));
+    };
+    let mut covered = 0;
+    for (range, role) in spans {
+        let (start, end) = (range.start.max(covered), range.end.min(len));
+        if start >= end {
+            continue;
+        }
+        if start > covered {
+            push(covered..start, SyntaxRole::Plain, &mut out);
+        }
+        push(start..end, role, &mut out);
+        covered = end;
+    }
+    if covered < len {
+        push(covered..len, SyntaxRole::Plain, &mut out);
+    }
+    out
+}
+
 /// Keeps a carried row's spans only while they tile the line
 /// contiguously from its start, then fills the rest with Plain: the
 /// engine draws only spanned bytes, so a covered row never loses text,
@@ -140,21 +182,29 @@ fn cover_row(spans: &mut Vec<(std::ops::Range<usize>, SyntaxRole)>, text: &str) 
 /// Applies one edit to a code or text document in place, the keystroke
 /// fast path: the source swaps to `current`, the touched line entries
 /// rebuild through `CodeBody::splice`, the touched highlight rows
-/// splice under the covering rule, and the block range follows. No
-/// other part of the document derives from the source, so the splice
-/// is the whole re-derivation. Answers the line ranges actually
+/// splice with their spans mapped through the edit, and the block range
+/// follows. Colors follow the text: a split carries the suffix's spans
+/// to the new row, a join concatenates both rows' spans, and only the
+/// inserted bytes themselves read plain until the worker colors them.
+/// `edit` is the replaced range in the pre-edit text and `new_touched`
+/// the ledger's touched line range. Answers the line ranges actually
 /// spliced, the layout splice's input; None means the document is not
 /// a single-block file and must reparse.
 pub fn splice_document(
     doc: &mut Document,
     current: &str,
-    old_touched: std::ops::Range<usize>,
+    edit: std::ops::Range<usize>,
     new_touched: std::ops::Range<usize>,
 ) -> Option<(std::ops::Range<usize>, std::ops::Range<usize>)> {
     if !doc.code_file && !doc.plain_file {
         return None;
     }
     let plain = doc.plain_file;
+    let removed = doc
+        .source
+        .get(edit.clone())
+        .map_or(0, |cut| cut.matches('\n').count());
+    let old_touched = new_touched.start..new_touched.start + removed + 1;
     let delta = current.len() as isize - doc.source.len() as isize;
     let [block] = &mut doc.blocks[..] else {
         return None;
@@ -166,6 +216,48 @@ pub fn splice_document(
         return None;
     };
     let old_len = lines.len();
+    let old_eff_end = if old_touched.end >= old_len {
+        old_len
+    } else {
+        old_touched.end
+    };
+    let old_eff = old_touched.start.min(old_len)..old_eff_end;
+    // The touched rows' spans lifted into region coordinates before the
+    // line vector splices the old geometry away. The region starts at
+    // the first touched line, whose start the edit cannot move.
+    let mut mapped: Vec<(std::ops::Range<usize>, SyntaxRole)> = Vec::new();
+    let mut region_start = 0;
+    if !plain && old_eff.start < old_len {
+        if let Some(first) = lines.line_range(old_eff.start) {
+            region_start = first.start;
+            let pos = edit.start.saturating_sub(region_start);
+            let pos_end = pos + edit.len();
+            for i in old_eff.clone() {
+                let Some(range) = lines.line_range(i) else {
+                    break;
+                };
+                let base = range.start - region_start;
+                for (r, role) in highlights.get(i).into_iter().flatten() {
+                    let (s, e) = (base + r.start, base + r.end);
+                    // The edit cuts a span in two: what stands before
+                    // it keeps its place, what stands after shifts by
+                    // the length delta, and the replaced middle drops.
+                    if e <= pos {
+                        mapped.push((s..e, *role));
+                        continue;
+                    }
+                    if s < pos {
+                        mapped.push((s..pos, *role));
+                    }
+                    if e > pos_end {
+                        let ns = (s.max(pos_end) as isize + delta) as usize;
+                        let ne = (e as isize + delta) as usize;
+                        mapped.push((ns..ne, *role));
+                    }
+                }
+            }
+        }
+    }
     if !lines.splice(
         current,
         old_touched.clone(),
@@ -176,27 +268,30 @@ pub fn splice_document(
         return None;
     }
     let new_len = lines.len();
-    // The ranges the vector actually replaced: an edit reaching the
-    // last entry or past it rebuilt the whole suffix.
-    let (old_eff, new_eff) = if old_touched.end >= old_len {
-        let from = old_touched.start.min(old_len);
-        (from..old_len, from..new_len)
+    let new_eff = if old_touched.end >= old_len {
+        old_eff.start..new_len
     } else {
-        (old_touched, new_touched)
+        new_touched
     };
     // Rows splice only as far as the computed prefix reaches; rows the
     // worker never colored stay absent and draw whole.
     if highlights.len() > old_eff.start {
         let upto = old_eff.end.min(highlights.len());
-        let rows: Vec<Vec<(std::ops::Range<usize>, SyntaxRole)>> = (0..new_eff.len())
-            .map(|i| {
-                let mut spans = highlights
-                    .get(old_eff.start + i)
-                    .filter(|_| old_eff.start + i < upto && !plain)
-                    .cloned()
-                    .unwrap_or_default();
+        let rows: Vec<Vec<(std::ops::Range<usize>, SyntaxRole)>> = new_eff
+            .clone()
+            .map(|j| {
+                let mut spans: Vec<(std::ops::Range<usize>, SyntaxRole)> = Vec::new();
                 if !plain {
-                    cover_row(&mut spans, lines.line(current, new_eff.start + i));
+                    if let Some(row) = lines.line_range(j) {
+                        let (lo, hi) = (row.start - region_start, row.end - region_start);
+                        for (r, role) in &mapped {
+                            let (s, e) = (r.start.max(lo), r.end.min(hi));
+                            if s < e {
+                                spans.push((s - lo..e - lo, *role));
+                            }
+                        }
+                        spans = tile_row(spans, lines.line(current, j).len());
+                    }
                 }
                 spans
             })
@@ -488,13 +583,13 @@ mod tests {
         let old_touched = start_line..start_line + removed + 1;
         let new_touched = start_line..start_line + text.matches('\n').count() + 1;
         let mut current = slow.source.to_string();
-        current.replace_range(range, text);
-        let spliced = splice_document(fast, &current, old_touched.clone(), new_touched.clone());
+        current.replace_range(range.clone(), text);
+        let spliced = splice_document(fast, &current, range, new_touched.clone());
         assert!(spliced.is_some(), "a file document takes the splice");
         *slow = reparse(kind, &current, slow, old_touched, new_touched);
     }
 
-    fn assert_docs_match(fast: &Document, slow: &Document, colors_too: bool) {
+    fn assert_docs_match(fast: &Document, slow: &Document) {
         assert_eq!(&*fast.source, &*slow.source, "sources match");
         assert_eq!(fast.blocks[0].range, slow.blocks[0].range, "ranges match");
         let (BlockKind::CodeBlock {
@@ -521,23 +616,22 @@ mod tests {
                 "line {i} matches"
             );
         }
-        if colors_too {
-            assert_eq!(fh, sh, "highlight rows match");
-        } else {
-            // A plain file's rows: empty draws whole, anything else
-            // must tile its line.
-            for (i, row) in fh.iter().enumerate() {
-                if row.is_empty() {
-                    continue;
-                }
-                let text = fl.line(&fast.source, i);
-                let mut covered = 0;
-                for (range, _) in row {
-                    assert_eq!(range.start, covered, "row {i} tiles");
-                    covered = range.end;
-                }
-                assert_eq!(covered, text.len(), "row {i} covers its line");
+        // The carries differ by design: the splice maps spans through
+        // the edit while the reparse keeps a row-aligned prefix. Both
+        // must hold the engine's covering invariant: a row is empty and
+        // draws whole, or its spans tile the line to its end.
+        let _ = sh;
+        for (i, row) in fh.iter().enumerate() {
+            if row.is_empty() {
+                continue;
             }
+            let text = fl.line(&fast.source, i);
+            let mut covered = 0;
+            for (range, _) in row {
+                assert_eq!(range.start, covered, "row {i} tiles");
+                covered = range.end;
+            }
+            assert_eq!(covered, text.len(), "row {i} covers its line");
         }
     }
 
@@ -549,17 +643,17 @@ mod tests {
         // Typing, a split, a join, an edit on the last line, an edit at
         // the very end of the file.
         edit_both(&mut fast, &mut slow, kind, 15..15, "x");
-        assert_docs_match(&fast, &slow, true);
+        assert_docs_match(&fast, &slow);
         edit_both(&mut fast, &mut slow, kind, 16..16, "\n");
-        assert_docs_match(&fast, &slow, true);
+        assert_docs_match(&fast, &slow);
         edit_both(&mut fast, &mut slow, kind, 10..11, "");
-        assert_docs_match(&fast, &slow, true);
+        assert_docs_match(&fast, &slow);
         let end = fast.source.len();
         edit_both(&mut fast, &mut slow, kind, end - 1..end, "");
-        assert_docs_match(&fast, &slow, true);
+        assert_docs_match(&fast, &slow);
         let end = fast.source.len();
         edit_both(&mut fast, &mut slow, kind, end..end, "tail");
-        assert_docs_match(&fast, &slow, true);
+        assert_docs_match(&fast, &slow);
     }
 
     #[test]
@@ -568,14 +662,77 @@ mod tests {
         let mut slow = load::text_document("hello\nworld\n\ntail\n");
         let kind = FileKind::Text;
         edit_both(&mut fast, &mut slow, kind, 2..2, "y");
-        assert_docs_match(&fast, &slow, false);
+        assert_docs_match(&fast, &slow);
         edit_both(&mut fast, &mut slow, kind, 4..4, "\n");
-        assert_docs_match(&fast, &slow, false);
+        assert_docs_match(&fast, &slow);
         edit_both(&mut fast, &mut slow, kind, 8..9, "");
-        assert_docs_match(&fast, &slow, false);
+        assert_docs_match(&fast, &slow);
         let end = fast.source.len();
         edit_both(&mut fast, &mut slow, kind, end..end, "\n\n");
-        assert_docs_match(&fast, &slow, false);
+        assert_docs_match(&fast, &slow);
+    }
+
+    #[test]
+    fn a_split_carries_the_colors_through() {
+        // Enter at a line's start moves the whole line down one row;
+        // its colors must move with it, or the line flashes plain
+        // until the worker re-colors it.
+        let (mut doc, rows) = fixture();
+        let current = "let a = 1;\n\nlet b = 2;\nlet c = 3;\n";
+        splice_document(&mut doc, current, 11..11, 1..3).expect("a code file splices");
+        let high = rows_of(&doc);
+        assert!(high[1].is_empty(), "the new blank row carries nothing");
+        assert_eq!(high[2], rows[1], "the moved line keeps its colors");
+        assert_eq!(high[3], rows[2], "the tail is untouched");
+    }
+
+    #[test]
+    fn a_mid_line_split_cuts_the_colors_at_the_break() {
+        // Enter after "let b" of "let b = 2;": the prefix keeps its
+        // spans, the suffix's spans move down rebased to the new row.
+        let (mut doc, rows) = fixture();
+        let current = "let a = 1;\nlet b\n = 2;\nlet c = 3;\n";
+        splice_document(&mut doc, current, 16..16, 1..3).expect("a code file splices");
+        let high = rows_of(&doc);
+        assert_eq!(high[0], rows[0]);
+        assert_eq!(
+            high[1],
+            vec![(0..3, SyntaxRole::Keyword), (3..5, SyntaxRole::Plain)],
+            "the prefix keeps its colors to the break"
+        );
+        assert_eq!(
+            high[2],
+            vec![
+                (0..3, SyntaxRole::Plain),
+                (3..4, SyntaxRole::Number),
+                (4..5, SyntaxRole::Plain),
+            ],
+            "the suffix colors follow the text down"
+        );
+        assert_eq!(high[3], rows[2]);
+    }
+
+    #[test]
+    fn a_join_merges_the_colors() {
+        // Backspace at a line's start joins it onto the one above; both
+        // lines' colors survive on the joined row.
+        let (mut doc, rows) = fixture();
+        let current = "let a = 1;\nlet b = 2;let c = 3;\n";
+        splice_document(&mut doc, current, 21..22, 1..2).expect("a code file splices");
+        let high = rows_of(&doc);
+        assert_eq!(high[0], rows[0]);
+        assert_eq!(
+            high[1],
+            vec![
+                (0..3, SyntaxRole::Keyword),
+                (3..8, SyntaxRole::Plain),
+                (8..9, SyntaxRole::Number),
+                (9..10, SyntaxRole::Plain),
+                (10..13, SyntaxRole::Type),
+                (13..20, SyntaxRole::Plain),
+            ],
+            "both lines' colors stand on the joined row"
+        );
     }
 
     #[test]

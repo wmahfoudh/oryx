@@ -410,7 +410,7 @@ fn keystroke_measured() {
             let current_us = started.elapsed().as_micros();
             let started = Instant::now();
             let (old_lines, new_lines) =
-                edit::splice_document(&mut doc, &current, touched.clone(), touched.clone())
+                edit::splice_document(&mut doc, &current, at..at, touched.clone())
                     .expect("a file document splices");
             let model_us = started.elapsed().as_micros();
             let started = Instant::now();

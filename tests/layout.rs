@@ -3289,9 +3289,9 @@ fn fast_keystroke(
     let old_touched = start_line..start_line + removed + 1;
     let new_touched = start_line..start_line + text.matches('\n').count() + 1;
     let mut current = doc.source.to_string();
-    current.replace_range(range, text);
+    current.replace_range(range.clone(), text);
     let (old_lines, new_lines) =
-        oryx::edit::splice_document(doc, &current, old_touched.clone(), new_touched.clone())
+        oryx::edit::splice_document(doc, &current, range, new_touched.clone())
             .expect("a file document splices");
     let mut fonts = fonts();
     assert!(
@@ -3322,6 +3322,19 @@ fn fast_keystroke(
     );
     lay.index_more();
     *reference = oryx::edit::reparse(kind, &current, reference, old_touched, new_touched);
+    // The splice's carry maps spans through the edit, finer than the
+    // reparse's row-aligned one; the reference adopts the spliced
+    // rows, since the comparison is about geometry, not the carry.
+    if let (
+        oryx::doc::model::BlockKind::CodeBlock { highlights, .. },
+        oryx::doc::model::BlockKind::CodeBlock {
+            highlights: spliced,
+            ..
+        },
+    ) = (&mut reference.blocks[0].kind, &doc.blocks[0].kind)
+    {
+        highlights.clone_from(spliced);
+    }
 }
 
 fn assert_same_layout(a: &LayoutDoc, doc_a: &Document, b: &LayoutDoc, doc_b: &Document) {
