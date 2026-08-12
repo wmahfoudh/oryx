@@ -22,7 +22,7 @@ use oryx::input::{
     touch,
 };
 use oryx::layout::{
-    layout_begin, layout_extend, layout_more, metrics, recolor_batch, window_to, DecoRect,
+    self, layout_begin, layout_extend, layout_more, metrics, recolor_batch, window_to, DecoRect,
     LayoutDoc, LayoutPass, ShapePool, ViewConfig, OPEN_SLICE, SLICE,
 };
 use oryx::paint;
@@ -63,6 +63,11 @@ const FLING_TICK: Duration = Duration::from_millis(16);
 /// The caret's blink half-period; every caret action restarts the
 /// visible half.
 const CARET_BLINK: Duration = Duration::from_millis(530);
+
+/// Typing rest before the highlight worker re-runs the edited block;
+/// each keystroke kills in-flight work through the generation, so the
+/// whole-block pass runs once per pause, never per key.
+const REHIGHLIGHT_REST: Duration = Duration::from_millis(400);
 
 /// How long after a touch pan the emulated mouse stays ignored, long
 /// enough to cover the click Windows synthesizes behind a lifted finger.
@@ -229,6 +234,7 @@ pub fn run(path: Option<PathBuf>, theme_name: Option<String>) -> anyhow::Result<
         edit_marks: HashMap::new(),
         ledger: None,
         undo: None,
+        rehighlight_at: None,
         crlf: opened_crlf,
         caret_snap: false,
         blink_visible: true,
@@ -506,6 +512,9 @@ struct App {
     /// The undo stack, living and dying with the ledger; the save point
     /// inside it drives the title asterisk.
     undo: Option<Undo>,
+    /// When the edited block re-highlights, set by each keystroke and
+    /// fired once typing rests.
+    rehighlight_at: Option<Instant>,
     /// Normalized-text offsets of the open file's CRLF endings, for the
     /// ledger's byte-exact emission.
     crlf: Vec<u32>,
@@ -980,10 +989,11 @@ impl App {
         self.refresh_title();
     }
 
-    /// One edit applied: the ledger splices it, the document reparses
-    /// from the current text with its highlight prefix carried, and the
-    /// touched tail re-highlights in the background. False when no
-    /// ledger stands.
+    /// One edit applied: the ledger splices it, the document and the
+    /// layout splice in place on the fast path, and the edited block
+    /// re-highlights once typing rests. The full reparse and relayout
+    /// survive as the fallback: a pass still measuring, or a splice the
+    /// model declines. False when no ledger stands.
     fn apply_edit(&mut self, range: std::ops::Range<usize>, text: &str) -> bool {
         let Some(path) = self.path.clone() else {
             return false;
@@ -999,19 +1009,78 @@ impl App {
         let touched = ledger.edit(range.clone(), text);
         let old_touched = touched.start..touched.start + removed + 1;
         let current = ledger.current();
-        self.document = edit::reparse(
-            load::detect(&path),
-            &current,
-            &self.document,
-            old_touched,
-            touched,
-        );
+        let settled =
+            self.pass.as_ref().is_some_and(LayoutPass::is_complete) && self.layout.is_some();
+        let spliced = settled
+            .then(|| {
+                edit::splice_document(
+                    &mut self.document,
+                    &current,
+                    old_touched.clone(),
+                    touched.clone(),
+                )
+            })
+            .flatten();
+        match spliced {
+            Some((old_lines, new_lines)) => {
+                // The model spliced; the layout follows in place, or a
+                // restart re-measures the already-correct model.
+                let lay = self.layout.as_mut().expect("settled layout");
+                let placed = layout::edit_code_lines(
+                    lay,
+                    &self.document,
+                    &self.theme,
+                    &mut self.fonts,
+                    &self.cfg,
+                    0,
+                    old_lines,
+                    new_lines,
+                );
+                if placed {
+                    // The next frame's window slide re-materializes the
+                    // band from the corrected table.
+                    self.band = None;
+                    self.pending_band_for = None;
+                    self.pending_recolor.clear();
+                    self.request_redraw();
+                } else {
+                    self.restart_layout();
+                }
+            }
+            None => {
+                self.document = edit::reparse(
+                    load::detect(&path),
+                    &current,
+                    &self.document,
+                    old_touched,
+                    touched,
+                );
+                self.restart_layout();
+            }
+        }
         self.outline = OutlineTree::build(&self.document);
-        // Every row kept its colors through the reparse, so nothing is
-        // pending by count; the worker re-runs the block outright and
-        // its arrivals correct the stale rows. Prose has no colors and
-        // skips the worker.
-        let rehighlight = match self.document.blocks.first().map(|b| &b.kind) {
+        // The keystroke kills in-flight highlight work, so stale spans
+        // never fold against shifted lines; the whole-block re-run
+        // waits for the typing to rest. Prose has no colors to correct.
+        self.start_highlight(Vec::new());
+        self.rehighlight_at =
+            (!self.document.plain_file).then(|| Instant::now() + REHIGHLIGHT_REST);
+        self.selection = None;
+        self.sel_anchor = None;
+        // The match set holds positions of the text that just changed;
+        // the next frame recomputes it against the edit.
+        if let Some(state) = self.search.as_mut() {
+            state.matches.clear();
+            state.rects.clear();
+            state.stale = true;
+        }
+        true
+    }
+
+    /// Restarts the highlight worker over the edited block, the rest
+    /// timer's due action.
+    fn rehighlight_edited(&mut self) {
+        let pending = match self.document.blocks.first().map(|b| &b.kind) {
             Some(BlockKind::CodeBlock {
                 language, lines, ..
             }) if !self.document.plain_file => vec![PendingBlock {
@@ -1022,18 +1091,7 @@ impl App {
             }],
             _ => Vec::new(),
         };
-        self.start_highlight(rehighlight);
-        self.selection = None;
-        self.sel_anchor = None;
-        // The match set holds positions of the text that just changed;
-        // the next frame recomputes it against the reparse.
-        if let Some(state) = self.search.as_mut() {
-            state.matches.clear();
-            state.rects.clear();
-            state.stale = true;
-        }
-        self.restart_layout();
-        true
+        self.start_highlight(pending);
     }
 
     /// Repaints the title; the asterisk follows the undo head against
@@ -2280,6 +2338,7 @@ impl App {
         }
         self.ledger = None;
         self.undo = None;
+        self.rehighlight_at = None;
         self.notice = None;
         let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         let loaded = load::open(&path, Some(Instant::now() + load::OPEN_BUDGET));
@@ -3408,6 +3467,14 @@ impl ApplicationHandler for App {
                 self.pass = None;
                 event_loop.set_control_flow(ControlFlow::Wait);
                 self.request_redraw();
+            }
+        }
+        if let Some(at) = self.rehighlight_at {
+            if Instant::now() >= at {
+                self.rehighlight_at = None;
+                self.rehighlight_edited();
+            } else {
+                event_loop.set_control_flow(ControlFlow::WaitUntil(at));
             }
         }
         if self.mode == edit::Mode::Edit && self.caret.is_some() {

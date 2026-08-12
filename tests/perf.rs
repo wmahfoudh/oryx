@@ -364,3 +364,103 @@ fn dump_huge_fixture() {
     let source = large_gen::generate(8 * 1024 * 1024);
     std::fs::write("tests/fixtures/huge.md", source).expect("write huge.md");
 }
+
+/// One keystroke's display path in edit mode, both pipes. The fast
+/// path is the app's: the ledger splice, the current-text rebuild, the
+/// in-place model and layout splices, then the window refill the next
+/// frame performs. The fallback rows measure the correctness-first
+/// pipe the app keeps for a still-measuring pass: the whole-document
+/// reparse with the highlight carry and the restarted streaming pass.
+/// The keystroke lands at the end of the file, the worst case for
+/// every scan; the code tier folds its highlights first so the carry
+/// copies real spans.
+#[test]
+#[ignore = "measurement only"]
+fn keystroke_measured() {
+    use oryx::doc::load;
+    use oryx::edit::{self, splice::Ledger};
+    use oryx::layout::edit_code_lines;
+    use oryx::ui::outline::OutlineTree;
+    use std::path::Path;
+    let pool = pool();
+    let theme = Theme::default_dark();
+    let cfg = ViewConfig::default();
+    for (name, bytes) in &TIERS[2..] {
+        for (kind, ext) in [("code", "rs"), ("text", "txt")] {
+            let source = large_gen::generate_code(*bytes);
+            let (_, _, mut doc) = measure_open(&source, ext);
+            if *kind == *"code" {
+                measure_highlight(&mut doc);
+            }
+            let mut fonts = FontStore::new();
+            let mut media = MediaCache::new(PathBuf::from("."));
+            let (mut lay, mut pass) = layout_begin(&doc, &cfg, WIDTH);
+            pass.attach_pool(std::sync::Arc::clone(&pool));
+            pass.retain_around(0.0, VIEWPORT_H);
+            layout_more(
+                &doc, &theme, &mut fonts, &mut media, &cfg, &mut lay, &mut pass, None,
+            );
+            let mut ledger = Ledger::new(std::sync::Arc::clone(&doc.source), Vec::new());
+            let at = doc.source.len() - 1;
+            let started = Instant::now();
+            let touched = ledger.edit(at..at, "x");
+            let splice_us = started.elapsed().as_micros();
+            let started = Instant::now();
+            let current = ledger.current();
+            let current_us = started.elapsed().as_micros();
+            let started = Instant::now();
+            let (old_lines, new_lines) =
+                edit::splice_document(&mut doc, &current, touched.clone(), touched.clone())
+                    .expect("a file document splices");
+            let model_us = started.elapsed().as_micros();
+            let started = Instant::now();
+            assert!(edit_code_lines(
+                &mut lay, &doc, &theme, &mut fonts, &cfg, 0, old_lines, new_lines,
+            ));
+            let layout_us = started.elapsed().as_micros();
+            let started = Instant::now();
+            window_to(
+                &doc,
+                &theme,
+                &mut fonts,
+                &mut media,
+                &cfg,
+                &mut lay,
+                Some(&pool),
+                0.0,
+                VIEWPORT_H,
+                true,
+            );
+            lay.index_more();
+            let refill_us = started.elapsed().as_micros();
+            let started = Instant::now();
+            let _outline = OutlineTree::build(&doc);
+            let outline_us = started.elapsed().as_micros();
+            println!(
+                "{kind:<4} {name:>6} fast: splice {:>5.1}ms, current {:>5.1}ms, \
+                 model {:>5.2}ms, layout {:>5.2}ms, refill {:>5.1}ms, outline {:>5.2}ms",
+                splice_us as f64 / 1000.0,
+                current_us as f64 / 1000.0,
+                model_us as f64 / 1000.0,
+                layout_us as f64 / 1000.0,
+                refill_us as f64 / 1000.0,
+                outline_us as f64 / 1000.0,
+            );
+
+            // The fallback pipe over the same edited state.
+            let file_kind = load::detect(Path::new(&format!("fixture.{ext}")));
+            let at = doc.source.len() - 1;
+            let touched = ledger.edit(at..at, "y");
+            let current = ledger.current();
+            let started = Instant::now();
+            doc = edit::reparse(file_kind, &current, &doc, touched.clone(), touched);
+            let reparse_ms = started.elapsed().as_millis();
+            let (laid, _resident) = measure_layout(&doc, Some(&pool));
+            println!(
+                "{kind:<4} {name:>6} slow: reparse {reparse_ms:>4}ms, \
+                 first slice {:>4}ms, full pass {:>5}ms",
+                laid.first_ms, laid.ms
+            );
+        }
+    }
+}

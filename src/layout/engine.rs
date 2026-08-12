@@ -1733,7 +1733,7 @@ fn place_block(
     };
 
     let is_code = matches!(block.kind, BlockKind::CodeBlock { .. });
-    let size = cfg.code_size * cfg.zoom;
+    let size = code_face(doc.plain_file, cfg).1 * cfg.zoom;
     out.table.push(
         block_index,
         BlockEntry {
@@ -2571,7 +2571,7 @@ fn replay_code_lines(
     let (x_base, avail) = block_geometry(block, table.margin, table.content_width, cfg);
     let x0 = x_base + entry.pad;
     let wrap_width = (avail - 2.0 * entry.pad).max(40.0);
-    let size = cfg.code_size * cfg.zoom;
+    let size = code_face(doc.plain_file, cfg).1 * cfg.zoom;
     let base = entry.content_y + entry.pad;
     let tall = table.tall_of(position);
     let mut next_tall = 0;
@@ -5038,6 +5038,134 @@ pub fn recolor_batch(
         }
     }
     Some((run_lo, run_hi, delta))
+}
+
+/// Splices an edit into a placed code block, the keystroke fast path:
+/// the touched lines shape once to learn their heights, the block's
+/// tall exceptions and every height shift arithmetically, and the
+/// window clears so the standing per-frame refill re-materializes the
+/// band from the corrected table. Nothing else in the document
+/// re-measures. The document must already carry the edit. Answers
+/// false when the layout is not windowed or the block is not placed as
+/// a code entry, the caller's cue to restart the pass instead.
+#[allow(clippy::too_many_arguments)]
+pub fn edit_code_lines(
+    lay: &mut LayoutDoc,
+    doc: &Document,
+    theme: &Theme,
+    fonts: &mut FontStore,
+    cfg: &ViewConfig,
+    block: usize,
+    old_lines: Range<usize>,
+    new_lines: Range<usize>,
+) -> bool {
+    if lay.window.is_none() {
+        return false;
+    }
+    let position = match lay.table.position_of_block.get(block) {
+        Some(&p) if p != u32::MAX => p as usize,
+        _ => return false,
+    };
+    let entry = &lay.table.entries[position];
+    if entry.flags & ENTRY_CODE == 0 {
+        return false;
+    }
+    let (line_height, pad) = (entry.line_height, entry.pad);
+    let Some(BlockKind::CodeBlock {
+        lines, highlights, ..
+    }) = doc.blocks.get(block).map(|b| &b.kind)
+    else {
+        return false;
+    };
+
+    // What the touched lines measured before the edit: the shared
+    // advance plus their tall exceptions.
+    let mut old_h = old_lines.len() as f32 * line_height;
+    for &(_, l, h) in lay.table.tall_of(position) {
+        if old_lines.contains(&(l as usize)) {
+            old_h += h - line_height;
+        }
+    }
+
+    // Shape the new touched lines once, for their heights alone; the
+    // window refill re-shapes the band from the corrected table.
+    let (x_base, avail) = block_geometry(
+        &doc.blocks[block],
+        lay.table.margin,
+        lay.table.content_width,
+        cfg,
+    );
+    let x0 = x_base + pad;
+    let wrap_width = (avail - 2.0 * pad).max(40.0);
+    let size = code_face(doc.plain_file, cfg).1 * cfg.zoom;
+    let empty: Vec<(Range<usize>, SyntaxRole)> = Vec::new();
+    let mut scratch = LayoutDoc::default();
+    let mut new_h = 0.0_f32;
+    let mut new_tall: Vec<(u32, u32, f32)> = Vec::new();
+    for line in new_lines.clone() {
+        let text = lines.line(&doc.source, line);
+        let advance = if text.is_empty() {
+            line_height
+        } else {
+            scratch.runs.clear();
+            scratch.code_lines.clear();
+            let segments = highlights.get(line).unwrap_or(&empty);
+            shape_code_line_step(
+                fonts,
+                theme,
+                cfg,
+                text,
+                segments,
+                block,
+                line,
+                x0,
+                size,
+                line_height,
+                wrap_width,
+                doc.plain_file,
+                &mut scratch,
+            )
+        };
+        if advance != line_height {
+            new_tall.push((position as u32, line as u32, advance));
+        }
+        new_h += advance;
+    }
+    let dy = new_h - old_h;
+    let line_delta = new_lines.len() as isize - old_lines.len() as isize;
+
+    // The tall exceptions: the touched range's entries swap for the
+    // measured ones, the position's later lines re-index.
+    let tall = &mut lay.table.tall;
+    let p = position as u32;
+    let lo =
+        tall.partition_point(|&(tp, tl, _)| tp < p || (tp == p && (tl as usize) < old_lines.start));
+    let hi =
+        tall.partition_point(|&(tp, tl, _)| tp < p || (tp == p && (tl as usize) < old_lines.end));
+    let pos_end = tall.partition_point(|&(tp, _, _)| tp <= p);
+    for t in &mut tall[hi..pos_end] {
+        t.1 = t.1.wrapping_add_signed(line_delta as i32);
+    }
+    tall.splice(lo..hi, new_tall);
+
+    // The heights follow arithmetically: this entry grows, everything
+    // recorded below it slides.
+    lay.table.entries[position].height += dy;
+    for entry in &mut lay.table.entries[position + 1..] {
+        entry.y += dy;
+        entry.content_y += dy;
+        if !entry.deco_top.is_nan() {
+            entry.deco_top += dy;
+        }
+    }
+    if let Some((rule_pos, y)) = &mut lay.table.notes_rule {
+        if *rule_pos > position {
+            *y += dy;
+        }
+    }
+    lay.height += dy;
+    lay.window_clear(position);
+    true
 }
 
 /// Recolors the laid-out lines `lines` of code block `block`: the

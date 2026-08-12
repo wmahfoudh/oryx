@@ -267,6 +267,86 @@ impl CodeBody {
         let base = self.owned.as_deref().unwrap_or(source);
         self.lines.iter().map(move |range| slice(base, range))
     }
+
+    /// Splices a verbatim body after an edit: `old_lines` of the body
+    /// were replaced by `new_lines` of the already-edited `source`, and
+    /// the bytes past the touched region shifted by `delta`. Touched
+    /// entries rebuild from the source, entries after shift; an edit
+    /// reaching past the last entry rebuilds the suffix from the first
+    /// touched line, where `keep_trailing` decides whether trailing
+    /// blank lines stay as rows (text files) or pop (code files).
+    /// Declines on an owned body, whose ranges have no source
+    /// coordinates to splice.
+    pub fn splice(
+        &mut self,
+        source: &str,
+        old_lines: Range<usize>,
+        new_lines: Range<usize>,
+        delta: isize,
+        keep_trailing: bool,
+    ) -> bool {
+        if self.owned.is_some() {
+            return false;
+        }
+        let len = self.lines.len();
+        // Bytes before the first touched line are untouched by the
+        // edit, so its recorded start still holds: one byte past the
+        // previous entry's terminator.
+        let from = old_lines.start.min(len);
+        let start = if from == 0 {
+            0
+        } else {
+            self.lines[from - 1].end as usize + 1
+        };
+        let start = start.min(source.len());
+        // The pieces between terminators from `start`: `split` keeps
+        // empty lines as real entries, which the region form needs.
+        let scan = |region: &str| -> Vec<Range<u32>> {
+            let mut at = start as u32;
+            region
+                .split('\n')
+                .map(|piece| {
+                    let range = at..at + piece.len() as u32;
+                    at = range.end + 1;
+                    range
+                })
+                .collect()
+        };
+        if old_lines.end >= len {
+            // The edit reaches the last entry or past it (the phantom
+            // line after a trailing terminator, a code file's popped
+            // tail): rebuild the suffix. The final piece after a
+            // closing terminator is that phantom, never a row.
+            let mut tail = scan(&source[start..]);
+            if source.ends_with('\n') || start == source.len() {
+                tail.pop();
+            }
+            if !keep_trailing {
+                while tail.last().is_some_and(|l| l.is_empty()) {
+                    tail.pop();
+                }
+            }
+            self.lines.truncate(from);
+            self.lines.append(&mut tail);
+            return true;
+        }
+        // Mid-file: the touched region ends one terminator before the
+        // next preserved entry's shifted start, so its pieces are
+        // exactly the new touched lines.
+        let next = (self.lines[old_lines.end].start as isize + delta) as usize;
+        let pieces = scan(&source[start..next - 1]);
+        debug_assert_eq!(
+            pieces.len(),
+            new_lines.len(),
+            "the region holds the touched lines"
+        );
+        for range in &mut self.lines[old_lines.end..] {
+            range.start = range.start.wrapping_add_signed(delta as i32);
+            range.end = range.end.wrapping_add_signed(delta as i32);
+        }
+        self.lines.splice(old_lines, pieces);
+        true
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -435,5 +515,127 @@ pub(crate) fn seal_blocks(blocks: &mut [Block], source: &str) {
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The loader's construction over the edited source, the splice's
+    /// referee: `str::lines` ranges, trailing blank lines popped unless
+    /// kept.
+    fn fresh(source: &str, keep_trailing: bool) -> Vec<Range<u32>> {
+        let base = source.as_ptr() as usize;
+        let mut lines: Vec<Range<u32>> = source
+            .lines()
+            .map(|line| {
+                let start = (line.as_ptr() as usize - base) as u32;
+                start..start + line.len() as u32
+            })
+            .collect();
+        if !keep_trailing {
+            while lines.last().is_some_and(|l| l.is_empty()) {
+                lines.pop();
+            }
+        }
+        lines
+    }
+
+    fn body(source: &str, keep_trailing: bool) -> CodeBody {
+        CodeBody::verbatim(fresh(source, keep_trailing))
+    }
+
+    fn ranges(body: &CodeBody, source: &str) -> Vec<Range<u32>> {
+        (0..body.len())
+            .map(|i| {
+                let r = body.line_range(i).expect("verbatim body");
+                assert!(r.end <= source.len(), "range within the source");
+                r.start as u32..r.end as u32
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_mid_line_edit_rebuilds_its_line_and_shifts_the_tail() {
+        let mut b = body("aaa\nbbb\nccc\n", true);
+        let edited = "aaa\nbxxbb\nccc\n";
+        assert!(b.splice(edited, 1..2, 1..2, 2, true));
+        assert_eq!(ranges(&b, edited), fresh(edited, true));
+    }
+
+    #[test]
+    fn a_split_adds_a_line_in_place() {
+        let mut b = body("aaa\nbbb\nccc\n", true);
+        let edited = "aaa\nb\nbb\nccc\n";
+        assert!(b.splice(edited, 1..2, 1..3, 1, true));
+        assert_eq!(ranges(&b, edited), fresh(edited, true));
+    }
+
+    #[test]
+    fn a_join_removes_a_line_in_place() {
+        let mut b = body("aaa\nbbb\nccc\n", true);
+        let edited = "aaabbb\nccc\n";
+        assert!(b.splice(edited, 0..2, 0..1, -1, true));
+        assert_eq!(ranges(&b, edited), fresh(edited, true));
+    }
+
+    #[test]
+    fn an_edit_on_the_last_line_rebuilds_the_suffix() {
+        let mut b = body("aaa\nbbb", true);
+        let edited = "aaa\nbbbxx";
+        assert!(b.splice(edited, 1..2, 1..2, 2, true));
+        assert_eq!(ranges(&b, edited), fresh(edited, true));
+    }
+
+    #[test]
+    fn typing_past_the_terminator_grows_a_row() {
+        // The caret after a trailing newline stands on a line no entry
+        // holds yet; the edit reaches past the vector and the suffix
+        // rebuild adds the row.
+        let mut b = body("aaa\n", true);
+        let edited = "aaa\nbbb";
+        assert!(b.splice(edited, 1..2, 1..2, 3, true));
+        assert_eq!(ranges(&b, edited), fresh(edited, true));
+    }
+
+    #[test]
+    fn a_trailing_blank_keeps_or_pops_by_kind() {
+        let mut text = body("aaa\n", true);
+        let edited = "aaa\n\n";
+        assert!(text.splice(edited, 1..2, 1..3, 1, true));
+        assert_eq!(
+            ranges(&text, edited),
+            fresh(edited, true),
+            "text keeps the row"
+        );
+        let mut code = body("aaa\n", false);
+        assert!(code.splice(edited, 1..2, 1..3, 1, false));
+        assert_eq!(ranges(&code, edited), fresh(edited, false), "code pops it");
+    }
+
+    #[test]
+    fn blank_rows_shift_through_an_edit_above_them() {
+        let mut b = body("aaa\n\n\nccc\n\n", true);
+        let edited = "aaaxx\n\n\nccc\n\n";
+        assert!(b.splice(edited, 0..1, 0..1, 2, true));
+        assert_eq!(ranges(&b, edited), fresh(edited, true));
+    }
+
+    #[test]
+    fn an_edit_beyond_a_popped_tail_rebuilds_the_suffix() {
+        // A code file's popped trailing blanks leave source bytes past
+        // the last entry; an edit landing there must still resolve.
+        let mut b = body("aaa\n\n\n", false);
+        assert_eq!(b.len(), 1, "the popped body holds one row");
+        let edited = "aaa\n\nx\n";
+        assert!(b.splice(edited, 2..3, 2..3, 1, false));
+        assert_eq!(ranges(&b, edited), fresh(edited, false));
+    }
+
+    #[test]
+    fn an_owned_body_declines_the_splice() {
+        let mut b = CodeBody::from_text("aaa\nbbb\n");
+        assert!(!b.splice("aaa\nbxbb\n", 1..2, 1..2, 1, true));
     }
 }

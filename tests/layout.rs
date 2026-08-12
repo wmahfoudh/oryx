@@ -3234,3 +3234,230 @@ fn typing_keeps_every_line_through_the_pooled_pass() {
         assert_eq!(lay.run_text(&doc, a), fresh.run_text(&reference, b));
     }
 }
+
+/// The app's windowed layout of a file document: begin, retain around
+/// the scroll, complete, slide the window there.
+fn windowed(doc: &Document, width: f32, scroll: f32, viewport: f32) -> LayoutDoc {
+    let mut fonts = fonts();
+    let mut media = MediaCache::new(PathBuf::from("."));
+    let (mut out, mut pass) = layout_begin(doc, &cfg(), width);
+    pass.retain_around(scroll, viewport);
+    layout_more(
+        doc,
+        &theme(),
+        &mut fonts,
+        &mut media,
+        &cfg(),
+        &mut out,
+        &mut pass,
+        None,
+    );
+    window_to(
+        doc,
+        &theme(),
+        &mut fonts,
+        &mut media,
+        &cfg(),
+        &mut out,
+        None,
+        scroll,
+        viewport,
+        true,
+    );
+    out.index_more();
+    out
+}
+
+/// One keystroke through the fast path: the model splice, the layout
+/// splice, and the window slide the next frame performs. The slow-pipe
+/// reference document advances beside it through `edit::reparse`, so
+/// highlight rows, and with them run splits, stay identical between
+/// the pipes.
+#[allow(clippy::too_many_arguments)]
+fn fast_keystroke(
+    doc: &mut Document,
+    reference: &mut Document,
+    kind: load::FileKind,
+    lay: &mut LayoutDoc,
+    range: std::ops::Range<usize>,
+    text: &str,
+    scroll: f32,
+    viewport: f32,
+) {
+    let removed = doc.source[range.clone()].matches('\n').count();
+    let start_line = doc.source[..range.start].matches('\n').count();
+    let old_touched = start_line..start_line + removed + 1;
+    let new_touched = start_line..start_line + text.matches('\n').count() + 1;
+    let mut current = doc.source.to_string();
+    current.replace_range(range, text);
+    let (old_lines, new_lines) =
+        oryx::edit::splice_document(doc, &current, old_touched.clone(), new_touched.clone())
+            .expect("a file document splices");
+    let mut fonts = fonts();
+    assert!(
+        oryx::layout::edit_code_lines(
+            lay,
+            doc,
+            &theme(),
+            &mut fonts,
+            &cfg(),
+            0,
+            old_lines,
+            new_lines
+        ),
+        "a placed code entry takes the splice"
+    );
+    let mut media = MediaCache::new(PathBuf::from("."));
+    window_to(
+        doc,
+        &theme(),
+        &mut fonts,
+        &mut media,
+        &cfg(),
+        lay,
+        None,
+        scroll,
+        viewport,
+        true,
+    );
+    lay.index_more();
+    *reference = oryx::edit::reparse(kind, &current, reference, old_touched, new_touched);
+}
+
+fn assert_same_layout(a: &LayoutDoc, doc_a: &Document, b: &LayoutDoc, doc_b: &Document) {
+    assert_eq!(a.height, b.height, "document heights match");
+    assert_eq!(a.runs.len(), b.runs.len(), "run counts match");
+    for (x, y) in a.runs.iter().zip(b.runs.iter()) {
+        assert_eq!(a.run_text(doc_a, x), b.run_text(doc_b, y), "texts match");
+        assert_eq!(
+            (x.x, x.y, x.width),
+            (y.x, y.y, y.width),
+            "geometry matches for {:?}",
+            a.run_text(doc_a, x)
+        );
+    }
+}
+
+#[test]
+fn the_layout_splice_matches_a_fresh_pass_on_a_text_file() {
+    let base = "The quick brown fox jumps over the lazy dog, and keeps going for a while.\n\
+                second line\n\
+                \n\
+                fourth line\n";
+    let path = std::env::temp_dir().join("oryx_fastpath_text_test.txt");
+    std::fs::write(&path, base).unwrap();
+    let mut doc = load::open(&path, None).unwrap().document;
+    let mut reference = load::open(&path, None).unwrap().document;
+    std::fs::remove_file(&path).ok();
+    let kind = load::FileKind::Text;
+    let (width, viewport) = (420.0, 300.0);
+    let mut lay = windowed(&doc, width, 0.0, viewport);
+    // Typing that crosses the wrap boundary, a split, a join, an edit
+    // at the very end of the file.
+    let steps: &[(usize, usize, &str)] = &[
+        (4, 4, "very "),
+        (10, 10, "extremely long and wordy "),
+        (80, 80, "\n"),
+        (76, 77, ""),
+        (0, 1, ""),
+    ];
+    for &(start, end, text) in steps {
+        fast_keystroke(
+            &mut doc,
+            &mut reference,
+            kind,
+            &mut lay,
+            start..end,
+            text,
+            0.0,
+            viewport,
+        );
+        let fresh = windowed(&reference, width, 0.0, viewport);
+        assert_same_layout(&lay, &doc, &fresh, &reference);
+    }
+    let end = doc.source.len();
+    fast_keystroke(
+        &mut doc,
+        &mut reference,
+        kind,
+        &mut lay,
+        end..end,
+        "\ntail",
+        0.0,
+        viewport,
+    );
+    let fresh = windowed(&reference, width, 0.0, viewport);
+    assert_same_layout(&lay, &doc, &fresh, &reference);
+}
+
+#[test]
+fn the_layout_splice_matches_a_fresh_pass_on_a_code_file() {
+    let mut source = String::new();
+    for i in 0..40 {
+        source.push_str(&format!("let value_{i} = compute({i});\n"));
+    }
+    let path = std::env::temp_dir().join("oryx_fastpath_code_test.rs");
+    std::fs::write(&path, &source).unwrap();
+    let mut doc = load::open(&path, None).unwrap().document;
+    let mut reference = load::open(&path, None).unwrap().document;
+    std::fs::remove_file(&path).ok();
+    let kind = load::FileKind::Code("rust");
+    let (width, viewport) = (700.0, 300.0);
+    let mut lay = windowed(&doc, width, 0.0, viewport);
+    let steps: &[(usize, usize, &str)] = &[
+        (10, 10, "x"),
+        (
+            40,
+            40,
+            " + extra_term_making_the_line_wrap_around_the_panel_width",
+        ),
+        (100, 100, "\n"),
+        (100, 101, ""),
+    ];
+    for &(start, end, text) in steps {
+        fast_keystroke(
+            &mut doc,
+            &mut reference,
+            kind,
+            &mut lay,
+            start..end,
+            text,
+            0.0,
+            viewport,
+        );
+        let fresh = windowed(&reference, width, 0.0, viewport);
+        assert_same_layout(&lay, &doc, &fresh, &reference);
+    }
+}
+
+#[test]
+fn the_layout_splice_holds_in_a_mid_document_band() {
+    let mut source = String::new();
+    for i in 0..400 {
+        source.push_str(&format!("line number {i} with a few words on it\n"));
+    }
+    let path = std::env::temp_dir().join("oryx_fastpath_band_test.txt");
+    std::fs::write(&path, &source).unwrap();
+    let mut doc = load::open(&path, None).unwrap().document;
+    let mut reference = load::open(&path, None).unwrap().document;
+    std::fs::remove_file(&path).ok();
+    let kind = load::FileKind::Text;
+    let (width, viewport) = (800.0, 200.0);
+    let full = windowed(&doc, width, 0.0, viewport);
+    let scroll = full.height / 2.0;
+    let mut lay = windowed(&doc, width, scroll, viewport);
+    // An edit inside the band: the offset of a line near the middle.
+    let at = doc.source.len() / 2;
+    fast_keystroke(
+        &mut doc,
+        &mut reference,
+        kind,
+        &mut lay,
+        at..at,
+        "inserted words \n",
+        scroll,
+        viewport,
+    );
+    let fresh = windowed(&reference, width, scroll, viewport);
+    assert_same_layout(&lay, &doc, &fresh, &reference);
+}
