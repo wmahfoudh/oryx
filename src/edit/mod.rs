@@ -7,9 +7,11 @@
 
 pub mod caret;
 pub mod splice;
+pub mod undo;
 
 use crate::doc::load::{self, FileKind};
 use crate::doc::model::{BlockKind, Document};
+use crate::style::highlight::SyntaxRole;
 
 /// The app-wide mode. Reading is the default; editing is entered
 /// through Ctrl+E and left through Escape or Ctrl+E again.
@@ -58,9 +60,13 @@ pub fn toggle(mode: Mode, kind: FileKind, lossy: bool) -> Result<Mode, Refusal> 
 /// Re-derives the document after a ledger edit: the current text
 /// reparsed by its kind, with every computed highlight carried over so
 /// no row flashes plain while the worker re-runs. The touched rows wear
-/// their old colors, close enough until the worker corrects them; a
-/// stale span that no longer fits its row drops. `old_touched` and
-/// `new_touched` are the edit's line ranges before and after.
+/// their old colors as far as they still cover the row, and the rest of
+/// the row reads plain until the worker corrects it: the engine draws
+/// only spanned bytes, so carried spans must tile a row to its end or
+/// its tail would vanish. A plain file keeps its fresh parse's
+/// full-line spans, since no worker follows to correct a carried one.
+/// `old_touched` and `new_touched` are the edit's line ranges before
+/// and after.
 pub fn reparse(
     kind: FileKind,
     current: &str,
@@ -73,6 +79,9 @@ pub fn reparse(
         FileKind::Unknown => load::code_document(None, current),
         _ => load::text_document(current),
     };
+    if new.plain_file {
+        return new;
+    }
     let empty = Vec::new();
     let old_high = match old.blocks.first().map(|b| &b.kind) {
         Some(BlockKind::CodeBlock { highlights, .. }) => highlights,
@@ -92,11 +101,22 @@ pub fn reparse(
             let line_index = new_touched.start + i;
             if line_index < lines.len() {
                 let text = lines.line(current, line_index);
+                let mut covered = 0;
                 spans.retain(|(range, _)| {
-                    range.end <= text.len()
-                        && text.is_char_boundary(range.start)
-                        && text.is_char_boundary(range.end)
+                    let keep = range.start == covered
+                        && range.end <= text.len()
+                        && text.is_char_boundary(range.end);
+                    if keep {
+                        covered = range.end;
+                    }
+                    keep
                 });
+                if covered < text.len() {
+                    match spans.last_mut() {
+                        Some((range, SyntaxRole::Plain)) => range.end = text.len(),
+                        _ => spans.push((covered..text.len(), SyntaxRole::Plain)),
+                    }
+                }
             } else {
                 spans.clear();
             }
@@ -200,12 +220,18 @@ mod tests {
     use crate::style::highlight::LineSpans;
 
     fn fixture() -> (Document, [LineSpans; 3]) {
-        use crate::style::highlight::SyntaxRole;
+        // Rows tile their lines with no gap, the way worker spans
+        // arrive: plain pieces included, every byte covered.
         let mut old = load::code_document(Some("rust"), "let a = 1;\nlet b = 2;\nlet c = 3;\n");
         let rows = [
-            vec![(0..3, SyntaxRole::Keyword)],
-            vec![(0..3, SyntaxRole::String), (6..9, SyntaxRole::Number)],
-            vec![(0..3, SyntaxRole::Type)],
+            vec![(0..3, SyntaxRole::Keyword), (3..10, SyntaxRole::Plain)],
+            vec![
+                (0..3, SyntaxRole::Keyword),
+                (3..8, SyntaxRole::Plain),
+                (8..9, SyntaxRole::Number),
+                (9..10, SyntaxRole::Plain),
+            ],
+            vec![(0..3, SyntaxRole::Type), (3..10, SyntaxRole::Plain)],
         ];
         let BlockKind::CodeBlock { highlights, .. } = &mut old.blocks[0].kind else {
             panic!("a code file is one code block");
@@ -235,7 +261,16 @@ mod tests {
         let high = rows_of(&new);
         assert_eq!(high.len(), 3, "no row goes blank while the worker runs");
         assert_eq!(high[0], rows[0]);
-        assert_eq!(high[1], rows[1], "the touched row wears its old colors");
+        assert_eq!(
+            high[1],
+            vec![
+                (0..3, SyntaxRole::Keyword),
+                (3..8, SyntaxRole::Plain),
+                (8..9, SyntaxRole::Number),
+                (9..11, SyntaxRole::Plain),
+            ],
+            "the touched row wears its old colors, covered to its end"
+        );
         assert_eq!(high[2], rows[2], "the tail keeps its colors");
     }
 
@@ -254,12 +289,13 @@ mod tests {
         assert_eq!(high[0], rows[0]);
         assert_eq!(
             high[1],
-            vec![rows[1][0].clone()],
-            "the span past the shortened row drops"
+            vec![(0..3, SyntaxRole::Keyword), (3..5, SyntaxRole::Plain)],
+            "the spans past the shortened row drop and plain covers the rest"
         );
-        assert!(
-            high[2].is_empty(),
-            "the just-opened row waits for the worker"
+        assert_eq!(
+            high[2],
+            vec![(0..5, SyntaxRole::Plain)],
+            "the just-opened row reads plain until the worker colors it"
         );
         assert_eq!(high[3], rows[2], "the tail shifts down intact");
     }
@@ -276,8 +312,76 @@ mod tests {
         );
         let high = rows_of(&new);
         assert_eq!(high.len(), 2);
-        assert_eq!(high[0], rows[0], "the joined row wears the first old row");
+        assert_eq!(
+            high[0],
+            vec![(0..3, SyntaxRole::Keyword), (3..20, SyntaxRole::Plain)],
+            "the joined row wears the first old row, covered to its end"
+        );
         assert_eq!(high[1], rows[2]);
+    }
+
+    use crate::style::highlight::SyntaxRole;
+
+    #[test]
+    fn a_text_file_edit_keeps_every_line_fully_spanned() {
+        // A plain file has no worker to correct a stale carried span,
+        // and the engine draws only spanned bytes, whole rows when a
+        // row has no spans at all: a carried span shorter than its
+        // grown line makes the line's tail vanish from the page. The
+        // opened file's rows carry the open pass's all-plain spans.
+        let mut old = load::text_document("hello\nworld\n");
+        let BlockKind::CodeBlock { highlights, .. } = &mut old.blocks[0].kind else {
+            panic!("a text file is one line-oriented block");
+        };
+        *highlights = vec![
+            vec![(0..5, SyntaxRole::Plain)],
+            vec![(0..5, SyntaxRole::Plain)],
+        ];
+        let new = reparse(FileKind::Text, "hello there\nworld\n", &old, 0..1, 0..1);
+        let BlockKind::CodeBlock {
+            highlights, lines, ..
+        } = &new.blocks[0].kind
+        else {
+            panic!("the reparse keeps the block");
+        };
+        for (i, row) in highlights.iter().enumerate() {
+            if row.is_empty() {
+                continue;
+            }
+            let text = lines.line(&new.source, i);
+            let mut covered = 0;
+            for (range, _) in row {
+                assert_eq!(range.start, covered, "row {i} spans tile with no gap");
+                covered = range.end;
+            }
+            assert_eq!(covered, text.len(), "row {i} spans cover it whole");
+        }
+    }
+
+    #[test]
+    fn a_grown_code_line_keeps_its_tail_covered() {
+        let (old, rows) = fixture();
+        let new = reparse(
+            FileKind::Code("rust"),
+            "let a = 1;\nlet b = 2 + 2;\nlet c = 3;\n",
+            &old,
+            1..2,
+            1..2,
+        );
+        let high = rows_of(&new);
+        let grown = "let b = 2 + 2;".len();
+        assert_eq!(
+            high[1].last().map(|(range, _)| range.end),
+            Some(grown),
+            "the carried spans still cover the line to its end"
+        );
+        let mut covered = 0;
+        for (range, _) in &high[1] {
+            assert_eq!(range.start, covered, "spans tile with no gap");
+            covered = range.end;
+        }
+        assert_eq!(high[0], rows[0]);
+        assert_eq!(high[2], rows[2]);
     }
 
     #[test]

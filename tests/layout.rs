@@ -3087,3 +3087,150 @@ fn justify_leaves_headings_and_code_natural() {
         assert_eq!(geo(&plain), geo(&just), "block {index} keeps its geometry");
     }
 }
+
+/// A keystroke in a text file walks the app's edit pipe: the ledger
+/// splices, the document reparses with the highlight carry, and the
+/// relayout must still place every line of the file.
+#[test]
+fn a_text_file_keystroke_keeps_every_line_placed() {
+    use oryx::edit::{self, splice::Ledger};
+    let base = "The quick brown fox jumps over the lazy dog.\n\
+                A second line to edit and undo.\n\
+                \n\
+                A paragraph after a blank line,\n\
+                with a trailing line below.\n";
+    let path = std::env::temp_dir().join("oryx_edit_relayout_test.txt");
+    std::fs::write(&path, base).unwrap();
+    let opened = load::open(&path, None).unwrap();
+    std::fs::remove_file(&path).ok();
+    let mut doc = opened.document;
+    let mut fonts = fonts();
+    let before = lay_doc(&doc, 800.0, &mut fonts);
+    let mut led = Ledger::new(std::sync::Arc::from(base), Vec::new());
+    for (i, ch) in ["t", "e", "s", "t"].iter().enumerate() {
+        let touched = led.edit(i..i, ch);
+        doc = edit::reparse(
+            load::FileKind::Text,
+            &led.current(),
+            &doc,
+            touched.clone(),
+            touched,
+        );
+    }
+    assert_eq!(&*doc.source, format!("test{base}").as_str());
+    let after = lay_doc(&doc, 800.0, &mut fonts);
+    assert_eq!(
+        after.runs.len(),
+        before.runs.len(),
+        "every line of the file is still placed"
+    );
+    assert!(
+        after.height >= before.height,
+        "the document keeps its height ({} was {})",
+        after.height,
+        before.height
+    );
+    // The edited document must lay out as the same text loaded fresh:
+    // a carried span shorter than its line would silently drop the
+    // line's tail here.
+    std::fs::write(&path, led.current()).unwrap();
+    let reference = load::open(&path, None).unwrap().document;
+    std::fs::remove_file(&path).ok();
+    let fresh = lay_doc(&reference, 800.0, &mut fonts);
+    assert_eq!(fresh.height, after.height);
+    assert_eq!(fresh.runs.len(), after.runs.len());
+    for (a, b) in after.runs.iter().zip(fresh.runs.iter()) {
+        assert_eq!(after.run_text(&doc, a), fresh.run_text(&reference, b));
+        assert_eq!((a.x, a.y, a.width), (b.x, b.y, b.width));
+    }
+}
+
+/// The same keystroke pipe through the app's frame mechanics: the
+/// shared shaping pool, deadline slices, retention, and the window
+/// slide. The relayout after each keystroke must place the whole file.
+#[test]
+fn typing_keeps_every_line_through_the_pooled_pass() {
+    use oryx::edit::{self, splice::Ledger};
+    let base = "The quick brown fox jumps over the lazy dog.\n\
+                A second line to edit and undo.\n\
+                \n\
+                A paragraph after a blank line,\n\
+                with a trailing line below.\n";
+    let path = std::env::temp_dir().join("oryx_edit_pooled_test.txt");
+    std::fs::write(&path, base).unwrap();
+    let opened = load::open(&path, None).unwrap();
+    std::fs::remove_file(&path).ok();
+    let mut doc = opened.document;
+    let mut store = fonts();
+    let mut media = MediaCache::new(PathBuf::from("."));
+    let pool = std::sync::Arc::new(ShapePool::new(2, &store.seed()));
+    let first = lay_pooled(&doc, 800.0, &mut store, &pool);
+    let mut led = Ledger::new(std::sync::Arc::from(base), Vec::new());
+    let mut lay = first;
+    for (i, ch) in ["t", "e", "s", "t"].iter().enumerate() {
+        let touched = led.edit(i..i, ch);
+        doc = edit::reparse(
+            load::FileKind::Text,
+            &led.current(),
+            &doc,
+            touched.clone(),
+            touched,
+        );
+        let (mut out, mut pass) = layout_begin(&doc, &cfg(), 800.0);
+        pass.attach_pool(std::sync::Arc::clone(&pool));
+        pass.retain_around(0.0, 600.0);
+        // An expired first slice seeds the pool, a pause lets workers
+        // race it with jobs from the pre-edit document, then short
+        // slices finish the pass the way frames do.
+        layout_more(
+            &doc,
+            &Theme::default_dark(),
+            &mut store,
+            &mut media,
+            &cfg(),
+            &mut out,
+            &mut pass,
+            Some(Instant::now()),
+        );
+        std::thread::sleep(Duration::from_millis(2));
+        while !layout_more(
+            &doc,
+            &Theme::default_dark(),
+            &mut store,
+            &mut media,
+            &cfg(),
+            &mut out,
+            &mut pass,
+            Some(Instant::now() + Duration::from_millis(1)),
+        ) {}
+        window_to(
+            &doc,
+            &Theme::default_dark(),
+            &mut store,
+            &mut media,
+            &cfg(),
+            &mut out,
+            Some(&pool),
+            0.0,
+            600.0,
+            true,
+        );
+        out.index_more();
+        lay = out;
+    }
+    // The reference is the same text loaded fresh, so a stale carry or
+    // a stale pooled step surfaces as a geometry difference.
+    std::fs::write(&path, led.current()).unwrap();
+    let reference = load::open(&path, None).unwrap().document;
+    std::fs::remove_file(&path).ok();
+    let fresh = lay_doc(&reference, 800.0, &mut fonts());
+    assert_eq!(
+        lay.runs.len(),
+        fresh.runs.len(),
+        "every line is placed after typing"
+    );
+    assert_eq!(lay.height, fresh.height, "the document keeps its height");
+    for (a, b) in lay.runs.iter().zip(fresh.runs.iter()) {
+        assert_eq!(lay.run_text(&doc, a), fresh.run_text(&reference, b));
+    }
+}

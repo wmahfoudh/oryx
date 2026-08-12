@@ -121,7 +121,10 @@ impl Ledger {
             range: new_start..new_end,
             text: format!("{prefix}{text}{suffix}"),
         };
-        let keep = !(merged.range.is_empty() && merged.text.is_empty());
+        // A splice whose text is the baseline's own is no edit: undo
+        // lands these, and keeping one would read dirty and emit its
+        // newlines in the dominant ending instead of their own bytes.
+        let keep = merged.text != self.base[merged.range.clone()];
         self.splices.splice(i0..j, keep.then_some(merged));
         touched
     }
@@ -261,6 +264,25 @@ mod tests {
         assert_eq!(led.current(), "abc");
         assert!(!led.is_dirty(), "a vanished edit leaves a clean ledger");
         assert_eq!(led.splice_count(), 0);
+    }
+
+    #[test]
+    fn a_replacement_restored_to_the_baseline_leaves_no_entry() {
+        // Undo applies inverses as ordinary edits, so a replacement
+        // undone lands a splice whose text is the baseline's own; it
+        // must vanish, or the file reads dirty and emit rewrites its
+        // newlines in the dominant ending.
+        let mut led = Ledger::new(Arc::from("alpha\nbeta\ngamma\n"), vec![5]);
+        led.edit(3..8, "XX");
+        assert_eq!(led.current(), "alpXXta\ngamma\n");
+        led.edit(3..5, "ha\nbe");
+        assert_eq!(led.current(), "alpha\nbeta\ngamma\n");
+        assert!(!led.is_dirty(), "the restored text is the baseline");
+        assert_eq!(
+            led.emit(),
+            b"alpha\r\nbeta\ngamma\n",
+            "the restored newline emits as the byte it was"
+        );
     }
 
     #[test]

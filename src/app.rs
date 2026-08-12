@@ -13,6 +13,7 @@ use oryx::edit::{
     self,
     caret::{self, Caret, CaretBox, Motion},
     splice::Ledger,
+    undo::{Kind, Undo},
 };
 use oryx::export::{self, ExportPass, ExportSettings};
 use oryx::input::{
@@ -227,6 +228,7 @@ pub fn run(path: Option<PathBuf>, theme_name: Option<String>) -> anyhow::Result<
         lossy,
         edit_marks: HashMap::new(),
         ledger: None,
+        undo: None,
         crlf: opened_crlf,
         caret_snap: false,
         blink_visible: true,
@@ -501,6 +503,9 @@ struct App {
     /// The splice ledger, from the first edit-mode entry until the file
     /// closes or saves; unsaved edits survive mode flips inside it.
     ledger: Option<Ledger>,
+    /// The undo stack, living and dying with the ledger; the save point
+    /// inside it drives the title asterisk.
+    undo: Option<Undo>,
     /// Normalized-text offsets of the open file's CRLF endings, for the
     /// ledger's byte-exact emission.
     crlf: Vec<u32>,
@@ -669,6 +674,8 @@ impl App {
             Command::Edit => self.toggle_edit(),
             Command::Cut => self.cut_selection(),
             Command::Paste => self.paste_clipboard(),
+            Command::Undo => self.undo_edit(),
+            Command::Redo => self.redo_edit(),
             // The Escape ladder, innermost out. The overlay branch
             // catches it upstream; the find bar rung is normally spent
             // there too and stands here for totality.
@@ -735,9 +742,10 @@ impl App {
         self.mode = edit::Mode::Edit;
         self.caret = Some(Caret::at(offset));
         // The first entry fixes the baseline; re-entry keeps the ledger
-        // and the unsaved edits inside it.
+        // and the unsaved edits inside it, and the undo stack with them.
         if self.ledger.is_none() {
             self.ledger = Some(Ledger::new(self.document.source.clone(), self.crlf.clone()));
+            self.undo = Some(Undo::new());
         }
         // The caret owns the keys; a sidebar holding them would strand
         // the arrows. Same funnel as the Right key's explicit handoff.
@@ -822,7 +830,7 @@ impl App {
                     if !self.delete_selection() {
                         let to = caret::word_left(&self.document.source, at);
                         if to < at {
-                            self.type_edit(to..at, "");
+                            self.type_edit(to..at, "", Kind::Structural);
                         }
                     }
                     return true;
@@ -831,7 +839,7 @@ impl App {
                     if !self.delete_selection() {
                         let to = caret::word_right(&self.document.source, at);
                         if to > at {
-                            self.type_edit(at..to, "");
+                            self.type_edit(at..to, "", Kind::Structural);
                         }
                     }
                     return true;
@@ -859,16 +867,18 @@ impl App {
             return false;
         };
         match key {
+            // Enter is a structural edit: a line split never joins a
+            // typing unit.
             Key::Named(NamedKey::Enter) => {
-                self.type_over("\n");
+                self.type_over("\n", Kind::Structural);
                 true
             }
             Key::Named(NamedKey::Tab) => {
-                self.type_over("\t");
+                self.type_over("\t", Kind::Insert);
                 true
             }
             Key::Named(NamedKey::Space) => {
-                self.type_over(" ");
+                self.type_over(" ", Kind::Insert);
                 true
             }
             Key::Named(NamedKey::Backspace) => {
@@ -878,7 +888,7 @@ impl App {
                         .next_back()
                         .map(|c| at - c.len_utf8());
                     if let Some(prev) = prev {
-                        self.type_edit(prev..at, "");
+                        self.type_edit(prev..at, "", Kind::Delete);
                     }
                 }
                 true
@@ -890,14 +900,14 @@ impl App {
                         .next()
                         .map(|c| at + c.len_utf8());
                     if let Some(next) = next {
-                        self.type_edit(at..next, "");
+                        self.type_edit(at..next, "", Kind::Delete);
                     }
                 }
                 true
             }
             Key::Character(s) if !s.chars().any(char::is_control) && !s.is_empty() => {
                 let text = s.clone();
-                self.type_over(&text);
+                self.type_over(&text, Kind::Insert);
                 true
             }
             Key::Character(_) => true,
@@ -905,16 +915,81 @@ impl App {
         }
     }
 
-    /// One typing edit: the ledger records it, the document reparses
-    /// from the current text with its highlight prefix carried, the
-    /// touched tail re-highlights in the background, and the next
-    /// placed frame snaps the view to the caret.
-    fn type_edit(&mut self, range: std::ops::Range<usize>, text: &str) {
-        let Some(path) = self.path.clone() else {
+    /// One typing edit: the history records it, the ledger applies it,
+    /// and the caret lands after the inserted text.
+    fn type_edit(&mut self, range: std::ops::Range<usize>, text: &str, kind: Kind) {
+        let replaced = self
+            .document
+            .source
+            .get(range.clone())
+            .unwrap_or_default()
+            .to_string();
+        let caret_before = self.caret.map_or(range.start, |c| c.offset);
+        let caret_after = range.start + text.len();
+        if !self.apply_edit(range.clone(), text) {
+            return;
+        }
+        if let Some(hist) = self.undo.as_mut() {
+            hist.record(
+                range,
+                text,
+                &replaced,
+                (caret_before, caret_after),
+                kind,
+                Instant::now(),
+            );
+        }
+        self.seat_caret_after_edit(caret_after);
+    }
+
+    /// Steps the history one unit back and applies its inverse; the
+    /// one deliberate view move, the snap to the restored caret. Inert
+    /// outside edit mode.
+    fn undo_edit(&mut self) {
+        if self.mode != edit::Mode::Edit {
+            return;
+        }
+        let Some((splice, caret)) = self.undo.as_mut().and_then(Undo::undo) else {
             return;
         };
-        let Some(ledger) = self.ledger.as_mut() else {
+        if self.apply_edit(splice.range, &splice.text) {
+            self.seat_caret_after_edit(caret);
+        }
+    }
+
+    /// Steps the history one unit forward and reapplies its splice.
+    /// Inert outside edit mode.
+    fn redo_edit(&mut self) {
+        if self.mode != edit::Mode::Edit {
             return;
+        }
+        let Some((splice, caret)) = self.undo.as_mut().and_then(Undo::redo) else {
+            return;
+        };
+        if self.apply_edit(splice.range, &splice.text) {
+            self.seat_caret_after_edit(caret);
+        }
+    }
+
+    /// The caret after an edit or an undo step: seated, blink woken,
+    /// the next placed frame snapping the view to it.
+    fn seat_caret_after_edit(&mut self, offset: usize) {
+        self.caret = Some(Caret::at(offset));
+        self.wake_caret();
+        self.caret_snap = true;
+        self.refresh_title();
+    }
+
+    /// One edit applied: the ledger splices it, the document reparses
+    /// from the current text with its highlight prefix carried, and the
+    /// touched tail re-highlights in the background. False when no
+    /// ledger stands.
+    fn apply_edit(&mut self, range: std::ops::Range<usize>, text: &str) -> bool {
+        let Some(path) = self.path.clone() else {
+            return false;
+        };
+        let Some(ledger) = self.ledger.as_mut() else {
+            return false;
         };
         let removed = self
             .document
@@ -957,16 +1032,14 @@ impl App {
             state.rects.clear();
             state.stale = true;
         }
-        self.caret = Some(Caret::at(range.start + text.len()));
-        self.wake_caret();
-        self.caret_snap = true;
-        self.refresh_title();
         self.restart_layout();
+        true
     }
 
-    /// Repaints the title; the asterisk follows the dirty ledger.
+    /// Repaints the title; the asterisk follows the undo head against
+    /// the save point, correct through undo past a save.
     fn refresh_title(&mut self) {
-        let dirty = self.ledger.as_ref().is_some_and(Ledger::is_dirty);
+        let dirty = self.undo.as_ref().is_some_and(Undo::is_dirty);
         if let (Some(gfx), Some(path)) = (self.gfx.as_ref(), self.path.as_deref()) {
             gfx.window.set_title(&window_title(
                 self.document.title.as_deref(),
@@ -989,20 +1062,22 @@ impl App {
     }
 
     /// Typing consumes the selection when one stands, else the caret
-    /// point.
-    fn type_over(&mut self, text: &str) {
-        let range = self.selection_source_range().unwrap_or_else(|| {
-            let at = self.caret.map_or(0, |c| c.offset);
-            at..at
-        });
-        self.type_edit(range, text);
+    /// point. Replacing a selection is structural whatever the key.
+    fn type_over(&mut self, text: &str, kind: Kind) {
+        match self.selection_source_range() {
+            Some(range) => self.type_edit(range, text, Kind::Structural),
+            None => {
+                let at = self.caret.map_or(0, |c| c.offset);
+                self.type_edit(at..at, text, kind);
+            }
+        }
     }
 
     /// Deletes the standing selection; false when there is none.
     fn delete_selection(&mut self) -> bool {
         match self.selection_source_range() {
             Some(range) => {
-                self.type_edit(range, "");
+                self.type_edit(range, "", Kind::Structural);
                 true
             }
             None => false,
@@ -1075,7 +1150,7 @@ impl App {
             return;
         };
         self.copy_selection(false);
-        self.type_edit(range, "");
+        self.type_edit(range, "", Kind::Structural);
     }
 
     /// Pastes the clipboard as source bytes at the caret, replacing the
@@ -1096,7 +1171,7 @@ impl App {
         // writes the file's own ending back on save.
         let text = text.replace("\r\n", "\n");
         if !text.is_empty() {
-            self.type_over(&text);
+            self.type_over(&text, Kind::Structural);
         }
     }
 
@@ -2204,6 +2279,7 @@ impl App {
             self.leave_edit();
         }
         self.ledger = None;
+        self.undo = None;
         self.notice = None;
         let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         let loaded = load::open(&path, Some(Instant::now() + load::OPEN_BUDGET));

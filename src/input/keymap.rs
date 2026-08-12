@@ -37,12 +37,14 @@ pub enum Command {
     Edit,
     Cut,
     Paste,
+    Undo,
+    Redo,
     Quit,
 }
 
 impl Command {
     /// Every variant; the coverage test checks each one against the table.
-    pub const ALL: [Command; 31] = [
+    pub const ALL: [Command; 33] = [
         Command::OpenFile,
         Command::Reload,
         Command::Sidebar,
@@ -73,6 +75,8 @@ impl Command {
         Command::Edit,
         Command::Cut,
         Command::Paste,
+        Command::Undo,
+        Command::Redo,
         Command::Quit,
     ];
 }
@@ -218,6 +222,21 @@ pub const SHORTCUTS: &[Shortcut] = &[
         action: "Paste at the caret (editing)",
         section: "Edit",
         bindings: &[(Binding::Ctrl("v"), Command::Paste)],
+    },
+    Shortcut {
+        keys: "Ctrl+Z",
+        action: "Undo the last edit (editing)",
+        section: "Edit",
+        bindings: &[(Binding::Ctrl("z"), Command::Undo)],
+    },
+    Shortcut {
+        keys: "Ctrl+Shift+Z / Ctrl+Y",
+        action: "Redo an undone edit (editing)",
+        section: "Edit",
+        bindings: &[
+            (Binding::CtrlShift("z"), Command::Redo),
+            (Binding::Ctrl("y"), Command::Redo),
+        ],
     },
     Shortcut {
         keys: "Ctrl+T",
@@ -416,6 +435,17 @@ mod tests {
     fn cut_and_paste_resolve() {
         assert_eq!(command(&chr("x"), true, false), Some(Command::Cut));
         assert_eq!(command(&chr("v"), true, false), Some(Command::Paste));
+    }
+
+    #[test]
+    fn undo_resolves_and_redo_answers_both_chords() {
+        assert_eq!(command(&chr("z"), true, false), Some(Command::Undo));
+        assert_eq!(command(&chr("Z"), true, true), Some(Command::Redo));
+        assert_eq!(
+            command(&chr("y"), true, false),
+            Some(Command::Redo),
+            "Ctrl+Y is the everyday redo alias"
+        );
     }
 
     #[test]
