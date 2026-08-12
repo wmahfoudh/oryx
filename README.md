@@ -70,13 +70,25 @@ DRM-protected books and fixed-layout books (usually comics and picture books) ar
 
 - **Find in document**: `Ctrl+F` searches text. The search is smart about case: `oryx` matches Oryx, ORYX and oryx, while `Oryx` performs an exact match. A match can cross styling, so `fast viewer` is found even when it was written as `**fast** *viewer*`, and it can cross a wrapped line. The whole document is searchable even while a big file is still loading.
 - **Select and copy**: `Ctrl+C` copies a selection as plain text. `Ctrl+Shift+C` copies the original markdown of the selection. A double click selects the word, a triple click the paragraph, the code line or the table cell. Select all is instant at any file size, a selection survives zooming, theme switches and window resizes, and both copies work before a big file has finished loading.
-- **Sidebar**: `Ctrl+B` opens a two-tab panel: the folder tree around the open file, and an outline of the document's headings that tracks the reading position, folds its branches, and jumps on a click. For a book, the outline is its table of contents. Both tabs drive entirely from the keyboard.
+- **Sidebar**: `Ctrl+Shift+B` opens a two-tab panel: the folder tree around the open file, and an outline of the document's headings that tracks the reading position, folds its branches, and jumps on a click. For a book, the outline is its table of contents. Both tabs drive entirely from the keyboard.
 - **Open file**: `Ctrl+O` opens the native file dialog.
-- **Live reload**: `F5` reloads a file being edited elsewhere.
+- **Live reload**: Oryx notices when the open file changes on disk and reloads it, as long as there are no unsaved edits. `F5` / `Ctrl+R` reload on demand.
 - **Zoom**: `Ctrl+Plus` (in) and `Ctrl+Minus` (out).
 - **Display scale**: Oryx follows the display's scale, so text and controls render at the intended size on a scaled screen (a laptop at 200%, for example). An `interface scale` entry in the settings (`Ctrl+,`) adjusts the size around the detected value, from -50% to +100%, and is remembered.
 - **Touch**: On a touch screen, swiping scrolls the document, the sidebar and the dialogs. A swipe released while moving keeps the document scrolling with momentum. Tapping clicks, and a two-finger pinch zooms the document.
 - **Persistence**: Window geometry, the active theme, the sidebar and the last folder are all saved and restored at every start.
+
+## Editing
+
+I often notice a typo in a note or want to fix a comment while reading a source file, and switching to an editor for one word feels wrong. Press `Ctrl+E` and the page itself becomes editable, with a caret and the usual keys; `Escape` (or `Ctrl+E` again) returns to reading.
+
+Source code and plain text files can be edited. Markdown files cannot yet (editing a rendered page while it stays a page is the hard part, and it is being worked on), books cannot at all, and neither can a file whose text did not read cleanly, since Oryx could not write it back exactly as it was. A small notice in the corner says so when editing is not available.
+
+Editing works the way a text editor does: typing, selections, `Ctrl+X` and `Ctrl+V`, undo with `Ctrl+Z`, redo with `Ctrl+Shift+Z` or `Ctrl+Y`. While editing, `Ctrl+Left` / `Ctrl+Right` jump by word, `Ctrl+Home` / `Ctrl+End` jump to the ends of the file, and `Ctrl+Backspace` / `Ctrl+Delete` delete by word. Typing is instant even in very large files.
+
+`Ctrl+S` saves. Oryx is careful with the file: lines that were not touched are written back byte for byte, and every line keeps its own ending, so a file with Windows line endings stays that way. The window title shows a `*` while changes are unsaved. `Ctrl+Shift+S` saves under a new name, and `Ctrl+N` creates a new file: the save dialog opens first, then the empty page is ready to type into.
+
+Closing the window, quitting or reloading with unsaved changes asks first: `Enter` saves, `D` discards, `Escape` keeps editing. If the file changes on disk while there are unsaved edits, Oryx shows a notice and leaves the edits alone.
 
 ## Themes
 
@@ -156,14 +168,17 @@ oryx --version          # print the version
 |---|---|
 | **Files** | |
 | `Ctrl+O` | Open a file |
+| `Ctrl+N` | New file |
+| `Ctrl+S` | Save (editing) |
+| `Ctrl+Shift+S` | Save as (editing) |
 | `F5` / `Ctrl+R` | Reload from disk |
 | **Navigation** | |
 | `Up` / `Down` | Scroll by line, or move the sidebar selection |
 | `Page Up` / `Page Down`, `Space` / `Shift+Space` | Scroll by page |
 | `Home` / `End` | Jump to top / bottom |
-| `Ctrl+B` | Toggle sidebar (files and outline) |
+| `Ctrl+Shift+B` | Toggle sidebar (files and outline) |
 | `Left` / `Right` | Toggle between sidebar and document |
-| `Ctrl+Left` / `Ctrl+Right` | Toggle the sidebar tab |
+| `Ctrl+Tab` | Toggle the sidebar tab |
 | **Find** | |
 | `Ctrl+F` | Find in document |
 | `F3` / `Shift+F3` | Next / previous match |
@@ -171,6 +186,11 @@ oryx --version          # print the version
 | `Ctrl+A` | Select all |
 | `Ctrl+C` | Copy selection as text |
 | `Ctrl+Shift+C` | Copy selection as markdown |
+| **Edit** | |
+| `Ctrl+E` | Edit the document |
+| `Ctrl+X` / `Ctrl+V` | Cut / paste (editing) |
+| `Ctrl+Z` | Undo the last edit |
+| `Ctrl+Shift+Z` / `Ctrl+Y` | Redo an undone edit |
 | **View** | |
 | `Ctrl+T` | Choose a theme |
 | `Ctrl+,` | Change fonts and sizes |
@@ -182,7 +202,7 @@ oryx --version          # print the version
 | `Ctrl+Shift+P` | Choose export settings, then export |
 | **Help** | |
 | `F1` | Show the shortcuts help |
-| `Escape` | Close overlay or sidebar, quit |
+| `Escape` | Close overlay or sidebar, leave editing, quit |
 
 `Ctrl` is `Cmd` on macOS.
 
