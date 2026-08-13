@@ -232,8 +232,7 @@ The 8 MB markdown export writes a 9219-page file. While open, the 8 MB markdown 
 
 Oryx is built for everyday use, and some things are out of scope (for the moment):
 
-- It does not edit files.
-- On a file several megabytes long, the colors and the layout below the first screens take a moment to catch up. An export waits for syntax highlighting to finish before it writes, so on the 8 MB file the wall time is roughly double the export column.
+- On a file several megabytes long, the layout below the first screens takes a moment to catch up. Syntax colors appear right away wherever you are reading, and a few lines can change color a moment later, once the full pass reaches them. An export waits for syntax highlighting to finish before it writes, so on the 8 MB file the wall time is roughly double the export column.
 - The implemented HTML is a subset: what GitHub renders in a README, nothing more.
 - Remote images use the operating system's TLS stack, which on Linux means it needs the OpenSSL library (normally shipped with every distro). Without it, badges show placeholders but everything else works.
 - macOS compiles but is untested, and there is no packaged build as I don't have a Mac. The Windows release is compiled on my Linux machine.
