@@ -6,7 +6,7 @@ use std::ops::Range;
 
 use crate::doc::model::{BlockKind, Document};
 use crate::export::PageGeometry;
-use crate::layout::{metrics, DecoRect, ImagePlace, LayoutDoc, MathGlyph};
+use crate::layout::{code_framed, metrics, DecoRect, ImagePlace, LayoutDoc, MathGlyph};
 
 /// Float slack for comparing positions that arithmetic should have made
 /// equal.
@@ -189,9 +189,10 @@ fn extended_bottom(doc: &Document, layout: &LayoutDoc, content: f32, item: &Item
     }
     // Every code line reserves the panel's closing padding, not just
     // the block's last: a panel that carries on overleaf closes on
-    // this page too, one padding below whichever line ends it.
-    let code =
-        block.is_some_and(|block| matches!(doc.blocks[block].kind, BlockKind::CodeBlock { .. }));
+    // this page too, one padding below whichever line ends it. A code
+    // or text file draws no panel, so it reserves nothing.
+    let code = code_framed(doc)
+        && block.is_some_and(|block| matches!(doc.blocks[block].kind, BlockKind::CodeBlock { .. }));
     if code {
         bottom += metrics::CODE_PAD;
     }
@@ -312,8 +313,9 @@ fn page_top(
         // A code line starts its page one padding up whether the panel
         // continues or opens fresh here: the rect begins there either
         // way, and a top left past the boundary strands an empty strip
-        // of it on the page before.
-        if matches!(doc.blocks[block].kind, BlockKind::CodeBlock { .. }) {
+        // of it on the page before. A frameless file has no rect to
+        // open, so its page starts at the line.
+        if code_framed(doc) && matches!(doc.blocks[block].kind, BlockKind::CodeBlock { .. }) {
             return item.top - metrics::CODE_PAD;
         }
         // A placeholder's alt text brings its whole box: the border
@@ -1016,8 +1018,8 @@ mod rules {
     use super::tests::{laid_out, laid_out_with_body_size};
     use super::*;
     use crate::doc::images::MediaCache;
-    use crate::doc::markdown;
     use crate::doc::model::{BlockKind, Document};
+    use crate::doc::{load, markdown};
     use crate::export::{Orientation, PageGeometry, PageSize};
     use crate::layout::{layout, ViewConfig};
     use crate::style::fonts::FontStore;
@@ -1320,6 +1322,34 @@ mod rules {
                 (first - page.top - metrics::CODE_PAD).abs() < SLACK,
                 "a continued panel starts one padding above its first line"
             );
+        }
+    }
+
+    /// A code or text file draws edge to edge with no panel around it,
+    /// so pagination must not reserve the panel's padding: reserving it
+    /// breaks the page early and leaves a strip of nothing where the
+    /// border would have been.
+    #[test]
+    fn a_frameless_file_paginates_without_panel_padding() {
+        let mut source = String::new();
+        for i in 0..300 {
+            source.push_str(&format!("let value_{i} = {i};\n"));
+        }
+        for (name, doc) in [
+            ("code", load::code_document(Some("rust"), &source)),
+            ("text", load::text_document(&source)),
+        ] {
+            let l = laid_out(&doc);
+            let pages = paginate(&doc, &l, &geometry());
+            assert!(pages.len() > 1, "{name}: the file spans pages");
+            for page in &pages[1..] {
+                let first = l.runs[page.runs.start].y;
+                assert!(
+                    (first - page.top).abs() < SLACK,
+                    "{name}: a frameless page starts at its first line, \
+                     not one padding above it"
+                );
+            }
         }
     }
 

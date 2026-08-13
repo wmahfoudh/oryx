@@ -2783,7 +2783,7 @@ fn quote_decoration(
 /// code: the lines draw on the page itself, no panel, no border, no
 /// inner pad, the full width to wrap in. A markdown fence always keeps
 /// the panel, even when the fence is the whole file.
-fn code_framed(doc: &Document) -> bool {
+pub fn code_framed(doc: &Document) -> bool {
     !(doc.code_file || doc.plain_file)
 }
 
