@@ -7,8 +7,9 @@ use oryx::doc::markdown;
 use oryx::doc::model::{BlockKind, Document, SpanScript};
 use oryx::doc::stream::{self, Swap};
 use oryx::layout::{
-    layout, layout_begin, layout_extend, layout_more, layout_step, metrics, recolor_batch,
-    recolor_code_lines, window_to, DecoRect, LayoutDoc, ShapePool, TextRef, TextRun, ViewConfig,
+    code_lines_in, layout, layout_begin, layout_extend, layout_more, layout_step, metrics,
+    recolor_batch, recolor_code_lines, window_to, DecoRect, LayoutDoc, ShapePool, TextRef, TextRun,
+    ViewConfig,
 };
 use oryx::style::fonts::{FontStore, CODE_FAMILY};
 use oryx::style::highlight::{self, Arrival};
@@ -71,6 +72,9 @@ fn highlight_all(doc: &mut Document) {
                 block: i,
                 start_line: 0,
                 spans,
+                seam: None,
+                converged: false,
+                speculative: false,
             },
         );
     }
@@ -231,6 +235,9 @@ fn unhighlighted_tail_renders_in_foreground() {
             block: 0,
             start_line: 0,
             spans: spans[0..1].to_vec(),
+            seam: None,
+            converged: false,
+            speculative: false,
         },
     );
     let l = lay_doc(&doc, 800.0, &mut fonts());
@@ -3473,4 +3480,40 @@ fn the_layout_splice_holds_in_a_mid_document_band() {
     );
     let fresh = windowed(&reference, width, scroll, viewport);
     assert_same_layout(&lay, &doc, &fresh, &reference);
+}
+
+/// The speculation trigger reads the visible code lines off the placed
+/// layout: which block, which line range, padded a screen each way.
+#[test]
+fn visible_code_lines_cover_the_padded_viewport() {
+    let source: String = (0..600).map(|i| format!("let v{i} = {i};\n")).collect();
+    let path = std::env::temp_dir().join("oryx_visible_lines_test.rs");
+    std::fs::write(&path, &source).unwrap();
+    let doc = load::open(&path, None).unwrap().document;
+    std::fs::remove_file(&path).ok();
+    let mut fonts = fonts();
+    let l = lay_doc(&doc, 800.0, &mut fonts);
+    let step = l.approx_top(0, 1).unwrap() - l.approx_top(0, 0).unwrap();
+    assert!(step > 0.0, "code lines advance down the page");
+
+    let top = l.approx_top(0, 300).unwrap();
+    let visible = code_lines_in(&l, &doc, top..top + step * 10.0);
+    assert_eq!(visible.len(), 1, "one block answers");
+    let (block, lines) = &visible[0];
+    assert_eq!(*block, 0);
+    assert!(
+        lines.start <= 300 && lines.end >= 310,
+        "the band's lines are covered, got {lines:?}"
+    );
+    assert!(
+        lines.start >= 299 && lines.end <= 312,
+        "the answer stays tight around the band, got {lines:?}"
+    );
+
+    let all = code_lines_in(&l, &doc, 0.0..l.height);
+    assert_eq!(all[0].1, 0..600, "the whole page answers every line");
+    assert!(
+        code_lines_in(&l, &doc, l.height + 1000.0..l.height + 2000.0).is_empty(),
+        "past the document nothing is visible"
+    );
 }

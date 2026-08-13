@@ -406,6 +406,7 @@ impl Builder {
                             language,
                             lines,
                             highlights: Vec::new(),
+                            exact: 0,
                         });
                     }
                 }
@@ -997,6 +998,7 @@ impl Builder {
             language: pre.language,
             lines: CodeBody::from_text(body),
             highlights: Vec::new(),
+            exact: 0,
         });
     }
 
@@ -1592,6 +1594,7 @@ mod tests {
             language,
             lines,
             highlights,
+            ..
         } = &d.blocks[0].kind
         else {
             panic!()
@@ -1823,6 +1826,7 @@ mod tests {
             language,
             lines,
             highlights,
+            ..
         } = &d.blocks[0].kind
         else {
             panic!()

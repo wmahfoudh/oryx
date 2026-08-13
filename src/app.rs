@@ -31,7 +31,7 @@ use oryx::paint::scroll::{self, BandCache};
 use oryx::platform::config::{self, Config, WindowState};
 use oryx::platform::save;
 use oryx::style::fonts::FontStore;
-use oryx::style::highlight::{Highlighter, PendingBlock};
+use oryx::style::highlight::{self, Highlighter, PendingBlock};
 use oryx::style::theme::{self, Rgba, Theme};
 use oryx::ui::confirm;
 use oryx::ui::export::{ExportDialog, ExportProgress};
@@ -237,6 +237,8 @@ pub fn run(path: Option<PathBuf>, theme_name: Option<String>) -> anyhow::Result<
         ledger: None,
         undo: None,
         rehighlight_at: None,
+        seams: HashMap::new(),
+        spec_band: None,
         confirm: None,
         help_stash: None,
         disk_seen: None,
@@ -567,6 +569,13 @@ struct App {
     /// When the edited block re-highlights, set by each keystroke and
     /// fired once typing rests.
     rehighlight_at: Option<Instant>,
+    /// The live generation's seam table per block, from the exact
+    /// sweep's arrivals: the (line, state) pairs a later sweep can
+    /// resume from and converge against.
+    seams: HashMap<usize, Vec<(usize, highlight::Seam)>>,
+    /// The band the standing speculation covers, so a resting view
+    /// asks once.
+    spec_band: Option<(usize, std::ops::Range<usize>)>,
     /// The unsaved-changes modal and the action it guards.
     confirm: Option<confirm::Pending>,
     /// The document stashed whole while the help page shows, edits and
@@ -1099,6 +1108,9 @@ impl App {
             .flatten();
         match spliced {
             Some((old_lines, new_lines)) => {
+                if let Some(table) = self.seams.get_mut(&0) {
+                    highlight::shift_seams(table, old_lines.clone(), new_lines.clone());
+                }
                 // The model spliced; the layout follows in place, or a
                 // restart re-measures the already-correct model.
                 let lay = self.layout.as_mut().expect("settled layout");
@@ -1124,6 +1136,9 @@ impl App {
                 }
             }
             None => {
+                if let Some(table) = self.seams.get_mut(&0) {
+                    highlight::shift_seams(table, old_touched.clone(), touched.clone());
+                }
                 self.document = edit::reparse(
                     load::detect(&path),
                     &current,
@@ -1136,9 +1151,10 @@ impl App {
         }
         self.outline = OutlineTree::build(&self.document);
         // The keystroke kills in-flight highlight work, so stale spans
-        // never fold against shifted lines; the whole-block re-run
-        // waits for the typing to rest. Prose has no colors to correct.
-        self.start_highlight(Vec::new());
+        // never fold against shifted lines; the resumed re-run waits
+        // for the typing to rest and needs the shifted seam table, so
+        // only the worker cancels. Prose has no colors to correct.
+        self.cancel_highlight();
         self.rehighlight_at =
             (!self.document.plain_file).then(|| Instant::now() + REHIGHLIGHT_REST);
         self.selection = None;
@@ -1356,20 +1372,46 @@ impl App {
     }
 
     /// Restarts the highlight worker over the edited block, the rest
-    /// timer's due action.
+    /// timer's due action. The sweep resumes from the nearest stored
+    /// seam at or before the exact frontier, which every splice clamps
+    /// to the burst's first touched line, and it converges against the
+    /// shifted table: typing anywhere re-colors about one chunk, not
+    /// the block.
     fn rehighlight_edited(&mut self) {
         let pending = match self.document.blocks.first().map(|b| &b.kind) {
             Some(BlockKind::CodeBlock {
-                language, lines, ..
-            }) if !self.document.plain_file => vec![PendingBlock {
-                block: 0,
-                language: language.clone(),
-                source: self.document.source.clone(),
-                lines: lines.clone(),
-            }],
+                language,
+                lines,
+                exact,
+                ..
+            }) if !self.document.plain_file => {
+                let resume = self.seams.get(&0).map(|table| {
+                    let at = table.partition_point(|(line, _)| *line <= *exact);
+                    let (start_line, seam) = match at.checked_sub(1).and_then(|i| table.get(i)) {
+                        Some((line, seam)) => (*line, Some(seam.clone())),
+                        None => (0, None),
+                    };
+                    highlight::Resume {
+                        start_line,
+                        seam,
+                        expected: table[at..].to_vec(),
+                    }
+                });
+                vec![PendingBlock {
+                    block: 0,
+                    language: language.clone(),
+                    source: self.document.source.clone(),
+                    lines: lines.clone(),
+                    resume,
+                }]
+            }
             _ => Vec::new(),
         };
-        self.start_highlight(pending);
+        // The resumed sweep converges against the stored table, which
+        // therefore survives the start; its arrivals upsert their own
+        // lines.
+        let waker = self.waker.clone();
+        self.highlighter.start(pending, move || waker());
     }
 
     /// Repaints the title; the asterisk follows the undo head against
@@ -2093,10 +2135,77 @@ impl App {
 
     /// Hands pending highlight work to the worker. An empty list still
     /// bumps the generation, so arrivals from the previous document are
-    /// dropped at the next drain.
+    /// dropped at the next drain. Every start here sweeps blocks from
+    /// their first line, so the seam table rebuilds from its arrivals.
     fn start_highlight(&mut self, pending: Vec<PendingBlock>) {
+        self.seams.clear();
+        self.spec_band = None;
         let waker = self.waker.clone();
         self.highlighter.start(pending, move || waker());
+    }
+
+    /// Cancels in-flight highlight work without touching the seam
+    /// table: a keystroke kills the worker between chunks, and the
+    /// rest timer's resumed sweep still needs the seams the old
+    /// generation recorded. Stale arrivals drop at the drain, so the
+    /// table only ever learns from the live generation.
+    fn cancel_highlight(&mut self) {
+        self.spec_band = None;
+        let waker = self.waker.clone();
+        self.highlighter.start(Vec::new(), move || waker());
+    }
+
+    /// Colors the visible band ahead of the exact sweep when the view
+    /// rests on lines the sweep has not reached, so a jump into a huge
+    /// file does not sit on plain text for the length of the wash. The
+    /// band is padded a screen each way; a band the standing request
+    /// already covers asks for nothing.
+    fn maybe_speculate(&mut self) {
+        if self.document.plain_file || self.drag.is_some() || self.sel_anchor.is_some() {
+            return;
+        }
+        let Some(lay) = self.layout.as_ref() else {
+            return;
+        };
+        let view_h = self.viewport_h();
+        let visible = layout::code_lines_in(
+            lay,
+            &self.document,
+            self.scroll_y - view_h..self.scroll_y + 2.0 * view_h,
+        );
+        for (block, lines) in visible {
+            let Some(BlockKind::CodeBlock {
+                language,
+                lines: body,
+                exact,
+                ..
+            }) = self.document.blocks.get(block).map(|b| &b.kind)
+            else {
+                continue;
+            };
+            if language.is_none() || *exact >= lines.end {
+                continue;
+            }
+            let band = (*exact).max(lines.start)..lines.end;
+            if self
+                .spec_band
+                .as_ref()
+                .is_some_and(|(b, r)| *b == block && r.start <= band.start && r.end >= band.end)
+            {
+                continue;
+            }
+            let job = highlight::SpecJob {
+                block,
+                language: language.clone(),
+                source: Arc::clone(&self.document.source),
+                lines: body.clone(),
+                range: band.clone(),
+            };
+            self.spec_band = Some((block, band));
+            let waker = self.waker.clone();
+            self.highlighter.speculate(job, move || waker());
+            return;
+        }
     }
 
     /// Hands the full source to the parse worker; the prefix on screen
@@ -2227,6 +2336,13 @@ impl App {
         }
         for arrival in &arrivals {
             load::fold(&mut self.document, arrival);
+            // The exact sweep's seams feed the table a later sweep
+            // resumes from; speculative arrivals never do.
+            if let (Some(seam), false) = (&arrival.seam, arrival.speculative) {
+                let line = arrival.start_line + arrival.spans.len();
+                let table = self.seams.entry(arrival.block).or_default();
+                highlight::record_seam(table, line, seam);
+            }
         }
         self.pending_recolor.extend(
             arrivals
@@ -3935,6 +4051,7 @@ impl ApplicationHandler for App {
                 }
             }
         }
+        self.maybe_speculate();
         // Last, so its near tick wins the wake; an early wake costs the
         // timers above nothing.
         self.step_fling(event_loop);

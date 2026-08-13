@@ -202,17 +202,19 @@ pub fn pending(doc: &Document) -> Vec<PendingBlock> {
         let BlockKind::CodeBlock {
             language,
             lines,
-            highlights,
+            exact,
+            ..
         } = &block.kind
         else {
             continue;
         };
-        if highlights.len() < lines.len() {
+        if *exact < lines.len() {
             pending.push(PendingBlock {
                 block: index,
                 language: language.clone(),
                 source: Arc::clone(&doc.source),
                 lines: lines.clone(),
+                resume: None,
             });
         }
     }
@@ -229,17 +231,20 @@ fn apply_budget(doc: &mut Document, deadline: Option<Instant>) -> Vec<PendingBlo
             language,
             lines,
             highlights,
+            exact,
         } = &mut block.kind
         else {
             continue;
         };
         *highlights = highlight::spans_until(&source, lines, language.as_deref(), deadline);
-        if highlights.len() < lines.len() {
+        *exact = highlights.len();
+        if *exact < lines.len() {
             pending.push(PendingBlock {
                 block: index,
                 language: language.clone(),
                 source: Arc::clone(&source),
                 lines: lines.clone(),
+                resume: None,
             });
         }
     }
@@ -255,7 +260,10 @@ pub fn fold(doc: &mut Document, arrival: &Arrival) {
         return;
     };
     let BlockKind::CodeBlock {
-        lines, highlights, ..
+        lines,
+        highlights,
+        exact,
+        ..
     } = &mut block.kind
     else {
         return;
@@ -268,6 +276,16 @@ pub fn fold(doc: &mut Document, arrival: &Arrival) {
         let line = arrival.start_line + offset;
         if line < end {
             highlights[line] = spans.clone();
+        }
+    }
+    // The exact frontier only ever advances contiguously, and a
+    // converged stop vouches for the whole tail.
+    if !arrival.speculative {
+        if arrival.start_line <= *exact {
+            *exact = (*exact).max(end).min(lines.len());
+        }
+        if arrival.converged {
+            *exact = lines.len();
         }
     }
 }
@@ -308,6 +326,7 @@ pub(crate) fn code_document(token: Option<&str>, text: &str) -> Document {
         language: token.map(str::to_string),
         lines: CodeBody::verbatim(lines),
         highlights: Vec::new(),
+        exact: 0,
     });
     block.range = 0..text.len();
     Document {
@@ -327,6 +346,7 @@ pub(crate) fn text_document(text: &str) -> Document {
         language: None,
         lines: CodeBody::verbatim(source_lines(text)),
         highlights: Vec::new(),
+        exact: 0,
     });
     block.range = 0..text.len();
     Document {
@@ -834,6 +854,7 @@ mod tests {
             language,
             lines,
             highlights,
+            ..
         } = &d.blocks[0].kind
         else {
             panic!("expected code block, got {:?}", d.blocks)
@@ -908,6 +929,9 @@ mod tests {
                 block: 0,
                 start_line: 0,
                 spans: eager[0..2].to_vec(),
+                seam: None,
+                converged: false,
+                speculative: false,
             },
         );
         let BlockKind::CodeBlock { highlights, .. } = &opened.document.blocks[0].kind else {
@@ -920,12 +944,60 @@ mod tests {
                 block: 0,
                 start_line: 2,
                 spans: eager[2..4].to_vec(),
+                seam: None,
+                converged: false,
+                speculative: false,
             },
         );
         let BlockKind::CodeBlock { highlights, .. } = &opened.document.blocks[0].kind else {
             panic!()
         };
         assert_eq!(highlights, &eager);
+    }
+
+    #[test]
+    fn the_exact_frontier_follows_folds() {
+        let text: String = (0..1200).map(|i| format!("let v{i} = {i};\n")).collect();
+        let mut doc = code_document(Some("rs"), &text);
+        let exact_of = |doc: &Document| match &doc.blocks[0].kind {
+            BlockKind::CodeBlock { exact, .. } => *exact,
+            _ => unreachable!(),
+        };
+        let arrival = |start: usize, n: usize, converged: bool, speculative: bool| Arrival {
+            block: 0,
+            start_line: start,
+            spans: vec![Vec::new(); n],
+            seam: None,
+            converged,
+            speculative,
+        };
+        fold(&mut doc, &arrival(0, 512, false, false));
+        assert_eq!(
+            exact_of(&doc),
+            512,
+            "a contiguous fold advances the frontier"
+        );
+        fold(&mut doc, &arrival(1100, 100, false, true));
+        assert_eq!(exact_of(&doc), 512, "a speculative fold never advances it");
+        assert!(
+            !pending(&doc).is_empty(),
+            "the block still wants its wash though its rows reach the end"
+        );
+        fold(&mut doc, &arrival(600, 100, false, false));
+        assert_eq!(exact_of(&doc), 512, "a gapped fold does not advance it");
+        fold(&mut doc, &arrival(512, 188, false, false));
+        assert_eq!(
+            exact_of(&doc),
+            700,
+            "the sweep advances through delivered rows"
+        );
+        fold(&mut doc, &arrival(700, 100, true, false));
+        assert_eq!(
+            exact_of(&doc),
+            1200,
+            "a converged stop restores the frontier to the end"
+        );
+        assert!(pending(&doc).is_empty(), "the wash is complete");
     }
 
     #[test]
@@ -971,12 +1043,16 @@ mod tests {
         );
         let source = Arc::clone(&doc.source);
         let BlockKind::CodeBlock {
-            lines, highlights, ..
+            lines,
+            highlights,
+            exact,
+            ..
         } = &mut doc.blocks[0].kind
         else {
             panic!("expected a code block")
         };
         *highlights = highlight::spans(&source, lines, Some("rust"));
+        *exact = highlights.len();
         let pending = pending(&doc);
         assert_eq!(pending.len(), 1, "the complete block is not redone");
         assert_eq!(pending[0].block, 2);

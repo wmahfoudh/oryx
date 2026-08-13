@@ -170,6 +170,10 @@ pub enum BlockKind {
         lines: CodeBody,
         /// One vector of styled ranges per line, computed at load.
         highlights: Vec<Vec<(Range<usize>, SyntaxRole)>>,
+        /// The exact sweep's contiguous verified progress in lines.
+        /// Speculative folds grow `highlights` without moving it, so
+        /// row count is not a progress measure; this is.
+        exact: usize,
     },
     ListItem {
         marker: Marker,

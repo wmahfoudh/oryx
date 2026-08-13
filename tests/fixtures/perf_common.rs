@@ -190,12 +190,14 @@ pub fn measure_highlight(doc: &mut Document) -> u128 {
             language,
             lines,
             highlights,
+            exact,
         } = &mut block.kind
         {
             let started = Instant::now();
             let spans = highlight::spans(&source, lines, language.as_deref());
             total += started.elapsed();
             *highlights = spans;
+            *exact = highlights.len();
         }
     }
     total.as_millis()

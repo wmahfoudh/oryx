@@ -931,6 +931,30 @@ fn settle_retention(
     }
 }
 
+/// The code lines a y range shows, one entry per code block it
+/// crosses. The speculation trigger reads it to learn what the viewport
+/// wants colored; blocks the pass has not placed answer nothing.
+pub fn code_lines_in(
+    lay: &LayoutDoc,
+    doc: &Document,
+    range: Range<f32>,
+) -> Vec<(usize, Range<usize>)> {
+    let mut out = Vec::new();
+    for position in positions_over(&lay.table, &range) {
+        let entry = &lay.table.entries[position];
+        if entry.flags & ENTRY_CODE == 0 {
+            continue;
+        }
+        let block = entry.block as usize;
+        let total = code_line_count(doc, block);
+        let lines = lay.table.lines_over(position, total, &range);
+        if !lines.is_empty() {
+            out.push((block, lines));
+        }
+    }
+    out
+}
+
 /// The placed positions whose emission overlaps `range`.
 fn positions_over(table: &BlockTable, range: &Range<f32>) -> Range<usize> {
     let start = table.entries.partition_point(|e| e.bottom() < range.start);

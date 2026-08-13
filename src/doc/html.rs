@@ -1257,6 +1257,7 @@ impl Walker {
             language: pre.language,
             lines: CodeBody::verbatim(lines),
             highlights: Vec::new(),
+            exact: 0,
         };
         self.emit_placed(kind, block_start..block_end);
     }

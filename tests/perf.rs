@@ -216,6 +216,7 @@ fn fold_backlog_measured() {
                 language,
                 lines,
                 highlights,
+                ..
             } = &mut block.kind
             {
                 *highlights = highlight::spans(&source, lines, language.as_deref());
@@ -261,6 +262,7 @@ fn fold_trickle_measured() {
                 language,
                 lines,
                 highlights,
+                ..
             } = &mut block.kind
             {
                 *highlights = highlight::spans(&source, lines, language.as_deref());
@@ -355,14 +357,249 @@ fn window_reentry_measured() {
     }
 }
 
-/// Writes the 8MB markdown fixture to `tests/fixtures/huge.md` for field
-/// testing in the app. Run on demand:
+/// Writes the 8MB fixtures to `tests/fixtures/huge.md` and
+/// `tests/fixtures/huge.rs` for field testing in the app. Run on
+/// demand:
 ///   cargo test --test perf dump_huge_fixture -- --ignored
 #[test]
 #[ignore = "writes the fixture on demand"]
 fn dump_huge_fixture() {
     let source = large_gen::generate(8 * 1024 * 1024);
     std::fs::write("tests/fixtures/huge.md", source).expect("write huge.md");
+    let source = large_gen::generate_code(8 * 1024 * 1024);
+    std::fs::write("tests/fixtures/huge.rs", source).expect("write huge.rs");
+}
+
+/// Design probe for the segmented wash: the hit-rate of the cold-state
+/// guess at segment boundaries and the share of lines a cold start
+/// colors differently, from one truth pass and one cold pass per
+/// corpus. Boundaries are probed every 256 lines; the 512 and 1024
+/// hit columns read the same pass at a stride. The pass time covers
+/// both parses, so the single-thread wash is about half of it.
+/// Corpora: the 8MB code fixture and the repo's own sources
+/// concatenated; set ORYX_WASH_PROBE=path to add a real file,
+/// language from its extension.
+#[test]
+#[ignore = "measurement only"]
+fn wash_guess_measured() {
+    use oryx::doc::model::CodeBody;
+
+    fn rust_sources(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        let mut paths: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
+        paths.sort();
+        for path in paths {
+            if path.is_dir() {
+                rust_sources(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                out.push(path);
+            }
+        }
+    }
+
+    let mut corpora: Vec<(String, String, String)> = Vec::new();
+    corpora.push((
+        "code 8MB".into(),
+        large_gen::generate_code(8 * 1024 * 1024),
+        "rs".into(),
+    ));
+    let mut files = Vec::new();
+    rust_sources(std::path::Path::new("src"), &mut files);
+    let repo: String = files
+        .iter()
+        .map(|p| std::fs::read_to_string(p).expect("read repo source"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    corpora.push(("repo src".into(), repo, "rs".into()));
+    if let Ok(path) = std::env::var("ORYX_WASH_PROBE") {
+        let path = PathBuf::from(path);
+        let language = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("txt")
+            .to_string();
+        let text = std::fs::read_to_string(&path).expect("read ORYX_WASH_PROBE");
+        corpora.push((path.display().to_string(), text, language));
+    }
+
+    for (name, source, language) in &corpora {
+        let body = CodeBody::from_text(source);
+        let started = Instant::now();
+        let probes = highlight::segment_probe("", &body, Some(language), 256);
+        let pass_ms = started.elapsed().as_millis();
+        print!(
+            "wash guess: {name} ({language}): {} lines, probe pass {pass_ms}ms",
+            body.len()
+        );
+        for (segment, stride) in [(256usize, 1usize), (512, 2), (1024, 4)] {
+            let sampled: Vec<bool> = probes
+                .iter()
+                .map(|p| p.state_hit)
+                .skip(stride - 1)
+                .step_by(stride)
+                .collect();
+            if sampled.is_empty() {
+                continue;
+            }
+            let hit = sampled.iter().filter(|h| **h).count();
+            let mut longest_miss = 0usize;
+            let mut run = 0usize;
+            for h in &sampled {
+                run = if *h { 0 } else { run + 1 };
+                longest_miss = longest_miss.max(run);
+            }
+            print!(
+                " | @{segment}: {hit}/{} ({:.1}%), miss run {longest_miss}",
+                sampled.len(),
+                100.0 * hit as f64 / sampled.len() as f64
+            );
+        }
+        let lines: usize = probes.iter().map(|p| p.lines).sum();
+        let drifted: usize = probes.iter().map(|p| p.drifted_lines).sum();
+        let worst = probes
+            .iter()
+            .map(|p| p.drifted_lines as f64 / p.lines.max(1) as f64)
+            .fold(0.0f64, f64::max);
+        println!(
+            " | cold drift {drifted}/{lines} lines ({:.2}%), worst segment {:.1}%",
+            100.0 * drifted as f64 / lines.max(1) as f64,
+            100.0 * worst
+        );
+    }
+}
+
+/// The rest timer's re-color after an edit, before and after seams.
+/// Before: the whole-block sweep from line 0, the churn every typing
+/// burst used to pay. After: the sweep resumed from the nearest stored
+/// seam, converging against the shifted table. Edits at the top, the
+/// middle, and the bottom of the 8MB code tier.
+#[test]
+#[ignore = "measurement only"]
+fn wash_edit_measured() {
+    use oryx::doc::model::BlockKind;
+    use oryx::edit::{self, splice::Ledger};
+    use oryx::style::highlight::{self, Seam, CHUNK_LINES};
+    let source = large_gen::generate_code(8 * 1024 * 1024);
+    let (_, _, mut doc) = measure_open(&source, "rs");
+    let (language, lines) = match &doc.blocks[0].kind {
+        BlockKind::CodeBlock {
+            language, lines, ..
+        } => (language.clone(), lines.clone()),
+        _ => panic!("a code file is one code block"),
+    };
+    let mut table: Vec<(usize, Seam)> = Vec::new();
+    let started = Instant::now();
+    highlight::spans_chunked(
+        &doc.source,
+        &lines,
+        language.as_deref(),
+        CHUNK_LINES,
+        None,
+        |c| {
+            table.push((c.start_line + c.spans.len(), c.seam));
+            true
+        },
+    );
+    let full_ms = started.elapsed().as_millis();
+    println!(
+        "wash edit 8MB: full sweep {full_ms}ms over {} lines, {} seams",
+        lines.len(),
+        table.len()
+    );
+    let len = doc.source.len();
+    for (name, pos) in [("top", 100), ("middle", len / 2), ("bottom", len - 2)] {
+        let mut table = table.clone();
+        let mut ledger = Ledger::new(std::sync::Arc::clone(&doc.source), Vec::new());
+        let touched = ledger.edit(pos..pos, "x");
+        let current = ledger.current();
+        let started = Instant::now();
+        let (old_eff, new_eff) = edit::splice_document(&mut doc, &current, pos..pos, touched)
+            .expect("the fixture edit stays on the fast path");
+        highlight::shift_seams(&mut table, old_eff, new_eff.clone());
+        // The splice reshaped the block's lines; the sweep reads them
+        // as the app would, never the pre-edit clone.
+        let lines = match &doc.blocks[0].kind {
+            BlockKind::CodeBlock { lines, .. } => lines.clone(),
+            _ => unreachable!(),
+        };
+        let at = table.partition_point(|(line, _)| *line <= new_eff.start);
+        let (start_line, seam) = match at.checked_sub(1).and_then(|i| table.get(i)) {
+            Some((line, seam)) => (*line, Some(seam.clone())),
+            None => (0, None),
+        };
+        let resume = highlight::Resume {
+            start_line,
+            seam,
+            expected: table[at..].to_vec(),
+        };
+        let mut delivered = 0usize;
+        let mut converged = false;
+        let complete = highlight::spans_chunked(
+            &doc.source,
+            &lines,
+            language.as_deref(),
+            CHUNK_LINES,
+            Some(&resume),
+            |c| {
+                delivered += c.spans.len();
+                converged |= c.converged;
+                true
+            },
+        );
+        println!(
+            "wash edit 8MB {name}: {}ms, {delivered} lines re-colored, converged {converged}",
+            started.elapsed().as_millis()
+        );
+        assert!(complete, "{name}: the resumed sweep completes");
+        // The last chunk has no downstream entry to converge on; every
+        // other edit stops without reaching the block's end.
+        assert!(
+            converged || delivered <= CHUNK_LINES,
+            "{name}: the sweep stayed local"
+        );
+    }
+}
+
+/// The speculative band: what a view resting past the exact sweep
+/// waits for, at the 8MB code tier. The band is the viewport padded a
+/// screen each way, taken at the end of the file, the worst place the
+/// old linear wash reached last. The drift column is what the exact
+/// sweep later corrects on screen.
+#[test]
+#[ignore = "measurement only"]
+fn wash_band_measured() {
+    use oryx::doc::model::BlockKind;
+    use oryx::layout::metrics;
+    use oryx::style::highlight;
+    let source = large_gen::generate_code(8 * 1024 * 1024);
+    let (_, _, doc) = measure_open(&source, "rs");
+    let (language, lines) = match &doc.blocks[0].kind {
+        BlockKind::CodeBlock {
+            language, lines, ..
+        } => (language.clone(), lines.clone()),
+        _ => panic!("a code file is one code block"),
+    };
+    // Three screens of code lines: the viewport padded a screen each
+    // way, at the reference body size.
+    let line_h = metrics::REFERENCE_BODY * metrics::LINE_HEIGHT;
+    let band = (3.0 * VIEWPORT_H / line_h).ceil() as usize;
+    let start = lines.len() - band;
+    let truth = highlight::spans(&doc.source, &lines, language.as_deref());
+    let started = Instant::now();
+    let guessed =
+        highlight::spans_band(&doc.source, &lines, language.as_deref(), start..lines.len());
+    let ms = started.elapsed().as_millis();
+    let drifted = guessed
+        .iter()
+        .zip(&truth[start..])
+        .filter(|(a, b)| a != b)
+        .count();
+    println!(
+        "wash band 8MB: {band} lines at the file's end in {ms}ms, {drifted} lines corrected later ({:.2}%)",
+        100.0 * drifted as f64 / band as f64
+    );
 }
 
 /// One keystroke's display path in edit mode, both pipes. The fast

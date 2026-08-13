@@ -207,3 +207,57 @@ fn memory_measured() {
     }
     alloc_track::set_enabled(false);
 }
+
+/// What the seam table costs: the app-side (line, parser state) pairs
+/// the exact sweep records, one per chunk, which the fixture rows above
+/// never see because they hold no app. Measured on the 8MB code tier,
+/// the largest table Oryx builds.
+#[test]
+#[ignore = "measurement only"]
+fn seam_table_measured() {
+    use oryx::doc::model::BlockKind;
+    use oryx::style::highlight::{self, Seam, CHUNK_LINES};
+    let source = large_gen::generate_code(8 * 1024 * 1024);
+    let (_, _, doc) = measure_open(&source, "rs");
+    let (language, lines) = match &doc.blocks[0].kind {
+        BlockKind::CodeBlock {
+            language, lines, ..
+        } => (language.clone(), lines.clone()),
+        _ => panic!("a code file is one code block"),
+    };
+    // One sweep before any measurement: the grammar's regex caches
+    // compile lazily inside the first parse and stay live, and
+    // counting them against the table reads as megabytes of seams
+    // that do not exist.
+    highlight::spans_chunked(
+        &doc.source,
+        &lines,
+        language.as_deref(),
+        CHUNK_LINES,
+        None,
+        |_| true,
+    );
+    alloc_track::set_enabled(true);
+    let base = alloc_track::live();
+    let mut table: Vec<(usize, Seam)> = Vec::new();
+    highlight::spans_chunked(
+        &doc.source,
+        &lines,
+        language.as_deref(),
+        CHUNK_LINES,
+        None,
+        |c| {
+            highlight::record_seam(&mut table, c.start_line + c.spans.len(), &c.seam);
+            true
+        },
+    );
+    let held = alloc_track::live() - base;
+    println!(
+        "mem seam table 8MB code: {} seams over {} lines, {:.2}MB held ({} bytes each)",
+        table.len(),
+        lines.len(),
+        mb(held),
+        held / table.len().max(1) as isize,
+    );
+    alloc_track::set_enabled(false);
+}

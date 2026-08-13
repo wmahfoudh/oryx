@@ -63,12 +63,15 @@ fn corpus() -> Vec<(String, Vec<u8>)> {
 /// Opens the bytes through the real loader, as the editor would: the
 /// normalized text and the recorded CRLF positions, or None for a
 /// lossy read.
-fn open_normalized(name: &str, bytes: &[u8]) -> Option<(Arc<str>, Vec<u32>)> {
-    let path = std::env::temp_dir().join(format!(
-        "oryx-covenant-{}-{}.txt",
-        std::process::id(),
-        name.len()
-    ));
+fn open_normalized(bytes: &[u8]) -> Option<(Arc<str>, Vec<u32>)> {
+    // The two covenant tests walk the corpus concurrently in this
+    // process, so the temp path must be unique per call, never derived
+    // from the file alone: a shared path lets one test truncate or
+    // remove the file between the other's write and read.
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let unique = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path =
+        std::env::temp_dir().join(format!("oryx-covenant-{}-{unique}.txt", std::process::id()));
     std::fs::write(&path, bytes).unwrap();
     let opened = load::open(&path, None);
     std::fs::remove_file(&path).ok();
@@ -86,7 +89,7 @@ fn file_lines(bytes: &[u8]) -> Vec<Vec<u8>> {
 #[test]
 fn a_zero_edit_save_is_byte_identical_across_the_corpus() {
     for (name, bytes) in corpus() {
-        let Some((source, crlf)) = open_normalized(&name, &bytes) else {
+        let Some((source, crlf)) = open_normalized(&bytes) else {
             continue;
         };
         let mut ledger = Ledger::new(source, crlf);
@@ -102,7 +105,7 @@ fn a_zero_edit_save_is_byte_identical_across_the_corpus() {
 fn a_single_edit_stays_confined_to_its_lines() {
     let mut rng = Lcg(0x6f727978);
     for (name, bytes) in corpus() {
-        let Some((source, crlf)) = open_normalized(&name, &bytes) else {
+        let Some((source, crlf)) = open_normalized(&bytes) else {
             continue;
         };
         for _ in 0..8 {

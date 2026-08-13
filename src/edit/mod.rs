@@ -83,12 +83,17 @@ pub fn reparse(
         return new;
     }
     let empty = Vec::new();
-    let old_high = match old.blocks.first().map(|b| &b.kind) {
-        Some(BlockKind::CodeBlock { highlights, .. }) => highlights,
-        _ => &empty,
+    let (old_high, old_exact) = match old.blocks.first().map(|b| &b.kind) {
+        Some(BlockKind::CodeBlock {
+            highlights, exact, ..
+        }) => (highlights, *exact),
+        _ => (&empty, 0),
     };
     if let Some(BlockKind::CodeBlock {
-        highlights, lines, ..
+        highlights,
+        lines,
+        exact,
+        ..
     }) = new.blocks.first_mut().map(|b| &mut b.kind)
     {
         let mut carried = old_high[..old_touched.start.min(old_high.len())].to_vec();
@@ -111,6 +116,9 @@ pub fn reparse(
         }
         carried.truncate(lines.len());
         *highlights = carried;
+        // The carried prefix before the edit stays verified; the rest
+        // waits for the resumed sweep, same clamp as the fast path.
+        *exact = old_exact.min(new_touched.start);
     }
     new
 }
@@ -210,7 +218,10 @@ pub fn splice_document(
         return None;
     };
     let BlockKind::CodeBlock {
-        lines, highlights, ..
+        lines,
+        highlights,
+        exact,
+        ..
     } = &mut block.kind
     else {
         return None;
@@ -298,6 +309,11 @@ pub fn splice_document(
             .collect();
         highlights.splice(old_eff.start..upto, rows);
     }
+    // Lines before the edit stay verified; the touched rows and the
+    // carried tail wait for the resumed sweep. Within a typing burst
+    // this clamp makes the frontier the burst's first touched line,
+    // shifts included, which is where the rest timer resumes from.
+    *exact = (*exact).min(new_eff.start);
     block.range = 0..current.len();
     doc.source = std::sync::Arc::from(current);
     Some((old_eff, new_eff))
@@ -389,7 +405,7 @@ mod tests {
         assert_ne!(texts[0], texts[2]);
     }
 
-    use crate::style::highlight::LineSpans;
+    use crate::style::highlight::{self, LineSpans};
 
     fn fixture() -> (Document, [LineSpans; 3]) {
         // Rows tile their lines with no gap, the way worker spans
@@ -417,6 +433,135 @@ mod tests {
             panic!("a code file stays one code block");
         };
         highlights
+    }
+
+    /// The app's sweep in miniature: chunked highlighting folded into
+    /// the document, every seam upserted into the table, the way
+    /// `fold_highlights` maintains it.
+    fn sweep(
+        doc: &mut Document,
+        table: &mut Vec<(usize, highlight::Seam)>,
+        chunk: usize,
+        resume: Option<highlight::Resume>,
+    ) -> usize {
+        use crate::style::highlight::{spans_chunked, Arrival};
+        let (language, lines) = match &doc.blocks[0].kind {
+            BlockKind::CodeBlock {
+                language, lines, ..
+            } => (language.clone(), lines.clone()),
+            _ => panic!("a code file is one code block"),
+        };
+        let source = std::sync::Arc::clone(&doc.source);
+        let mut arrivals = Vec::new();
+        spans_chunked(
+            &source,
+            &lines,
+            language.as_deref(),
+            chunk,
+            resume.as_ref(),
+            |c| {
+                arrivals.push(Arrival {
+                    block: 0,
+                    start_line: c.start_line,
+                    spans: c.spans,
+                    seam: Some(c.seam),
+                    converged: c.converged,
+                    speculative: false,
+                });
+                true
+            },
+        );
+        let delivered = arrivals.len();
+        for arrival in &arrivals {
+            load::fold(doc, arrival);
+            if let Some(seam) = &arrival.seam {
+                highlight::record_seam(table, arrival.start_line + arrival.spans.len(), seam);
+            }
+        }
+        delivered
+    }
+
+    /// The app's resume construction: the nearest stored seam at or
+    /// before the touched line, the strictly later entries as the
+    /// convergence targets; no seam resumes fresh from line 0 with the
+    /// whole table as targets.
+    fn resume_from(table: &[(usize, highlight::Seam)], touched: usize) -> highlight::Resume {
+        let at = table.partition_point(|(line, _)| *line <= touched);
+        let (start_line, seam) = match at.checked_sub(1).and_then(|i| table.get(i)) {
+            Some((line, seam)) => (*line, Some(seam.clone())),
+            None => (0, None),
+        };
+        highlight::Resume {
+            start_line,
+            seam,
+            expected: table[at..].to_vec(),
+        }
+    }
+
+    #[test]
+    fn a_resumed_sweep_after_any_edit_matches_a_fresh_parse() {
+        use crate::edit::splice::Ledger;
+        let text: String = (0..600)
+            .map(|i| match i % 20 {
+                0 => format!("fn f{i}(x: u64) -> u64 {{\n"),
+                7 => format!("    /* a note on v{i} */\n"),
+                19 => "}\n".to_string(),
+                _ => format!("    let v{i} = {i}; // n\n"),
+            })
+            .collect();
+        // Edits across the file: replacements, an insert splitting a
+        // line, a delete joining two, a comment opener that changes
+        // every downstream state, and a tail edit.
+        let cases: &[(usize, usize, &str)] = &[
+            (14_000, 6, "renamed"),
+            (7_003, 0, "very_long_new_name"),
+            (2_500, 40, ""),
+            (11_111, 0, "\n"),
+            (5_050, 1, ""),
+            (9_000, 0, "/*"),
+            (14_050, 3, "end"),
+            (100, 2, "zz"),
+        ];
+        let chunk = 64;
+        for (pos, del, insert) in cases {
+            let mut doc = load::code_document(Some("rust"), &text);
+            let mut table = Vec::new();
+            let full = sweep(&mut doc, &mut table, chunk, None);
+            let mut ledger = Ledger::new(std::sync::Arc::clone(&doc.source), Vec::new());
+            let range = *pos..*pos + *del;
+            let touched = ledger.edit(range.clone(), insert);
+            let current = ledger.current();
+            let spliced = splice_document(&mut doc, &current, range.clone(), touched.clone());
+            let (old_eff, new_eff) = spliced.expect("the splice fixture stays on the fast path");
+            highlight::shift_seams(&mut table, old_eff, new_eff.clone());
+            let resume = resume_from(&table, new_eff.start);
+            let delivered = sweep(&mut doc, &mut table, chunk, Some(resume));
+            let BlockKind::CodeBlock {
+                language,
+                lines,
+                highlights,
+                exact,
+            } = &doc.blocks[0].kind
+            else {
+                panic!("a code file stays one code block");
+            };
+            let fresh = highlight::spans(&doc.source, lines, language.as_deref());
+            assert_eq!(
+                highlights, &fresh,
+                "edit at {pos}: the resumed sweep settles on the fresh parse"
+            );
+            assert_eq!(
+                *exact,
+                lines.len(),
+                "edit at {pos}: the frontier reaches the end"
+            );
+            if *insert != "/*" {
+                assert!(
+                    delivered < full,
+                    "edit at {pos}: a local edit converges before the block's end"
+                );
+            }
+        }
     }
 
     #[test]

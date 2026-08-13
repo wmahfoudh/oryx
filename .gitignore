@@ -1,3 +1,6 @@
 /target/
 /release/
 /internal/
+# Generated on demand by the perf suite's dump_huge_fixture for field
+# testing; 8MB and reproducible from tests/fixtures/large_gen.rs.
+/tests/fixtures/huge.rs
