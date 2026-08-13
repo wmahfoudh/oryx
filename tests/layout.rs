@@ -3517,3 +3517,68 @@ fn visible_code_lines_cover_the_padded_viewport() {
         "past the document nothing is visible"
     );
 }
+
+/// The reader's ask, end to end: Ctrl+End on a document the pass is
+/// still placing lands short of the file's end, and the held jump
+/// seats the view at the true end once the pass completes.
+#[test]
+fn a_held_bottom_jump_reaches_the_document_end() {
+    use oryx::paint::scroll::{self, BottomHold};
+    let source: String = (0..20_000)
+        .map(|i| format!("line number {i} with a few words on it\n"))
+        .collect();
+    let path = std::env::temp_dir().join("oryx_bottom_hold_test.txt");
+    std::fs::write(&path, &source).unwrap();
+    let doc = load::open(&path, None).unwrap().document;
+    std::fs::remove_file(&path).ok();
+    let theme = Theme::default_dark();
+    let mut fonts = fonts();
+    let mut media = MediaCache::new(PathBuf::from("."));
+    let cfg = cfg();
+    let viewport = 800.0;
+    let (mut lay, mut pass) = layout_begin(&doc, &cfg, 1000.0);
+    let slice = Duration::from_millis(16);
+    // The first slice, then the reader's jump: the app's Bottom.
+    layout_more(
+        &doc,
+        &theme,
+        &mut fonts,
+        &mut media,
+        &cfg,
+        &mut lay,
+        &mut pass,
+        Some(Instant::now() + slice),
+    );
+    let mut hold = BottomHold::default();
+    let mut scroll_y = scroll::clamp(lay.height, lay.height, viewport);
+    hold.take(scroll_y, pass.is_complete());
+    let landed_first = scroll_y;
+    // The pass runs on, a slice per frame, as the app drives it.
+    loop {
+        let done = layout_more(
+            &doc,
+            &theme,
+            &mut fonts,
+            &mut media,
+            &cfg,
+            &mut lay,
+            &mut pass,
+            Some(Instant::now() + slice),
+        );
+        if hold.settle(scroll_y, done) {
+            scroll_y = scroll::clamp(lay.height, lay.height, viewport);
+        }
+        if done {
+            break;
+        }
+    }
+    assert!(
+        landed_first < lay.height - viewport,
+        "the fixture must outlast one slice, or it proves nothing"
+    );
+    assert_eq!(
+        scroll_y,
+        lay.height - viewport,
+        "the held jump seats the view at the completed document's end"
+    );
+}

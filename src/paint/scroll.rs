@@ -22,6 +22,54 @@ pub fn reached(target: f32, doc_height: f32, viewport_h: f32) -> bool {
     clamp(target, doc_height, viewport_h) >= target
 }
 
+/// A jump to the bottom of a document the pass is still placing. The
+/// placed height is the whole height Oryx knows, so such a jump lands
+/// short of the file's end; the intent is held instead of being spent
+/// on the spot, and the completing pass seats the view where the
+/// reader asked to go. The view holds still while the document grows,
+/// since a page moving on its own reads as a fault, and a reader who
+/// scrolls away in the meantime releases the hold rather than being
+/// pulled to the end later.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct BottomHold {
+    held: bool,
+    /// Where the jump left the view. Nothing moves it while the hold
+    /// stands, so a different position means the reader took over.
+    seated: f32,
+}
+
+impl BottomHold {
+    /// Records a jump that landed at `seated`. Against a complete pass
+    /// the bottom is the document's own and nothing is held.
+    pub fn take(&mut self, seated: f32, pass_complete: bool) {
+        self.held = !pass_complete;
+        self.seated = seated;
+    }
+
+    pub fn clear(&mut self) {
+        self.held = false;
+    }
+
+    /// Whether this slice must seat the view on the completed
+    /// document's bottom, which spends the hold. A view that has moved
+    /// since the jump belongs to the reader again and releases the
+    /// hold unspent.
+    pub fn settle(&mut self, scroll_y: f32, pass_complete: bool) -> bool {
+        if !self.held {
+            return false;
+        }
+        if scroll_y != self.seated {
+            self.held = false;
+            return false;
+        }
+        if !pass_complete {
+            return false;
+        }
+        self.held = false;
+        true
+    }
+}
+
 /// A resize drag delivers a new width per frame. Restarting a pass that
 /// cannot finish inside one slice would strand the reader at the top for
 /// the whole drag, so the current layout is kept until the size settles.
@@ -113,6 +161,45 @@ mod tests {
         assert!(reached(500.0, 800.0, 300.0));
         // The top is always reachable, including in an empty document.
         assert!(reached(0.0, 0.0, 300.0));
+    }
+
+    #[test]
+    fn a_bottom_jump_lands_again_when_the_pass_completes() {
+        let (viewport, mut placed) = (300.0, 1000.0);
+        let mut hold = BottomHold::default();
+        let mut at = clamp(placed, placed, viewport);
+        assert_eq!(at, 700.0);
+        hold.take(at, false);
+        // Slices land under the reader; the view holds still until the
+        // document is whole.
+        for grown in [4000.0, 9000.0] {
+            assert!(
+                !hold.settle(at, false),
+                "a growing document never moves the view under the reader"
+            );
+            placed = grown;
+        }
+        assert!(hold.settle(at, true));
+        at = clamp(placed, placed, viewport);
+        assert_eq!(at, 8700.0, "the completed pass seats the view at the end");
+        assert!(!hold.settle(at, true), "the hold is spent");
+    }
+
+    #[test]
+    fn reading_elsewhere_releases_the_bottom_jump() {
+        let mut hold = BottomHold::default();
+        hold.take(700.0, false);
+        // The reader scrolls back up before the pass completes; the
+        // document must not jump out from under them later.
+        assert!(!hold.settle(120.0, false));
+        assert!(!hold.settle(120.0, true));
+    }
+
+    #[test]
+    fn a_jump_against_a_complete_pass_holds_nothing() {
+        let mut hold = BottomHold::default();
+        hold.take(700.0, true);
+        assert!(!hold.settle(700.0, true));
     }
 
     #[test]

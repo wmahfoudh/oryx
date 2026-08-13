@@ -239,6 +239,7 @@ pub fn run(path: Option<PathBuf>, theme_name: Option<String>) -> anyhow::Result<
         rehighlight_at: None,
         seams: HashMap::new(),
         spec_band: None,
+        bottom_hold: scroll::BottomHold::default(),
         confirm: None,
         help_stash: None,
         disk_seen: None,
@@ -576,6 +577,9 @@ struct App {
     /// The band the standing speculation covers, so a resting view
     /// asks once.
     spec_band: Option<(usize, std::ops::Range<usize>)>,
+    /// A jump to the bottom of a document the pass had not finished
+    /// placing, waiting for the whole document to seat it.
+    bottom_hold: scroll::BottomHold,
     /// The unsaved-changes modal and the action it guards.
     confirm: Option<confirm::Pending>,
     /// The document stashed whole while the help page shows, edits and
@@ -751,7 +755,13 @@ impl App {
             Command::PageUp => self.scroll_by(-self.page_step()),
             Command::PageDown => self.scroll_by(self.page_step()),
             Command::Top => self.scroll_to(0.0),
-            Command::Bottom => self.scroll_to(self.doc_height()),
+            Command::Bottom => {
+                self.scroll_to(self.doc_height());
+                // The placed height is all Oryx knows, so on a document
+                // still streaming this lands short of the file's end;
+                // the intent is held and the completing pass spends it.
+                self.bottom_hold.take(self.scroll_y, !self.layout_pending());
+            }
             Command::Edit => self.toggle_edit(),
             Command::Cut => self.cut_selection(),
             Command::Paste => self.paste_clipboard(),
@@ -2802,8 +2812,11 @@ impl App {
         self.band = None;
         // Both hold targets in the old document's coordinates; left
         // alone they fire against the new one once its layout grows.
+        // The bottom jump is the third, and it would seat a fresh
+        // reader at the end of a file they just opened.
         self.pending_scroll = None;
         self.pending_anchor = None;
+        self.bottom_hold.clear();
         // A remembered book resumes where reading stopped, once placed.
         self.pending_offset = self
             .document
@@ -3060,6 +3073,7 @@ impl App {
         self.pending_anchor = None;
         self.pending_offset = None;
         self.pending_recolor.clear();
+        self.bottom_hold.clear();
         if let Some(gfx) = self.gfx.as_ref() {
             gfx.window.set_title("Oryx help");
         }
@@ -3575,6 +3589,14 @@ impl App {
             self.request_redraw();
         }
         self.grow_band(before);
+        // A jump to the bottom taken while the document was still
+        // being placed is spent here, on the whole document.
+        if self
+            .bottom_hold
+            .settle(self.scroll_y, !self.layout_pending())
+        {
+            self.scroll_to(self.doc_height());
+        }
     }
 
     /// Content appended below the painted band leaves its pixels valid,
