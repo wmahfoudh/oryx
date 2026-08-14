@@ -273,6 +273,15 @@ fn lines_of(lay: &LayoutDoc, doc: &Document) -> Vec<Line> {
     lines
 }
 
+/// The top of the row an offset stands on. Leaving the editor seats
+/// the page here, so a reader returns to the line they were editing
+/// rather than to the one they came in from. None when the layout has
+/// not placed that far, which the pending target answers instead.
+pub fn row_top(lay: &LayoutDoc, doc: &Document, offset: usize) -> Option<f32> {
+    let lines = lines_of(lay, doc);
+    locate(&lines, offset).map(|i| lines[i].y)
+}
+
 /// The line holding an offset. A wrap boundary belongs to the later
 /// line; a line's own end position belongs to it.
 fn locate(lines: &[Line], offset: usize) -> Option<usize> {
@@ -709,6 +718,63 @@ mod tests {
 
     fn text_doc(source: &str) -> Document {
         load::text_document(source)
+    }
+
+    fn md_doc(source: &str) -> Document {
+        crate::doc::markdown::parse(source)
+    }
+
+    /// A rendered page with enough blocks to scroll through.
+    fn page() -> Document {
+        let mut src = String::new();
+        for i in 0..40 {
+            src.push_str(&format!("## Section {i}\n\nA paragraph of prose for section {i}, long enough to wrap once or twice across the width the tests lay out at.\n\n"));
+        }
+        md_doc(&src)
+    }
+
+    #[test]
+    fn entering_lands_on_the_first_visible_line() {
+        let doc = page();
+        let (l, _) = lay_of(&doc);
+        let lines = lines_of(&l, &doc);
+        for probe in [0usize, 7, 23, 61] {
+            let view_top = lines[probe].y;
+            let offset = landing(&l, &doc, None, None, view_top, 400.0);
+            assert_eq!(
+                offset, lines[probe].start,
+                "a view resting on row {probe} enters at that row's first character"
+            );
+        }
+    }
+
+    #[test]
+    fn the_crossing_returns_to_the_row_it_left() {
+        let doc = page();
+        let (l, _) = lay_of(&doc);
+        let lines = lines_of(&l, &doc);
+        for probe in [0usize, 7, 23, 61] {
+            let view_top = lines[probe].y;
+            let offset = landing(&l, &doc, None, None, view_top, 400.0);
+            assert_eq!(
+                row_top(&l, &doc, offset),
+                Some(view_top),
+                "leaving from row {probe} seats the page back on it"
+            );
+        }
+    }
+
+    #[test]
+    fn a_caret_moved_while_editing_seats_its_own_row() {
+        let doc = page();
+        let (l, _) = lay_of(&doc);
+        let lines = lines_of(&l, &doc);
+        let moved = lines[30].start + 2;
+        assert_eq!(
+            row_top(&l, &doc, moved),
+            Some(lines[30].y),
+            "the row the caret ended on, not the one the crossing began at"
+        );
     }
 
     /// Code lines shape in the monospace face, so columns align exactly

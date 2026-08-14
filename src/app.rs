@@ -933,6 +933,7 @@ impl App {
     /// whole when no byte changed, and is rebuilt from the buffer when
     /// one did, so unsaved edits show on the page and not just on disk.
     fn leave_edit(&mut self) {
+        let left_at = self.caret.map(|c| c.offset);
         if let (Some(path), Some(c)) = (self.path.clone(), self.caret) {
             self.edit_marks.insert(path, c.offset);
         }
@@ -956,7 +957,21 @@ impl App {
                 }
                 self.swapped_document(None, None);
             }
+            // The page the reader came in from, then the row they are
+            // leaving on: a restored layout answers exactly, and a page
+            // still to be laid out answers through the pending target
+            // once it reaches that far.
             self.scroll_y = parked.scroll_y;
+            if let Some(offset) = left_at {
+                match self
+                    .layout
+                    .as_ref()
+                    .and_then(|lay| caret::row_top(lay, &self.document, offset))
+                {
+                    Some(y) => self.scroll_to(y),
+                    None => self.pending_offset = Some(offset),
+                }
+            }
         }
         self.request_redraw();
     }
