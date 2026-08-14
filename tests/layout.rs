@@ -3582,3 +3582,45 @@ fn a_held_bottom_jump_reaches_the_document_end() {
         "the held jump seats the view at the completed document's end"
     );
 }
+
+/// The markdown source view draws bold and italic in the mono face's
+/// own styles. A monospace family draws them at the regular advance, so
+/// a styled line must occupy exactly the width of a plain line of the
+/// same length: the source view is a grid and a marker must not shift
+/// the character under it.
+#[test]
+fn markdown_source_styles_keep_the_grid() {
+    let mut doc =
+        oryx::edit::source_document(load::FileKind::Markdown, "**bold**\n*slant*\n12345678\n")
+            .expect("markdown opens its source");
+    highlight_all(&mut doc);
+    let l = lay_doc(&doc, 900.0, &mut fonts());
+    let row_width = |row: usize| -> f32 {
+        l.runs
+            .iter()
+            .filter(|r| r.span == row)
+            .map(|r| r.width)
+            .sum()
+    };
+    let plain = row_width(2);
+    assert!(plain > 0.0, "the plain row laid out");
+    assert!(
+        (row_width(0) - plain).abs() < 0.01,
+        "bold row {} vs plain row {plain}",
+        row_width(0)
+    );
+    let slant = row_width(1);
+    assert!(
+        (slant - plain * 7.0 / 8.0).abs() < 0.01,
+        "italic row {slant} vs seven columns of {plain} over eight"
+    );
+    let styled: Vec<&TextRun> = l.runs.iter().filter(|r| r.span == 0).collect();
+    assert!(
+        styled.iter().any(|r| r.weight > 400),
+        "the bold row carries the bold face"
+    );
+    assert!(
+        l.runs.iter().filter(|r| r.span == 1).any(|r| r.italic),
+        "the italic row carries the slanted face"
+    );
+}

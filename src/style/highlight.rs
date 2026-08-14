@@ -24,6 +24,28 @@ pub enum SyntaxRole {
     Variable,
     Punctuation,
     Plain,
+    /// Markdown source roles. A markdown file edits its own bytes, so
+    /// its source is colored from the document's theme, the heading
+    /// ramp and the text and block colors, rather than from the code
+    /// palette. Only the markdown grammar produces these.
+    Heading(u8),
+    Bold,
+    Italic,
+    InlineCode,
+    Link,
+    Quote,
+    Rule,
+}
+
+/// The face a role asks for, as (bold, italic). A monospace family
+/// draws both at the same advance width, so no glyph moves; every other
+/// role keeps the regular face, since a source view's rows are a grid.
+pub fn role_face(role: SyntaxRole) -> (bool, bool) {
+    match role {
+        SyntaxRole::Bold => (true, false),
+        SyntaxRole::Italic => (false, true),
+        _ => (false, false),
+    }
 }
 
 /// Per-line styled ranges for a code block. Lines with no recognized
@@ -136,7 +158,7 @@ pub fn spans_chunked(
 ) -> bool {
     let chunk_size = chunk_size.max(1);
     let mut parser = match resume.and_then(|r| r.seam.clone()) {
-        Some(seam) => Parser::from_seam(seam),
+        Some(seam) => Parser::from_seam(seam, language),
         None => Parser::new(language),
     };
     let expected: &[(usize, Seam)] = resume.map_or(&[], |r| &r.expected);
@@ -232,6 +254,7 @@ pub fn segment_probe(
             cold = Some(Parser {
                 parse: guess.parse.clone(),
                 stack: guess.stack.clone(),
+                markdown: guess.markdown,
             });
             out.push(SegmentProbe {
                 state_hit: truth.parse == guess.parse && truth.stack == guess.stack,
@@ -435,6 +458,10 @@ impl Highlighter {
 struct Parser {
     parse: ParseState,
     stack: ScopeStack,
+    /// The markdown grammar resolves to the document's own colors
+    /// rather than the code palette. Fixed at construction, so a code
+    /// file can never reach a markdown role.
+    markdown: bool,
 }
 
 impl Parser {
@@ -445,15 +472,17 @@ impl Parser {
         Parser {
             parse: ParseState::new(syntax),
             stack: ScopeStack::new(),
+            markdown: is_markdown(language),
         }
     }
 
     /// A parser continuing from a recorded seam; the state embeds its
     /// contexts, so no language lookup is involved.
-    fn from_seam(seam: Seam) -> Parser {
+    fn from_seam(seam: Seam, language: Option<&str>) -> Parser {
         Parser {
             parse: seam.parse,
             stack: seam.stack,
+            markdown: is_markdown(language),
         }
     }
 
@@ -465,6 +494,13 @@ impl Parser {
     }
 
     fn line(&mut self, line: &str) -> LineSpans {
+        // The grammar levels only the first two headings, so the rest
+        // are read off the line itself.
+        let hashes = if self.markdown {
+            line.bytes().take_while(|b| *b == b'#').count().min(6) as u8
+        } else {
+            0
+        };
         let text = format!("{line}\n");
         let ops = self
             .parse
@@ -472,10 +508,15 @@ impl Parser {
             .unwrap_or_default();
         let mut ranges: LineSpans = Vec::new();
         let mut last = 0usize;
+        let markdown = self.markdown;
         let mut push = |from: usize, to: usize, stack: &ScopeStack| {
             let to = to.min(line.len());
             if from < to {
-                let role = role_for(stack);
+                let role = if markdown {
+                    markdown_role(stack, hashes)
+                } else {
+                    role_for(stack)
+                };
                 match ranges.last_mut() {
                     Some((prev, r)) if *r == role && prev.end == from => prev.end = to,
                     _ => ranges.push((from..to, role)),
@@ -534,6 +575,50 @@ fn resolve_syntax(token: &str) -> Option<&'static syntect::parsing::SyntaxRefere
             .find(|(from, _)| *from == token)
             .and_then(|(_, to)| set.find_syntax_by_token(to))
     })
+}
+
+/// Whether a language token resolves to the markdown grammar, which is
+/// the only one whose scopes carry the document's own colors.
+fn is_markdown(language: Option<&str>) -> bool {
+    language
+        .and_then(resolve_syntax)
+        .is_some_and(|s| s.name == "Markdown")
+}
+
+/// The markdown source roles, resolved from the outside in so a marker
+/// takes the color of the construct holding it: the grammar scopes `**`
+/// as `punctuation.definition.bold` nested inside `markup.bold`, and
+/// the reader means the bold run. `hashes` is the line's leading run of
+/// `#`, since the grammar levels only the first two headings.
+fn markdown_role(stack: &ScopeStack, hashes: u8) -> SyntaxRole {
+    for scope in stack.as_slice() {
+        let name = scope.build_string();
+        let role = if let Some(rest) = name.strip_prefix("markup.heading") {
+            let level = rest
+                .strip_prefix('.')
+                .and_then(|r| r.split('.').next())
+                .and_then(|d| d.parse::<u8>().ok())
+                .unwrap_or(hashes)
+                .clamp(1, 6);
+            SyntaxRole::Heading(level)
+        } else if name.starts_with("markup.bold") {
+            SyntaxRole::Bold
+        } else if name.starts_with("markup.italic") {
+            SyntaxRole::Italic
+        } else if name.starts_with("markup.raw") {
+            SyntaxRole::InlineCode
+        } else if name.starts_with("meta.link") || name.starts_with("markup.underline.link") {
+            SyntaxRole::Link
+        } else if name.starts_with("markup.quote") {
+            SyntaxRole::Quote
+        } else if name.starts_with("meta.separator") {
+            SyntaxRole::Rule
+        } else {
+            continue;
+        };
+        return role;
+    }
+    SyntaxRole::Plain
 }
 
 /// The innermost scope with a known mapping wins.
@@ -653,6 +738,101 @@ mod tests {
         let h = spans("", &src, Some("python"));
         assert_eq!(role_at(&h[0], 0), SyntaxRole::Keyword, "def");
         assert_eq!(role_at(&h[1], 4), SyntaxRole::Keyword, "return");
+    }
+
+    /// Every byte of `text` inside the line resolves to the same role,
+    /// delimiters included, which is what makes a marker take the color
+    /// of the construct it belongs to.
+    fn whole_construct(line: &str, text: &str, want: SyntaxRole) {
+        let src = lines(&[line]);
+        let h = spans("", &src, Some("md"));
+        let at = line.find(text).expect("the construct is in the line");
+        for pos in at..at + text.len() {
+            assert_eq!(
+                role_at(&h[0], pos),
+                want,
+                "{line:?} byte {pos} ({:?}) inside {text:?}",
+                &line[pos..pos + 1]
+            );
+        }
+    }
+
+    #[test]
+    fn markdown_markers_wear_their_construct_color() {
+        whole_construct("Text **bold** here.", "**bold**", SyntaxRole::Bold);
+        whole_construct("Text *slanted* here.", "*slanted*", SyntaxRole::Italic);
+        whole_construct("Text `code` here.", "`code`", SyntaxRole::InlineCode);
+        whole_construct("# Title", "# Title", SyntaxRole::Heading(1));
+        whole_construct("> quoted line", "> quoted line", SyntaxRole::Quote);
+        whole_construct("---", "---", SyntaxRole::Rule);
+        whole_construct(
+            "A [label](https://example.com) here.",
+            "[label](https://example.com)",
+            SyntaxRole::Link,
+        );
+    }
+
+    #[test]
+    fn heading_levels_follow_the_hashes() {
+        for level in 1..=6u8 {
+            let line = format!("{} Title", "#".repeat(level as usize));
+            whole_construct(&line, &line, SyntaxRole::Heading(level));
+        }
+    }
+
+    #[test]
+    fn a_fence_is_one_construct_from_marker_to_marker() {
+        let src = lines(&["```rust", "let x = 1;", "```"]);
+        let h = spans("", &src, Some("md"));
+        for (row, line) in ["```rust", "let x = 1;", "```"].iter().enumerate() {
+            for pos in 0..line.len() {
+                assert_eq!(
+                    role_at(&h[row], pos),
+                    SyntaxRole::InlineCode,
+                    "fence row {row} byte {pos}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_code_file_never_meets_a_markdown_role() {
+        let src = lines(&["fn main() {", "    // a note", "    let s = \"hi\";", "}"]);
+        let h = spans("", &src, Some("rust"));
+        for line in &h {
+            for (range, role) in line {
+                assert!(
+                    !matches!(
+                        role,
+                        SyntaxRole::Heading(_)
+                            | SyntaxRole::Bold
+                            | SyntaxRole::Italic
+                            | SyntaxRole::InlineCode
+                            | SyntaxRole::Link
+                            | SyntaxRole::Quote
+                            | SyntaxRole::Rule
+                    ),
+                    "{range:?} took {role:?}, a markdown role, in a rust file"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn only_bold_and_italic_change_the_face() {
+        assert_eq!(role_face(SyntaxRole::Bold), (true, false));
+        assert_eq!(role_face(SyntaxRole::Italic), (false, true));
+        for role in [
+            SyntaxRole::Heading(1),
+            SyntaxRole::InlineCode,
+            SyntaxRole::Link,
+            SyntaxRole::Quote,
+            SyntaxRole::Rule,
+            SyntaxRole::Plain,
+            SyntaxRole::Keyword,
+        ] {
+            assert_eq!(role_face(role), (false, false), "{role:?} keeps the face");
+        }
     }
 
     #[test]

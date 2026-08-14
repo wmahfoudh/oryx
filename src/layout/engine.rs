@@ -5285,8 +5285,17 @@ fn shape_code_line(
     let rich: Vec<(&str, Attrs)> = segments
         .iter()
         .enumerate()
-        .map(|(index, (range, _))| {
-            let attrs = Attrs::new().family(Family::Name(face)).metadata(index);
+        .map(|(index, (range, role))| {
+            let mut attrs = Attrs::new().family(Family::Name(face)).metadata(index);
+            // Only a markdown source asks for a face: a monospace bold
+            // and italic keep the regular advance, so the grid holds.
+            let (bold, italic) = crate::style::highlight::role_face(*role);
+            if bold {
+                attrs = attrs.weight(Weight::BOLD);
+            }
+            if italic {
+                attrs = attrs.style(Style::Italic);
+            }
             (&line[range.clone()], attrs)
         })
         .collect();
@@ -5319,6 +5328,9 @@ fn shape_code_line(
             // The rich pieces cover the line contiguously, so an offset
             // into their concatenation is an offset into the line.
             let family = out.family_id(face);
+            // The face the run was shaped with has to travel with it:
+            // paint rasterizes from these fields, not from the buffer.
+            let (bold, slanted) = crate::style::highlight::role_face(role);
             out.runs.push(TextRun {
                 text: TextRef::Model {
                     start: start_byte as u32,
@@ -5330,8 +5342,12 @@ fn shape_code_line(
                 width: last.x + last.w - first.x,
                 size,
                 family,
-                weight: Weight::NORMAL.0,
-                italic: false,
+                weight: if bold {
+                    Weight::BOLD.0
+                } else {
+                    Weight::NORMAL.0
+                },
+                italic: slanted,
                 color: if prose {
                     theme.text.body
                 } else {
@@ -5359,6 +5375,25 @@ fn role_color(theme: &Theme, role: SyntaxRole) -> Rgba {
         SyntaxRole::Variable => s.variable,
         SyntaxRole::Punctuation => s.punctuation,
         SyntaxRole::Plain => theme.surface.foreground,
+        // A markdown source is drawn in the colors its own rendering
+        // uses, so the file on screen and the page it becomes agree.
+        SyntaxRole::Heading(level) => {
+            let h = &theme.headings;
+            match level {
+                1 => h.h1,
+                2 => h.h2,
+                3 => h.h3,
+                4 => h.h4,
+                5 => h.h5,
+                _ => h.h6,
+            }
+        }
+        SyntaxRole::Bold => theme.text.bold,
+        SyntaxRole::Italic => theme.text.italic,
+        SyntaxRole::InlineCode => theme.text.inline_code,
+        SyntaxRole::Link => theme.text.link,
+        SyntaxRole::Quote => theme.blocks.quote_bar,
+        SyntaxRole::Rule => theme.blocks.rule,
     }
 }
 
