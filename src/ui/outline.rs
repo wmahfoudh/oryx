@@ -262,6 +262,16 @@ impl OutlineTree {
     }
 }
 
+/// The source offset an outline entry points at, or None when the
+/// entry never resolved or the document does not hold that block. The
+/// editor keeps the rendered page's outline while it shows the file's
+/// source, so an entry's block index and the document on screen can
+/// belong to different models; every lookup goes through here rather
+/// than indexing a block table directly.
+pub fn entry_offset(doc: &Document, block: usize) -> Option<usize> {
+    doc.blocks.get(block).map(|b| b.range.start)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -269,6 +279,37 @@ mod tests {
 
     fn doc(source: &str) -> Document {
         markdown::parse(source)
+    }
+
+    #[test]
+    fn every_entry_points_at_its_heading_in_the_source() {
+        let src = "# One\n\ntext\n\n## Two\n\nmore text here\n\n### Three\n\ntail\n";
+        let d = doc(src);
+        let tree = OutlineTree::build(&d);
+        assert_eq!(tree.entries().len(), 3);
+        for entry in tree.entries() {
+            let offset = entry_offset(&d, entry.block).expect("the entry resolves");
+            // A heading block's range opens at its text, past the
+            // markers, so the entry lands the caret inside the heading.
+            // What has to hold is the row: the line it stands on is the
+            // heading's own.
+            let line_start = src[..offset].rfind('\n').map_or(0, |i| i + 1);
+            assert!(
+                src[line_start..].starts_with('#'),
+                "{:?} resolved to {offset}, which is not on a heading line",
+                entry.text
+            );
+        }
+    }
+
+    #[test]
+    fn an_entry_from_another_model_resolves_to_nothing() {
+        // The editor keeps the page's outline while the source is on
+        // screen, so a lookup can meet a document with one block where
+        // the entry was numbered against many.
+        let source_view = crate::doc::load::code_document(Some("md"), "# One\n\n## Two\n");
+        assert_eq!(entry_offset(&source_view, 4), None);
+        assert_eq!(entry_offset(&source_view, usize::MAX), None);
     }
 
     fn levels(tree: &OutlineTree) -> Vec<(u8, &str)> {

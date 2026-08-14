@@ -37,7 +37,7 @@ use oryx::ui::confirm;
 use oryx::ui::export::{ExportDialog, ExportProgress};
 use oryx::ui::help;
 use oryx::ui::notice::{self, Notice};
-use oryx::ui::outline::OutlineTree;
+use oryx::ui::outline::{entry_offset, OutlineTree};
 use oryx::ui::overlay::{Action, Overlay, OverlayResult};
 use oryx::ui::scrollbar;
 use oryx::ui::search::{self, SearchState};
@@ -912,10 +912,11 @@ impl App {
 
     /// The state that belongs to a document rather than to the file,
     /// reset after either crossing swaps one for the other: the layout
-    /// and its pass, the painted band, the outline, a selection that
-    /// anchors on the old model, and the highlight worker. A restored
-    /// page brings its own layout back; a fresh one passes None and the
-    /// next frame places it.
+    /// and its pass, the painted band, a selection that anchors on the
+    /// old model, and the highlight worker. A restored page brings its
+    /// own layout back; a fresh one passes None and the next frame
+    /// places it. The outline is not reset here: it describes the
+    /// rendered page and outlives the trip into the source.
     fn swapped_document(&mut self, layout: Option<LayoutDoc>, pass: Option<LayoutPass>) {
         self.layout = layout;
         self.pass = pass;
@@ -924,8 +925,30 @@ impl App {
         self.selection = None;
         self.sel_anchor = None;
         self.close_search();
-        self.outline = OutlineTree::build(&self.document);
         self.start_highlight(load::pending(&self.document));
+    }
+
+    /// Rebuilds the page held behind the editor from the buffer, which
+    /// a save makes the file. The outline refreshes with it, and the
+    /// next return costs no parse, since the parked page is the
+    /// buffer's own render again.
+    fn refresh_parked_page(&mut self) {
+        let Some(kind) = self.path.as_deref().map(load::detect) else {
+            return;
+        };
+        let head = self.undo.as_ref().map_or(0, Undo::head);
+        if !self.edit_park.as_ref().is_some_and(|p| p.head != head) {
+            return;
+        }
+        let page = edit::rendered_document(kind, &self.document.source);
+        let outline = OutlineTree::build(&page);
+        if let Some(parked) = self.edit_park.as_mut() {
+            parked.document = page;
+            parked.head = head;
+            parked.layout = None;
+            parked.pass = None;
+        }
+        self.outline = outline;
     }
 
     /// Back to reading; the caret offset is remembered for this file so
@@ -957,6 +980,7 @@ impl App {
                 }
                 self.swapped_document(None, None);
             }
+            self.outline = OutlineTree::build(&self.document);
             // The page the reader came in from, then the row they are
             // leaving on: a restored layout answers exactly, and a page
             // still to be laid out answers through the pending target
@@ -1313,6 +1337,7 @@ impl App {
                 if let Some(undo) = self.undo.as_mut() {
                     undo.mark_saved();
                 }
+                self.refresh_parked_page();
                 self.note_disk_state();
                 self.refresh_title();
                 let figure = if lines == 1 {
@@ -2684,6 +2709,18 @@ impl App {
     /// Scrolls to a heading block: a placed anchor jumps now; a folded
     /// or unplaced one reveals and lands through the pending target.
     fn jump_to_heading(&mut self, block: usize) {
+        // While the source is on screen the outline still describes the
+        // page parked behind it, so the entry resolves against that
+        // model and the caret lands on the heading's own line.
+        if let Some(parked) = self.edit_park.as_ref() {
+            if let Some(offset) = entry_offset(&parked.document, block) {
+                self.caret = Some(Caret::at(offset));
+                self.caret_snap = true;
+                self.wake_caret();
+                self.request_redraw();
+            }
+            return;
+        }
         match self.document.blocks.get(block).map(|b| &b.kind) {
             Some(BlockKind::Heading { anchor, .. }) => {
                 let target = format!("#{anchor}");
@@ -4003,7 +4040,14 @@ impl App {
         // ownership machine is a read-mode concept.
         let owns_keys = self.key_pane == KeyPane::Sidebar && self.mode == edit::Mode::Read;
         if let Some(side) = self.sidebar.as_mut() {
-            let current = outline_current(&mut self.outline, side, lay, self.scroll_y);
+            // The outline describes the rendered page, so while the
+            // source is on screen it holds the mark it had rather than
+            // tracking a layout of a different model.
+            let current = if self.mode == edit::Mode::Read {
+                outline_current(&mut self.outline, side, lay, self.scroll_y)
+            } else {
+                self.outline.last_current()
+            };
             let fits = self
                 .sidebar_canvas
                 .as_ref()
