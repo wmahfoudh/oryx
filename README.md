@@ -80,7 +80,7 @@ DRM-protected books and fixed-layout books (usually comics and picture books) ar
 
 ## Editing
 
-I often notice a typo in a note or want to fix a comment while reading a source file, and switching to an editor for one word feels wrong. Press `Ctrl+E` and the page itself becomes editable, with a caret and the usual keys; `Escape` (or `Ctrl+E` again) returns to reading.
+Press `Ctrl+E` and the page itself becomes editable, with a caret and the usual keys; `Escape` (or `Ctrl+E` again) returns to reading.
 
 Source code and plain text files can be edited. Markdown files cannot yet (editing a rendered page while it stays a page is the hard part, and it is being worked on), books cannot at all, and neither can a file whose text did not read cleanly, since Oryx could not write it back exactly as it was. A small notice in the corner says so when editing is not available.
 

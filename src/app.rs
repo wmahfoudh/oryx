@@ -928,6 +928,28 @@ impl App {
         self.start_highlight(load::pending(&self.document));
     }
 
+    /// Puts the row holding `offset` at the top of the editor, the way
+    /// a jump lands rather than the way a typed caret is kept in view.
+    /// A placed row answers exactly; past the placed height the block
+    /// table answers by line index, which is what a source view is
+    /// indexed by.
+    fn seat_editor_on(&mut self, offset: usize) {
+        let exact = self
+            .layout
+            .as_ref()
+            .and_then(|lay| caret::row_top(lay, &self.document, offset));
+        if let Some(y) = exact {
+            self.scroll_to(y);
+            return;
+        }
+        let line = self.document.source[..offset.min(self.document.source.len())]
+            .matches('\n')
+            .count();
+        if let Some(y) = self.layout.as_ref().and_then(|lay| lay.approx_top(0, line)) {
+            self.scroll_to(y);
+        }
+    }
+
     /// Rebuilds the page held behind the editor from the buffer, which
     /// a save makes the file. The outline refreshes with it, and the
     /// next return costs no parse, since the parked page is the
@@ -2712,13 +2734,17 @@ impl App {
         // While the source is on screen the outline still describes the
         // page parked behind it, so the entry resolves against that
         // model and the caret lands on the heading's own line.
-        if let Some(parked) = self.edit_park.as_ref() {
-            if let Some(offset) = entry_offset(&parked.document, block) {
+        if self.edit_park.is_some() {
+            let offset = self
+                .edit_park
+                .as_ref()
+                .and_then(|parked| entry_offset(&parked.document, block));
+            if let Some(offset) = offset {
                 self.caret = Some(Caret::at(offset));
-                self.caret_snap = true;
+                self.seat_editor_on(offset);
                 self.wake_caret();
-                self.request_redraw();
             }
+            self.request_redraw();
             return;
         }
         match self.document.blocks.get(block).map(|b| &b.kind) {
