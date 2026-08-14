@@ -830,12 +830,6 @@ impl App {
     /// Entry changes nothing on the page: the caret lands by the
     /// precedence order and appears, and that is all.
     fn enter_edit(&mut self) {
-        // Editing owns the whole model, the same reason export and
-        // select-all join the worker: a markdown file over the prefix
-        // target opens on a parsed prefix, and a delivery landing after
-        // the first keystroke would swap the edited document for a
-        // parse of the bytes before it.
-        self.finish_parse();
         let view_h = self.viewport_h();
         let remembered = self
             .path
@@ -1394,15 +1388,6 @@ impl App {
     /// shifted table: typing anywhere re-colors about one chunk, not
     /// the block.
     fn rehighlight_edited(&mut self) {
-        // A markdown edit reparsed the whole document, so its seams
-        // describe text that no longer stands and its fences are many:
-        // the open path's own question, which blocks owe colors, is the
-        // right one, and the carry has already answered it for every
-        // fence the edit did not touch.
-        if !self.document.code_file && !self.document.plain_file {
-            self.start_highlight(load::pending(&self.document));
-            return;
-        }
         let pending = match self.document.blocks.first().map(|b| &b.kind) {
             Some(BlockKind::CodeBlock {
                 language,

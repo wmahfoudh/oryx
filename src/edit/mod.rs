@@ -21,10 +21,11 @@ pub enum Mode {
     Edit,
 }
 
-/// Why the door stays shut. A book and a lossy read can never promise
-/// byte fidelity back to disk.
+/// Why the door stays shut. Markdown waits for its editing milestone; a
+/// book and a lossy read can never promise byte fidelity back to disk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refusal {
+    Markdown,
     Book,
     Lossy,
 }
@@ -33,6 +34,7 @@ impl Refusal {
     /// The corner-notice line shown for the refusal.
     pub fn message(self) -> &'static str {
         match self {
+            Refusal::Markdown => "Markdown files cannot be edited yet",
             Refusal::Book => "Books cannot be edited",
             Refusal::Lossy => "This file did not decode cleanly and cannot be edited",
         }
@@ -49,10 +51,9 @@ pub fn toggle(mode: Mode, kind: FileKind, lossy: bool) -> Result<Mode, Refusal> 
         // Undisplayable never becomes a document; the arm keeps the
         // match total.
         FileKind::Epub | FileKind::Undisplayable => Err(Refusal::Book),
+        FileKind::Markdown => Err(Refusal::Markdown),
         _ if lossy => Err(Refusal::Lossy),
-        FileKind::Markdown | FileKind::Code(_) | FileKind::Text | FileKind::Unknown => {
-            Ok(Mode::Edit)
-        }
+        FileKind::Code(_) | FileKind::Text | FileKind::Unknown => Ok(Mode::Edit),
     }
 }
 
@@ -74,14 +75,6 @@ pub fn reparse(
     new_touched: std::ops::Range<usize>,
 ) -> Document {
     let mut new = match kind {
-        FileKind::Markdown => {
-            // The whole document reparses: a markdown file is many
-            // blocks and the line-range carry below speaks for one.
-            // Fences carry their colors by matching blocks instead.
-            let mut new = crate::doc::markdown::parse(current);
-            carry_fence_colors(&mut new, old);
-            return new;
-        }
         FileKind::Code(token) => load::code_document(Some(token), current),
         FileKind::Unknown => load::code_document(None, current),
         _ => load::text_document(current),
@@ -128,66 +121,6 @@ pub fn reparse(
         *exact = old_exact.min(new_touched.start);
     }
     new
-}
-
-/// Carries computed fence colors across a markdown reparse. A fresh
-/// parse holds no highlights, so without this every fence in the file
-/// would go plain on each keystroke until the worker caught up. Code
-/// blocks are matched in document order and a block carries only when
-/// it describes the same lines as before, so an edited fence keeps
-/// nothing and waits for the worker rather than wearing colors that
-/// describe bytes it no longer has. A fence added or removed changes
-/// the count and the whole file waits, which is the honest answer for
-/// an edit that restructured the document.
-fn carry_fence_colors(new: &mut Document, old: &Document) {
-    let code_blocks = |doc: &Document| -> Vec<usize> {
-        doc.blocks
-            .iter()
-            .enumerate()
-            .filter(|(_, b)| matches!(b.kind, BlockKind::CodeBlock { .. }))
-            .map(|(i, _)| i)
-            .collect()
-    };
-    let (olds, news) = (code_blocks(old), code_blocks(new));
-    if olds.len() != news.len() {
-        return;
-    }
-    for (o, n) in olds.into_iter().zip(news) {
-        let BlockKind::CodeBlock {
-            language: old_lang,
-            lines: old_lines,
-            highlights,
-            exact,
-        } = &old.blocks[o].kind
-        else {
-            continue;
-        };
-        if highlights.is_empty() {
-            continue;
-        }
-        let BlockKind::CodeBlock {
-            language: new_lang,
-            lines: new_lines,
-            ..
-        } = &new.blocks[n].kind
-        else {
-            continue;
-        };
-        let same = old_lang == new_lang
-            && old_lines.len() == new_lines.len()
-            && old_lines.iter(&old.source).eq(new_lines.iter(&new.source));
-        if !same {
-            continue;
-        }
-        let (carried, carried_exact) = (highlights.clone(), *exact);
-        if let BlockKind::CodeBlock {
-            highlights, exact, ..
-        } = &mut new.blocks[n].kind
-        {
-            *highlights = carried;
-            *exact = carried_exact;
-        }
-    }
 }
 
 /// Tiles a row from ordered, disjoint spans: every gap fills with
@@ -431,10 +364,10 @@ mod tests {
     }
 
     #[test]
-    fn the_door_opens_on_markdown_and_refuses_books_and_lossy_reads() {
+    fn the_door_refuses_markdown_books_and_lossy_reads() {
         assert_eq!(
             toggle(Mode::Read, FileKind::Markdown, false),
-            Ok(Mode::Edit)
+            Err(Refusal::Markdown)
         );
         assert_eq!(
             toggle(Mode::Read, FileKind::Epub, false),
@@ -444,11 +377,6 @@ mod tests {
             toggle(Mode::Read, FileKind::Text, true),
             Err(Refusal::Lossy),
             "a lossy read refuses whatever the kind"
-        );
-        assert_eq!(
-            toggle(Mode::Read, FileKind::Markdown, true),
-            Err(Refusal::Lossy),
-            "markdown answers to the lossy rule like any other file"
         );
     }
 
@@ -464,216 +392,17 @@ mod tests {
 
     #[test]
     fn refusals_carry_distinct_messages() {
-        let texts = [Refusal::Book.message(), Refusal::Lossy.message()];
+        let texts = [
+            Refusal::Markdown.message(),
+            Refusal::Book.message(),
+            Refusal::Lossy.message(),
+        ];
         for text in texts {
             assert!(!text.is_empty());
         }
         assert_ne!(texts[0], texts[1]);
-    }
-
-    /// The referee for markdown editing: whatever the reparse carries
-    /// over, the document it produces must be the document a fresh
-    /// parse of the same text produces.
-    #[test]
-    fn a_markdown_edit_reparses_to_a_fresh_parse() {
-        let src = "# Title\n\nA **bold** word.\n\n- an item\n\n> quoted\n\n\
-                   ```rust\nlet x = 1;\n```\n\n| a | b |\n|---|---|\n| 1 | 2 |\n";
-        let sites = [
-            ("heading", "Title"),
-            ("paragraph", "word"),
-            ("inside bold", "bold"),
-            ("list item", "an item"),
-            ("quote", "quoted"),
-            ("fence body", "let x"),
-            ("table cell", "| 1 |"),
-        ];
-        for (name, needle) in sites {
-            let at = src
-                .find(needle)
-                .unwrap_or_else(|| panic!("{name} in the fixture"));
-            let mut current = String::from(src);
-            current.insert(at, 'X');
-            let old = crate::doc::markdown::parse(src);
-            let line = src[..at].matches('\n').count();
-            let new = reparse(
-                FileKind::Markdown,
-                &current,
-                &old,
-                line..line + 1,
-                line..line + 1,
-            );
-            let fresh = crate::doc::markdown::parse(current.as_str());
-            assert_eq!(&*new.source, &*fresh.source, "{name}: the source");
-            assert_eq!(new.blocks, fresh.blocks, "{name}: the blocks");
-        }
-    }
-
-    /// A fresh markdown parse computes no highlights, so without a
-    /// carry every fence in the file would go plain on each keystroke
-    /// until the worker caught up.
-    #[test]
-    fn fences_keep_their_colors_through_an_edit_elsewhere() {
-        let src = "```rust\nlet x = 1;\n```\n\nA paragraph.\n\n```python\ny = 2\n```\n";
-        let mut old = crate::doc::markdown::parse(src);
-        let source = std::sync::Arc::clone(&old.source);
-        let mut colored = 0;
-        for block in &mut old.blocks {
-            if let BlockKind::CodeBlock {
-                language,
-                lines,
-                highlights,
-                exact,
-            } = &mut block.kind
-            {
-                *highlights = highlight::spans(&source, lines, language.as_deref());
-                *exact = highlights.len();
-                colored += 1;
-            }
-        }
-        assert_eq!(colored, 2, "the fixture has two fences");
-        let at = src.find("paragraph").expect("the paragraph");
-        let mut current = String::from(src);
-        current.insert(at, 'X');
-        let line = src[..at].matches('\n').count();
-        let new = reparse(
-            FileKind::Markdown,
-            &current,
-            &old,
-            line..line + 1,
-            line..line + 1,
-        );
-        for (index, block) in new.blocks.iter().enumerate() {
-            let BlockKind::CodeBlock {
-                highlights,
-                lines,
-                exact,
-                ..
-            } = &block.kind
-            else {
-                continue;
-            };
-            assert_eq!(
-                highlights.len(),
-                lines.len(),
-                "block {index} kept a color row per line"
-            );
-            assert_eq!(*exact, lines.len(), "block {index} kept its frontier");
-            assert!(
-                highlights
-                    .iter()
-                    .flatten()
-                    .any(|(_, role)| *role != SyntaxRole::Plain),
-                "block {index} kept real colors, not a plain tiling"
-            );
-        }
-    }
-
-    /// A markdown file whose whole content is one fence parses to a
-    /// single code block, which looks exactly like a code file to a
-    /// careless splice. The fence's body lines are not the document's
-    /// lines, so taking that path would splice the wrong rows: the
-    /// document flags, not the block shape, decide.
-    #[test]
-    fn a_one_fence_markdown_file_still_reparses() {
-        let src = "```rust\nlet x = 1;\n```\n";
-        let mut doc = crate::doc::markdown::parse(src);
-        assert_eq!(doc.blocks.len(), 1, "the fixture is a single block");
-        assert!(
-            matches!(doc.blocks[0].kind, BlockKind::CodeBlock { .. }),
-            "and that block is a code block"
-        );
-        let at = src.find("let x").expect("the line");
-        let mut current = String::from(src);
-        current.insert(at, 'X');
-        assert!(
-            splice_document(&mut doc, &current, at..at, 1..2).is_none(),
-            "a markdown document reparses whatever its block shape"
-        );
-    }
-
-    /// What the rest timer hands the worker after a markdown edit: the
-    /// carry decides which fences still owe colors, and `load::pending`
-    /// reads that off the frontier.
-    #[test]
-    fn only_the_edited_fence_is_pending_after_a_markdown_reparse() {
-        let src = "```rust\nlet x = 1;\n```\n\n```python\ny = 2\n```\n";
-        let mut old = crate::doc::markdown::parse(src);
-        let source = std::sync::Arc::clone(&old.source);
-        for block in &mut old.blocks {
-            if let BlockKind::CodeBlock {
-                language,
-                lines,
-                highlights,
-                exact,
-            } = &mut block.kind
-            {
-                *highlights = highlight::spans(&source, lines, language.as_deref());
-                *exact = highlights.len();
-            }
-        }
-        assert!(
-            load::pending(&old).is_empty(),
-            "a fully colored document owes nothing"
-        );
-        let at = src.find("let x").expect("the rust line");
-        let mut current = String::from(src);
-        current.insert(at, 'X');
-        let line = src[..at].matches('\n').count();
-        let new = reparse(
-            FileKind::Markdown,
-            &current,
-            &old,
-            line..line + 1,
-            line..line + 1,
-        );
-        let pending = load::pending(&new);
-        assert_eq!(pending.len(), 1, "one fence owes colors");
-        assert_eq!(pending[0].language.as_deref(), Some("rust"));
-    }
-
-    /// An edited fence is a different fence: its carried colors would
-    /// describe the old bytes, so the block waits for the worker.
-    #[test]
-    fn an_edited_fence_drops_only_its_own_colors() {
-        let src = "```rust\nlet x = 1;\n```\n\n```python\ny = 2\n```\n";
-        let mut old = crate::doc::markdown::parse(src);
-        let source = std::sync::Arc::clone(&old.source);
-        for block in &mut old.blocks {
-            if let BlockKind::CodeBlock {
-                language,
-                lines,
-                highlights,
-                exact,
-            } = &mut block.kind
-            {
-                *highlights = highlight::spans(&source, lines, language.as_deref());
-                *exact = highlights.len();
-            }
-        }
-        let at = src.find("let x").expect("the rust line");
-        let mut current = String::from(src);
-        current.insert(at, 'X');
-        let line = src[..at].matches('\n').count();
-        let new = reparse(
-            FileKind::Markdown,
-            &current,
-            &old,
-            line..line + 1,
-            line..line + 1,
-        );
-        let rows: Vec<usize> = new
-            .blocks
-            .iter()
-            .filter_map(|b| match &b.kind {
-                BlockKind::CodeBlock { highlights, .. } => Some(highlights.len()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            rows,
-            vec![0, 1],
-            "the edited fence waits for the worker, the untouched one keeps its row"
-        );
+        assert_ne!(texts[1], texts[2]);
+        assert_ne!(texts[0], texts[2]);
     }
 
     use crate::style::highlight::{self, LineSpans};
