@@ -52,6 +52,14 @@ pub fn page() -> String {
          screen, swiping scrolls with momentum, tapping clicks, and a two-finger pinch \
          zooms.\n",
     );
+    out.push_str("\n## About\n\n");
+    let _ = writeln!(
+        out,
+        "This is Oryx {}. The full documentation is in the project README, on \
+         [Codeberg](https://codeberg.org/wmahfoudh/oryx) or \
+         [GitHub](https://github.com/wmahfoudh/oryx).",
+        env!("CARGO_PKG_VERSION")
+    );
     out
 }
 
@@ -77,5 +85,16 @@ mod tests {
         for section in ["Files", "Navigation", "Edit", "Export"] {
             assert!(page.contains(section), "the page has a {section} caption");
         }
+    }
+
+    #[test]
+    fn the_page_names_the_version_and_the_project_homes() {
+        let page = page();
+        assert!(
+            page.contains(env!("CARGO_PKG_VERSION")),
+            "the running version stands on the page"
+        );
+        assert!(page.contains("https://codeberg.org/wmahfoudh/oryx"));
+        assert!(page.contains("https://github.com/wmahfoudh/oryx"));
     }
 }
