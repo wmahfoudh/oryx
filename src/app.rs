@@ -1027,6 +1027,8 @@ impl App {
             let head = self.undo.as_ref().map_or(0, Undo::head);
             let same_look = self.cfg.zoom == parked.zoom && self.config.theme == parked.theme;
             if head == parked.head {
+                // The held outline describes this very page; rebuilding
+                // it here cost 273ms at the 8MB tier for nothing.
                 self.document = parked.document;
                 self.layout_width = parked.layout_width;
                 self.swapped_document(
@@ -1040,8 +1042,8 @@ impl App {
                     self.document = edit::rendered_document(kind, &text);
                 }
                 self.swapped_document(None, None);
+                self.outline = OutlineTree::build(&self.document);
             }
-            self.outline = OutlineTree::build(&self.document);
             // The page the reader came in from, then the row they are
             // leaving on: a restored layout answers exactly, and a page
             // still to be laid out answers through the pending target

@@ -701,3 +701,74 @@ fn keystroke_measured() {
         }
     }
 }
+
+/// The editing crossing's three costs at the markdown tiers: entering
+/// edit mode (the source view built from the file's bytes, then its
+/// layout), returning with no edit (the parked page and layout move
+/// back whole, the outline held), and returning after a one-byte edit
+/// (the buffer reparsed as a page, its outline rebuilt, then a fresh
+/// layout). The clean return is what the parked render exists for and
+/// must not scale with the file; its first cut rebuilt the outline and
+/// paid 273ms at the 8MB tier, which moved the rebuild to the changed
+/// path. The edited return's parse and outline columns are also the
+/// save cost, a save rebuilding the parked page the same way.
+#[test]
+#[ignore = "measurement only"]
+fn crossing_measured() {
+    use oryx::doc::load;
+    use oryx::edit::{self, splice::Ledger};
+    use oryx::ui::outline::OutlineTree;
+    use std::path::Path;
+    let pool = pool();
+    let kind = load::detect(Path::new("fixture.md"));
+    for (name, bytes) in TIERS.iter().filter(|(n, _)| *n != "medium") {
+        let source = large_gen::generate(*bytes);
+        let (_, _, doc) = measure_open(&source, "md");
+        // The reading state the crossing leaves: the page fully placed.
+        let (_, page_lay) = measure_layout(&doc, Some(&pool));
+
+        let text = std::sync::Arc::clone(&doc.source);
+        let started = Instant::now();
+        let source_doc = edit::source_document(kind, &text).expect("markdown swaps");
+        let build_us = started.elapsed().as_micros();
+        let (laid, _resident) = measure_layout(&source_doc, Some(&pool));
+        assert!(laid.height > 0.0, "source view laid out");
+        println!(
+            "crossing {name:>6} enter: source build {:>5.1}ms, \
+             first slice {:>4}ms, full pass {:>5}ms",
+            build_us as f64 / 1000.0,
+            laid.first_ms,
+            laid.ms
+        );
+
+        let started = Instant::now();
+        let restored = doc;
+        let _restored_lay = page_lay;
+        let return_us = started.elapsed().as_micros();
+        drop(restored);
+        println!(
+            "crossing {name:>6} clean return: {:>5.2}ms",
+            return_us as f64 / 1000.0
+        );
+
+        let mut ledger = Ledger::new(std::sync::Arc::clone(&source_doc.source), Vec::new());
+        let at = source_doc.source.len() - 1;
+        ledger.edit(at..at, "x");
+        let current = ledger.current();
+        let started = Instant::now();
+        let page = edit::rendered_document(kind, &current);
+        let parse_ms = started.elapsed().as_millis();
+        let started = Instant::now();
+        let _outline = OutlineTree::build(&page);
+        let outline_us = started.elapsed().as_micros();
+        let (laid, _resident) = measure_layout(&page, Some(&pool));
+        assert!(laid.height > 0.0, "edited page laid out");
+        println!(
+            "crossing {name:>6} edited return: parse {parse_ms:>4}ms, \
+             outline {:>5.2}ms, first slice {:>4}ms, full pass {:>5}ms",
+            outline_us as f64 / 1000.0,
+            laid.first_ms,
+            laid.ms
+        );
+    }
+}
