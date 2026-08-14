@@ -3,7 +3,7 @@ members = ["noad"]
 
 [package]
 name = "oryx"
-version = "0.15.1"
+version = "0.15.2"
 edition = "2021"
 license = "GPL-3.0-only"
 rust-version = "1.80"

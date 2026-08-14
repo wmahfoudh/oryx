@@ -11,10 +11,13 @@ use crate::input::keymap;
 pub fn page() -> String {
     use std::fmt::Write;
     let mut out = String::with_capacity(4096);
-    out.push_str("# Oryx help\n\n");
+    let _ = write!(out, "# Oryx v{} Shortcuts\n\n", env!("CARGO_PKG_VERSION"));
     let _ = writeln!(
         out,
-        "Press {} or {} to go back to the document you were reading.",
+        "Press {} or {} to close this. \
+         Please refer to the full documentation in the project README, on \
+         [Codeberg](https://codeberg.org/wmahfoudh/oryx) or \
+         [GitHub](https://github.com/wmahfoudh/oryx).",
         keymap::display("F1"),
         keymap::display("Escape"),
     );
@@ -51,14 +54,6 @@ pub fn page() -> String {
          The wheel scrolls, and dragging the scrollbar or its track jumps. On a touch \
          screen, swiping scrolls with momentum, tapping clicks, and a two-finger pinch \
          zooms.\n",
-    );
-    out.push_str("\n## About\n\n");
-    let _ = writeln!(
-        out,
-        "This is Oryx {}. The full documentation is in the project README, on \
-         [Codeberg](https://codeberg.org/wmahfoudh/oryx) or \
-         [GitHub](https://github.com/wmahfoudh/oryx).",
-        env!("CARGO_PKG_VERSION")
     );
     out
 }

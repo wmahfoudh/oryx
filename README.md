@@ -5,17 +5,25 @@
 ![Version](https://img.shields.io/github/v/release/wmahfoudh/oryx?label=Version&color=purple)
 ![Made with Rust](https://img.shields.io/badge/Made%20with-Rust-orange?logo=rust&logoColor=white)
 
-[What Oryx reads](#what-oryx-reads) •
-[Books](#books-epub) •
-[Themes](#themes) •
-[Export to PDF](#export-to-pdf) •
-[Install](#install) •
-[Using Oryx](#using-oryx) •
-[Performance](#performance)
-
 </div>
 
-Oryx started as a personal project. I work with a lot of markdown files and did not find a (very) fast tool that could render them beautifully on the desktop without the need for a browser. Exporting to PDF would be a plus. That was the first version of the functional specs. Oryx has grown a lot since, and it stayed fast. The latest addition is EPUB: Oryx opens a book like any other document and renders it in the Oryx themes. Editing markdown is a tempting feature, but not on the roadmap at this stage.
+<details>
+<Summary>
+<b>Quick Links:</b>
+</summary>
+
+- [Oryx Scope](#oryx-scope)
+- [Reading Books](#books-epub)
+- [Editing](#editing)
+- [Themes](#themes)
+- [PDF Export](#export-to-pdf)
+- [Installation](#install)
+- [Using Oryx](#using-oryx)
+- [Performance](#performance)
+
+</details>
+
+Oryx started as a personal project. I work with markdown files and did not find a (very) fast tool that could render them beautifully on the desktop without a browser or an Electron app. Exporting to PDF would have been a plus. That was the first version of the functional specs. Oryx has grown a lot since, and it stayed fast and beautiful.
 
 - **Instant**: A document is on screen in well under 100 ms from cold, even an 8 MB file.
 - **Light**: Memory stays flat as you scroll, whatever the file size.
@@ -24,7 +32,7 @@ Oryx started as a personal project. I work with a lot of markdown files and did 
 - **Self-contained**: One binary and a folder of themes. No browser engine, no runtime, no GPU requirement.
 - **Runs anywhere**: The same speed on a new laptop or an old machine with no graphics card.
 
-## What Oryx reads
+## Oryx Scope
 
 The complete recognized syntax, markdown and embedded HTML, is listed in [SYNTAX.md](SYNTAX.md). The [examples](examples/) folder is installed with Oryx and shows the syntax on real documents.
 
@@ -62,7 +70,7 @@ Oryx opens EPUB books and renders them as one continuous document, in the active
 
 Book text is justified: lines end at the same right edge, and the last line of each paragraph stays ragged, like print. `Ctrl+J` turns justification off and on. Markdown files can justify too; they start ragged, and each kind remembers its own choice.
 
-The sidebar's Outline tab shows the book's own table of contents, follows the reading position and jumps on a click. Links inside the book work, so a footnote reference jumps to its note and back. Unlike markdown files, which open at the top, ebooks reopen where reading stopped.
+The sidebar's Outline tab shows the book's own table of contents, follows the reading position and jumps on a click. Links inside the book work, so a footnote reference jumps to its note and back. Ebooks reopen where reading stopped, even after Oryx is closed; other files open at the top on a new start.
 
 DRM-protected books and fixed-layout books (usually comics and picture books) are not supported. The [examples](examples/) folder installed with Oryx includes *The Adventures of Sherlock Holmes* to try it on.
 
@@ -76,17 +84,23 @@ DRM-protected books and fixed-layout books (usually comics and picture books) ar
 - **Zoom**: `Ctrl+Plus` (in) and `Ctrl+Minus` (out).
 - **Display scale**: Oryx follows the display's scale, so text and controls render at the intended size on a scaled screen (a laptop at 200%, for example). An `interface scale` entry in the settings (`Ctrl+,`) adjusts the size around the detected value, from -50% to +100%, and is remembered.
 - **Touch**: On a touch screen, swiping scrolls the document, the sidebar and the dialogs. A swipe released while moving keeps the document scrolling with momentum. Tapping clicks, and a two-finger pinch zooms the document.
-- **Persistence**: Window geometry, the active theme, the sidebar and the last folder are all saved and restored at every start.
+- **Persistence**: Window geometry, the active theme, the sidebar and the last folder are all saved and restored at every start. While Oryx is open, switching between files keeps each file's place: a file left mid-edit comes back in the editor, at the same spot.
 
 ## Editing
 
-Press `Ctrl+E` and the page itself becomes editable, with a caret and the usual keys; `Escape` (or `Ctrl+E` again) returns to reading.
+Press `Ctrl+E` to enter edit mode, with a caret and the usual keys; `Escape` (or `Ctrl+E` again) returns to reading.
 
-Source code and plain text files can be edited. Markdown files cannot yet (editing a rendered page while it stays a page is the hard part, and it is being worked on), books cannot at all, and neither can a file whose text did not read cleanly, since Oryx could not write it back exactly as it was. A small notice in the corner says so when editing is not available.
+Source code and plain text files edit on the page itself. A markdown file shows its own source instead: the page is replaced by the markdown text, drawn in the theme's colors with the markers visible. `Escape` brings the view mode with the edits applied.
+
+During a session, you can switch between files and Oryx will remember your reading or editing position. 
+
+Books cannot be edited, and neither can a file whose text did not read cleanly, since Oryx could not write it back exactly as it was. A small notice in the corner will tell you when editing is not available.
 
 Editing works the way a text editor does: typing, selections, `Ctrl+X` and `Ctrl+V`, undo with `Ctrl+Z`, redo with `Ctrl+Shift+Z` or `Ctrl+Y`. While editing, `Ctrl+Left` / `Ctrl+Right` jump by word, `Ctrl+Home` / `Ctrl+End` jump to the ends of the file, and `Ctrl+Backspace` / `Ctrl+Delete` delete by word. Typing is instant even in very large files.
 
-`Ctrl+S` saves. Oryx is careful with the file: lines that were not touched are written back byte for byte, and every line keeps its own ending, so a file with Windows line endings stays that way. The window title shows a `*` while changes are unsaved. `Ctrl+Shift+S` saves under a new name, and `Ctrl+N` creates a new file: the save dialog opens first, then the empty page is ready to type into.
+`Ctrl+S` saves. Oryx is careful with the file: lines that were not touched are written back byte for byte, and every line keeps its own ending, so a file with Windows line endings stays that way. The window title shows a `*` while changes are unsaved. `Ctrl+Shift+S` saves under a new name.
+
+`Ctrl+N` creates a new file: the save dialog opens first, then the empty page is ready to type into. That is how Oryx knows the type of file you created to be able to apply colors.
 
 Closing the window, quitting or reloading with unsaved changes asks first: `Enter` saves, `D` discards, `Escape` keeps editing. If the file changes on disk while there are unsaved edits, Oryx shows a notice and leaves the edits alone.
 
@@ -114,12 +128,12 @@ Nine themes are original designs: `oryx-light` and its dark twin `oryx-dark`, `o
 
 `Ctrl+P` exports the document using the configured export settings. Markdown headings are converted to PDF outlines, and the fonts are embedded. Emoji render in the PDF as images. A book exports with each chapter starting on a new page, and its table of contents becomes the PDF outline.
 
-**Oryx tries its best so that**:
+**Oryx tries to avoid that**:
 
-- Page breaks don't happen through a line
-- Headings are not left alone at the foot of a page
-- Images are not cut
-- Table rows are not split between pages unless the row is taller than the page itself
+- Page breaks happen through a line
+- Headings are left alone at the foot of a page
+- Images are cut
+- Table rows are split between pages (unless the row is taller than the page itself)
 
 ## Install
 
@@ -228,11 +242,11 @@ The 8 MB markdown export writes a 9219-page file. While open, the 8 MB markdown 
 > [!NOTE]
 > Oryx is not a markdown-to-PDF converter. Its export reproduces the page you read, pixel for pixel: the theme, every shaped glyph, syntax colors for close to a hundred languages, images, links, the outline and the embedded fonts, at a millisecond or two per finished page whatever the document size. Raw conversion without any of that is a different, far faster job: a few milliseconds for a whole small file.
 
-## Limits
+## Limitations
 
-Oryx is built for everyday use, and some things are out of scope (for the moment):
+Oryx is built for everyday use, and has some limitations:
 
-- On a file several megabytes long, the layout below the first screens takes a moment to catch up. Syntax colors appear right away wherever you are reading, and a few lines can change color a moment later, once the full pass reaches them. An export waits for syntax highlighting to finish before it writes, so on the 8 MB file the wall time is roughly double the export column.
+- On a file several megabytes long, the layout below the first screens takes a moment to catch up. Syntax colors appear right away wherever you are reading, and a few lines can change color a moment later, once the full pass reaches them. An export waits for syntax highlighting to finish before it writes, so on the 8 MB file the wall time can be double the export column above.
 - The implemented HTML is a subset: what GitHub renders in a README, nothing more.
 - Remote images use the operating system's TLS stack, which on Linux means it needs the OpenSSL library (normally shipped with every distro). Without it, badges show placeholders but everything else works.
 - macOS compiles but is untested, and there is no packaged build as I don't have a Mac. The Windows release is compiled on my Linux machine.
