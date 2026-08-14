@@ -1346,7 +1346,13 @@ impl App {
                 self.restart_layout();
             }
         }
-        self.outline = OutlineTree::build(&self.document);
+        // The outline belongs to the rendered page. While a park
+        // stands, the document on screen is the source view, whose
+        // build would empty the panel; the held outline refreshes on
+        // save and on the crossing back.
+        if self.edit_park.is_none() {
+            self.outline = OutlineTree::build(&self.document);
+        }
         // The keystroke kills in-flight highlight work, so stale spans
         // never fold against shifted lines; the resumed re-run waits
         // for the typing to rest and needs the shifted seam table, so
