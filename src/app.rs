@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -79,6 +79,12 @@ const MOUSE_MUTE: Duration = Duration::from_millis(150);
 const ICON_64: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/icon_64.rgba"));
 
 pub fn run(path: Option<PathBuf>, theme_name: Option<String>) -> anyhow::Result<()> {
+    // One form of the path for the whole session. Everything keyed on
+    // it, the edit marks, the resume note, the disk identity, has to
+    // match what `open_file` stores for every later file, and that is
+    // the canonical form; a path as typed on the command line would
+    // key the first file differently from the same file reopened.
+    let path = path.map(|p| p.canonicalize().unwrap_or(p));
     let (document, pending, streamed, book, book_toc, lossy, opened_crlf) = match &path {
         Some(p) => {
             let opened = load::open(p, Some(Instant::now() + load::OPEN_BUDGET))?;
@@ -243,6 +249,8 @@ pub fn run(path: Option<PathBuf>, theme_name: Option<String>) -> anyhow::Result<
         confirm: None,
         help_stash: None,
         edit_park: None,
+        resume_edit: HashSet::new(),
+        pending_row: None,
         disk_seen: None,
         disk_check_at: Instant::now(),
         crlf: opened_crlf,
@@ -607,6 +615,13 @@ struct App {
     /// The rendered page held while its own source is edited. Only the
     /// kinds that render to something other than their bytes park one.
     edit_park: Option<Box<Parked>>,
+    /// Files left while they were being edited, which reopen in the
+    /// editor. Switching away is not a decision to stop editing;
+    /// Escape is, and it clears the entry.
+    resume_edit: HashSet<PathBuf>,
+    /// A row to seat at the top of the editor once the layout places
+    /// it, the source view's counterpart to `pending_offset`.
+    pending_row: Option<usize>,
     /// The open file's on-disk identity at last read or write, for the
     /// external-change check.
     disk_seen: Option<(std::time::SystemTime, u64)>,
@@ -902,6 +917,11 @@ impl App {
             };
             self.edit_park = Some(Box::new(parked));
             self.swapped_document(None, None);
+            // The reading scroll means nothing in the source view: the
+            // two documents share no coordinate but the bytes. Seat the
+            // editor on the row the caret landed on, which is the row
+            // the page was resting at.
+            self.seat_editor_on(offset);
         }
         // The caret owns the keys; a sidebar holding them would strand
         // the arrows. Same funnel as the Right key's explicit handoff.
@@ -922,6 +942,7 @@ impl App {
         self.pass = pass;
         self.band = None;
         self.pending_band_for = None;
+        self.pending_row = None;
         self.selection = None;
         self.sel_anchor = None;
         self.close_search();
@@ -934,20 +955,30 @@ impl App {
     /// table answers by line index, which is what a source view is
     /// indexed by.
     fn seat_editor_on(&mut self, offset: usize) {
-        let exact = self
-            .layout
-            .as_ref()
-            .and_then(|lay| caret::row_top(lay, &self.document, offset));
-        if let Some(y) = exact {
-            self.scroll_to(y);
-            return;
+        match self.editor_row_y(offset) {
+            Some(y) => {
+                self.pending_row = None;
+                self.scroll_to(y);
+            }
+            None => self.pending_row = Some(offset),
         }
-        let line = self.document.source[..offset.min(self.document.source.len())]
-            .matches('\n')
-            .count();
-        if let Some(y) = self.layout.as_ref().and_then(|lay| lay.approx_top(0, line)) {
-            self.scroll_to(y);
+    }
+
+    /// The y of the row an offset stands on in the editor. Placed runs
+    /// answer exactly, which covers a caret near the view. Beyond the
+    /// layout window there are no runs to read, and a jump across a
+    /// whole file is exactly that case, so the block table answers by
+    /// line index, which is how a source view is indexed.
+    fn editor_row_y(&self, offset: usize) -> Option<f32> {
+        let lay = self.layout.as_ref()?;
+        if let Some(y) = caret::row_top(lay, &self.document, offset) {
+            return Some(y);
         }
+        let block = self.document.block_at_offset(offset)?;
+        let start = self.document.blocks.get(block)?.range.start;
+        let end = offset.min(self.document.source.len()).max(start);
+        let line = self.document.source[start..end].matches('\n').count();
+        lay.approx_top(block, line)
     }
 
     /// Rebuilds the page held behind the editor from the buffer, which
@@ -984,6 +1015,9 @@ impl App {
         }
         self.mode = edit::Mode::Read;
         self.caret = None;
+        if let Some(path) = self.path.as_ref() {
+            self.resume_edit.remove(path);
+        }
         if let Some(parked) = self.edit_park.take() {
             let head = self.undo.as_ref().map_or(0, Undo::head);
             let same_look = self.cfg.zoom == parked.zoom && self.config.theme == parked.theme;
@@ -2913,6 +2947,13 @@ impl App {
         if self.mode == edit::Mode::Edit {
             self.edit_park = None;
             self.leave_edit();
+            // Switching files is not a decision to stop editing, so the
+            // outgoing file is noted and comes back the way it was left.
+            // Escape is that decision, and `leave_edit` clears the note,
+            // which is why this stands after it.
+            if let Some(path) = self.path.clone() {
+                self.resume_edit.insert(path);
+            }
         }
         self.ledger = None;
         self.undo = None;
@@ -2984,6 +3025,7 @@ impl App {
         // reader at the end of a file they just opened.
         self.pending_scroll = None;
         self.pending_anchor = None;
+        self.pending_row = None;
         self.bottom_hold.clear();
         // A remembered book resumes where reading stopped, once placed.
         self.pending_offset = self
@@ -3005,6 +3047,12 @@ impl App {
                 Some(&path),
                 false,
             ));
+        }
+        // A file left mid-edit reopens in the editor at the caret it
+        // was left on. The layout is fresh, so the seat waits for the
+        // row to be placed.
+        if self.resume_edit.remove(&path) && opened {
+            self.enter_edit();
         }
         self.request_redraw();
     }
@@ -3791,6 +3839,7 @@ impl App {
         if self.pending_scroll.is_none()
             && self.pending_anchor.is_none()
             && self.pending_offset.is_none()
+            && self.pending_row.is_none()
         {
             return;
         }
@@ -3800,6 +3849,20 @@ impl App {
             if scroll::reached(target, height, vh) {
                 self.pending_scroll = None;
                 self.scroll_y = target;
+            }
+        }
+        // A row asked for before the layout reached it: the same
+        // pending discipline as the offset target below, resolved
+        // against rows rather than blocks, since the editor is indexed
+        // by lines and a source view is one block.
+        if let Some(offset) = self.pending_row {
+            match self.editor_row_y(offset) {
+                Some(y) if scroll::reached(y, height, vh) || !self.layout_pending() => {
+                    self.pending_row = None;
+                    self.scroll_to(y);
+                }
+                None if self.layout.is_some() && !self.layout_pending() => self.pending_row = None,
+                _ => {}
             }
         }
         if let Some(offset) = self.pending_offset {
