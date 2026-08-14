@@ -240,6 +240,7 @@ pub fn run(path: Option<PathBuf>, theme_name: Option<String>) -> anyhow::Result<
         caret: None,
         lossy,
         edit_marks: HashMap::new(),
+        read_marks: HashMap::new(),
         ledger: None,
         undo: None,
         rehighlight_at: None,
@@ -588,6 +589,10 @@ struct App {
     /// Caret offsets remembered per file for this session, feeding the
     /// landing precedence on re-entry.
     edit_marks: HashMap<PathBuf, usize>,
+    /// The reading position a file switch left behind, the top block's
+    /// source offset by canonical path. In memory only: a revisit in
+    /// the same session resumes there, a new session starts at the top.
+    read_marks: HashMap<PathBuf, usize>,
     /// The splice ledger, from the first edit-mode entry until the file
     /// closes or saves; unsaved edits survive mode flips inside it.
     ledger: Option<Ledger>,
@@ -2810,15 +2815,27 @@ impl App {
         }
     }
 
-    /// Files the book's reading position: the block at the viewport
-    /// top, by its source offset. Files are not remembered.
+    /// Files the reading position the screen is leaving: a book's into
+    /// the persisted store, a plain file's into the session's map. A
+    /// file resting in edit mode is skipped, since it returns through
+    /// its caret rather than through a reading position.
     fn remember_position(&mut self) {
-        let Some(key) = self.document.book_id.clone() else {
+        let Some(offset) = self.top_offset() else {
             return;
         };
-        let Some(lay) = self.layout.as_ref() else {
-            return;
-        };
+        if let Some(key) = self.document.book_id.clone() {
+            self.positions.remember(&key, offset);
+            self.positions.save();
+        } else if self.mode == edit::Mode::Read {
+            if let Some(path) = self.path.clone() {
+                self.read_marks.insert(path, offset);
+            }
+        }
+    }
+
+    /// The source offset of the block at the viewport top.
+    fn top_offset(&self) -> Option<usize> {
+        let lay = self.layout.as_ref()?;
         let mut offset = 0usize;
         for (index, block) in self.document.blocks.iter().enumerate() {
             match lay.approx_top(index, 0) {
@@ -2826,8 +2843,7 @@ impl App {
                 _ => break,
             }
         }
-        self.positions.remember(&key, offset);
-        self.positions.save();
+        Some(offset)
     }
 
     /// Runs a sidebar action and persists the tree's root when it moved.
@@ -3027,12 +3043,22 @@ impl App {
         self.pending_anchor = None;
         self.pending_row = None;
         self.bottom_hold.clear();
-        // A remembered book resumes where reading stopped, once placed.
+        // A remembered file resumes where reading stopped, once placed:
+        // a book from the persisted store, a plain file from the
+        // session's map. A file about to resume editing returns through
+        // its caret instead, so no offset target competes with the seat.
         self.pending_offset = self
             .document
             .book_id
             .as_deref()
-            .and_then(|key| self.positions.lookup(key));
+            .and_then(|key| self.positions.lookup(key))
+            .or_else(|| {
+                if self.resume_edit.contains(&path) {
+                    None
+                } else {
+                    self.read_marks.get(&path).copied()
+                }
+            });
         if let Some(side) = self.sidebar.as_mut() {
             if reroot && side.root() != dir {
                 let tab = side.tab();
@@ -3081,6 +3107,9 @@ impl App {
         };
         let scroll = self.scroll_y;
         self.open_file(&path, false);
+        // The reload keeps its exact scroll; the revisit target would
+        // land it on the block's top instead.
+        self.pending_offset = None;
         self.scroll_y = scroll;
     }
 
