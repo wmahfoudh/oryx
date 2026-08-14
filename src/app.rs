@@ -3050,9 +3050,17 @@ impl App {
         }
         // A file left mid-edit reopens in the editor at the caret it
         // was left on. The layout is fresh, so the seat waits for the
-        // row to be placed.
+        // row to be placed. The swap kinds seat inside `enter_edit`;
+        // the in-place kinds keep the scroll, which is right for a
+        // same-file crossing and wrong here, the reopened file having
+        // arrived with the scroll at zero, so they get the same seat.
         if self.resume_edit.remove(&path) && opened {
             self.enter_edit();
+            if self.edit_park.is_none() {
+                if let Some(offset) = self.caret.map(|c| c.offset) {
+                    self.seat_editor_on(offset);
+                }
+            }
         }
         self.request_redraw();
     }
