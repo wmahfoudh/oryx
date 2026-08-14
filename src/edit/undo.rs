@@ -168,6 +168,13 @@ impl Undo {
         self.save != Some(self.head)
     }
 
+    /// Where the stack stands. The stack is linear, so two moments
+    /// sharing a head share their bytes, whatever path of typing,
+    /// undoing and redoing ran between them.
+    pub fn head(&self) -> usize {
+        self.head
+    }
+
     /// Units on the stack, applied or not; the coalescing assertions.
     pub fn unit_count(&self) -> usize {
         self.units.len()

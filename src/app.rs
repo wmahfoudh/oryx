@@ -242,6 +242,7 @@ pub fn run(path: Option<PathBuf>, theme_name: Option<String>) -> anyhow::Result<
         bottom_hold: scroll::BottomHold::default(),
         confirm: None,
         help_stash: None,
+        edit_park: None,
         disk_seen: None,
         disk_check_at: Instant::now(),
         crlf: opened_crlf,
@@ -336,6 +337,24 @@ fn draw_caret(
 /// A book's `dc:title` wins over the file name; files have no title.
 /// A dirty buffer carries the leading asterisk.
 /// Everything the help page displaces, moved back verbatim on return.
+/// The rendered page set aside while its source is edited. A return
+/// that changed no byte puts it back whole, so looking at the source
+/// and coming out costs nothing at any file size.
+struct Parked {
+    document: Document,
+    layout: Option<LayoutDoc>,
+    pass: Option<LayoutPass>,
+    scroll_y: f32,
+    layout_width: f32,
+    /// The undo head at the crossing; an equal head on the way out
+    /// means equal bytes, so the parked page is still the truth.
+    head: usize,
+    /// The look the parked layout was built under. A theme or zoom
+    /// change while editing drops the layout and keeps the model.
+    zoom: f32,
+    theme: String,
+}
+
 struct Stash {
     path: Option<PathBuf>,
     document: Document,
@@ -585,6 +604,9 @@ struct App {
     /// The document stashed whole while the help page shows, edits and
     /// layout included, so F1 out and back never touches the disk.
     help_stash: Option<Box<Stash>>,
+    /// The rendered page held while its own source is edited. Only the
+    /// kinds that render to something other than their bytes park one.
+    edit_park: Option<Box<Parked>>,
     /// The open file's on-disk identity at last read or write, for the
     /// external-change check.
     disk_seen: Option<(std::time::SystemTime, u64)>,
@@ -827,9 +849,18 @@ impl App {
         }
     }
 
-    /// Entry changes nothing on the page: the caret lands by the
-    /// precedence order and appears, and that is all.
+    /// Opens the editor on the file's own bytes. A code or text file
+    /// already shows them, so nothing swaps and the caret simply
+    /// appears; markdown parks its rendered page and puts its source
+    /// on screen in its place.
     fn enter_edit(&mut self) {
+        let Some(kind) = self.path.as_deref().map(load::detect) else {
+            return;
+        };
+        // A page parked mid-stream would be a prefix, and the worker's
+        // delivery would swap it under the return. Landing it first
+        // costs nothing on the kinds that never stream.
+        self.finish_parse();
         let view_h = self.viewport_h();
         let remembered = self
             .path
@@ -856,6 +887,22 @@ impl App {
             self.ledger = Some(Ledger::new(self.document.source.clone(), self.crlf.clone()));
             self.undo = Some(Undo::new());
         }
+        let text = Arc::clone(&self.document.source);
+        if let Some(source) = edit::source_document(kind, &text) {
+            let head = self.undo.as_ref().map_or(0, Undo::head);
+            let parked = Parked {
+                document: std::mem::replace(&mut self.document, source),
+                layout: self.layout.take(),
+                pass: self.pass.take(),
+                scroll_y: self.scroll_y,
+                layout_width: self.layout_width,
+                head,
+                zoom: self.cfg.zoom,
+                theme: self.config.theme.clone(),
+            };
+            self.edit_park = Some(Box::new(parked));
+            self.swapped_document(None, None);
+        }
         // The caret owns the keys; a sidebar holding them would strand
         // the arrows. Same funnel as the Right key's explicit handoff.
         self.move_ownership(PaneAct::Right);
@@ -863,14 +910,54 @@ impl App {
         self.request_redraw();
     }
 
+    /// The state that belongs to a document rather than to the file,
+    /// reset after either crossing swaps one for the other: the layout
+    /// and its pass, the painted band, the outline, a selection that
+    /// anchors on the old model, and the highlight worker. A restored
+    /// page brings its own layout back; a fresh one passes None and the
+    /// next frame places it.
+    fn swapped_document(&mut self, layout: Option<LayoutDoc>, pass: Option<LayoutPass>) {
+        self.layout = layout;
+        self.pass = pass;
+        self.band = None;
+        self.pending_band_for = None;
+        self.selection = None;
+        self.sel_anchor = None;
+        self.close_search();
+        self.outline = OutlineTree::build(&self.document);
+        self.start_highlight(load::pending(&self.document));
+    }
+
     /// Back to reading; the caret offset is remembered for this file so
-    /// re-entry lands where editing stopped.
+    /// re-entry lands where editing stopped. A parked page returns
+    /// whole when no byte changed, and is rebuilt from the buffer when
+    /// one did, so unsaved edits show on the page and not just on disk.
     fn leave_edit(&mut self) {
         if let (Some(path), Some(c)) = (self.path.clone(), self.caret) {
             self.edit_marks.insert(path, c.offset);
         }
         self.mode = edit::Mode::Read;
         self.caret = None;
+        if let Some(parked) = self.edit_park.take() {
+            let head = self.undo.as_ref().map_or(0, Undo::head);
+            let same_look = self.cfg.zoom == parked.zoom && self.config.theme == parked.theme;
+            if head == parked.head {
+                self.document = parked.document;
+                self.layout_width = parked.layout_width;
+                self.swapped_document(
+                    parked.layout.filter(|_| same_look),
+                    parked.pass.filter(|_| same_look),
+                );
+            } else {
+                let kind = self.path.as_deref().map(load::detect);
+                let text = Arc::clone(&self.document.source);
+                if let Some(kind) = kind {
+                    self.document = edit::rendered_document(kind, &text);
+                }
+                self.swapped_document(None, None);
+            }
+            self.scroll_y = parked.scroll_y;
+        }
         self.request_redraw();
     }
 
@@ -2742,8 +2829,11 @@ impl App {
         self.export_warning = None;
         self.remember_position();
         // The mark is stored against the outgoing path, which `leave_edit`
-        // reads before the new one lands below.
+        // reads before the new one lands below. The parked page goes
+        // first: rebuilding a page this call is about to replace would
+        // cost a full parse of the outgoing file for nothing.
         if self.mode == edit::Mode::Edit {
+            self.edit_park = None;
             self.leave_edit();
         }
         self.ledger = None;

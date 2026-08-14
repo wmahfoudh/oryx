@@ -1,9 +1,10 @@
 //! Edit mode: the door in and out, and the Escape ladder.
 //!
-//! The rendered page is the only editing surface. Reading is the app as
-//! it stands; editing adds a caret and hands it every bare key. The
-//! transitions are pure functions so the tables are testable on their
-//! own; `App` owns the wiring.
+//! Reading and editing are two surfaces and one is on screen at a time.
+//! Reading draws the rendered page; editing draws the file's own bytes
+//! as source lines and hands the caret every bare key. The transitions
+//! are pure functions so the tables are testable on their own; `App`
+//! owns the wiring.
 
 pub mod caret;
 pub mod splice;
@@ -21,11 +22,10 @@ pub enum Mode {
     Edit,
 }
 
-/// Why the door stays shut. Markdown waits for its editing milestone; a
-/// book and a lossy read can never promise byte fidelity back to disk.
+/// Why the door stays shut. A book's bytes live inside a zip and a
+/// lossy read can never promise byte fidelity back to disk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refusal {
-    Markdown,
     Book,
     Lossy,
 }
@@ -34,7 +34,6 @@ impl Refusal {
     /// The corner-notice line shown for the refusal.
     pub fn message(self) -> &'static str {
         match self {
-            Refusal::Markdown => "Markdown files cannot be edited yet",
             Refusal::Book => "Books cannot be edited",
             Refusal::Lossy => "This file did not decode cleanly and cannot be edited",
         }
@@ -51,9 +50,34 @@ pub fn toggle(mode: Mode, kind: FileKind, lossy: bool) -> Result<Mode, Refusal> 
         // Undisplayable never becomes a document; the arm keeps the
         // match total.
         FileKind::Epub | FileKind::Undisplayable => Err(Refusal::Book),
-        FileKind::Markdown => Err(Refusal::Markdown),
         _ if lossy => Err(Refusal::Lossy),
-        FileKind::Code(_) | FileKind::Text | FileKind::Unknown => Ok(Mode::Edit),
+        FileKind::Markdown | FileKind::Code(_) | FileKind::Text | FileKind::Unknown => {
+            Ok(Mode::Edit)
+        }
+    }
+}
+
+/// The document the editor works on, or None when the kind already
+/// shows its own bytes. A code or text file reads and edits the same
+/// characters, so nothing is swapped; markdown renders to something
+/// other than its source, so editing it means opening the file's own
+/// lines, colored by the markdown grammar.
+pub fn source_document(kind: FileKind, text: &str) -> Option<Document> {
+    match kind {
+        FileKind::Markdown => Some(load::code_document(Some("md"), text)),
+        _ => None,
+    }
+}
+
+/// The document reading shows for these bytes: the inverse of
+/// `source_document`, and the same table `load::open` uses once the
+/// bytes are in hand.
+pub fn rendered_document(kind: FileKind, text: &str) -> Document {
+    match kind {
+        FileKind::Markdown => crate::doc::markdown::parse(text),
+        FileKind::Code(token) => load::code_document(Some(token), text),
+        FileKind::Text => load::text_document(text),
+        _ => load::code_document(None, text),
     }
 }
 
@@ -76,6 +100,10 @@ pub fn reparse(
 ) -> Document {
     let mut new = match kind {
         FileKind::Code(token) => load::code_document(Some(token), current),
+        // Editing a markdown file edits its source, so a keystroke
+        // re-derives the same source view the door opened, colors and
+        // all. `source_document` names that shape.
+        FileKind::Markdown => load::code_document(Some("md"), current),
         FileKind::Unknown => load::code_document(None, current),
         _ => load::text_document(current),
     };
@@ -350,11 +378,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_door_opens_on_text_code_and_unknown_files() {
+    fn the_door_opens_on_every_editable_kind() {
         assert_eq!(toggle(Mode::Read, FileKind::Text, false), Ok(Mode::Edit));
         assert_eq!(
             toggle(Mode::Read, FileKind::Code("rust"), false),
             Ok(Mode::Edit)
+        );
+        assert_eq!(
+            toggle(Mode::Read, FileKind::Markdown, false),
+            Ok(Mode::Edit),
+            "markdown edits as its own source"
         );
         assert_eq!(
             toggle(Mode::Read, FileKind::Unknown, false),
@@ -364,11 +397,7 @@ mod tests {
     }
 
     #[test]
-    fn the_door_refuses_markdown_books_and_lossy_reads() {
-        assert_eq!(
-            toggle(Mode::Read, FileKind::Markdown, false),
-            Err(Refusal::Markdown)
-        );
+    fn the_door_refuses_books_and_lossy_reads() {
         assert_eq!(
             toggle(Mode::Read, FileKind::Epub, false),
             Err(Refusal::Book)
@@ -378,6 +407,74 @@ mod tests {
             Err(Refusal::Lossy),
             "a lossy read refuses whatever the kind"
         );
+        assert_eq!(
+            toggle(Mode::Read, FileKind::Markdown, true),
+            Err(Refusal::Lossy),
+            "a lossy markdown refuses as lossy, not as markdown"
+        );
+    }
+
+    #[test]
+    fn markdown_edits_the_bytes_it_was_parsed_from() {
+        let text = "# Title\n\nA paragraph with **bold** in it.\n\n- one\n- two\n";
+        let doc = source_document(FileKind::Markdown, text).expect("markdown swaps to its source");
+        assert!(doc.code_file, "the source view is line-oriented like code");
+        assert_eq!(&*doc.source, text, "the editor sees the file's own bytes");
+        assert_eq!(doc.blocks.len(), 1, "one block, the whole file");
+        let BlockKind::CodeBlock {
+            lines, language, ..
+        } = &doc.blocks[0].kind
+        else {
+            panic!("the source view is one code block");
+        };
+        assert_eq!(
+            language.as_deref(),
+            Some("md"),
+            "the markdown grammar colors it"
+        );
+        assert_eq!(lines.len(), 6, "every source line is a row");
+    }
+
+    #[test]
+    fn a_keystroke_keeps_the_markdown_source_view() {
+        let before = source_document(FileKind::Markdown, "# Title\n\nBody.\n").unwrap();
+        let after = reparse(
+            FileKind::Markdown,
+            "# Title!\n\nBody.\n",
+            &before,
+            0..1,
+            0..1,
+        );
+        assert!(
+            after.code_file,
+            "a keystroke re-derives the source view, not a plain text file"
+        );
+        let BlockKind::CodeBlock { language, .. } = &after.blocks[0].kind else {
+            panic!("the source view is one code block");
+        };
+        assert_eq!(
+            language.as_deref(),
+            Some("md"),
+            "the markdown grammar survives the keystroke"
+        );
+    }
+
+    #[test]
+    fn a_file_already_showing_its_source_needs_no_swap() {
+        for kind in [FileKind::Code("rust"), FileKind::Text, FileKind::Unknown] {
+            assert!(
+                source_document(kind, "let a = 1;\n").is_none(),
+                "{kind:?} is already its own source"
+            );
+        }
+    }
+
+    #[test]
+    fn leaving_markdown_renders_the_edited_bytes() {
+        let doc = rendered_document(FileKind::Markdown, "# Title\n\nA paragraph.\n");
+        assert!(!doc.code_file, "the page returns rendered, not as source");
+        assert_eq!(doc.blocks.len(), 2, "a heading and a paragraph");
+        assert!(matches!(doc.blocks[0].kind, BlockKind::Heading { .. }));
     }
 
     #[test]
@@ -392,17 +489,11 @@ mod tests {
 
     #[test]
     fn refusals_carry_distinct_messages() {
-        let texts = [
-            Refusal::Markdown.message(),
-            Refusal::Book.message(),
-            Refusal::Lossy.message(),
-        ];
+        let texts = [Refusal::Book.message(), Refusal::Lossy.message()];
         for text in texts {
             assert!(!text.is_empty());
         }
         assert_ne!(texts[0], texts[1]);
-        assert_ne!(texts[1], texts[2]);
-        assert_ne!(texts[0], texts[2]);
     }
 
     use crate::style::highlight::{self, LineSpans};
