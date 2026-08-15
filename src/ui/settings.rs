@@ -231,6 +231,7 @@ impl Overlay for Settings {
 
         overlay::panel_shadow(painter, px, py, panel_w, panel_h, RADIUS);
         painter.fill(px, py, panel_w, panel_h, RADIUS, ui.overlay_bg);
+        overlay::panel_header(painter, px, py, panel_w, HEADER_H, RADIUS, theme);
 
         match &self.pick {
             Some(pick) => {
@@ -253,7 +254,7 @@ impl Overlay for Settings {
                             panel_w - PAD,
                             LIST_ROW_H - 2.0,
                             5.0,
-                            ui.overlay_highlight,
+                            overlay::row_highlight(theme),
                         );
                     }
                     // Each family renders in itself, as its own preview.
@@ -276,6 +277,7 @@ impl Overlay for Settings {
                     RADIUS,
                     ui.overlay_bg,
                 );
+                overlay::panel_header(painter, px, py, panel_w, HEADER_H, RADIUS, theme);
                 let title = ROWS[pick.row];
                 let title_w = painter.measure(title, BODY_FAMILY, 17.0, 700);
                 painter.text(
@@ -318,7 +320,7 @@ impl Overlay for Settings {
                             panel_w - PAD,
                             ROW_H - 6.0,
                             6.0,
-                            ui.overlay_highlight,
+                            overlay::row_highlight(theme),
                         );
                     }
                     painter.text(

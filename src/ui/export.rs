@@ -399,6 +399,7 @@ impl Overlay for ExportDialog {
         self.geometry = (px, py, DIALOG_W, panel_h);
         overlay::panel_shadow(painter, px, py, DIALOG_W, panel_h, RADIUS);
         painter.fill(px, py, DIALOG_W, panel_h, RADIUS, ui.overlay_bg);
+        overlay::panel_header(painter, px, py, DIALOG_W, DIALOG_HEADER_H, RADIUS, theme);
 
         let title = "Export to PDF";
         let title_w = painter.measure(title, BODY_FAMILY, TITLE_SIZE, 700);
@@ -421,7 +422,7 @@ impl Overlay for ExportDialog {
                     DIALOG_W - DIALOG_PAD,
                     DIALOG_ROW_H,
                     4.0,
-                    ui.overlay_highlight,
+                    overlay::row_highlight(theme),
                 );
             }
             painter.text(
@@ -486,7 +487,7 @@ impl Overlay for ExportDialog {
                     DIALOG_W - 2.0 * DIALOG_PAD - 8.0,
                     LIST_ROW_H,
                     4.0,
-                    ui.overlay_highlight,
+                    overlay::row_highlight(theme),
                 );
             }
             let (name, swatches) = match pick.row {
@@ -561,7 +562,7 @@ impl Overlay for ExportDialog {
     fn click(&mut self, x: f32, y: f32) -> OverlayResult {
         let (px, py, w, h) = self.geometry;
         if !inside((px, py, w, h), x, y) {
-            return OverlayResult::Open;
+            return OverlayResult::Close;
         }
         if y < py + DIALOG_HEADER_H {
             self.drag.press(x, y, px, py);
@@ -748,6 +749,22 @@ mod tests {
         assert_eq!(d.settings().page_numbers, before, "and left toggles back");
         press(&mut d, NamedKey::Space);
         assert_eq!(d.settings().page_numbers, !before, "space still works");
+    }
+
+    // Every panel closes on a click outside it; the export dialog had
+    // drifted into staying open, field report 15/08/2026.
+    #[test]
+    fn a_click_outside_closes_the_dialog() {
+        let mut d = dialog();
+        d.geometry = (100.0, 100.0, DIALOG_W, 300.0);
+        assert!(
+            matches!(d.click(20.0, 20.0), OverlayResult::Close),
+            "outside the panel, the click closes"
+        );
+        assert!(
+            matches!(d.click(150.0, 200.0), OverlayResult::Open),
+            "inside, it acts and stays"
+        );
     }
 
     #[test]

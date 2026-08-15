@@ -97,6 +97,29 @@ impl PanelDrag {
     }
 }
 
+/// The header band a panel drags by, drawn over the panel fill: the
+/// theme's highlight role with a hairline divider in its table border
+/// role under it, so the band reads as chrome even beside a selected
+/// first row in a theme where highlight and selection share a color.
+/// Top corners follow the panel radius, the bottom sits square where
+/// the body begins; shipped highlights are opaque, so the squaring
+/// fill may overlap the rounded one. The roles are chosen here, one
+/// place, so the panels cannot drift apart.
+pub fn panel_header(
+    painter: &mut Painter,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    radius: f32,
+    theme: &Theme,
+) {
+    let color = theme.ui.overlay_highlight;
+    painter.fill(x, y, w, h, radius, color);
+    painter.fill(x, y + h - radius, w, radius, 0.0, color);
+    painter.fill(x, y + h - 1.0, w, 1.0, 0.0, theme.blocks.table_border);
+}
+
 /// Soft shadow lifting a panel off the document: three fills growing
 /// outward, drawn before the panel's own fill, following its corner
 /// radius. The confirm dialog and the search bar keep their own
@@ -134,6 +157,26 @@ pub fn scroll_into_view(index: usize, row_h: f32, scroll: f32, list_h: f32) -> f
     }
 }
 
+/// The fill a selected row wears inside a panel: the theme's selection
+/// role, softened halfway toward the panel surface when the theme
+/// gives selection and highlight one color, so a selected first row
+/// never merges with the header band. One standing rule instead of a
+/// per-theme edit.
+pub fn row_highlight(theme: &Theme) -> crate::style::theme::Rgba {
+    let sel = theme.ui.selection_bg;
+    if sel != theme.ui.overlay_highlight {
+        return sel;
+    }
+    let bg = theme.ui.overlay_bg;
+    let mix = |a: u8, b: u8| ((a as u16 + b as u16) / 2) as u8;
+    crate::style::theme::Rgba {
+        r: mix(sel.r, bg.r),
+        g: mix(sel.g, bg.g),
+        b: mix(sel.b, bg.b),
+        a: mix(sel.a, bg.a),
+    }
+}
+
 pub trait Overlay {
     /// Paints the overlay; geometry may be cached for hit testing.
     fn draw(&mut self, painter: &mut Painter, theme: &Theme);
@@ -149,5 +192,32 @@ pub trait Overlay {
     /// Mouse wheel, positive scrolling down.
     fn scroll(&mut self, _lines: f32) -> OverlayResult {
         OverlayResult::Open
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Distinct roles pass through; colliding roles soften toward the
+    // panel surface so the row never merges with the header band.
+    #[test]
+    fn a_selected_row_never_wears_the_headers_color() {
+        let mut theme = Theme::default_dark();
+        theme.ui.selection_bg = theme.ui.overlay_highlight;
+        let row = row_highlight(&theme);
+        assert_ne!(row, theme.ui.overlay_highlight, "the collision softens");
+        let mut apart = Theme::default_dark();
+        apart.ui.selection_bg = crate::style::theme::Rgba {
+            r: 1,
+            g: 2,
+            b: 3,
+            a: 255,
+        };
+        assert_eq!(
+            row_highlight(&apart),
+            apart.ui.selection_bg,
+            "distinct roles pass through"
+        );
     }
 }

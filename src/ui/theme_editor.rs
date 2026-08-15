@@ -382,7 +382,7 @@ impl Overlay for ThemeEditor {
                             list_w + PAD,
                             ROW_H - 2.0,
                             5.0,
-                            ui.overlay_highlight,
+                            overlay::row_highlight(app_theme),
                         );
                     }
                     painter.text(
@@ -420,6 +420,7 @@ impl Overlay for ThemeEditor {
 
         // Masks over list overflow, then header and footer content.
         painter.fill(px, py, panel_w, list_top - py, 8.0, ui.overlay_bg);
+        overlay::panel_header(painter, px, py, panel_w, HEADER_H, 8.0, app_theme);
         painter.fill(
             px,
             list_bottom,

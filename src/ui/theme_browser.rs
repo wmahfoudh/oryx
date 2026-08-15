@@ -346,9 +346,9 @@ impl Overlay for ThemeBrowser {
                     panel_w - PAD,
                     ROW_H - 4.0,
                     6.0,
-                    theme.ui.overlay_highlight,
+                    theme.ui.selection_bg,
                 );
-                theme.ui.overlay_highlight
+                theme.ui.selection_bg
             } else {
                 theme.ui.overlay_bg
             };
@@ -501,6 +501,7 @@ impl Overlay for ThemeBrowser {
             RADIUS,
             theme.ui.overlay_bg,
         );
+        overlay::panel_header(painter, px, py, panel_w, HEADER_H, RADIUS, theme);
 
         let title = "Themes";
         let title_w = painter.measure(title, BODY_FAMILY, 17.0, 700);
