@@ -436,6 +436,36 @@ mod tests {
         assert_eq!(lines.len(), 6, "every source line is a row");
     }
 
+    // The rendered page's checkbox click as the stack sees it: one
+    // structural unit with the caret pair at the marker, healed whole
+    // by one undo.
+    #[test]
+    fn the_checkbox_flip_round_trips_through_the_stack() {
+        use crate::edit::splice::Ledger;
+        use crate::edit::undo::{Kind, Undo};
+        let text = "- [ ] task\n";
+        let mut doc = rendered_document(FileKind::Markdown, text);
+        let mut ledger = Ledger::new(doc.source.clone(), Vec::new());
+        let mut undo = Undo::new();
+        let (range, t) = doc.flip_task(0).expect("a task flips");
+        ledger.edit(range.clone(), t);
+        undo.record(
+            range.clone(),
+            t,
+            " ",
+            (range.start, range.start),
+            Kind::Structural,
+            std::time::Instant::now(),
+        );
+        assert_eq!(ledger.current(), "- [x] task\n");
+        assert!(undo.is_dirty(), "the flip raises the asterisk");
+        let (splice, caret) = undo.undo().expect("one unit stands");
+        assert_eq!(caret, range.start, "the caret pair stands at the marker");
+        ledger.edit(splice.range.clone(), &splice.text);
+        assert_eq!(ledger.current(), text, "one undo heals the flip");
+        assert!(!ledger.is_dirty(), "the ledger is back at its baseline");
+    }
+
     #[test]
     fn a_keystroke_keeps_the_markdown_source_view() {
         let before = source_document(FileKind::Markdown, "# Title\n\nBody.\n").unwrap();

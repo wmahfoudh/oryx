@@ -195,6 +195,22 @@ pub struct LayoutDoc {
     table: BlockTable,
     /// Materialized-window bookkeeping while retention is bounded.
     window: Option<WindowState>,
+    /// The checkbox square every placed task item draws, keyed by
+    /// block, the click's hit targets. Deliberately outside the
+    /// window's eviction: positions are exact wherever the window
+    /// sits, so a recorded box stays valid until the layout itself is
+    /// dropped; re-materialization re-pushes and replaces by key.
+    checkboxes: Vec<TaskBox>,
+}
+
+/// One drawn checkbox: its square in document coordinates and the
+/// model block it flips.
+#[derive(Debug, Clone, Copy)]
+pub struct TaskBox {
+    pub x: f32,
+    pub y: f32,
+    pub side: f32,
+    pub block: u32,
 }
 
 /// Recorded placement of one order position: where the block sits and
@@ -466,7 +482,49 @@ impl LayoutDoc {
                 line.y0 += top;
                 line
             }));
+        for mut tb in scratch.checkboxes.drain(..) {
+            tb.y += top;
+            self.push_checkbox(tb);
+        }
         scratch.height = 0.0;
+    }
+
+    /// Records a task item's checkbox square, replacing the block's
+    /// earlier record when re-materialization shapes it again.
+    fn push_checkbox(&mut self, tb: TaskBox) {
+        match self.checkboxes.iter_mut().find(|c| c.block == tb.block) {
+            Some(slot) => *slot = tb,
+            None => self.checkboxes.push(tb),
+        }
+    }
+
+    /// The task block whose checkbox square holds the point, a small
+    /// halo included so the square is easy to hit.
+    pub fn checkbox_at(&self, x: f32, y: f32) -> Option<usize> {
+        let pad = 2.0;
+        self.checkboxes
+            .iter()
+            .find(|c| {
+                x >= c.x - pad
+                    && x <= c.x + c.side + pad
+                    && y >= c.y - pad
+                    && y <= c.y + c.side + pad
+            })
+            .map(|c| c.block as usize)
+    }
+
+    /// Drops the materialized window so the next slide refills the
+    /// band from the model at its recorded positions: the cost of a
+    /// far scroll jump, paid deliberately when the model changed
+    /// without its geometry moving, which is the checkbox flip. False
+    /// when the layout is not windowed; the caller restarts instead.
+    pub fn rematerialize(&mut self) -> bool {
+        let Some(window) = self.window.as_ref() else {
+            return false;
+        };
+        let start = window.start;
+        self.window_clear(start);
+        true
     }
 }
 
@@ -2159,6 +2217,9 @@ impl LayoutDoc {
             .splice(0..0, assembly.doc.table_rows.drain(..));
         self.code_lines
             .splice(0..0, assembly.doc.code_lines.drain(..));
+        for tb in assembly.doc.checkboxes.drain(..) {
+            self.push_checkbox(tb);
+        }
         self.index = YIndex::default();
     }
 
@@ -2206,6 +2267,9 @@ impl LayoutDoc {
         self.math_glyphs.append(&mut assembly.doc.math_glyphs);
         self.table_rows.append(&mut assembly.doc.table_rows);
         self.code_lines.append(&mut assembly.doc.code_lines);
+        for tb in assembly.doc.checkboxes.drain(..) {
+            self.push_checkbox(tb);
+        }
     }
 
     /// Drops emitted geometry from the vectors' front: the fused
@@ -3414,10 +3478,18 @@ fn layout_list_item(
             place_marker(runs, text_x - width - gutter, y0, block_index, out);
         }
         Marker::None => {}
-        Marker::Task { checked } => {
+        Marker::Task { checked, .. } => {
             let side = 0.8 * size;
             let bx = text_x - side - gutter;
             let by = y0 + (line_height - side) / 2.0;
+            // The square is the click's hit target, recorded with the
+            // same values it is drawn from.
+            out.push_checkbox(TaskBox {
+                x: bx,
+                y: by,
+                side,
+                block: block_index as u32,
+            });
             if *checked {
                 let radius = 3.0 * cfg.zoom;
                 out.rects.push(

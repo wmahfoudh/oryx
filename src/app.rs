@@ -901,12 +901,7 @@ impl App {
         };
         self.mode = edit::Mode::Edit;
         self.caret = Some(Caret::at(offset));
-        // The first entry fixes the baseline; re-entry keeps the ledger
-        // and the unsaved edits inside it, and the undo stack with them.
-        if self.ledger.is_none() {
-            self.ledger = Some(Ledger::new(self.document.source.clone(), self.crlf.clone()));
-            self.undo = Some(Undo::new());
-        }
+        self.ensure_ledger();
         let text = Arc::clone(&self.document.source);
         if let Some(source) = edit::source_document(kind, &text) {
             let head = self.undo.as_ref().map_or(0, Undo::head);
@@ -1240,32 +1235,141 @@ impl App {
         self.seat_caret_after_edit(caret_after);
     }
 
-    /// Steps the history one unit back and applies its inverse; the
-    /// one deliberate view move, the snap to the restored caret. Inert
-    /// outside edit mode.
-    fn undo_edit(&mut self) {
-        if self.mode != edit::Mode::Edit {
+    /// Arms the splice ledger and the undo stack when none stand: the
+    /// first edit fixes the baseline, whichever door asks, Ctrl+E or
+    /// the rendered page's checkbox click. Re-entry keeps the ledger
+    /// and the unsaved edits inside it, and the undo stack with them.
+    fn ensure_ledger(&mut self) {
+        if self.ledger.is_none() {
+            self.ledger = Some(Ledger::new(self.document.source.clone(), self.crlf.clone()));
+            self.undo = Some(Undo::new());
+        }
+    }
+
+    /// A click on a rendered task checkbox, the one edit reading
+    /// allows. The flip replaces one byte with one byte, so nothing on
+    /// the page moves: the model flips in place and the band simply
+    /// re-materializes at its recorded positions. Books and lossy
+    /// reads refuse the way the editor's door does, quietly.
+    fn click_checkbox(&mut self, block: usize) {
+        let Some(path) = self.path.clone() else {
+            return;
+        };
+        if edit::toggle(edit::Mode::Read, load::detect(&path), self.lossy).is_err() {
             return;
         }
+        self.ensure_ledger();
+        let Some((range, text)) = self.document.flip_task(block) else {
+            return;
+        };
+        let replaced = if text == "x" { " " } else { "x" };
+        if let Some(ledger) = self.ledger.as_mut() {
+            ledger.edit(range.clone(), text);
+        }
+        if let Some(hist) = self.undo.as_mut() {
+            hist.record(
+                range.clone(),
+                text,
+                replaced,
+                (range.start, range.start),
+                Kind::Structural,
+                Instant::now(),
+            );
+        }
+        let settled = self.pass.as_ref().is_some_and(LayoutPass::is_complete);
+        let refilled = settled
+            && self
+                .layout
+                .as_mut()
+                .is_some_and(layout::LayoutDoc::rematerialize);
+        if refilled {
+            self.band = None;
+            self.pending_band_for = None;
+            self.request_redraw();
+        } else {
+            self.restart_layout();
+        }
+        self.refresh_title();
+    }
+
+    /// Steps the history one unit back and applies its inverse; the
+    /// one deliberate view move, the snap to the restored caret. In
+    /// read mode the checkbox flips are undoable without entering the
+    /// editor; deeper text units are legal too and pay the rendered
+    /// rebuild.
+    fn undo_edit(&mut self) {
         let Some((splice, caret)) = self.undo.as_mut().and_then(Undo::undo) else {
             return;
         };
-        if self.apply_edit(splice.range, &splice.text) {
-            self.seat_caret_after_edit(caret);
+        match self.mode {
+            edit::Mode::Edit => {
+                if self.apply_edit(splice.range, &splice.text) {
+                    self.seat_caret_after_edit(caret);
+                }
+            }
+            edit::Mode::Read => self.apply_read_edit(splice.range, &splice.text, caret),
         }
+    }
+
+    /// A read-mode undo or redo applied: the ledger replays the
+    /// splice, the rendered page rebuilds from the buffer, and the
+    /// view stays put unless the restored edit is off screen, where
+    /// its block seats through the pending target.
+    fn apply_read_edit(&mut self, range: std::ops::Range<usize>, text: &str, caret: usize) {
+        let Some(path) = self.path.clone() else {
+            return;
+        };
+        let Some(ledger) = self.ledger.as_mut() else {
+            return;
+        };
+        let touched = ledger.edit(range.clone(), text);
+        let removed = self
+            .document
+            .source
+            .get(range)
+            .map_or(0, |cut| cut.matches('\n').count());
+        let old_touched = touched.start..touched.start + removed + 1;
+        if let Some(table) = self.seams.get_mut(&0) {
+            highlight::shift_seams(table, old_touched, touched);
+        }
+        let current = ledger.current();
+        let visible = self
+            .layout
+            .as_ref()
+            .and_then(|l| caret::row_top(l, &self.document, caret))
+            .is_some_and(|y| y >= self.scroll_y && y < self.scroll_y + self.viewport_h());
+        self.document = edit::rendered_document(load::detect(&path), &current);
+        self.restart_layout();
+        self.outline = OutlineTree::build(&self.document);
+        self.cancel_highlight();
+        self.rehighlight_at =
+            (!self.document.plain_file).then(|| Instant::now() + REHIGHLIGHT_REST);
+        self.selection = None;
+        self.sel_anchor = None;
+        if let Some(state) = self.search.as_mut() {
+            state.matches.clear();
+            state.rects.clear();
+            state.stale = true;
+        }
+        if !visible {
+            self.pending_offset = Some(caret);
+        }
+        self.refresh_title();
     }
 
     /// Steps the history one unit forward and reapplies its splice.
     /// Inert outside edit mode.
     fn redo_edit(&mut self) {
-        if self.mode != edit::Mode::Edit {
-            return;
-        }
         let Some((splice, caret)) = self.undo.as_mut().and_then(Undo::redo) else {
             return;
         };
-        if self.apply_edit(splice.range, &splice.text) {
-            self.seat_caret_after_edit(caret);
+        match self.mode {
+            edit::Mode::Edit => {
+                if self.apply_edit(splice.range, &splice.text) {
+                    self.seat_caret_after_edit(caret);
+                }
+            }
+            edit::Mode::Read => self.apply_read_edit(splice.range, &splice.text, caret),
         }
     }
 
@@ -3797,6 +3901,10 @@ impl App {
         };
         let x = self.cursor.x as f32 - self.inset();
         let y = self.cursor.y as f32 + self.scroll_y;
+        if let Some(block) = lay.checkbox_at(x, y) {
+            self.click_checkbox(block);
+            return;
+        }
         let Some(target) = lay.link_at(&self.document, x, y).map(str::to_owned) else {
             if let Some(group) = lay.summary_at(&self.document, x, y) {
                 self.document.toggle_details(group);
@@ -3872,6 +3980,7 @@ impl App {
             && self.layout.as_ref().is_some_and(|l| {
                 l.link_at(&self.document, x, y).is_some()
                     || l.summary_at(&self.document, x, y).is_some()
+                    || (self.mode == edit::Mode::Read && l.checkbox_at(x, y).is_some())
             });
         if hovering != self.hover_link || on_edge != self.hover_edge {
             self.hover_link = hovering;

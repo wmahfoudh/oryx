@@ -23,9 +23,10 @@ level zero
 1. counted one
 2. counted two
 9) paren nine
+10) This
 
-- [ ] open task
-- [x] done task
+- [x] open task
+- [ ] done task
 
 > a quoted line to continue
 > > a nested quote
@@ -33,3 +34,4 @@ level zero
 ## The empty item
 
 - press Enter at the end of this item, then Enter again on the empty marker
+    - This is a new line 

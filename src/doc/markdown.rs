@@ -316,7 +316,10 @@ impl Builder {
             }
             Event::TaskListMarker(checked) => {
                 if let Some(slot) = self.item_markers.last_mut() {
-                    *slot = Some(Marker::Task { checked });
+                    *slot = Some(Marker::Task {
+                        checked,
+                        marker: range.start,
+                    });
                 }
             }
             Event::SoftBreak => self.text(" "),
@@ -1612,7 +1615,7 @@ mod tests {
     fn task_list_item() {
         let d = parse("- [x] done");
         let BlockKind::ListItem {
-            marker: Marker::Task { checked },
+            marker: Marker::Task { checked, marker },
             depth,
             ..
         } = &d.blocks[0].kind
@@ -1621,6 +1624,51 @@ mod tests {
         };
         assert!(*checked);
         assert_eq!(*depth, 0);
+        assert_eq!(
+            &d.source[*marker..marker + 3],
+            "[x]",
+            "the marker names its own bytes"
+        );
+        let d = parse("intro\n\n- [ ] open");
+        let BlockKind::ListItem {
+            marker: Marker::Task { checked, marker },
+            ..
+        } = &d.blocks[1].kind
+        else {
+            panic!()
+        };
+        assert!(!*checked);
+        assert_eq!(&d.source[*marker..marker + 3], "[ ]");
+    }
+
+    // The rendered page's one permitted edit: the flip replaces one
+    // byte with one byte, so no offset in the model moves.
+    #[test]
+    fn a_checkbox_flip_moves_nothing() {
+        let mut d = parse("# T\n\n- [ ] one\n- [x] two\n\ntail\n");
+        let before: Vec<_> = d.blocks.iter().map(|b| b.range.clone()).collect();
+        let block = d
+            .blocks
+            .iter()
+            .position(|b| matches!(b.kind, BlockKind::ListItem { .. }))
+            .expect("a task item");
+        let (splice, text) = d.flip_task(block).expect("a task flips");
+        assert_eq!(text, "x");
+        assert_eq!(splice.len(), 1);
+        assert_eq!(&d.source[splice.start - 1..splice.end + 1], "[x]");
+        let after: Vec<_> = d.blocks.iter().map(|b| b.range.clone()).collect();
+        assert_eq!(before, after, "no block range moved");
+        let BlockKind::ListItem {
+            marker: Marker::Task { checked, .. },
+            ..
+        } = &d.blocks[block].kind
+        else {
+            panic!()
+        };
+        assert!(*checked, "the marker flipped in place");
+        let (_, text) = d.flip_task(block).expect("and flips back");
+        assert_eq!(text, " ");
+        assert!(d.flip_task(0).is_none(), "a heading refuses");
     }
 
     #[test]

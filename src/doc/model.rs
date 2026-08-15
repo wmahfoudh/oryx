@@ -80,6 +80,34 @@ impl Document {
         g.open = !g.open;
     }
 
+    /// Flips a task checkbox in place, the rendered page's one
+    /// permitted edit: one byte of source, space for x, and the
+    /// marker's flag. Length-preserving, so no offset in the model
+    /// moves. Answers the splice applied, for the ledger and the undo
+    /// stack; None when the block is not a task item or the source
+    /// under the marker is not a box.
+    pub fn flip_task(&mut self, block: usize) -> Option<(Range<usize>, &'static str)> {
+        let BlockKind::ListItem {
+            marker: Marker::Task { checked, marker },
+            ..
+        } = &mut self.blocks.get_mut(block)?.kind
+        else {
+            return None;
+        };
+        let seat = *marker;
+        if !matches!(self.source.get(seat..seat + 3), Some("[ ]" | "[x]" | "[X]")) {
+            return None;
+        }
+        let text = if *checked { " " } else { "x" };
+        *checked = !*checked;
+        let mut source = String::with_capacity(self.source.len());
+        source.push_str(&self.source[..seat + 1]);
+        source.push_str(text);
+        source.push_str(&self.source[seat + 2..]);
+        self.source = source.into();
+        Some((seat + 1..seat + 2, text))
+    }
+
     /// The block holding a source offset: the last one starting at or
     /// before it. Book anchors resolve to blocks through this.
     pub fn block_at_offset(&self, offset: usize) -> Option<usize> {
@@ -366,6 +394,9 @@ pub enum Marker {
     Number(u64),
     Task {
         checked: bool,
+        /// Source offset of the three marker bytes, `[x]` or `[ ]`,
+        /// which the rendered page's checkbox click flips.
+        marker: usize,
     },
     /// Indented like an item but drawing no marker; definition bodies.
     None,

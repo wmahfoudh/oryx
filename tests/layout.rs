@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use oryx::doc::images::MediaCache;
 use oryx::doc::load;
 use oryx::doc::markdown;
-use oryx::doc::model::{BlockKind, Document, SpanScript};
+use oryx::doc::model::{BlockKind, Document, Marker, SpanScript};
 use oryx::doc::stream::{self, Swap};
 use oryx::layout::{
     code_lines_in, layout, layout_begin, layout_extend, layout_more, layout_step, metrics,
@@ -380,6 +380,37 @@ fn task_items_draw_checkboxes() {
             .iter()
             .any(|r| r.color == t.blocks.rule && r.stroke > 0.0),
         "unchecked box outline"
+    );
+}
+
+// The squares are the click's hit targets: a point inside each box
+// answers its own block, the gutter beside the text answers nothing.
+#[test]
+fn checkboxes_answer_the_click() {
+    let (doc, l) = lay2("- [x] done\n- [ ] todo", 800.0);
+    let done = find_text(&l, &doc, "done");
+    let todo = find_text(&l, &doc, "todo");
+    let first = l
+        .checkbox_at(done.x - 14.0, done.y + 6.0)
+        .expect("the first box answers");
+    let second = l
+        .checkbox_at(todo.x - 14.0, todo.y + 6.0)
+        .expect("the second box answers");
+    assert_ne!(first, second, "each box names its own block");
+    assert!(
+        matches!(
+            doc.blocks[first].kind,
+            BlockKind::ListItem {
+                marker: Marker::Task { checked: true, .. },
+                ..
+            }
+        ),
+        "the first hit is the checked item"
+    );
+    assert_eq!(
+        l.checkbox_at(done.x + 40.0, done.y + 6.0),
+        None,
+        "the text is not a checkbox"
     );
 }
 
