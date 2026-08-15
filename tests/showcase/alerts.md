@@ -1,6 +1,6 @@
-# This is Oryx rendering alerts and blockquotes
+# This Oryx rendering alerts and blockquotes
 
-GitHub alerts take a titled panel with a colored bar and a matching title,
+GitHub is alerts take a titled panel with a colored bar and a matching title,
 one color per kind, all drawn from the active theme.
 
 > [!NOTE]

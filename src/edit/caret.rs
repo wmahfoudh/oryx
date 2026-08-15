@@ -584,15 +584,17 @@ impl Caret {
             });
         }
         // A line with no glyphs, just opened by Enter or blank between
-        // paragraphs: the caret stands at the line start, anchored to
-        // the nearest text line, one advance per blank row between.
+        // paragraphs: the caret stands at the line start, advanced
+        // over any whitespace the split carried, anchored to the
+        // nearest text line, one advance per blank row between.
         if let Some(li) = lines.iter().rposition(|l| l.end < self.offset) {
             let line = &lines[li];
             let gap = doc.source.get(line.end..self.offset)?.matches('\n').count();
             if gap == 0 {
                 return None;
             }
-            let x = line.runs.first().map_or(0.0, |r| r.x);
+            let x = line.runs.first().map_or(0.0, |r| r.x)
+                + line_prefix_advance(fonts, lay, doc, line, self.offset);
             return Some(CaretBox {
                 x,
                 y: line.y + line.h * gap as f32,
@@ -610,13 +612,43 @@ impl Caret {
         if gap == 0 {
             return None;
         }
-        let x = below.runs.first().map_or(0.0, |r| r.x);
+        let x = below.runs.first().map_or(0.0, |r| r.x)
+            + line_prefix_advance(fonts, lay, doc, below, self.offset);
         Some(CaretBox {
             x,
             y: below.y - below.h * gap as f32,
             h: below.h,
         })
     }
+}
+
+/// The advance of the caret line's own prefix on a line the layout
+/// holds no glyphs for: the whitespace Enter carried onto it, shaped
+/// in the face of the anchor line's first run so a tab advances as a
+/// tab. Zero with nothing before the caret on its line.
+fn line_prefix_advance(
+    fonts: &mut FontStore,
+    lay: &LayoutDoc,
+    doc: &Document,
+    anchor: &Line,
+    offset: usize,
+) -> f32 {
+    let head = &doc.source[..offset];
+    let prefix = &head[head.rfind('\n').map_or(0, |i| i + 1)..];
+    if prefix.is_empty() {
+        return 0.0;
+    }
+    let Some(run) = anchor.runs.first() else {
+        return 0.0;
+    };
+    let text_run = &lay.runs[run.index];
+    let family = lay.run_family(text_run);
+    let buffer = selection::shape_run(fonts, text_run, prefix, family);
+    buffer
+        .layout_runs()
+        .next()
+        .and_then(|line| line.glyphs.last())
+        .map_or(0.0, |g| g.x + g.w)
 }
 
 /// Places the caret from a click, in document coordinates.
@@ -905,6 +937,42 @@ mod tests {
             .expect("the line opened past the text seats the caret");
         assert_eq!(tail.x, alpha.x);
         assert!(tail.y > alpha.y, "the new line stands below the last text");
+    }
+
+    // The line Enter just opened holds nothing but the carried
+    // indentation; the layout trims it to no glyphs at all, and the
+    // caret must still stand at its column, not at the line start.
+    #[test]
+    fn the_caret_advances_over_a_whitespace_only_line() {
+        let doc = code_doc("    deep\n    \nnext\n");
+        let (l, mut fonts) = lay_of(&doc);
+        let column = Caret::at(at(&doc, "deep"))
+            .geometry(&l, &doc, &mut fonts)
+            .expect("the indented text seats the caret");
+        let held = Caret::at(13)
+            .geometry(&l, &doc, &mut fonts)
+            .expect("the whitespace line seats the caret");
+        assert!(
+            (held.x - column.x).abs() < 0.5,
+            "four carried spaces stand the caret under the line above: {} vs {}",
+            held.x,
+            column.x
+        );
+
+        let doc = code_doc("\tdeep\n\t\nnext\n");
+        let (l, mut fonts) = lay_of(&doc);
+        let column = Caret::at(at(&doc, "deep"))
+            .geometry(&l, &doc, &mut fonts)
+            .expect("the tabbed text seats the caret");
+        let held = Caret::at(7)
+            .geometry(&l, &doc, &mut fonts)
+            .expect("the tab-only line seats the caret");
+        assert!(
+            (held.x - column.x).abs() < 0.5,
+            "a carried tab advances the caret: {} vs {}",
+            held.x,
+            column.x
+        );
     }
 
     #[test]

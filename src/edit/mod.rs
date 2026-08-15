@@ -7,6 +7,7 @@
 //! owns the wiring.
 
 pub mod caret;
+pub mod manners;
 pub mod splice;
 pub mod undo;
 

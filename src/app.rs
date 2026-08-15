@@ -1168,7 +1168,8 @@ impl App {
             // Enter is a structural edit: a line split never joins a
             // typing unit.
             Key::Named(NamedKey::Enter) => {
-                self.type_over("\n", Kind::Structural);
+                let text = self.enter_insertion();
+                self.type_over(&text, Kind::Structural);
                 true
             }
             Key::Named(NamedKey::Tab) => {
@@ -1643,6 +1644,20 @@ impl App {
     fn selection_anchor_offset(&self) -> Option<usize> {
         let sel = self.selection.filter(|s| !s.is_empty())?;
         caret::model_offset(&self.document, &sel.start)
+    }
+
+    /// The bytes Enter inserts: a newline carrying the current line's
+    /// indentation. The split point is the selection start when one
+    /// stands, since the replacement happens in the same splice and
+    /// the caret lands on that line.
+    fn enter_insertion(&self) -> String {
+        let at = self
+            .selection_source_range()
+            .map_or_else(|| self.caret.map_or(0, |c| c.offset), |r| r.start);
+        let source = &self.document.source;
+        let start = source[..at].rfind('\n').map_or(0, |i| i + 1);
+        let end = source[at..].find('\n').map_or(source.len(), |i| at + i);
+        edit::manners::enter_text(&source[start..end], at - start)
     }
 
     /// Typing consumes the selection when one stands, else the caret
