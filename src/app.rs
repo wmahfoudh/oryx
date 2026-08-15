@@ -1172,7 +1172,7 @@ impl App {
                 true
             }
             Key::Named(NamedKey::Tab) => {
-                self.type_over("\t", Kind::Insert);
+                self.press_tab(shift);
                 true
             }
             Key::Named(NamedKey::Space) => {
@@ -1674,6 +1674,108 @@ impl App {
                 self.type_edit(start..start + len, "", Kind::Structural);
             }
             None => self.type_over(&plain, Kind::Structural),
+        }
+    }
+
+    /// Tab and Shift+Tab: the file's indent unit inserted at the
+    /// caret, or the touched lines moved whole. A selection spanning
+    /// more than one line indents and outdents every line it touches
+    /// in one structural unit, and survives the edit.
+    fn press_tab(&mut self, outdent: bool) {
+        let multi = self
+            .selection_source_range()
+            .is_some_and(|r| self.document.source[r].contains('\n'));
+        if !outdent && !multi {
+            // On a markdown list item with the caret at or before the
+            // content, where Enter's continuation leaves it, Tab nests
+            // the item instead of typing into it.
+            if self.selection_source_range().is_none() && self.markdown_source() {
+                let at = self.caret.map_or(0, |c| c.offset);
+                let source = &self.document.source;
+                let start = source[..at].rfind('\n').map_or(0, |i| i + 1);
+                let end = source[at..].find('\n').map_or(source.len(), |i| at + i);
+                if edit::manners::tab_nests(&source[start..end], at - start) {
+                    self.indent_lines(false);
+                    return;
+                }
+            }
+            let unit = edit::manners::indent_unit(&self.document.source);
+            self.type_over(&unit.text(), Kind::Insert);
+            return;
+        }
+        self.indent_lines(outdent);
+    }
+
+    /// The line burst behind press_tab: the lines the selection
+    /// touches, or the caret's line alone, re-indented as one splice
+    /// and one undo unit. Caret and selection ride the per-line deltas
+    /// rather than the splice's own seat, so an outdent never yanks
+    /// the caret to the line start.
+    fn indent_lines(&mut self, outdent: bool) {
+        let unit = edit::manners::indent_unit(&self.document.source);
+        let sel = self.selection_source_range();
+        let caret_before = self.caret.map_or(0, |c| c.offset);
+        let anchor_before = self.selection_anchor_offset();
+        let (from, to) = sel.map_or((caret_before, caret_before), |r| (r.start, r.end));
+        let source = &self.document.source;
+        let start = source[..from].rfind('\n').map_or(0, |i| i + 1);
+        // A selection ending at a line start leaves that line alone.
+        let last = if to > from && source[..to].ends_with('\n') {
+            to - 1
+        } else {
+            to
+        };
+        let end = source[last..].find('\n').map_or(source.len(), |i| last + i);
+        let (text, deltas) = edit::manners::reindent(&source[start..end], &unit, outdent);
+        if deltas.iter().all(|&d| d == 0) {
+            return;
+        }
+        let mut line_starts = vec![start];
+        for (i, b) in source[start..end].bytes().enumerate() {
+            if b == b'\n' {
+                line_starts.push(start + i + 1);
+            }
+        }
+        let map = |p: usize| -> usize {
+            let k = line_starts.partition_point(|ls| *ls <= p) - 1;
+            let prefix: i64 = deltas[..k].iter().sum();
+            let (ls, d) = (line_starts[k], deltas[k]);
+            let new = if d < 0 && p < ls + (-d) as usize {
+                // Inside the bytes the outdent removed: the position
+                // clamps to its line start.
+                ls as i64 + prefix
+            } else if d > 0 && p == ls {
+                // A selection end hugging the line start stays there,
+                // keeping the inserted unit inside the selection.
+                ls as i64 + prefix
+            } else {
+                p as i64 + prefix + d
+            };
+            new as usize
+        };
+        let caret_after = map(caret_before);
+        let anchor_after = anchor_before.map(map);
+        let replaced = source[start..end].to_string();
+        if !self.apply_edit(start..end, &text) {
+            return;
+        }
+        if let Some(hist) = self.undo.as_mut() {
+            hist.record(
+                start..end,
+                &text,
+                &replaced,
+                (caret_before, caret_after),
+                Kind::Structural,
+                Instant::now(),
+            );
+        }
+        self.seat_caret_after_edit(caret_after);
+        // The selection apply_edit cleared comes back, its ends mapped.
+        if let Some(anchor) = anchor_after.filter(|a| *a != caret_after) {
+            if let Some(s) = caret::span_selection(&self.document, anchor, caret_after) {
+                self.sel_anchor = Some(s.start);
+                self.selection = Some(s);
+            }
         }
     }
 

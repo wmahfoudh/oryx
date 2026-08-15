@@ -50,16 +50,7 @@ pub fn markdown_enter(line: &str, col: usize) -> Option<MarkdownEnter> {
 /// on and task boxes blanked; None when the line opens with neither
 /// quote nor marker.
 fn markdown_prefix(line: &str) -> Option<(usize, String)> {
-    let b = line.as_bytes();
-    let indent = line.len() - line.trim_start_matches([' ', '\t']).len();
-    let mut i = indent;
-    while i < b.len() && b[i] == b'>' {
-        i += 1;
-        while i < b.len() && (b[i] == b' ' || b[i] == b'\t') {
-            i += 1;
-        }
-    }
-    let quote = i;
+    let (indent, quote) = marker_seat(line);
     match list_marker(&line[quote..]) {
         Some((len, marker)) => Some((quote + len, format!("{}{marker}", &line[..quote]))),
         None if quote > indent => Some((quote, line[..quote].to_string())),
@@ -112,6 +103,144 @@ fn list_marker(rest: &str) -> Option<(usize, String)> {
         }
     }
     Some((len, cont))
+}
+
+/// True when Tab nests the whole item rather than inserting: the line
+/// is a markdown list item, quoted or not, and the caret sits at or
+/// before its first content byte, which is where Enter's continuation
+/// leaves it. A bare quote line never nests, since four leading spaces
+/// would turn the quote into an indented code block.
+pub fn tab_nests(line: &str, col: usize) -> bool {
+    let (_, quote) = marker_seat(line);
+    match list_marker(&line[quote..]) {
+        Some((len, _)) => col <= quote + len,
+        None => false,
+    }
+}
+
+/// The seat a list marker would stand on: the byte width of the line's
+/// indentation, and of the quote run with each `>`'s trailing
+/// whitespace after it.
+fn marker_seat(line: &str) -> (usize, usize) {
+    let b = line.as_bytes();
+    let indent = line.len() - line.trim_start_matches([' ', '\t']).len();
+    let mut i = indent;
+    while i < b.len() && b[i] == b'>' {
+        i += 1;
+        while i < b.len() && (b[i] == b' ' || b[i] == b'\t') {
+            i += 1;
+        }
+    }
+    (indent, i)
+}
+
+/// One indent step, resolved per file the way new line endings resolve
+/// to the dominant ending.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndentUnit {
+    Tab,
+    Spaces(u8),
+}
+
+impl IndentUnit {
+    /// The bytes Tab inserts.
+    pub fn text(self) -> String {
+        match self {
+            IndentUnit::Tab => "\t".to_string(),
+            IndentUnit::Spaces(n) => " ".repeat(n as usize),
+        }
+    }
+}
+
+/// The file's dominant indent: a tab where tab-led lines dominate, the
+/// dominant space step where space-led lines do, a tab where the file
+/// offers no evidence. The step is the most common leading-width
+/// difference between a line and the nearest less-indented line above,
+/// kept inside 2..=8; ties go to the smaller step. The scan caps at
+/// the first 64KB, which carries any real file's indentation habits:
+/// the full pass read 9.5ms on the 8MB fixture, too slow for a held
+/// key, and the capped one is free at human rate.
+pub fn indent_unit(source: &str) -> IndentUnit {
+    let mut cap = source.len().min(64 * 1024);
+    while !source.is_char_boundary(cap) {
+        cap -= 1;
+    }
+    let mut tabs = 0usize;
+    let mut spaces = 0usize;
+    let mut stack: Vec<usize> = Vec::new();
+    let mut diffs = [0usize; 9];
+    for line in source[..cap].lines() {
+        let b = line.as_bytes();
+        match b.first() {
+            Some(b'\t') => tabs += 1,
+            Some(b' ') => {
+                spaces += 1;
+                let w = b.iter().take_while(|c| **c == b' ').count();
+                while stack.last().is_some_and(|&t| t >= w) {
+                    stack.pop();
+                }
+                let d = w - stack.last().copied().unwrap_or(0);
+                if (2..=8).contains(&d) {
+                    diffs[d] += 1;
+                }
+                stack.push(w);
+            }
+            // Content at the margin: the nearest less-indented line
+            // above anything after it is this one, at width zero.
+            Some(_) => stack.clear(),
+            None => {}
+        }
+    }
+    if spaces == 0 || tabs >= spaces {
+        return IndentUnit::Tab;
+    }
+    (2..=8)
+        .filter(|&d| diffs[d] > 0)
+        .max_by_key(|&d| (diffs[d], std::cmp::Reverse(d)))
+        .map_or(IndentUnit::Spaces(4), |d| IndentUnit::Spaces(d as u8))
+}
+
+/// Re-indents a region of whole lines, without its trailing newline:
+/// one unit onto every non-empty line, or one unit off every line that
+/// carries one. Answers the new text and one byte delta per line, the
+/// caller's map from old positions to new.
+pub fn reindent(region: &str, unit: &IndentUnit, outdent: bool) -> (String, Vec<i64>) {
+    let mut out = String::with_capacity(region.len() + 64);
+    let mut deltas = Vec::with_capacity(8);
+    for (i, line) in region.split('\n').enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        let delta = if outdent {
+            let cut = outdent_cut(line, unit);
+            out.push_str(&line[cut..]);
+            -(cut as i64)
+        } else if line.is_empty() {
+            0
+        } else {
+            let ins = unit.text();
+            out.push_str(&ins);
+            out.push_str(line);
+            ins.len() as i64
+        };
+        deltas.push(delta);
+    }
+    (out, deltas)
+}
+
+/// The leading bytes one outdent removes: a tab when the line starts
+/// with one, else up to a step of spaces, the unit's own width or the
+/// conventional four when the unit is a tab.
+fn outdent_cut(line: &str, unit: &IndentUnit) -> usize {
+    let b = line.as_bytes();
+    if b.first() == Some(&b'\t') {
+        return 1;
+    }
+    let step = match unit {
+        IndentUnit::Spaces(n) => *n as usize,
+        IndentUnit::Tab => 4,
+    };
+    b.iter().take_while(|c| **c == b' ').count().min(step)
 }
 
 #[cfg(test)]
@@ -228,6 +357,80 @@ mod tests {
             markdown_enter("> ", 2),
             unwind(2),
             "an empty quote ends too"
+        );
+    }
+
+    #[test]
+    fn tab_nests_at_or_before_the_items_content() {
+        assert!(tab_nests("- item", 0), "the line start nests");
+        assert!(tab_nests("- item", 1), "inside the marker nests");
+        assert!(tab_nests("- item", 2), "right after the marker nests");
+        assert!(!tab_nests("- item", 3), "inside the content inserts");
+        assert!(tab_nests("  - item", 4));
+        assert!(tab_nests("1. one", 3));
+        assert!(tab_nests("- [ ] task", 6));
+        assert!(!tab_nests("- [ ] task", 7));
+        assert!(tab_nests("> - quoted item", 4), "a quoted item still nests");
+        assert!(!tab_nests("> quoted", 2), "a bare quote never nests");
+        assert!(!tab_nests("plain", 0));
+        assert!(!tab_nests("    code", 4));
+    }
+
+    #[test]
+    fn the_unit_follows_the_dominant_indentation() {
+        assert_eq!(
+            indent_unit("all:\n\tcc -o all main.c\n\tstrip all\n"),
+            IndentUnit::Tab,
+            "tab-led lines dominate a Makefile"
+        );
+        assert_eq!(
+            indent_unit("- a\n  - b\n  - c\n"),
+            IndentUnit::Spaces(2),
+            "two-space nesting reads as a two-space step"
+        );
+        assert_eq!(
+            indent_unit("fn main() {\n    if x {\n        y();\n    }\n}\n"),
+            IndentUnit::Spaces(4),
+            "four-space blocks read as a four-space step"
+        );
+        assert_eq!(
+            indent_unit("\ta\n\tb\n  c\n"),
+            IndentUnit::Tab,
+            "tabs outnumber spaces"
+        );
+        assert_eq!(
+            indent_unit("plain\nlines\n"),
+            IndentUnit::Tab,
+            "no evidence answers a tab"
+        );
+        assert_eq!(indent_unit(""), IndentUnit::Tab);
+    }
+
+    #[test]
+    fn reindent_moves_every_line_and_skips_empty_on_indent() {
+        let (text, deltas) = reindent("one\n\n  three", &IndentUnit::Spaces(2), false);
+        assert_eq!(text, "  one\n\n    three");
+        assert_eq!(deltas, vec![2, 0, 2]);
+        let (text, deltas) = reindent("a\nb", &IndentUnit::Tab, false);
+        assert_eq!(text, "\ta\n\tb");
+        assert_eq!(deltas, vec![1, 1]);
+    }
+
+    #[test]
+    fn outdent_trims_a_tab_a_step_or_a_short_run() {
+        let (text, deltas) = reindent("\tone", &IndentUnit::Tab, true);
+        assert_eq!(text, "one", "one leading tab leaves");
+        assert_eq!(deltas, vec![-1]);
+        let (text, deltas) = reindent("    one\n  two\n one\nzero", &IndentUnit::Spaces(2), true);
+        assert_eq!(
+            text, "  one\ntwo\none\nzero",
+            "a step of spaces leaves, a short run leaves whole, bare stays"
+        );
+        assert_eq!(deltas, vec![-2, -2, -1, 0]);
+        let (text, _) = reindent("        deep", &IndentUnit::Tab, true);
+        assert_eq!(
+            text, "    deep",
+            "a tab unit outdents spaces by the conventional four"
         );
     }
 

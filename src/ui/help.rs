@@ -35,7 +35,10 @@ pub fn page() -> String {
         "The arrows, `Home`, `End`, `Page Up` and `Page Down` move the caret. \
          `{}` / `{}` jump by word, `{}` / `{}` jump to the ends of the file, and \
          `{}` / `{}` delete by word. Typing replaces a selection, and `{}` followed \
-         by typing replaces the whole file.",
+         by typing replaces the whole file. `Enter` keeps the line's indentation, \
+         and in a markdown file it continues lists and quotes. `Tab` indents and \
+         `Shift+Tab` removes an indent, over every selected line at once; at a \
+         list marker, `Tab` nests the item.",
         keymap::display("Ctrl+Left"),
         keymap::display("Ctrl+Right"),
         keymap::display("Ctrl+Home"),
