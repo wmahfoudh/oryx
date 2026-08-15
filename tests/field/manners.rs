@@ -8,7 +8,6 @@ fn main() {
     for item in items {
         if item > 1 {
             println!("{item}");
-            println!("{bringa}");
         }
     }
 }

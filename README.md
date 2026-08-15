@@ -25,11 +25,11 @@
 
 Oryx started as a personal project. I work with markdown files and did not find a (very) fast tool that could render them beautifully on the desktop without a browser or an Electron app. Exporting to PDF would have been a plus. That was the first version of the functional specs. Oryx has grown a lot since, and it stayed fast and beautiful.
 
-- **Instant**: A document is on screen in well under 100 ms from cold, even an 8 MB file.
-- **Light**: Memory stays flat as you scroll, whatever the file size.
+- **Instant**: A document displays in under 100 ms from cold, even an 8 MB file.
+- **Light**: Memory stays flat however you scroll, whatever is the file size.
 - **Distraction-free**: No panes, no toolbars, no menus. `F1` lists the shortcuts, `Esc` closes whatever is open.
-- **Beautiful**: 31 themes, each defining all 51 color roles, for reading and for PDF export alike.
-- **Self-contained**: One binary and a folder of themes. No browser engine, no runtime, no GPU requirement.
+- **Beautiful**: 30+ themes, with 51 color roles each, for reading and for PDF export alike.
+- **Self-contained**: One binary and a folder of themes and examples. No browser engine, no runtime, no GPU requirement.
 - **Runs anywhere**: The same speed on a new laptop or an old machine with no graphics card.
 
 ## Oryx Scope
@@ -42,7 +42,7 @@ Headings, bold, italic, strikethrough, inline code, links and bare URLs (a link 
 
 ### Source code
 
-Fenced blocks get a bordered panel and syntax colors for code, and a line too long for the panel wraps inside it. Oryx also opens source files directly and renders them as one highlighted document. Over a hundred extensions are supported, from Rust and Python to Terraform and Zig. A `Dockerfile` or a `Makefile` is recognized by its name. Any other text file opens in the code font. Binary files are refused.
+Oryx displays fenced blocks in a bordered panel with syntax colors for code. A a code line too wraps inside it the panel. Oryx also opens source files directly and renders them as one highlighted document. Over a hundred extensions are supported, from Rust and Python to Terraform and Zig. Some file s like a `Dockerfile` or a `Makefile` are recognized by name. Any other text file opens in the code font.
 
 ![Oryx rendering highlighted code](screenshots/code.png)
 
@@ -50,7 +50,7 @@ Fenced blocks get a bordered panel and syntax colors for code, and a line too lo
 
 The five GitHub alerts are styled, each with its own color and title. Oryx shows a YAML frontmatter header as a small metadata panel above the document. Footnote markers appear raised in the text and link to their definitions, gathered at the foot of the document.
 
-**Images and badges**: Supported formats are PNG, JPEG, GIF, WebP or SVG. Remote images are fetched in the background and cached on disk, so a README covered in badges comes up immediately the second time it is opened, and keeps working offline. If a path is broken, the image is replaced by a placeholder with the alt text.
+**Images and badges**: Supported formats are PNG, JPEG, GIF, WebP or SVG. Remote images are fetched in the background and cached on disk, so a file with badges comes up immediately the second time it is opened, and keeps working offline. If a path is broken, the image is replaced by a placeholder with the alt text.
 
 **Embedded HTML** covers what GitHub renders: tables with or without a header row, collapsible `<details>` sections, HTML headings, lists and quotes, definition lists, centered blocks, images at a set width or height, rows of clickable badges, and the inline tags down to `mark`, `kbd` and `small`. Search sees into a closed section, and jumping to a match unfolds it.
 
@@ -58,7 +58,7 @@ The five GitHub alerts are styled, each with its own color and title. Oryx shows
 
 ### Math
 
-Oryx typesets TeX math in the STIX Two Math font: fractions, radicals, matrices, stretched delimiters and stacked limits. It recognizes all four GitHub notations: `$...$`, `$$...$$`, a `math` fence, and the backtick form ``$`...`$``. Oryx infers whether a dollar sign is a currency or a math delimiter, so prices like `$5-$10` stay text.
+Oryx typesets TeX math in the STIX Two Math font: fractions, radicals, matrices, stretched delimiters and stacked limits. It recognizes all four GitHub notations: `$...$`, `$$...$$`, a `math` fence, and the backtick form ``$`...`$``. Oryx infers whether a dollar sign is a currency or a math delimiter, so prices like `$5-$10` do not mess rendering.
 
 The command vocabulary is KaTeX compatible: Greek, binary operators, relations and their negations, arrows, accents, the seven math alphabets, operator names, spacing, the matrix environments, and `\newcommand` macros. If Oryx encounters an unknown command, it will render it as its literal source, and the rest of the equation renders normally. An equation wider than the window shrinks to fit (to a reasonable extent). PDF export includes the typeset math, and text copied from the PDF reads back as the equation's characters. The supported commands are listed in [SYNTAX.md](SYNTAX.md#math), and [examples/sample-math.md](examples/sample-math.md) shows many of them in one document.
 
@@ -92,21 +92,25 @@ Press `Ctrl+E` to enter edit mode, with a caret and the usual keys; `Escape` (or
 
 Source code and plain text files edit on the page itself. A markdown file shows its own source instead: the page is replaced by the markdown text, drawn in the theme's colors with the markers visible. `Escape` brings the view mode with the edits applied.
 
-During a session, you can switch between files and Oryx will remember your reading or editing position. 
+During a session, you can switch between files and Oryx will remember the reading or editing position. 
 
 Books cannot be edited, and neither can a file whose text did not read cleanly, since Oryx could not write it back exactly as it was. A small notice in the corner will tell you when editing is not available.
 
 Editing works the way a text editor does: typing, selections, `Ctrl+X` and `Ctrl+V`, undo with `Ctrl+Z`, redo with `Ctrl+Shift+Z` or `Ctrl+Y`. While editing, `Ctrl+Left` / `Ctrl+Right` jump by word, `Ctrl+Home` / `Ctrl+End` jump to the ends of the file, and `Ctrl+Backspace` / `Ctrl+Delete` delete by word. Typing is instant even in very large files.
 
-`Ctrl+S` saves. Oryx is careful with the file: lines that were not touched are written back byte for byte, and every line keeps its own ending, so a file with Windows line endings stays that way. The window title shows a `*` while changes are unsaved. `Ctrl+Shift+S` saves under a new name.
+`Enter` keeps the indentation of the current line. In a markdown file it also continues what you are writing: a list item gets the next marker (numbered lists count on), a task item continues unchecked, and a quoted line keeps its `>`. `Enter` on an empty item ends the list. `Tab` indents and `Shift+Tab` removes an indent, on every line of a selection at once; with the caret at a list marker, `Tab` nests the item. Whether `Tab` inserts a tab or spaces follows what the file already uses.
 
-`Ctrl+N` creates a new file: the save dialog opens first, then the empty page is ready to type into. That is how Oryx knows the type of file you created to be able to apply colors.
+A task checkbox can be ticked by clicking it on the page, without entering edit mode. Nothing else on the page moves, `Ctrl+Z` undoes it, and `Ctrl+S` saves it.
+
+`Ctrl+S` saves. Oryx is careful with the file: lines that were not touched are written back unchanged, and every line keeps its own ending, so a file with Windows line endings stays that way. The window title shows a `*` while changes are unsaved. `Ctrl+Shift+S` saves under a new name.
+
+`Ctrl+N` creates a new file: the save dialog opens first, then the empty page is ready to type into. That is how Oryx knows the type of file you created to be able to apply syntax colors.
 
 Closing the window, quitting or reloading with unsaved changes asks first: `Enter` saves, `D` discards, `Escape` keeps editing. If the file changes on disk while there are unsaved edits, Oryx shows a notice and leaves the edits alone.
 
 ## Themes
 
-Thirty-one themes ship with Oryx. Editable TOML files with **51 color roles**, so every possible markdown element can be colored separately.
+Thirty plus themes ship with Oryx. Editable TOML files with **51 color roles**, so every possible markdown element can be colored separately.
 
 Press `Ctrl+T` to open the theme browser. Arrow keys move through the list and preview the selected theme, `Enter` validates and closes the browser, and `Escape` restores the previous one (cancels):
 
@@ -114,7 +118,7 @@ Press `Ctrl+T` to open the theme browser. Arrow keys move through the list and p
   <img src="screenshots/themes.png" alt="The theme browser">
 </p>
 
-The theme editor changes any role with a color picker while the document restyles behind it. Editing a bundled theme creates a copy, so the shipped files remain as they were. A custom theme is a TOML file saved in the themes directory.
+The theme editor changes any color role with through color picker while the document restyles live. Editing a bundled theme creates a copy, so the shipped files remain unchanged. A custom theme is a TOML file saved in the themes directory.
 
 <p align="center">
   <img src="screenshots/themes-editor.png" alt="The theme editor">
@@ -124,11 +128,11 @@ Nine themes are original designs: `oryx-light` and its dark twin `oryx-dark`, `o
 
 ## Export to PDF
 
-`Ctrl+Shift+P` opens the export settings: theme, body font and size, code font and size, page size, orientation and page numbers. Six page sizes are available: A4, Letter and Legal, and the book trim sizes A5, 6 x 9 in and 5 x 8 in, so a book can export at its print size. When the document is a book, a justify toggle is also present. The export settings are kept separate from the app's own appearance and remembered between runs. The idea is that reading in a dark theme at 22 points and exporting in a light one at 11 should not need switching back and forth each time we need an export.
+`Ctrl+Shift+P` opens the export settings: theme, body font and size, code font and size, page size, orientation and page numbers. Six page sizes are available: A4, Letter and Legal, and the book trim sizes. When the document is a book, a justify toggle is also present. Oryx separates the export settings from the app's own appearance and remembers them between runs. The idea is that reading in a dark theme at 22 points and exporting in a light one at 11 should not need switching back and forth each time we need an export.
 
-`Ctrl+P` exports the document using the configured export settings. Markdown headings are converted to PDF outlines, and the fonts are embedded. Emoji render in the PDF as images. A book exports with each chapter starting on a new page, and its table of contents becomes the PDF outline.
+`Ctrl+P` exports the document using the configured export settings. After setting your preferences, this is usually the way to go. Markdown headings are converted to PDF outlines, and the fonts are embedded. Emoji render in the PDF as images. A book exports with each chapter starting on a new page, and its table of contents becomes the PDF outline.
 
-**Oryx tries to avoid that**:
+**During export, Oryx tries to avoid that**:
 
 - Page breaks happen through a line
 - Headings are left alone at the foot of a page
@@ -167,7 +171,7 @@ make install
 After installing, open Oryx from the launcher and browse folders and files through the sidebar.
 
 > [!NOTE]
-> There are no menus. **Press `F1`** for the complete shortcut list, `Esc` to close a panel or quit.
+> There are no menus. **Press `F1`** for the complete shortcut list. `Esc` or a click outside closes a dialog, and `Esc` quits.
 
 ```sh
 oryx README.md          # open a file
@@ -216,13 +220,13 @@ oryx --version          # print the version
 | `Ctrl+Shift+P` | Choose export settings, then export |
 | **Help** | |
 | `F1` | Open the help page, and close it |
-| `Escape` | Close overlay or sidebar, leave editing, quit |
+| `Escape` | Close overlay, leave editing, quit |
 
 `Ctrl` is `Cmd` on macOS.
 
 ## Performance
 
-Performance is one of the reasons Oryx was created. Most markdown viewers start struggling above one megabyte of file size, without even offering decent theming. Oryx was built to remove that ceiling: the same reading, whatever the file size and whatever the machine. Here is how it works:
+Performance is one of the reasons behind Oryx. Most markdown viewers start struggling above one megabyte of file size, without even offering decent look. Oryx offers the same beautiful reading experience, whatever the file size and whatever the machine. Here is how it works:
 
 For a big markdown file, Oryx parses only its first screens before the first paint and the rest arrives from a background thread. It uses all CPU cores to build the layout, for the wash-in below the first screens as well as every zoom or resize. Only the part of the document around the reading position is kept in drawn form, and scrolling rebuilds the landing from recorded positions in about a millisecond; memory stays flat however long the document is. Painting covers a band around the viewport, a couple of screens either side, and scrolling inside that band is a memory copy: the cost of a scroll frame does not depend on the document's length. Syntax highlighting and the layout below follow in the background, a slice at a time, without moving anything already on screen.
 
@@ -243,8 +247,6 @@ The 8 MB markdown export writes a 9219-page file. While open, the 8 MB markdown 
 > Oryx is not a markdown-to-PDF converter. Its export reproduces the page you read, pixel for pixel: the theme, every shaped glyph, syntax colors for close to a hundred languages, images, links, the outline and the embedded fonts, at a millisecond or two per finished page whatever the document size. Raw conversion without any of that is a different, far faster job: a few milliseconds for a whole small file.
 
 ## Limitations
-
-Oryx is built for everyday use, and has some limitations:
 
 - On a file several megabytes long, the layout below the first screens takes a moment to catch up. Syntax colors appear right away wherever you are reading, and a few lines can change color a moment later, once the full pass reaches them. An export waits for syntax highlighting to finish before it writes, so on the 8 MB file the wall time can be double the export column above.
 - The implemented HTML is a subset: what GitHub renders in a README, nothing more.

@@ -249,13 +249,13 @@ pub const SHORTCUTS: &[Shortcut] = &[
     },
     Shortcut {
         keys: "Ctrl+Z",
-        action: "Undo the last edit (editing)",
+        action: "Undo the last edit",
         section: "Edit",
         bindings: &[(Binding::Ctrl("z"), Command::Undo)],
     },
     Shortcut {
         keys: "Ctrl+Shift+Z / Ctrl+Y",
-        action: "Redo an undone edit (editing)",
+        action: "Redo an undone edit",
         section: "Edit",
         bindings: &[
             (Binding::CtrlShift("z"), Command::Redo),

@@ -15,7 +15,7 @@ pub fn page() -> String {
     let _ = writeln!(
         out,
         "Press {} or {} to close this. \
-         Please refer to the full documentation in the project README, on \
+         Please refer to the full documentation on \
          [Codeberg](https://codeberg.org/wmahfoudh/oryx) or \
          [GitHub](https://github.com/wmahfoudh/oryx).",
         keymap::display("F1"),

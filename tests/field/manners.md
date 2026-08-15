@@ -14,6 +14,10 @@ level zero
 
 ## Lists
 
+* list 1
+* list 2
+* list 3
+
 - first item
 - second item with a longer tail to split in the middle
   - nested two spaces deep
@@ -25,8 +29,8 @@ level zero
 9) paren nine
 10) This
 
-- [x] open task
-- [ ] done task
+- [ ] open task
+- [x] done task
 
 > a quoted line to continue
 > > a nested quote
