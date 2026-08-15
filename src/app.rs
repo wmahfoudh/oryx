@@ -1168,8 +1168,7 @@ impl App {
             // Enter is a structural edit: a line split never joins a
             // typing unit.
             Key::Named(NamedKey::Enter) => {
-                let text = self.enter_insertion();
-                self.type_over(&text, Kind::Structural);
+                self.press_enter();
                 true
             }
             Key::Named(NamedKey::Tab) => {
@@ -1646,18 +1645,46 @@ impl App {
         caret::model_offset(&self.document, &sel.start)
     }
 
-    /// The bytes Enter inserts: a newline carrying the current line's
-    /// indentation. The split point is the selection start when one
-    /// stands, since the replacement happens in the same splice and
-    /// the caret lands on that line.
-    fn enter_insertion(&self) -> String {
-        let at = self
-            .selection_source_range()
+    /// Enter: the markdown continuation when the source view speaks
+    /// markdown and no selection stands, else the plain indent carry.
+    /// The split point is the selection start when one stands, since
+    /// the replacement happens in the same splice and the caret lands
+    /// on that line. Structural either way.
+    fn press_enter(&mut self) {
+        let selected = self.selection_source_range();
+        let at = selected
+            .clone()
             .map_or_else(|| self.caret.map_or(0, |c| c.offset), |r| r.start);
-        let source = &self.document.source;
-        let start = source[..at].rfind('\n').map_or(0, |i| i + 1);
-        let end = source[at..].find('\n').map_or(source.len(), |i| at + i);
-        edit::manners::enter_text(&source[start..end], at - start)
+        let (start, decision, plain) = {
+            let source = &self.document.source;
+            let start = source[..at].rfind('\n').map_or(0, |i| i + 1);
+            let end = source[at..].find('\n').map_or(source.len(), |i| at + i);
+            let line = &source[start..end];
+            let col = at - start;
+            let decision = (selected.is_none() && self.markdown_source())
+                .then(|| edit::manners::markdown_enter(line, col))
+                .flatten();
+            (start, decision, edit::manners::enter_text(line, col))
+        };
+        match decision {
+            Some(edit::manners::MarkdownEnter::Insert(text)) => {
+                self.type_over(&text, Kind::Structural);
+            }
+            Some(edit::manners::MarkdownEnter::Unwind(len)) => {
+                self.type_edit(start..start + len, "", Kind::Structural);
+            }
+            None => self.type_over(&plain, Kind::Structural),
+        }
+    }
+
+    /// True while the editor shows a markdown file's own bytes, the
+    /// one kind whose Enter continues lists and quotes.
+    fn markdown_source(&self) -> bool {
+        self.mode == edit::Mode::Edit
+            && self
+                .path
+                .as_deref()
+                .is_some_and(|p| load::detect(p) == load::FileKind::Markdown)
     }
 
     /// Typing consumes the selection when one stands, else the caret
