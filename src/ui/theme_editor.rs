@@ -10,7 +10,7 @@ use winit::keyboard::{Key, NamedKey};
 use crate::paint::painter::Painter;
 use crate::style::fonts::{BODY_FAMILY, CODE_FAMILY};
 use crate::style::theme::{self, Rgba, Theme};
-use crate::ui::overlay::{inside, Action, Overlay, OverlayResult};
+use crate::ui::overlay::{self, inside, Action, Overlay, OverlayResult, PanelDrag};
 use crate::ui::textfield::TextField;
 use crate::ui::theme_browser::duplicate_path;
 
@@ -67,10 +67,9 @@ pub struct ThemeEditor {
     /// later click can place the caret without a painter.
     hex_offsets: Vec<f32>,
     drag: Option<Part>,
-    /// Cursor offset from the panel origin while moving it.
-    grab: (f32, f32),
-    /// User displacement of the panel from its centered position.
-    offset: (f32, f32),
+    /// The header drag, shared panel scaffolding; the picker parts
+    /// above carry their own drags.
+    panel: PanelDrag,
     dirty: bool,
     /// Created on first copy or paste, kept alive for X11.
     clipboard: Option<arboard::Clipboard>,
@@ -110,8 +109,7 @@ impl ThemeEditor {
             hex_entry: None,
             hex_offsets: Vec::new(),
             drag: None,
-            grab: (0.0, 0.0),
-            offset: (0.0, 0.0),
+            panel: PanelDrag::default(),
             dirty: false,
             clipboard: None,
             geometry: Geometry::default(),
@@ -158,13 +156,12 @@ impl ThemeEditor {
         self.selected = role.min(theme::ROLES.len() - 1);
         self.hex_entry = None;
         self.sync_picker();
-        let row_top = self.entry_row(self.selected) as f32 * ROW_H;
-        let list_h = self.geometry.list_h.max(ROW_H);
-        if row_top < self.scroll {
-            self.scroll = row_top;
-        } else if row_top + ROW_H > self.scroll + list_h {
-            self.scroll = row_top + ROW_H - list_h;
-        }
+        self.scroll = overlay::scroll_into_view(
+            self.entry_row(self.selected),
+            ROW_H,
+            self.scroll,
+            self.geometry.list_h,
+        );
     }
 
     fn step(&mut self, delta: i32) {
@@ -281,10 +278,7 @@ impl ThemeEditor {
         };
         match part {
             Part::Move => {
-                self.offset = (
-                    x - self.grab.0 - self.geometry.center.0,
-                    y - self.grab.1 - self.geometry.center.1,
-                );
+                self.panel.to(x, y, self.geometry.center);
                 OverlayResult::Open
             }
             Part::Sv => {
@@ -329,9 +323,7 @@ impl Overlay for ThemeEditor {
         let panel_w = PANEL_W.min(w - 40.0);
         let panel_h = (h * 0.85).max(300.0);
         let center = (((w - panel_w) / 2.0).floor(), ((h - panel_h) / 2.0).floor());
-        // The header must stay reachable as the drag handle.
-        let px = (center.0 + self.offset.0).clamp(60.0 - panel_w, w - 60.0);
-        let py = (center.1 + self.offset.1).clamp(-8.0, h - HEADER_H);
+        let (px, py) = self.panel.place(center, panel_w, w, h);
         let list_top = py + HEADER_H + PAD / 2.0;
         let list_h = panel_h - HEADER_H - FOOTER_H - PAD;
         let list_w = panel_w - PICKER_W - 3.0 * PAD;
@@ -354,21 +346,7 @@ impl Overlay for ThemeEditor {
         };
         self.scroll = self.scroll.clamp(0.0, self.max_scroll());
 
-        for (offset, alpha_v) in [(10.0, 14), (6.0, 22), (3.0, 34)] {
-            painter.fill(
-                px - offset,
-                py - offset + 2.0,
-                panel_w + 2.0 * offset,
-                panel_h + 2.0 * offset,
-                8.0 + offset,
-                Rgba {
-                    r: 0,
-                    g: 0,
-                    b: 0,
-                    a: alpha_v,
-                },
-            );
-        }
+        overlay::panel_shadow(painter, px, py, panel_w, panel_h, 8.0);
         painter.fill(px, py, panel_w, panel_h, 8.0, ui.overlay_bg);
 
         // Role list.
@@ -704,7 +682,7 @@ impl Overlay for ThemeEditor {
         self.hex_entry = None;
         if y < py + HEADER_H {
             self.drag = Some(Part::Move);
-            self.grab = (x - px, y - py);
+            self.panel.press(x, y, px, py);
             return OverlayResult::Open;
         }
         if inside(self.geometry.sv, x, y) {
@@ -740,6 +718,7 @@ impl Overlay for ThemeEditor {
 
     fn release(&mut self) {
         self.drag = None;
+        self.panel.release();
     }
 
     fn scroll(&mut self, lines: f32) -> OverlayResult {

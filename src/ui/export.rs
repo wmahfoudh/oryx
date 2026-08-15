@@ -7,7 +7,7 @@ use crate::export::{ExportSettings, Orientation, PageSize, Progress};
 use crate::paint::painter::Painter;
 use crate::style::fonts::BODY_FAMILY;
 use crate::style::theme::{Rgba, Theme};
-use crate::ui::overlay::{inside, Action, Overlay, OverlayResult};
+use crate::ui::overlay::{self, inside, Action, Overlay, OverlayResult, PanelDrag};
 
 const MIN_W: f32 = 380.0;
 const PANEL_H: f32 = 96.0;
@@ -95,21 +95,7 @@ impl Overlay for ExportProgress {
         let detail = elide(painter, &detail, LINE_SIZE, 400, panel_w - 2.0 * PAD);
         let px = ((w - panel_w) / 2.0).floor();
         let py = ((h - PANEL_H) / 2.0).floor();
-        for (grow, alpha) in [(10.0, 14), (6.0, 22), (3.0, 34)] {
-            painter.fill(
-                px - grow,
-                py - grow + 2.0,
-                panel_w + 2.0 * grow,
-                PANEL_H + 2.0 * grow,
-                RADIUS + grow,
-                Rgba {
-                    r: 0,
-                    g: 0,
-                    b: 0,
-                    a: alpha,
-                },
-            );
-        }
+        overlay::panel_shadow(painter, px, py, panel_w, PANEL_H, RADIUS);
         painter.fill(px, py, panel_w, PANEL_H, RADIUS, ui.overlay_bg);
 
         let title_w = painter.measure(&title, BODY_FAMILY, TITLE_SIZE, 700);
@@ -220,9 +206,7 @@ pub struct ExportDialog {
     /// Where the panel would sit centred, which the drag offset is
     /// measured against.
     center: (f32, f32),
-    moving: bool,
-    grab: (f32, f32),
-    offset: (f32, f32),
+    drag: PanelDrag,
 }
 
 impl ExportDialog {
@@ -245,9 +229,7 @@ impl ExportDialog {
             pick: None,
             geometry: (0.0, 0.0, 0.0, 0.0),
             center: (0.0, 0.0),
-            moving: false,
-            grab: (0.0, 0.0),
-            offset: (0.0, 0.0),
+            drag: PanelDrag::default(),
         }
     }
 
@@ -412,27 +394,10 @@ impl Overlay for ExportDialog {
             ((w - DIALOG_W) / 2.0).floor(),
             ((h - panel_h) / 2.0).floor(),
         );
-        // Clamped so a dragged panel always keeps a grabbable edge on
-        // screen, the same bounds the other panels use.
-        let px = (center.0 + self.offset.0).clamp(60.0 - DIALOG_W, w - 60.0);
-        let py = (center.1 + self.offset.1).clamp(-8.0, h - DIALOG_HEADER_H);
+        let (px, py) = self.drag.place(center, DIALOG_W, w, h);
         self.center = center;
         self.geometry = (px, py, DIALOG_W, panel_h);
-        for (grow, alpha) in [(10.0, 14), (6.0, 22), (3.0, 34)] {
-            painter.fill(
-                px - grow,
-                py - grow + 2.0,
-                DIALOG_W + 2.0 * grow,
-                panel_h + 2.0 * grow,
-                RADIUS + grow,
-                Rgba {
-                    r: 0,
-                    g: 0,
-                    b: 0,
-                    a: alpha,
-                },
-            );
-        }
+        overlay::panel_shadow(painter, px, py, DIALOG_W, panel_h, RADIUS);
         painter.fill(px, py, DIALOG_W, panel_h, RADIUS, ui.overlay_bg);
 
         let title = "Export to PDF";
@@ -599,8 +564,7 @@ impl Overlay for ExportDialog {
             return OverlayResult::Open;
         }
         if y < py + DIALOG_HEADER_H {
-            self.moving = true;
-            self.grab = (x - px, y - py);
+            self.drag.press(x, y, px, py);
             return OverlayResult::Open;
         }
         if self.pick.is_some() {
@@ -617,17 +581,12 @@ impl Overlay for ExportDialog {
     }
 
     fn drag(&mut self, x: f32, y: f32) -> OverlayResult {
-        if self.moving {
-            self.offset = (
-                x - self.grab.0 - self.center.0,
-                y - self.grab.1 - self.center.1,
-            );
-        }
+        self.drag.to(x, y, self.center);
         OverlayResult::Open
     }
 
     fn release(&mut self) {
-        self.moving = false;
+        self.drag.release();
     }
 }
 
@@ -798,13 +757,17 @@ mod tests {
         d.center = (100.0, 100.0);
         d.click(150.0, 110.0);
         d.drag(200.0, 160.0);
-        assert_eq!(d.offset, (50.0, 50.0), "the header moves the panel");
+        assert_eq!(d.drag.offset(), (50.0, 50.0), "the header moves the panel");
         d.release();
         d.drag(400.0, 400.0);
-        assert_eq!(d.offset, (50.0, 50.0), "and stops on release");
+        assert_eq!(d.drag.offset(), (50.0, 50.0), "and stops on release");
         d.click(150.0, 100.0 + DIALOG_HEADER_H + 5.0);
         d.drag(300.0, 300.0);
-        assert_eq!(d.offset, (50.0, 50.0), "a row selects rather than drags");
+        assert_eq!(
+            d.drag.offset(),
+            (50.0, 50.0),
+            "a row selects rather than drags"
+        );
         assert_eq!(d.row, 0);
     }
 

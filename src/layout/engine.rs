@@ -3312,30 +3312,12 @@ fn shape_segment(
         let line_text = buffer.lines[run.line_i].text();
         let line_base = line_offsets[run.line_i];
         let glyphs = trim_trailing_spaces(run.glyphs, line_text);
-        let mut g = 0;
-        while g < glyphs.len() {
-            let span_index = glyphs[g].metadata;
-            let mut end = g + 1;
-            // A justified run must hold no stretched space inside it,
-            // since paint re-shapes runs naturally: cut after each space
-            // so every word paints at its own recorded x. The space
-            // stays with the word before it, keeping byte ranges
-            // contiguous.
-            while end < glyphs.len()
-                && glyphs[end].metadata == span_index
-                && !(base.justify
-                    && glyph_is_space(line_text, &glyphs[end - 1])
-                    && !glyph_is_space(line_text, &glyphs[end]))
-            {
-                end += 1;
-            }
-            let first = &glyphs[g];
-            let last = &glyphs[end - 1];
-            let start_byte = glyphs[g..end].iter().map(|gl| gl.start).min().unwrap();
-            let end_byte = glyphs[g..end].iter().map(|gl| gl.end).max().unwrap();
+        for group in glyph_groups(glyphs, line_text, base.justify) {
+            let span_index = group.meta;
+            let (start_byte, end_byte) = (group.bytes.start, group.bytes.end);
             let st = &styles[span_index];
-            let x = x0 + first.x;
-            let width = last.x + last.w - first.x;
+            let x = x0 + group.x;
+            let width = group.width;
             let y = y0 + run.line_top - st.rise;
             let baseline = y0 + run.line_y - st.rise;
             if let Some(pill) = st.pill {
@@ -3397,7 +3379,6 @@ fn shape_segment(
                     st.color,
                 ));
             }
-            g = end;
         }
     }
     height
@@ -5385,17 +5366,9 @@ fn shape_code_line(
         height = height.max(run.line_top + line_height);
         let line_text = buffer.lines[run.line_i].text();
         let glyphs = trim_trailing_spaces(run.glyphs, line_text);
-        let mut g = 0;
-        while g < glyphs.len() {
-            let segment_index = glyphs[g].metadata;
-            let mut end = g + 1;
-            while end < glyphs.len() && glyphs[end].metadata == segment_index {
-                end += 1;
-            }
-            let first = &glyphs[g];
-            let last = &glyphs[end - 1];
-            let start_byte = glyphs[g..end].iter().map(|gl| gl.start).min().unwrap();
-            let end_byte = glyphs[g..end].iter().map(|gl| gl.end).max().unwrap();
+        for group in glyph_groups(glyphs, line_text, false) {
+            let segment_index = group.meta;
+            let (start_byte, end_byte) = (group.bytes.start, group.bytes.end);
             let role = segments[segment_index].1;
             // The rich pieces cover the line contiguously, so an offset
             // into their concatenation is an offset into the line.
@@ -5408,10 +5381,10 @@ fn shape_code_line(
                     start: start_byte as u32,
                     len: (end_byte - start_byte) as u32,
                 },
-                x: x0 + first.x,
+                x: x0 + group.x,
                 y: y0 + run.line_top,
                 baseline: y0 + run.line_y,
-                width: last.x + last.w - first.x,
+                width: group.width,
                 size,
                 family,
                 weight: if bold {
@@ -5428,7 +5401,6 @@ fn shape_code_line(
                 block: block_index,
                 span: line_index,
             });
-            g = end;
         }
     }
     height.max(line_height)
@@ -5472,6 +5444,66 @@ fn role_color(theme: &Theme, role: SyntaxRole) -> Rgba {
 /// Drops line-trailing whitespace glyphs so run widths match visible text.
 /// Whether a glyph draws only a stretchable space, U+0020 or U+00A0,
 /// the characters justification widens.
+/// One run of consecutive glyphs sharing a metadata index on a shaped
+/// line: the segment they answer to, their byte span inside the line,
+/// and their x extent.
+struct GlyphGroup {
+    meta: usize,
+    bytes: std::ops::Range<usize>,
+    x: f32,
+    width: f32,
+}
+
+/// Walks a shaped line grouping consecutive glyphs by metadata, the
+/// one walk both the prose and the code paths consume. With
+/// `cut_spaces`, a group also ends after each space run, since a
+/// justified line must hold no stretched space inside a group: paint
+/// re-shapes runs naturally, so every word paints at its own recorded
+/// x, and the space stays with the word before it to keep byte ranges
+/// contiguous.
+fn glyph_groups<'a>(
+    glyphs: &'a [cosmic_text::LayoutGlyph],
+    line_text: &'a str,
+    cut_spaces: bool,
+) -> impl Iterator<Item = GlyphGroup> + 'a {
+    let mut g = 0;
+    std::iter::from_fn(move || {
+        if g >= glyphs.len() {
+            return None;
+        }
+        let meta = glyphs[g].metadata;
+        let mut end = g + 1;
+        while end < glyphs.len()
+            && glyphs[end].metadata == meta
+            && !(cut_spaces
+                && glyph_is_space(line_text, &glyphs[end - 1])
+                && !glyph_is_space(line_text, &glyphs[end]))
+        {
+            end += 1;
+        }
+        let first = &glyphs[g];
+        let last = &glyphs[end - 1];
+        let start = glyphs[g..end]
+            .iter()
+            .map(|gl| gl.start)
+            .min()
+            .expect("a glyph");
+        let stop = glyphs[g..end]
+            .iter()
+            .map(|gl| gl.end)
+            .max()
+            .expect("a glyph");
+        let group = GlyphGroup {
+            meta,
+            bytes: start..stop,
+            x: first.x,
+            width: last.x + last.w - first.x,
+        };
+        g = end;
+        Some(group)
+    })
+}
+
 fn glyph_is_space(line_text: &str, glyph: &cosmic_text::LayoutGlyph) -> bool {
     matches!(&line_text[glyph.start..glyph.end], " " | "\u{a0}")
 }

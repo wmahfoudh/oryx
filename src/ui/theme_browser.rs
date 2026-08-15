@@ -11,7 +11,7 @@ use crate::input::DOUBLE_CLICK;
 use crate::paint::painter::Painter;
 use crate::style::fonts::BODY_FAMILY;
 use crate::style::theme::{self, Rgba, Theme};
-use crate::ui::overlay::{inside, Action, Overlay, OverlayResult};
+use crate::ui::overlay::{self, inside, Action, Overlay, OverlayResult, PanelDrag};
 use crate::ui::textfield::TextField;
 
 /// A drawn rename field: the caret offsets of its text and its box.
@@ -65,9 +65,7 @@ pub struct ThemeBrowser {
     rename_rect: (f32, f32, f32, f32),
     clipboard: Option<arboard::Clipboard>,
     last_name_click: Option<(usize, Instant)>,
-    moving: bool,
-    grab: (f32, f32),
-    offset: (f32, f32),
+    drag: PanelDrag,
     geometry: Geometry,
 }
 
@@ -84,9 +82,7 @@ impl ThemeBrowser {
             rename_rect: (0.0, 0.0, 0.0, 0.0),
             clipboard: None,
             last_name_click: None,
-            moving: false,
-            grab: (0.0, 0.0),
-            offset: (0.0, 0.0),
+            drag: PanelDrag::default(),
             geometry: Geometry::default(),
         };
         browser.rescan();
@@ -131,13 +127,8 @@ impl ThemeBrowser {
     fn select(&mut self, index: usize) {
         self.selected = index.min(self.rows.len().saturating_sub(1));
         self.pending_delete = None;
-        let row_top = self.selected as f32 * ROW_H;
-        let list_h = self.geometry.list_h.max(ROW_H);
-        if row_top < self.scroll {
-            self.scroll = row_top;
-        } else if row_top + ROW_H > self.scroll + list_h {
-            self.scroll = row_top + ROW_H - list_h;
-        }
+        self.scroll =
+            overlay::scroll_into_view(self.selected, ROW_H, self.scroll, self.geometry.list_h);
     }
 
     fn select_by_name(&mut self, name: &str) {
@@ -316,8 +307,7 @@ impl Overlay for ThemeBrowser {
         let want_h = HEADER_H + PAD + self.rows.len() as f32 * ROW_H + PAD;
         let panel_h = want_h.min(max_h);
         let center = (((w - panel_w) / 2.0).floor(), ((h - panel_h) / 2.0).floor());
-        let px = (center.0 + self.offset.0).clamp(60.0 - panel_w, w - 60.0);
-        let py = (center.1 + self.offset.1).clamp(-8.0, h - HEADER_H);
+        let (px, py) = self.drag.place(center, panel_w, w, h);
         let list_top = py + HEADER_H + PAD;
         let list_h = panel_h - HEADER_H - 2.0 * PAD;
         let list_bottom = list_top + list_h;
@@ -335,21 +325,7 @@ impl Overlay for ThemeBrowser {
         self.scroll = self.scroll.clamp(0.0, self.max_scroll());
 
         // Soft shadow lifts the panel off the untouched document.
-        for (offset, alpha) in [(10.0, 14), (6.0, 22), (3.0, 34)] {
-            painter.fill(
-                px - offset,
-                py - offset + 2.0,
-                panel_w + 2.0 * offset,
-                panel_h + 2.0 * offset,
-                RADIUS + offset,
-                Rgba {
-                    r: 0,
-                    g: 0,
-                    b: 0,
-                    a: alpha,
-                },
-            );
-        }
+        overlay::panel_shadow(painter, px, py, panel_w, panel_h, RADIUS);
         painter.fill(px, py, panel_w, panel_h, RADIUS, theme.ui.overlay_bg);
 
         let first = (self.scroll / ROW_H).floor() as usize;
@@ -605,8 +581,7 @@ impl Overlay for ThemeBrowser {
             return OverlayResult::Close;
         }
         if y < py + HEADER_H {
-            self.moving = true;
-            self.grab = (x - px, y - py);
+            self.drag.press(x, y, px, py);
             return OverlayResult::Open;
         }
         if y < self.geometry.list_top || y > self.geometry.list_top + self.geometry.list_h {
@@ -650,17 +625,12 @@ impl Overlay for ThemeBrowser {
     }
 
     fn drag(&mut self, x: f32, y: f32) -> OverlayResult {
-        if self.moving {
-            self.offset = (
-                x - self.grab.0 - self.geometry.center.0,
-                y - self.grab.1 - self.geometry.center.1,
-            );
-        }
+        self.drag.to(x, y, self.geometry.center);
         OverlayResult::Open
     }
 
     fn release(&mut self) {
-        self.moving = false;
+        self.drag.release();
     }
 
     fn scroll(&mut self, lines: f32) -> OverlayResult {

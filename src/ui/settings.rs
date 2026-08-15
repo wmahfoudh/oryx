@@ -6,8 +6,8 @@ use winit::keyboard::{Key, NamedKey};
 
 use crate::paint::painter::Painter;
 use crate::style::fonts::BODY_FAMILY;
-use crate::style::theme::{Rgba, Theme};
-use crate::ui::overlay::{Action, Overlay, OverlayResult};
+use crate::style::theme::Theme;
+use crate::ui::overlay::{self, Action, Overlay, OverlayResult, PanelDrag};
 
 const ROW_H: f32 = 40.0;
 const LIST_ROW_H: f32 = 28.0;
@@ -89,9 +89,7 @@ pub struct Settings {
     ui_scale: f32,
     row: usize,
     pick: Option<Pick>,
-    moving: bool,
-    grab: (f32, f32),
-    offset: (f32, f32),
+    drag: PanelDrag,
     geometry: Geometry,
 }
 
@@ -113,9 +111,7 @@ impl Settings {
             ui_scale,
             row: 0,
             pick: None,
-            moving: false,
-            grab: (0.0, 0.0),
-            offset: (0.0, 0.0),
+            drag: PanelDrag::default(),
             geometry: Geometry::default(),
         }
     }
@@ -180,11 +176,21 @@ impl Settings {
             }
             Key::Named(NamedKey::ArrowDown) => {
                 pick.selected = (pick.selected + 1).min(self.families.len().saturating_sub(1));
-                pick.scroll = scroll_into_view(pick.selected, pick.scroll, self.geometry.list_h);
+                pick.scroll = overlay::scroll_into_view(
+                    pick.selected,
+                    LIST_ROW_H,
+                    pick.scroll,
+                    self.geometry.list_h,
+                );
             }
             Key::Named(NamedKey::ArrowUp) => {
                 pick.selected = pick.selected.saturating_sub(1);
-                pick.scroll = scroll_into_view(pick.selected, pick.scroll, self.geometry.list_h);
+                pick.scroll = overlay::scroll_into_view(
+                    pick.selected,
+                    LIST_ROW_H,
+                    pick.scroll,
+                    self.geometry.list_h,
+                );
             }
             Key::Named(NamedKey::Enter) => {
                 let index = pick.selected;
@@ -200,19 +206,6 @@ impl Settings {
     }
 }
 
-/// Keeps a list row visible inside the viewport height.
-fn scroll_into_view(index: usize, scroll: f32, list_h: f32) -> f32 {
-    let top = index as f32 * LIST_ROW_H;
-    let list_h = list_h.max(LIST_ROW_H);
-    if top < scroll {
-        top
-    } else if top + LIST_ROW_H > scroll + list_h {
-        top + LIST_ROW_H - list_h
-    } else {
-        scroll
-    }
-}
-
 impl Overlay for Settings {
     fn draw(&mut self, painter: &mut Painter, theme: &Theme) {
         let (w, h) = (painter.width(), painter.height());
@@ -223,8 +216,7 @@ impl Overlay for Settings {
             None => HEADER_H + PAD + ROWS.len() as f32 * ROW_H + PAD + FOOTER_H,
         };
         let center = (((w - panel_w) / 2.0).floor(), ((h - panel_h) / 2.0).floor());
-        let px = (center.0 + self.offset.0).clamp(60.0 - panel_w, w - 60.0);
-        let py = (center.1 + self.offset.1).clamp(-8.0, h - HEADER_H);
+        let (px, py) = self.drag.place(center, panel_w, w, h);
         let rows_top = py + HEADER_H + PAD;
         let list_top = py + HEADER_H + PAD / 2.0;
         let list_h = panel_h - HEADER_H - FOOTER_H - PAD;
@@ -237,21 +229,7 @@ impl Overlay for Settings {
             list_h,
         };
 
-        for (grow, alpha) in [(10.0, 14), (6.0, 22), (3.0, 34)] {
-            painter.fill(
-                px - grow,
-                py - grow + 2.0,
-                panel_w + 2.0 * grow,
-                panel_h + 2.0 * grow,
-                RADIUS + grow,
-                Rgba {
-                    r: 0,
-                    g: 0,
-                    b: 0,
-                    a: alpha,
-                },
-            );
-        }
+        overlay::panel_shadow(painter, px, py, panel_w, panel_h, RADIUS);
         painter.fill(px, py, panel_w, panel_h, RADIUS, ui.overlay_bg);
 
         match &self.pick {
@@ -436,8 +414,7 @@ impl Overlay for Settings {
             return OverlayResult::Close;
         }
         if y < py + HEADER_H {
-            self.moving = true;
-            self.grab = (x - px, y - py);
+            self.drag.press(x, y, px, py);
             return OverlayResult::Open;
         }
         if let Some(pick) = self.pick.as_mut() {
@@ -476,17 +453,12 @@ impl Overlay for Settings {
     }
 
     fn drag(&mut self, x: f32, y: f32) -> OverlayResult {
-        if self.moving {
-            self.offset = (
-                x - self.grab.0 - self.geometry.center.0,
-                y - self.grab.1 - self.geometry.center.1,
-            );
-        }
+        self.drag.to(x, y, self.geometry.center);
         OverlayResult::Open
     }
 
     fn release(&mut self) {
-        self.moving = false;
+        self.drag.release();
     }
 
     fn scroll(&mut self, lines: f32) -> OverlayResult {

@@ -50,6 +50,90 @@ pub fn inside(rect: (f32, f32, f32, f32), x: f32, y: f32) -> bool {
     x >= rect.0 && x <= rect.0 + rect.2 && y >= rect.1 && y <= rect.1 + rect.3
 }
 
+/// The header band every panel drags by.
+pub const HEADER_H: f32 = 44.0;
+
+/// The drag state every panel shares: the offset a header drag
+/// accumulates, applied to the panel's centred seat at draw.
+#[derive(Default)]
+pub struct PanelDrag {
+    offset: (f32, f32),
+    grab: (f32, f32),
+    moving: bool,
+}
+
+impl PanelDrag {
+    /// Arms the drag from a press at `(x, y)` on a panel at `(px, py)`.
+    pub fn press(&mut self, x: f32, y: f32, px: f32, py: f32) {
+        self.moving = true;
+        self.grab = (x - px, y - py);
+    }
+
+    /// Follows the cursor while armed; the offset is read back at draw
+    /// through `place`.
+    pub fn to(&mut self, x: f32, y: f32, center: (f32, f32)) {
+        if self.moving {
+            self.offset = (x - self.grab.0 - center.0, y - self.grab.1 - center.1);
+        }
+    }
+
+    pub fn release(&mut self) {
+        self.moving = false;
+    }
+
+    /// The accumulated offset, read by tests pinning drag behavior.
+    pub fn offset(&self) -> (f32, f32) {
+        self.offset
+    }
+
+    /// The panel's top-left from its centred seat and the accumulated
+    /// offset, clamped so a dragged panel always keeps a grabbable
+    /// edge on screen.
+    pub fn place(&self, center: (f32, f32), panel_w: f32, w: f32, h: f32) -> (f32, f32) {
+        (
+            (center.0 + self.offset.0).clamp(60.0 - panel_w, w - 60.0),
+            (center.1 + self.offset.1).clamp(-8.0, h - HEADER_H),
+        )
+    }
+}
+
+/// Soft shadow lifting a panel off the document: three fills growing
+/// outward, drawn before the panel's own fill, following its corner
+/// radius. The confirm dialog and the search bar keep their own
+/// lighter pair, small chrome deliberately floating lower.
+pub fn panel_shadow(painter: &mut Painter, x: f32, y: f32, w: f32, h: f32, radius: f32) {
+    for (grow, alpha) in [(10.0, 14), (6.0, 22), (3.0, 34)] {
+        painter.fill(
+            x - grow,
+            y - grow + 2.0,
+            w + 2.0 * grow,
+            h + 2.0 * grow,
+            radius + grow,
+            crate::style::theme::Rgba {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: alpha,
+            },
+        );
+    }
+}
+
+/// Keeps row `index` visible in a list: the scroll that moves just
+/// enough in the row's direction, or the standing one when the row
+/// already shows.
+pub fn scroll_into_view(index: usize, row_h: f32, scroll: f32, list_h: f32) -> f32 {
+    let top = index as f32 * row_h;
+    let list_h = list_h.max(row_h);
+    if top < scroll {
+        top
+    } else if top + row_h > scroll + list_h {
+        top + row_h - list_h
+    } else {
+        scroll
+    }
+}
+
 pub trait Overlay {
     /// Paints the overlay; geometry may be cached for hit testing.
     fn draw(&mut self, painter: &mut Painter, theme: &Theme);
