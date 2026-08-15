@@ -3614,7 +3614,13 @@ impl App {
         let same_look = self.cfg.zoom == stash.zoom && self.config.theme == stash.theme;
         self.layout = stash.layout.filter(|_| same_look);
         self.pass = stash.pass.filter(|_| same_look);
-        self.outline = if self.book_toc.is_empty() {
+        // The outline belongs to the rendered page. A return into a
+        // parked markdown edit must read the parked page, not the
+        // source view on screen, or the panel blanks to "No headings"
+        // and holds blank for the rest of the edit.
+        self.outline = if let Some(parked) = self.edit_park.as_deref() {
+            OutlineTree::build(&parked.document)
+        } else if self.book_toc.is_empty() {
             OutlineTree::build(&self.document)
         } else {
             OutlineTree::from_toc(&self.book_toc, &self.document)

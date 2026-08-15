@@ -9,7 +9,7 @@
 
 <details>
 <Summary>
-<b>Quick Links:</b>
+<b>Quick Links</b>
 </summary>
 
 - [Oryx Scope](#oryx-scope)
