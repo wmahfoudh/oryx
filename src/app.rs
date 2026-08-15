@@ -826,7 +826,6 @@ impl App {
                     self.mode,
                     self.search.is_some(),
                     self.selection.is_some_and(|s| !s.is_empty()),
-                    self.sidebar.is_some(),
                 );
                 match act {
                     edit::EscapeAct::CloseFind => self.close_search(),
@@ -837,13 +836,10 @@ impl App {
                         self.request_redraw();
                     }
                     edit::EscapeAct::LeaveEdit => self.leave_edit(),
-                    // While the help page shows, Escape means leaving
-                    // it: the sidebar stays as the reader left it.
-                    edit::EscapeAct::CloseSidebar if self.help_stash.is_some() => {
-                        self.help_return();
-                    }
-                    edit::EscapeAct::CloseSidebar => self.toggle_sidebar(),
                     edit::EscapeAct::Quit => {
+                        // While the help page shows, Escape means
+                        // leaving it; the sidebar stays as it stands
+                        // either way, hiding belongs to Ctrl+Shift+B.
                         if self.help_stash.is_some() {
                             self.help_return();
                         } else if self.guard_unsaved(confirm::Pending::Quit) {

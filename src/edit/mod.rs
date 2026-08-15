@@ -354,22 +354,21 @@ pub enum EscapeAct {
     CloseFind,
     ClearSelection,
     LeaveEdit,
-    CloseSidebar,
     Quit,
 }
 
-/// The Escape ladder, innermost out, one press each. While editing: the
-/// find bar, then the selection, then the mode itself. While reading
-/// the cascade stays as it stands: the find bar, then an open sidebar,
-/// then the app. Overlays intercept upstream and never reach here.
-pub fn escape(mode: Mode, find_open: bool, has_selection: bool, sidebar_open: bool) -> EscapeAct {
+/// The Escape ladder, innermost out, one press each. While editing:
+/// the find bar, then the selection, then the mode itself. While
+/// reading: the find bar, then the app. The sidebar is not a rung:
+/// Escape leaves it as it stands, and hiding belongs to Ctrl+Shift+B
+/// alone. Overlays intercept upstream and never reach here.
+pub fn escape(mode: Mode, find_open: bool, has_selection: bool) -> EscapeAct {
     if find_open {
         return EscapeAct::CloseFind;
     }
     match mode {
         Mode::Edit if has_selection => EscapeAct::ClearSelection,
         Mode::Edit => EscapeAct::LeaveEdit,
-        Mode::Read if sidebar_open => EscapeAct::CloseSidebar,
         Mode::Read => EscapeAct::Quit,
     }
 }
@@ -1013,27 +1012,22 @@ mod tests {
 
     #[test]
     fn escape_layers_innermost_out_while_editing() {
-        assert_eq!(escape(Mode::Edit, true, true, true), EscapeAct::CloseFind);
-        assert_eq!(
-            escape(Mode::Edit, false, true, true),
-            EscapeAct::ClearSelection
-        );
-        assert_eq!(escape(Mode::Edit, false, false, true), EscapeAct::LeaveEdit);
-        assert_eq!(
-            escape(Mode::Edit, false, false, false),
-            EscapeAct::LeaveEdit,
-            "the sidebar outlives the mode; Escape reaches it in read mode"
-        );
+        assert_eq!(escape(Mode::Edit, true, true), EscapeAct::CloseFind);
+        assert_eq!(escape(Mode::Edit, false, true), EscapeAct::ClearSelection);
+        assert_eq!(escape(Mode::Edit, false, false), EscapeAct::LeaveEdit);
     }
 
+    // The sidebar is not a rung: Escape quits with the panel as it
+    // stands, so a quit by Escape no longer saves a sidebar-less
+    // start. Hiding belongs to Ctrl+Shift+B alone.
     #[test]
-    fn escape_keeps_the_reading_cascade() {
-        assert_eq!(escape(Mode::Read, true, false, true), EscapeAct::CloseFind);
+    fn escape_leaves_the_sidebar_alone() {
+        assert_eq!(escape(Mode::Read, true, false), EscapeAct::CloseFind);
         assert_eq!(
-            escape(Mode::Read, false, true, true),
-            EscapeAct::CloseSidebar,
+            escape(Mode::Read, false, true),
+            EscapeAct::Quit,
             "read mode never spends Escape on the selection"
         );
-        assert_eq!(escape(Mode::Read, false, false, false), EscapeAct::Quit);
+        assert_eq!(escape(Mode::Read, false, false), EscapeAct::Quit);
     }
 }
