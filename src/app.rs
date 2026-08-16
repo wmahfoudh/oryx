@@ -2713,6 +2713,12 @@ impl App {
             self.sidebar_click(x, y);
             self.move_ownership(PaneAct::ClickSidebar);
         } else {
+            // A click into the document turns copy intent toward it:
+            // the field's stale selection drops, so Ctrl+C copies what
+            // the reader selects here, not the preselected query.
+            if let Some(state) = self.search.as_mut() {
+                state.focused_mut().clear_selection();
+            }
             self.move_ownership(PaneAct::ClickDocument);
             self.scrollbar_press();
             if self.drag.is_none() {

@@ -15,7 +15,7 @@ use crate::ui::textfield::TextField;
 /// never crosses them.
 const BLOCK_SEP: char = '\u{1}';
 
-const BAR_WIDTH: f32 = 316.0;
+const BAR_WIDTH: f32 = 344.0;
 const BAR_HEIGHT: f32 = 40.0;
 const MARGIN: f32 = 16.0;
 const PAD: f32 = 16.0;
@@ -24,7 +24,7 @@ const QUERY_SIZE: f32 = 15.0;
 const COUNTER_SIZE: f32 = 13.0;
 const TOGGLE_W: f32 = 26.0;
 const TOGGLE_H: f32 = 22.0;
-const ROW_H: f32 = 34.0;
+const ROW_H: f32 = 36.0;
 
 /// Live find session: the query as typed, its matches, and the cursor
 /// among them. `stale` marks the matches for recomputation against the
@@ -192,13 +192,26 @@ pub fn draw_bar(painter: &mut Painter, theme: &Theme, state: &SearchState, width
             1.0,
             theme.blocks.table_border,
         );
+        // The replace-all hint sits where the counter does above, in
+        // the same face and color.
+        let hint = "Ctrl+\u{23CE} all";
+        let hint_w = painter.measure(hint, CODE_FAMILY, COUNTER_SIZE, 400);
+        painter.text(
+            x + BAR_WIDTH - PAD - hint_w,
+            y + BAR_HEIGHT + 7.0 + (QUERY_SIZE - COUNTER_SIZE) * 1.1,
+            hint,
+            CODE_FAMILY,
+            COUNTER_SIZE,
+            400,
+            theme.blocks.frontmatter_fg,
+        );
         draw_field(
             painter,
             theme,
             field,
             x + PAD,
-            y + BAR_HEIGHT + 6.0,
-            BAR_WIDTH - 2.0 * PAD,
+            y + BAR_HEIGHT + 7.0,
+            BAR_WIDTH - 2.0 * PAD - hint_w - 12.0,
             "replace",
             state.replace_focused(),
         );

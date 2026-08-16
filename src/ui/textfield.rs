@@ -246,6 +246,11 @@ impl TextField {
         }
     }
 
+    /// Drops the selection, text and caret untouched.
+    pub fn clear_selection(&mut self) {
+        self.anchor = None;
+    }
+
     /// Deletes the selection if one stands.
     pub fn delete_selection(&mut self) -> Edit {
         match self.selection() {
@@ -379,6 +384,16 @@ mod tests {
         let mut f = TextField::new(text);
         f.set_caret(caret);
         f
+    }
+
+    #[test]
+    fn clear_selection_keeps_text_and_caret() {
+        let mut f = TextField::new("hello");
+        f.select_all();
+        f.clear_selection();
+        assert_eq!(f.selection(), None);
+        assert_eq!(f.text(), "hello");
+        assert_eq!(f.caret(), 5);
     }
 
     #[test]
