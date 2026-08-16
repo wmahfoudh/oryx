@@ -1,5 +1,5 @@
-//! Find in document: smart-case substring matching over the layout's
-//! visual lines. Each match is a `Selection`, so highlight geometry and
+//! Find in document: smart-case substring matching over the document's
+//! display text. Each match is a `Selection`, so highlight geometry and
 //! scroll targets reuse the selection machinery.
 
 use std::ops::Range;
@@ -11,7 +11,6 @@ use crate::style::theme::{Rgba, Theme};
 use crate::ui::selection::{block_pieces, ModelPos, Piece, Selection};
 use crate::ui::textfield::TextField;
 
-/// Run index marking a boundary character no match may cover.
 /// A character no query can contain, planted between blocks so a match
 /// never crosses them.
 const BLOCK_SEP: char = '\u{1}';
@@ -218,13 +217,102 @@ fn fold(c: char) -> char {
     c.to_lowercase().next().unwrap_or(c)
 }
 
-/// One searchable character: its model position (None for the block
-/// separators and display joiners), the character, and its byte length
-/// for computing end positions.
-struct HChar {
-    pos: Option<ModelPos>,
-    c: char,
-    len: usize,
+/// One run of addressable text: `text[range]` maps linearly into the
+/// span's bytes starting at `byte`.
+struct Seg {
+    range: Range<usize>,
+    block: usize,
+    span: usize,
+    byte: usize,
+}
+
+/// The document's display text flattened into one string, walked from
+/// the model through the same pieces the copies use, beside the table
+/// mapping its addressable bytes back to model positions. Separators,
+/// joiners and labels contribute their characters but no segment, so a
+/// range covering them alone converts to no selection.
+struct Haystack {
+    text: String,
+    segs: Vec<Seg>,
+}
+
+impl Haystack {
+    fn build(doc: &Document) -> Haystack {
+        let mut hay = Haystack {
+            text: String::new(),
+            segs: Vec::new(),
+        };
+        for index in 0..doc.blocks.len() {
+            let mut opened = false;
+            for piece in block_pieces(doc, index) {
+                match piece {
+                    Piece::Sep(text) => hay.push_inert(&mut opened, text),
+                    Piece::Label(text) => hay.push_inert(&mut opened, &text),
+                    Piece::Addr { span, text } => {
+                        if text.is_empty() {
+                            continue;
+                        }
+                        hay.open(&mut opened);
+                        hay.segs.push(Seg {
+                            range: hay.text.len()..hay.text.len() + text.len(),
+                            block: index,
+                            span,
+                            byte: 0,
+                        });
+                        hay.text.push_str(&text);
+                    }
+                }
+            }
+        }
+        hay
+    }
+
+    /// Plants the block separator ahead of a block's first character.
+    fn open(&mut self, opened: &mut bool) {
+        if !*opened {
+            if !self.text.is_empty() {
+                self.text.push(BLOCK_SEP);
+            }
+            *opened = true;
+        }
+    }
+
+    fn push_inert(&mut self, opened: &mut bool, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        self.open(opened);
+        self.text.push_str(text);
+    }
+
+    /// The selection a byte range of `text` converts to, clipped to the
+    /// addressable characters inside it. A range covering the block
+    /// separator or holding no addressable byte converts to nothing.
+    fn selection(&self, range: Range<usize>) -> Option<Selection> {
+        if self.text[range.clone()].contains(BLOCK_SEP) {
+            return None;
+        }
+        let first = self
+            .segs
+            .partition_point(|seg| seg.range.end <= range.start);
+        let last = self.segs.partition_point(|seg| seg.range.start < range.end);
+        if first >= last {
+            return None;
+        }
+        let head = &self.segs[first];
+        let tail = &self.segs[last - 1];
+        let start = ModelPos {
+            block: head.block,
+            span: head.span,
+            byte: head.byte + range.start.saturating_sub(head.range.start),
+        };
+        let end = ModelPos {
+            block: tail.block,
+            span: tail.span,
+            byte: tail.byte + range.end.min(tail.range.end) - tail.range.start,
+        };
+        Some(Selection { start, end })
+    }
 }
 
 /// Every match in document order, found in the model's display text, so
@@ -235,93 +323,48 @@ pub fn matches(doc: &Document, query: &str) -> Vec<Selection> {
     if query.is_empty() {
         return Vec::new();
     }
-    let sensitive = smart_case_sensitive(query);
-    let needle: Vec<char> = if sensitive {
-        query.chars().collect()
+    let hay = Haystack::build(doc);
+    let found = if smart_case_sensitive(query) {
+        find_exact(&hay.text, query)
     } else {
-        query.chars().map(fold).collect()
+        find_folded(&hay.text, query)
     };
-    let hay = haystack(doc);
+    found
+        .into_iter()
+        .filter_map(|range| hay.selection(range))
+        .collect()
+}
+
+/// Byte ranges of every occurrence in order, non-overlapping: the scan
+/// resumes at each match's end.
+fn find_exact(text: &str, query: &str) -> Vec<Range<usize>> {
     let mut out = Vec::new();
-    let mut i = 0;
-    while i + needle.len() <= hay.len() {
-        let window = &hay[i..i + needle.len()];
-        let hit = window.iter().zip(&needle).all(|(h, want)| {
-            h.c != BLOCK_SEP && (if sensitive { h.c } else { fold(h.c) }) == *want
-        });
-        if hit {
-            let start = window.iter().find_map(|h| h.pos);
-            let end = window.iter().rev().find_map(|h| {
-                h.pos.map(|p| ModelPos {
-                    byte: p.byte + h.len,
-                    ..p
-                })
-            });
-            if let (Some(start), Some(end)) = (start, end) {
-                out.push(Selection { start, end });
-            }
-            i += needle.len();
-        } else {
-            i += 1;
-        }
+    let mut from = 0;
+    while let Some(at) = text[from..].find(query) {
+        let start = from + at;
+        out.push(start..start + query.len());
+        from = start + query.len();
     }
     out
 }
 
-/// The document's display text as one character sequence, walked from
-/// the model through the same pieces the copies use.
-fn haystack(doc: &Document) -> Vec<HChar> {
-    let mut out: Vec<HChar> = Vec::new();
-    for index in 0..doc.blocks.len() {
-        let mut opened = false;
-        for piece in block_pieces(doc, index) {
-            match piece {
-                Piece::Sep(sep) => {
-                    for c in sep.chars() {
-                        push_char(&mut out, &mut opened, None, c);
-                    }
-                }
-                Piece::Label(label) => {
-                    for c in label.chars() {
-                        push_char(&mut out, &mut opened, None, c);
-                    }
-                }
-                Piece::Addr { span, text } => {
-                    let mut byte = 0usize;
-                    for c in text.chars() {
-                        let pos = ModelPos {
-                            block: index,
-                            span,
-                            byte,
-                        };
-                        push_char(&mut out, &mut opened, Some(pos), c);
-                        byte += c.len_utf8();
-                    }
-                }
-            }
-        }
+/// Case-insensitive occurrences: haystack and needle fold to the same
+/// alphabet, and each match maps back through the per-character offset
+/// table, since folding can change a character's byte length.
+fn find_folded(text: &str, query: &str) -> Vec<Range<usize>> {
+    let needle: String = query.chars().map(fold).collect();
+    let mut folded = String::with_capacity(text.len());
+    let mut map: Vec<(usize, usize)> = Vec::new();
+    for (at, c) in text.char_indices() {
+        map.push((folded.len(), at));
+        folded.push(fold(c));
     }
-    out
-}
-
-/// Appends one character, planting the block separator ahead of a
-/// block's first character.
-fn push_char(out: &mut Vec<HChar>, opened: &mut bool, pos: Option<ModelPos>, c: char) {
-    if !*opened {
-        if !out.is_empty() {
-            out.push(HChar {
-                pos: None,
-                c: BLOCK_SEP,
-                len: 0,
-            });
-        }
-        *opened = true;
-    }
-    out.push(HChar {
-        pos,
-        c,
-        len: c.len_utf8(),
-    });
+    map.push((folded.len(), text.len()));
+    let seat = |at: usize| map[map.partition_point(|&(f, _)| f < at)].1;
+    find_exact(&folded, &needle)
+        .into_iter()
+        .map(|range| seat(range.start)..seat(range.end))
+        .collect()
 }
 
 /// The neighboring match index with wraparound in either direction.
