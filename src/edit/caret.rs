@@ -337,10 +337,8 @@ fn x_of(
     }
     let buffer = selection::shape_run(fonts, text_run, text, family);
     if let Some(line) = buffer.layout_runs().next() {
-        for glyph in line.glyphs {
-            if glyph.start >= byte {
-                return glyph.x;
-            }
+        if let Some(x) = selection::boundary_x(line.glyphs, text, byte) {
+            return x;
         }
     }
     text_run.width

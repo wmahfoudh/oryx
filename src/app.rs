@@ -40,7 +40,7 @@ use oryx::ui::notice::{self, Notice};
 use oryx::ui::outline::{entry_offset, OutlineTree};
 use oryx::ui::overlay::{Action, Overlay, OverlayResult};
 use oryx::ui::scrollbar;
-use oryx::ui::search::{self, SearchState};
+use oryx::ui::search::{self, BarHit, ReplaceRow, SearchState};
 use oryx::ui::selection::{self, ModelPos, Selection};
 use oryx::ui::settings::{self, Settings};
 use oryx::ui::sidebar::{self, Sidebar};
@@ -1018,12 +1018,9 @@ impl App {
     /// one did, so unsaved edits show on the page and not just on disk.
     fn leave_edit(&mut self) {
         // The replace row is an editor tool; reading keeps the plain bar.
-        let dropped = self.search.as_mut().and_then(|state| {
-            state.focus_replace = false;
-            state.replace.take()
-        });
-        if let Some(field) = dropped {
-            self.last_replace = field.text().to_string();
+        let dropped = self.search.as_mut().and_then(|state| state.replace.take());
+        if let Some(row) = dropped {
+            self.last_replace = row.field.text().to_string();
         }
         let left_at = self.caret.map(|c| c.offset);
         if let (Some(path), Some(c)) = (self.path.clone(), self.caret) {
@@ -2046,7 +2043,9 @@ impl App {
     fn open_search(&mut self) {
         if let Some(state) = self.search.as_mut() {
             state.query.select_all();
-            state.focus_replace = false;
+            if let Some(row) = state.replace.as_mut() {
+                row.focused = false;
+            }
             state.doc_intent = false;
             self.request_redraw();
             return;
@@ -2058,7 +2057,6 @@ impl App {
             regex: self.last_regex,
             error: false,
             replace: None,
-            focus_replace: false,
             seek: None,
             doc_intent: false,
             matches: Vec::new(),
@@ -2085,25 +2083,26 @@ impl App {
             return;
         };
         if state.replace.is_none() {
-            state.replace = Some(TextField::new(self.last_replace.clone()));
+            state.replace = Some(ReplaceRow {
+                field: TextField::new(self.last_replace.clone()),
+                focused: false,
+            });
         }
-        state.focus_replace = was_open;
+        let row = state.replace.as_mut().expect("row just ensured");
+        row.focused = was_open;
         if was_open {
-            state
-                .replace
-                .as_mut()
-                .expect("row just ensured")
-                .select_all();
+            row.field.select_all();
         }
         self.request_redraw();
     }
 
     fn close_search(&mut self) {
+        self.search_mouse = false;
         if let Some(state) = self.search.take() {
             self.last_query = state.query.text().to_string();
             self.last_regex = state.regex;
-            if let Some(field) = state.replace.as_ref() {
-                self.last_replace = field.text().to_string();
+            if let Some(row) = state.replace.as_ref() {
+                self.last_replace = row.field.text().to_string();
             }
             self.band = None;
             self.request_redraw();
@@ -2123,103 +2122,61 @@ impl App {
         self.request_redraw();
     }
 
-    /// Replaces the current match with the replace field's text as one
-    /// structural edit, then advances to the first match at or after the
-    /// splice. In regex mode the replacement expands the match's own
-    /// captures. Editing only; with no match it does nothing.
-    fn replace_current(&mut self) {
+    /// The source edits a replace acts on, in match order: the current
+    /// match alone or every match, plain text literal, regex expanded
+    /// with each match's own captures. `None` when replacing cannot
+    /// proceed: not editing, no bar or row, an invalid or stale pattern,
+    /// no matches, or a match list that no longer describes this text.
+    fn replacement_edits(&mut self, all: bool) -> Option<Vec<(std::ops::Range<usize>, String)>> {
         if self.mode != edit::Mode::Edit {
-            return;
+            return None;
         }
         self.sync_search();
-        let Some(state) = self.search.as_ref() else {
-            return;
-        };
+        let state = self.search.as_ref()?;
         if state.error || state.stale || state.matches.is_empty() {
-            return;
+            return None;
         }
-        let Some(template) = state.replace.as_ref().map(|f| f.text().to_string()) else {
-            return;
-        };
-        let index = state.current.min(state.matches.len() - 1);
-        let (sel, text) = if state.regex {
-            let pairs = search::regex_replacements(&self.document, state.query.text(), &template);
-            let Some(pairs) = pairs else {
-                return;
-            };
+        let template = state.replace.as_ref()?.field.text().to_string();
+        let pairs: Vec<(Selection, String)> = if state.regex {
+            let pairs = search::regex_replacements(&self.document, state.query.text(), &template)?;
             // The pairs mirror the match list; a length drift means the
             // matches no longer describe this text, so the replace waits.
             if pairs.len() != state.matches.len() {
-                return;
+                return None;
             }
             pairs
-                .into_iter()
-                .nth(index)
-                .expect("index bounded by the list")
-        } else {
-            (state.matches[index], template)
-        };
-        let Some(range) = caret::selection_range(&self.document, &sel) else {
-            return;
-        };
-        self.selection = None;
-        let after = range.start + text.len();
-        self.type_edit(range, &text, Kind::Structural);
-        // The splice marked the matches stale; the recompute honors the
-        // seek once the relayout lets it run. The replace was a document
-        // act, so Ctrl+Z right after takes it back.
-        if let Some(state) = self.search.as_mut() {
-            state.seek = Some(after);
-            state.doc_intent = true;
-        }
-        self.request_redraw();
-    }
-
-    /// Replaces every match in one region splice, one undo unit and one
-    /// relayout, and reports the count in the corner notice. Editing
-    /// only; with no match it does nothing and records nothing.
-    fn replace_all(&mut self) {
-        if self.mode != edit::Mode::Edit {
-            return;
-        }
-        self.sync_search();
-        let Some(state) = self.search.as_ref() else {
-            return;
-        };
-        if state.error || state.stale || state.matches.is_empty() {
-            return;
-        }
-        let Some(template) = state.replace.as_ref().map(|f| f.text().to_string()) else {
-            return;
-        };
-        let edits: Vec<(std::ops::Range<usize>, String)> = if state.regex {
-            let pairs = search::regex_replacements(&self.document, state.query.text(), &template);
-            let Some(pairs) = pairs else {
-                return;
-            };
-            if pairs.len() != state.matches.len() {
-                return;
-            }
-            pairs
-                .into_iter()
-                .filter_map(|(sel, text)| {
-                    caret::selection_range(&self.document, &sel).map(|range| (range, text))
-                })
-                .collect()
         } else {
             state
                 .matches
                 .iter()
-                .filter_map(|sel| {
-                    caret::selection_range(&self.document, sel)
-                        .map(|range| (range, template.clone()))
-                })
+                .map(|sel| (*sel, template.clone()))
                 .collect()
         };
-        let count = edits.len();
-        let Some((region, text)) = splice::combine(&self.document.source, &edits) else {
-            return;
+        let index = state.current.min(pairs.len() - 1);
+        let picked = if all {
+            pairs
+        } else {
+            vec![pairs.into_iter().nth(index).expect("index bounded")]
         };
+        let edits: Vec<(std::ops::Range<usize>, String)> = picked
+            .into_iter()
+            .filter_map(|(sel, text)| {
+                caret::selection_range(&self.document, &sel).map(|range| (range, text))
+            })
+            .collect();
+        (!edits.is_empty()).then_some(edits)
+    }
+
+    /// Splices the edits as one structural undo unit and seats the
+    /// search past them: the recompute honors the seek once the relayout
+    /// lets it run, and the splice was a document act, so Ctrl+Z right
+    /// after takes it back.
+    fn apply_replacements(
+        &mut self,
+        edits: Vec<(std::ops::Range<usize>, String)>,
+    ) -> Option<usize> {
+        let count = edits.len();
+        let (region, text) = splice::combine(&self.document.source, &edits)?;
         self.selection = None;
         let after = region.start + text.len();
         self.type_edit(region, &text, Kind::Structural);
@@ -2227,29 +2184,62 @@ impl App {
             state.seek = Some(after);
             state.doc_intent = true;
         }
-        self.show_notice(&format!("{count} replaced"));
+        self.request_redraw();
+        Some(count)
     }
 
-    /// A left press on the search bar's regex toggle, consumed before
-    /// the document sees the click.
-    fn search_toggle_press(&mut self) -> bool {
-        if self.search.is_none() {
-            return false;
+    /// Replaces the current match and advances to the first match at or
+    /// after the splice.
+    fn replace_current(&mut self) {
+        if let Some(edits) = self.replacement_edits(false) {
+            self.apply_replacements(edits);
         }
-        let Some(width) = self
-            .gfx
-            .as_ref()
-            .map(|g| g.window.inner_size().width as f32 / self.scale)
-        else {
+    }
+
+    /// Replaces every match in one region splice, one undo unit and one
+    /// relayout, and reports the count in the corner notice.
+    fn replace_all(&mut self) {
+        if let Some(edits) = self.replacement_edits(true) {
+            if let Some(count) = self.apply_replacements(edits) {
+                self.show_notice(&format!("{count} replaced"));
+            }
+        }
+    }
+
+    /// A left press anywhere on the search bar, consumed before the
+    /// document sees the click: the toggle flips the mode, and a row
+    /// click focuses that row's field, a bar act either way.
+    fn search_bar_press(&mut self) -> bool {
+        let Some(replace_row) = self.search.as_ref().map(|state| state.replace.is_some()) else {
+            return false;
+        };
+        let Some(width) = self.logical_width() else {
             return false;
         };
         let (x, y) = self.ui_cursor();
-        if !search::toggle_hit(width, x, y) {
+        let Some(hit) = search::bar_hit(width, replace_row, x, y) else {
             return false;
-        }
+        };
         self.search_mouse = true;
-        self.toggle_search_regex();
+        match hit {
+            BarHit::Toggle => self.toggle_search_regex(),
+            BarHit::Query | BarHit::Replace => {
+                let state = self.search.as_mut().expect("search open");
+                if let Some(row) = state.replace.as_mut() {
+                    row.focused = matches!(hit, BarHit::Replace);
+                }
+                state.doc_intent = false;
+                self.request_redraw();
+            }
+        }
         true
+    }
+
+    /// Window width in logical units, the space bar geometry lives in.
+    fn logical_width(&self) -> Option<f32> {
+        self.gfx
+            .as_ref()
+            .map(|g| g.window.inner_size().width as f32 / self.scale)
     }
 
     /// Moves to the neighboring match; with the bar closed, reopens it.
@@ -2321,8 +2311,9 @@ impl App {
             // shown; without it the key keeps its editor meaning.
             Key::Named(NamedKey::Tab) => {
                 let state = self.search.as_mut().expect("search open");
-                if state.replace.is_some() {
-                    state.focus_replace = !state.focus_replace;
+                if let Some(row) = state.replace.as_mut() {
+                    row.focused = !row.focused;
+                    state.doc_intent = false;
                     self.request_redraw();
                     true
                 } else {
@@ -2344,12 +2335,11 @@ impl App {
             // Copy and cut act on the focused field's own selection;
             // without one the key keeps its document meaning.
             Key::Character(s) if ctrl && s.eq_ignore_ascii_case("c") && !shift => {
-                let selected = self
+                match self
                     .search
                     .as_ref()
-                    .map(|state| state.focused().selected_text().to_string())
-                    .filter(|text| !text.is_empty());
-                match selected {
+                    .and_then(SearchState::focused_selection)
+                {
                     Some(text) => {
                         self.set_clipboard(text);
                         true
@@ -2357,13 +2347,12 @@ impl App {
                     None => false,
                 }
             }
-            Key::Character(s) if ctrl && s.eq_ignore_ascii_case("x") => {
-                let selected = self
+            Key::Character(s) if ctrl && s.eq_ignore_ascii_case("x") && !shift => {
+                match self
                     .search
                     .as_ref()
-                    .map(|state| state.focused().selected_text().to_string())
-                    .filter(|text| !text.is_empty());
-                match selected {
+                    .and_then(SearchState::focused_selection)
+                {
                     Some(text) => {
                         self.set_clipboard(text);
                         let state = self.search.as_mut().expect("search open");
@@ -2393,7 +2382,10 @@ impl App {
                 let on_query = !state.replace_focused();
                 match state.focused_mut().key(key, ctrl, shift) {
                     Edit::Ignored => false,
+                    // A claimed key is a bar act either way, so the
+                    // intent turns back to the field.
                     Edit::Handled => {
+                        state.doc_intent = false;
                         self.request_redraw();
                         true
                     }
@@ -2715,6 +2707,9 @@ impl App {
     /// A left button press at the current cursor, from the mouse or a
     /// synthesized tap.
     fn left_press(&mut self) {
+        // A stale latch from a lost release must not eat this press's
+        // own release.
+        self.search_mouse = false;
         if let Some(overlay) = self.overlay.as_mut() {
             self.overlay_mouse = true;
             let (x, y) = (
@@ -2723,7 +2718,7 @@ impl App {
             );
             let result = overlay.click(x, y);
             self.overlay_result(result);
-        } else if self.search_toggle_press() || self.sidebar_edge_press() {
+        } else if self.search_bar_press() || self.sidebar_edge_press() {
         } else if (self.cursor.x as f32) < self.inset() && self.sidebar.is_some() {
             let (x, y) = self.ui_cursor();
             self.sidebar_click(x, y);
@@ -4314,9 +4309,9 @@ impl App {
         let y = self.cursor.y as f32 + self.scroll_y;
         let (ux, uy) = self.ui_cursor();
         let on_toggle = self.search.is_some()
-            && self.gfx.as_ref().is_some_and(|g| {
-                search::toggle_hit(g.window.inner_size().width as f32 / self.scale, ux, uy)
-            });
+            && self
+                .logical_width()
+                .is_some_and(|width| search::toggle_hit(width, ux, uy));
         let hovering = on_toggle
             || (!on_edge
                 && self.layout.as_ref().is_some_and(|l| {

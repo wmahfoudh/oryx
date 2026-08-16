@@ -262,7 +262,9 @@ impl TextField {
         }
     }
 
-    /// Restores the state before the last text change.
+    /// Restores the state before the last text change. An empty history
+    /// reports `Ignored`, so the owner's own undo can answer instead of
+    /// the key dying in the field.
     pub fn undo(&mut self) -> Edit {
         match self.undo.pop() {
             Some((text, caret)) => {
@@ -272,11 +274,12 @@ impl TextField {
                 self.anchor = None;
                 Edit::Changed
             }
-            None => Edit::Handled,
+            None => Edit::Ignored,
         }
     }
 
-    /// Restores the state an undo left.
+    /// Restores the state an undo left, `Ignored` on an empty history
+    /// like `undo`.
     pub fn redo(&mut self) -> Edit {
         match self.redo.pop() {
             Some((text, caret)) => {
@@ -286,7 +289,7 @@ impl TextField {
                 self.anchor = None;
                 Edit::Changed
             }
-            None => Edit::Handled,
+            None => Edit::Ignored,
         }
     }
 
@@ -410,9 +413,9 @@ mod tests {
     }
 
     #[test]
-    fn undo_with_no_history_is_claimed_but_quiet() {
+    fn undo_with_no_history_is_not_claimed() {
         let mut f = field_at("ab", 2);
-        assert_eq!(f.key(&ch("z"), true, false), Edit::Handled);
+        assert_eq!(f.key(&ch("z"), true, false), Edit::Ignored);
         assert_eq!(f.text(), "ab");
     }
 
@@ -431,7 +434,7 @@ mod tests {
         f.key(&ch("z"), true, false);
         f.key(&ch("d"), false, false);
         assert_eq!(f.text(), "abd");
-        assert_eq!(f.key(&ch("z"), true, true), Edit::Handled);
+        assert_eq!(f.key(&ch("z"), true, true), Edit::Ignored);
         assert_eq!(f.text(), "abd");
     }
 
@@ -440,7 +443,7 @@ mod tests {
         let mut f = field_at("ab", 2);
         f.key(&ch("c"), false, false);
         f.set_text("fresh");
-        assert_eq!(f.key(&ch("z"), true, false), Edit::Handled);
+        assert_eq!(f.key(&ch("z"), true, false), Edit::Ignored);
         assert_eq!(f.text(), "fresh");
     }
 

@@ -7,7 +7,7 @@
 use std::borrow::Cow;
 use std::cmp::Ordering;
 
-use cosmic_text::{Attrs, Buffer, Family, Metrics, Shaping, Style, Weight};
+use cosmic_text::{Attrs, Buffer, Family, LayoutGlyph, Metrics, Shaping, Style, Weight};
 
 use crate::doc::model::{BlockKind, Document, Span};
 use crate::layout::{metrics, LayoutDoc, TextRef, TextRun};
@@ -903,22 +903,29 @@ fn prefix_width(
         .entry(index)
         .or_insert_with(|| shape_run(fonts, run, text, family));
     if let Some(line) = buffer.layout_runs().next() {
-        for glyph in line.glyphs {
-            if glyph.start >= byte {
-                return glyph.x;
-            }
-            // The boundary falls inside the glyph's cluster: a ligature
-            // such as fi is one glyph over two characters, and its width
-            // splits evenly per character so a highlight can end between
-            // them.
-            if byte < glyph.end {
-                let within = text[glyph.start..byte].chars().count() as f32;
-                let total = text[glyph.start..glyph.end].chars().count() as f32;
-                return glyph.x + glyph.w * within / total.max(1.0);
-            }
+        if let Some(x) = boundary_x(line.glyphs, text, byte) {
+            return x;
         }
     }
     run.width
+}
+
+/// X offset of a byte boundary among shaped glyphs. A boundary inside a
+/// glyph's cluster (a ligature such as fi is one glyph over two
+/// characters) splits the glyph's width evenly per character, so carets
+/// and highlights land between the characters and always agree.
+pub(crate) fn boundary_x(glyphs: &[LayoutGlyph], text: &str, byte: usize) -> Option<f32> {
+    for glyph in glyphs {
+        if glyph.start >= byte {
+            return Some(glyph.x);
+        }
+        if byte < glyph.end {
+            let within = text[glyph.start..byte].chars().count() as f32;
+            let total = text[glyph.start..glyph.end].chars().count() as f32;
+            return Some(glyph.x + glyph.w * within / total.max(1.0));
+        }
+    }
+    None
 }
 
 #[cfg(test)]

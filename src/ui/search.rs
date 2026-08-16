@@ -6,7 +6,7 @@ use std::ops::Range;
 
 use crate::doc::model::Document;
 use crate::paint::painter::Painter;
-use crate::style::fonts::{BODY_FAMILY, CODE_FAMILY};
+use crate::style::fonts::CODE_FAMILY;
 use crate::style::theme::{Rgba, Theme};
 use crate::ui::selection::{block_pieces, ModelPos, Piece, Selection};
 use crate::ui::textfield::TextField;
@@ -41,12 +41,10 @@ pub struct SearchState {
     /// The pattern failed to compile or exceeded the backtracking
     /// limit; the bar shows the caution border and no counter.
     pub error: bool,
-    /// The replace field while find and replace is open; edit mode
-    /// only, dropped on leaving the editor.
-    pub replace: Option<TextField>,
-    /// The replace field takes the typing; read through
-    /// `replace_focused`, which also requires the row to be shown.
-    pub focus_replace: bool,
+    /// The replace row while find and replace is open; edit mode only,
+    /// dropped on leaving the editor. Focus lives inside the row, so a
+    /// focused replace field without a row cannot exist.
+    pub replace: Option<ReplaceRow>,
     /// A replace happened at this source offset: once the matches
     /// recompute, the current one seats on the first at or after it,
     /// wrapping to the first. Consumed by the recompute, however many
@@ -70,25 +68,39 @@ pub struct SearchState {
     pub settle: bool,
 }
 
+/// The second row of the bar: the replacement text and whether its
+/// field takes the typing instead of the query.
+pub struct ReplaceRow {
+    pub field: TextField,
+    pub focused: bool,
+}
+
 impl SearchState {
     /// The replace row is shown and takes the typing.
     pub fn replace_focused(&self) -> bool {
-        self.focus_replace && self.replace.is_some()
+        self.replace.as_ref().is_some_and(|row| row.focused)
     }
 
     /// The field the keyboard feeds.
     pub fn focused(&self) -> &TextField {
         match self.replace.as_ref() {
-            Some(field) if self.focus_replace => field,
+            Some(row) if row.focused => &row.field,
             _ => &self.query,
         }
     }
 
     pub fn focused_mut(&mut self) -> &mut TextField {
         match self.replace.as_mut() {
-            Some(field) if self.focus_replace => field,
+            Some(row) if row.focused => &mut row.field,
             _ => &mut self.query,
         }
+    }
+
+    /// The focused field's selected text, when any; the one accessor
+    /// copy and cut share so they cannot drift.
+    pub fn focused_selection(&self) -> Option<String> {
+        let text = self.focused().selected_text();
+        (!text.is_empty()).then(|| text.to_string())
     }
 }
 
@@ -187,7 +199,7 @@ pub fn draw_bar(painter: &mut Painter, theme: &Theme, state: &SearchState, width
         !state.replace_focused(),
     );
 
-    if let Some(field) = state.replace.as_ref() {
+    if let Some(row) = state.replace.as_ref() {
         painter.line(
             x + PAD,
             y + BAR_HEIGHT - 1.0,
@@ -212,14 +224,42 @@ pub fn draw_bar(painter: &mut Painter, theme: &Theme, state: &SearchState, width
         draw_field(
             painter,
             theme,
-            field,
+            &row.field,
             x + PAD,
             y + BAR_HEIGHT + 7.0,
             BAR_WIDTH - 2.0 * PAD - hint_w - 12.0,
             "replace",
-            state.replace_focused(),
+            row.focused,
         );
     }
+}
+
+/// What a click at logical window coordinates lands on in the bar.
+pub enum BarHit {
+    Toggle,
+    Query,
+    Replace,
+}
+
+/// The bar element under a point, `None` outside the pill; the geometry
+/// mirrors `draw_bar`.
+pub fn bar_hit(width: f32, replace_row: bool, px: f32, py: f32) -> Option<BarHit> {
+    let x = (width - BAR_WIDTH - MARGIN).max(MARGIN);
+    let height = if replace_row {
+        BAR_HEIGHT + ROW_H
+    } else {
+        BAR_HEIGHT
+    };
+    if !(x..x + BAR_WIDTH).contains(&px) || !(MARGIN..MARGIN + height).contains(&py) {
+        return None;
+    }
+    if toggle_hit(width, px, py) {
+        return Some(BarHit::Toggle);
+    }
+    if replace_row && py >= MARGIN + BAR_HEIGHT {
+        return Some(BarHit::Replace);
+    }
+    Some(BarHit::Query)
 }
 
 /// One field row: windowed text with the caret kept visible, the
@@ -245,7 +285,7 @@ fn draw_field(
         text[window.clone()].to_string()
     };
     let lead = if cut {
-        painter.measure("\u{2026}", BODY_FAMILY, QUERY_SIZE, 400)
+        painter.measure("\u{2026}", CODE_FAMILY, QUERY_SIZE, 400)
     } else {
         0.0
     };
@@ -253,7 +293,7 @@ fn draw_field(
     // of a text too long for the pill still lands under its character.
     let x_of = |painter: &mut Painter, at: usize| {
         let at = at.clamp(window.start, window.end);
-        lead + painter.measure(&text[window.start..at], BODY_FAMILY, QUERY_SIZE, 400)
+        lead + painter.measure(&text[window.start..at], CODE_FAMILY, QUERY_SIZE, 400)
     };
     if focused {
         if let Some(range) = field.selection() {
@@ -274,7 +314,7 @@ fn draw_field(
             left + 6.0,
             top,
             placeholder,
-            BODY_FAMILY,
+            CODE_FAMILY,
             QUERY_SIZE,
             400,
             theme.blocks.frontmatter_fg,
@@ -284,7 +324,7 @@ fn draw_field(
             left,
             top,
             &shown,
-            BODY_FAMILY,
+            CODE_FAMILY,
             QUERY_SIZE,
             400,
             ui.overlay_fg,
@@ -316,7 +356,7 @@ fn window_fit(
     avail: f32,
 ) -> (Range<usize>, bool) {
     let fits = |painter: &mut Painter, text: &str| {
-        painter.measure(text, BODY_FAMILY, QUERY_SIZE, 400) <= avail
+        painter.measure(text, CODE_FAMILY, QUERY_SIZE, 400) <= avail
     };
     if fits(painter, query) {
         return (0..query.len(), false);
@@ -355,12 +395,11 @@ fn fold(c: char) -> char {
 }
 
 /// One run of addressable text: `text[range]` maps linearly into the
-/// span's bytes starting at `byte`.
+/// span's text from its start.
 struct Seg {
     range: Range<usize>,
     block: usize,
     span: usize,
-    byte: usize,
 }
 
 /// The document's display text flattened into one string, walked from
@@ -394,7 +433,6 @@ impl Haystack {
                             range: hay.text.len()..hay.text.len() + text.len(),
                             block: index,
                             span,
-                            byte: 0,
                         });
                         hay.text.push_str(&text);
                     }
@@ -446,12 +484,12 @@ impl Haystack {
         let start = ModelPos {
             block: head.block,
             span: head.span,
-            byte: head.byte + range.start.saturating_sub(head.range.start),
+            byte: range.start.saturating_sub(head.range.start),
         };
         let end = ModelPos {
             block: tail.block,
             span: tail.span,
-            byte: tail.byte + range.end.min(tail.range.end) - tail.range.start,
+            byte: range.end.min(tail.range.end) - tail.range.start,
         };
         Some(Selection { start, end })
     }
@@ -490,13 +528,32 @@ pub fn regex_matches(doc: &Document, pattern: &str) -> Option<Vec<Selection>> {
     let regex = compile(pattern)?;
     let hay = Haystack::build(doc);
     let mut out = Vec::new();
-    for found in regex.find_iter(&hay.text) {
-        let found = found.ok()?;
-        if let Some(selection) = hay.selection(found.start()..found.end()) {
-            out.push(selection);
+    let mut pos = 0;
+    while pos <= hay.text.len() {
+        let Some(found) = regex.find_from_pos(&hay.text, pos).ok()? else {
+            break;
+        };
+        match hay.selection(found.start()..found.end()) {
+            Some(selection) => {
+                out.push(selection);
+                pos = found.end();
+            }
+            // A zero-width or boundary-covering candidate: resume just
+            // inside it, so a greedy match crossing a block cannot hide
+            // the real matches it covered.
+            None => pos = next_boundary(&hay.text, found.start()),
         }
     }
     Some(out)
+}
+
+/// The next character boundary past `at`, or past the end so a caller's
+/// scan terminates.
+fn next_boundary(text: &str, at: usize) -> usize {
+    text[at..]
+        .chars()
+        .next()
+        .map_or(text.len() + 1, |c| at + c.len_utf8())
 }
 
 /// Every regex match beside its expanded replacement: `$1`, `$0` and
@@ -515,11 +572,20 @@ pub fn regex_replacements(
     let hay = Haystack::build(doc);
     let expander = fancy_regex::Expander::default();
     let mut out = Vec::new();
-    for captures in regex.captures_iter(&hay.text) {
-        let captures = captures.ok()?;
+    // The walk mirrors `regex_matches` exactly, discard recovery
+    // included, which is what keeps the pairs aligned with the matches.
+    let mut pos = 0;
+    while pos <= hay.text.len() {
+        let Some(captures) = regex.captures_from_pos(&hay.text, pos).ok()? else {
+            break;
+        };
         let found = captures.get(0).expect("a match always captures group 0");
-        if let Some(selection) = hay.selection(found.start()..found.end()) {
-            out.push((selection, expander.expansion(template, &captures)));
+        match hay.selection(found.start()..found.end()) {
+            Some(selection) => {
+                out.push((selection, expander.expansion(template, &captures)));
+                pos = found.end();
+            }
+            None => pos = next_boundary(&hay.text, found.start()),
         }
     }
     Some(out)
@@ -551,9 +617,13 @@ fn regex_case_sensitive(pattern: &str) -> bool {
 }
 
 /// Byte ranges of every occurrence in order, non-overlapping: the scan
-/// resumes at each match's end.
+/// resumes at each match's end. An empty needle finds nothing, which
+/// also keeps the scan from standing still.
 fn find_exact(text: &str, query: &str) -> Vec<Range<usize>> {
     let mut out = Vec::new();
+    if query.is_empty() {
+        return out;
+    }
     let mut from = 0;
     while let Some(at) = text[from..].find(query) {
         let start = from + at;
@@ -809,6 +879,26 @@ mod tests {
         assert_eq!(found.len(), 2, "every block holding an f is a line");
         assert_eq!(found[0].start.block, 0);
         assert_eq!(found[1].start.block, 1);
+    }
+
+    #[test]
+    fn a_discarded_greedy_match_hides_nothing_behind_it() {
+        // The greedy candidate from block one spans the separator and is
+        // discarded; the scan must resume inside it, not after it.
+        let doc = markdown::parse("bar\n\nfoo");
+        assert_eq!(regex_matches(&doc, "[^q]*foo").expect("valid").len(), 1);
+        assert_eq!(regex_matches(&doc, "(?s).*foo").expect("valid").len(), 1);
+        let pairs = regex_replacements(&doc, "[^q]*foo", "$0").expect("valid");
+        assert_eq!(
+            pairs.len(),
+            1,
+            "the pairs walk with the same recovery as the matches"
+        );
+    }
+
+    #[test]
+    fn find_exact_refuses_an_empty_needle() {
+        assert!(find_exact("abc", "").is_empty());
     }
 
     #[test]
