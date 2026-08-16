@@ -130,7 +130,7 @@ The theme editor changes any color role with through color picker while the docu
   <img src="screenshots/themes-editor.png" alt="The theme editor">
 </p>
 
-Nine themes are original designs: `oryx-light` and its dark twin `oryx-dark`, `oryx-sand` and `oryx-night`, `inkstone`, `ember`, `meadow`, `slate`, and `be-vendible`. The rest adapt permissively licensed editor palettes, [credited below](#credits).
+Ten themes are original designs: `oryx-light` and its dark twin `oryx-dark`, `oryx-hero`, `oryx-sand` and `oryx-night`, `inkstone`, `ember`, `meadow`, `slate`, and `be-vendible`. The rest adapt permissively licensed editor palettes, [credited below](#credits).
 
 ## Export to PDF
 
