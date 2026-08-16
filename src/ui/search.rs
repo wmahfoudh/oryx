@@ -52,6 +52,10 @@ pub struct SearchState {
     /// wrapping to the first. Consumed by the recompute, however many
     /// frames the relayout takes to let it run.
     pub seek: Option<usize>,
+    /// The last act targeted the document, a click into it or a
+    /// replace, so Ctrl+Z and Ctrl+Shift+Z pass through to the document
+    /// instead of the field. Editing a field turns it back.
+    pub doc_intent: bool,
     pub matches: Vec<Selection>,
     /// Highlight rects for the matches inside the band window alone;
     /// the counter and navigation use the full match list.

@@ -2047,6 +2047,7 @@ impl App {
         if let Some(state) = self.search.as_mut() {
             state.query.select_all();
             state.focus_replace = false;
+            state.doc_intent = false;
             self.request_redraw();
             return;
         }
@@ -2059,6 +2060,7 @@ impl App {
             replace: None,
             focus_replace: false,
             seek: None,
+            doc_intent: false,
             matches: Vec::new(),
             rects: Vec::new(),
             rects_scroll: 0.0,
@@ -2164,9 +2166,11 @@ impl App {
         let after = range.start + text.len();
         self.type_edit(range, &text, Kind::Structural);
         // The splice marked the matches stale; the recompute honors the
-        // seek once the relayout lets it run.
+        // seek once the relayout lets it run. The replace was a document
+        // act, so Ctrl+Z right after takes it back.
         if let Some(state) = self.search.as_mut() {
             state.seek = Some(after);
+            state.doc_intent = true;
         }
         self.request_redraw();
     }
@@ -2221,6 +2225,7 @@ impl App {
         self.type_edit(region, &text, Kind::Structural);
         if let Some(state) = self.search.as_mut() {
             state.seek = Some(after);
+            state.doc_intent = true;
         }
         self.show_notice(&format!("{count} replaced"));
     }
@@ -2364,6 +2369,7 @@ impl App {
                         let state = self.search.as_mut().expect("search open");
                         let on_query = !state.replace_focused();
                         state.focused_mut().delete_selection();
+                        state.doc_intent = false;
                         if on_query {
                             state.stale = true;
                             self.band = None;
@@ -2376,6 +2382,14 @@ impl App {
             }
             key => {
                 let state = self.search.as_mut().expect("search open");
+                // With intent on the document, undo and redo pass
+                // through to it instead of the field.
+                if state.doc_intent
+                    && ctrl
+                    && matches!(key, Key::Character(s) if s.eq_ignore_ascii_case("z"))
+                {
+                    return false;
+                }
                 let on_query = !state.replace_focused();
                 match state.focused_mut().key(key, ctrl, shift) {
                     Edit::Ignored => false,
@@ -2384,6 +2398,7 @@ impl App {
                         true
                     }
                     Edit::Changed => {
+                        state.doc_intent = false;
                         if on_query {
                             state.stale = true;
                             self.band = None;
@@ -2407,6 +2422,7 @@ impl App {
         if state.focused_mut().insert(text) != Edit::Changed {
             return;
         }
+        state.doc_intent = false;
         if on_query {
             state.stale = true;
             self.band = None;
@@ -2713,11 +2729,12 @@ impl App {
             self.sidebar_click(x, y);
             self.move_ownership(PaneAct::ClickSidebar);
         } else {
-            // A click into the document turns copy intent toward it:
-            // the field's stale selection drops, so Ctrl+C copies what
-            // the reader selects here, not the preselected query.
+            // A click into the document turns the intent toward it: the
+            // field's stale selection drops, so Ctrl+C copies what the
+            // reader selects here, and Ctrl+Z undoes the document.
             if let Some(state) = self.search.as_mut() {
                 state.focused_mut().clear_selection();
+                state.doc_intent = true;
             }
             self.move_ownership(PaneAct::ClickDocument);
             self.scrollbar_press();
