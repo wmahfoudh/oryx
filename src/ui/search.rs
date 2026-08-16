@@ -50,9 +50,10 @@ pub struct SearchState {
     /// wrapping to the first. Consumed by the recompute, however many
     /// frames the relayout takes to let it run.
     pub seek: Option<usize>,
-    /// The last act targeted the document, a click into it or a
-    /// replace, so Ctrl+Z and Ctrl+Shift+Z pass through to the document
-    /// instead of the field. Editing a field turns it back.
+    /// A replace just edited the document, so Ctrl+Z and Ctrl+Shift+Z
+    /// pass through to it and take the replacement back. Any key the
+    /// bar claims turns them back to the field. Clicks never set this:
+    /// a click off the bar closes it instead.
     pub doc_intent: bool,
     pub matches: Vec<Selection>,
     /// Highlight rects for the matches inside the band window alone;

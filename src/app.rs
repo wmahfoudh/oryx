@@ -2718,42 +2718,42 @@ impl App {
             );
             let result = overlay.click(x, y);
             self.overlay_result(result);
-        } else if self.search_bar_press() || self.sidebar_edge_press() {
-        } else if (self.cursor.x as f32) < self.inset() && self.sidebar.is_some() {
-            let (x, y) = self.ui_cursor();
-            self.sidebar_click(x, y);
-            self.move_ownership(PaneAct::ClickSidebar);
+        } else if self.search_bar_press() {
         } else {
-            // A click into the document turns the intent toward it: the
-            // field's stale selection drops, so Ctrl+C copies what the
-            // reader selects here, and Ctrl+Z undoes the document.
-            if let Some(state) = self.search.as_mut() {
-                state.focused_mut().clear_selection();
-                state.doc_intent = true;
-            }
-            self.move_ownership(PaneAct::ClickDocument);
-            self.scrollbar_press();
-            if self.drag.is_none() {
-                if self.mode == edit::Mode::Edit {
-                    match self.register_click() {
-                        2 => {
-                            self.select_unit(false);
-                            self.caret_to_selection_edge();
+            // A click anywhere off the bar closes it, the panels' own
+            // outside-click manner; the click still acts on what it hit,
+            // and the document owns every key again.
+            self.close_search();
+            if self.sidebar_edge_press() {
+            } else if (self.cursor.x as f32) < self.inset() && self.sidebar.is_some() {
+                let (x, y) = self.ui_cursor();
+                self.sidebar_click(x, y);
+                self.move_ownership(PaneAct::ClickSidebar);
+            } else {
+                self.move_ownership(PaneAct::ClickDocument);
+                self.scrollbar_press();
+                if self.drag.is_none() {
+                    if self.mode == edit::Mode::Edit {
+                        match self.register_click() {
+                            2 => {
+                                self.select_unit(false);
+                                self.caret_to_selection_edge();
+                            }
+                            3 => {
+                                self.select_unit(true);
+                                self.caret_to_selection_edge();
+                            }
+                            _ => {
+                                self.place_caret();
+                                self.begin_selection();
+                            }
                         }
-                        3 => {
-                            self.select_unit(true);
-                            self.caret_to_selection_edge();
+                    } else {
+                        match self.register_click() {
+                            2 => self.select_unit(false),
+                            3 => self.select_unit(true),
+                            _ => self.begin_selection(),
                         }
-                        _ => {
-                            self.place_caret();
-                            self.begin_selection();
-                        }
-                    }
-                } else {
-                    match self.register_click() {
-                        2 => self.select_unit(false),
-                        3 => self.select_unit(true),
-                        _ => self.begin_selection(),
                     }
                 }
             }

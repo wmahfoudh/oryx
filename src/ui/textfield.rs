@@ -141,10 +141,12 @@ impl TextField {
             Key::Named(NamedKey::Space) => self.insert_text(" "),
             Key::Named(NamedKey::Backspace) => self.delete(Step::Back),
             Key::Named(NamedKey::Delete) => self.delete(Step::Forward),
-            Key::Named(NamedKey::ArrowLeft) => self.move_caret(Motion::Left, shift),
-            Key::Named(NamedKey::ArrowRight) => self.move_caret(Motion::Right, shift),
-            Key::Named(NamedKey::Home) => self.move_caret(Motion::Start, shift),
-            Key::Named(NamedKey::End) => self.move_caret(Motion::End, shift),
+            // Ctrl-modified navigation means nothing on one line; the
+            // owner keeps its document jumps while a field is open.
+            Key::Named(NamedKey::ArrowLeft) if !ctrl => self.move_caret(Motion::Left, shift),
+            Key::Named(NamedKey::ArrowRight) if !ctrl => self.move_caret(Motion::Right, shift),
+            Key::Named(NamedKey::Home) if !ctrl => self.move_caret(Motion::Start, shift),
+            Key::Named(NamedKey::End) if !ctrl => self.move_caret(Motion::End, shift),
             _ => Edit::Ignored,
         }
     }
@@ -387,6 +389,20 @@ mod tests {
         let mut f = TextField::new(text);
         f.set_caret(caret);
         f
+    }
+
+    #[test]
+    fn ctrl_navigation_is_left_to_the_owner() {
+        let mut f = field_at("hello", 2);
+        for key in [
+            NamedKey::Home,
+            NamedKey::End,
+            NamedKey::ArrowLeft,
+            NamedKey::ArrowRight,
+        ] {
+            assert_eq!(f.key(&named(key), true, false), Edit::Ignored);
+        }
+        assert_eq!(f.caret(), 2, "the field caret never moved");
     }
 
     #[test]
