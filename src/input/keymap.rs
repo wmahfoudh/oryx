@@ -211,6 +211,13 @@ pub const SHORTCUTS: &[Shortcut] = &[
             (Binding::Named(NamedKey::F3), Command::FindNext),
         ],
     },
+    // Handled by the open search bar itself, so no command binding.
+    Shortcut {
+        keys: "Alt+R",
+        action: "Regex matching on/off",
+        section: "Find",
+        bindings: &[],
+    },
     Shortcut {
         keys: "Ctrl+A",
         action: "Select all",

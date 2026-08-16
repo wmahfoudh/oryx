@@ -23,15 +23,22 @@ pub enum Edit {
     Changed,
 }
 
+/// Edits a field remembers for undo; enough for any single line.
+const HISTORY: usize = 100;
+
 /// A single line of editable text. The caret is a byte index and always
 /// sits on a character boundary; `anchor` holds the fixed end of a
-/// selection while the caret is its moving end.
+/// selection while the caret is its moving end. Every text change
+/// records the prior text and caret, so Ctrl+Z and Ctrl+Shift+Z work in
+/// every field.
 #[derive(Debug, Default, Clone)]
 pub struct TextField {
     text: String,
     caret: usize,
     anchor: Option<usize>,
     last_click: Option<Instant>,
+    undo: Vec<(String, usize)>,
+    redo: Vec<(String, usize)>,
 }
 
 impl TextField {
@@ -43,6 +50,8 @@ impl TextField {
             text,
             anchor: None,
             last_click: None,
+            undo: Vec::new(),
+            redo: Vec::new(),
         }
     }
 
@@ -76,11 +85,14 @@ impl TextField {
         }
     }
 
-    /// Replaces the content, caret at the end, selection cleared.
+    /// Replaces the content, caret at the end, selection cleared. A
+    /// programmatic reset, so the undo history clears with it.
     pub fn set_text(&mut self, text: impl Into<String>) {
         self.text = text.into();
         self.caret = self.text.len();
         self.anchor = None;
+        self.undo.clear();
+        self.redo.clear();
     }
 
     pub fn clear(&mut self) {
@@ -115,6 +127,12 @@ impl TextField {
                 if c.eq_ignore_ascii_case("a") {
                     self.select_all();
                     Edit::Handled
+                } else if c.eq_ignore_ascii_case("z") {
+                    if shift {
+                        self.redo()
+                    } else {
+                        self.undo()
+                    }
                 } else {
                     Edit::Ignored
                 }
@@ -228,7 +246,51 @@ impl TextField {
         }
     }
 
+    /// Deletes the selection if one stands.
+    pub fn delete_selection(&mut self) -> Edit {
+        match self.selection() {
+            Some(range) => {
+                self.replace(range, "");
+                Edit::Changed
+            }
+            None => Edit::Handled,
+        }
+    }
+
+    /// Restores the state before the last text change.
+    pub fn undo(&mut self) -> Edit {
+        match self.undo.pop() {
+            Some((text, caret)) => {
+                self.redo.push((std::mem::take(&mut self.text), self.caret));
+                self.text = text;
+                self.caret = caret;
+                self.anchor = None;
+                Edit::Changed
+            }
+            None => Edit::Handled,
+        }
+    }
+
+    /// Restores the state an undo left.
+    pub fn redo(&mut self) -> Edit {
+        match self.redo.pop() {
+            Some((text, caret)) => {
+                self.undo.push((std::mem::take(&mut self.text), self.caret));
+                self.text = text;
+                self.caret = caret;
+                self.anchor = None;
+                Edit::Changed
+            }
+            None => Edit::Handled,
+        }
+    }
+
     fn replace(&mut self, range: Range<usize>, text: &str) {
+        self.undo.push((self.text.clone(), self.caret));
+        if self.undo.len() > HISTORY {
+            self.undo.remove(0);
+        }
+        self.redo.clear();
         self.text.replace_range(range.clone(), text);
         self.caret = range.start + text.len();
         self.anchor = None;
@@ -317,6 +379,65 @@ mod tests {
         let mut f = TextField::new(text);
         f.set_caret(caret);
         f
+    }
+
+    #[test]
+    fn undo_restores_text_and_caret_and_redo_returns() {
+        let mut f = field_at("ab", 2);
+        assert_eq!(f.key(&ch("c"), false, false), Edit::Changed);
+        assert_eq!(f.text(), "abc");
+        assert_eq!(f.key(&ch("z"), true, false), Edit::Changed);
+        assert_eq!(f.text(), "ab");
+        assert_eq!(f.caret(), 2);
+        assert_eq!(f.key(&ch("z"), true, true), Edit::Changed);
+        assert_eq!(f.text(), "abc");
+        assert_eq!(f.caret(), 3);
+    }
+
+    #[test]
+    fn undo_with_no_history_is_claimed_but_quiet() {
+        let mut f = field_at("ab", 2);
+        assert_eq!(f.key(&ch("z"), true, false), Edit::Handled);
+        assert_eq!(f.text(), "ab");
+    }
+
+    #[test]
+    fn a_paste_undoes_as_one_unit() {
+        let mut f = TextField::new("");
+        assert_eq!(f.insert("hello"), Edit::Changed);
+        assert_eq!(f.key(&ch("z"), true, false), Edit::Changed);
+        assert_eq!(f.text(), "");
+    }
+
+    #[test]
+    fn a_new_edit_clears_the_redo_stack() {
+        let mut f = field_at("ab", 2);
+        f.key(&ch("c"), false, false);
+        f.key(&ch("z"), true, false);
+        f.key(&ch("d"), false, false);
+        assert_eq!(f.text(), "abd");
+        assert_eq!(f.key(&ch("z"), true, true), Edit::Handled);
+        assert_eq!(f.text(), "abd");
+    }
+
+    #[test]
+    fn set_text_resets_the_history() {
+        let mut f = field_at("ab", 2);
+        f.key(&ch("c"), false, false);
+        f.set_text("fresh");
+        assert_eq!(f.key(&ch("z"), true, false), Edit::Handled);
+        assert_eq!(f.text(), "fresh");
+    }
+
+    #[test]
+    fn delete_selection_removes_it_and_undo_brings_it_back() {
+        let mut f = TextField::new("hello");
+        f.select_all();
+        assert_eq!(f.delete_selection(), Edit::Changed);
+        assert_eq!(f.text(), "");
+        assert_eq!(f.delete_selection(), Edit::Handled);
+        assert_eq!(f.key(&ch("z"), true, false), Edit::Changed);
+        assert_eq!(f.text(), "hello");
     }
 
     #[test]

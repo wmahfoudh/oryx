@@ -15,13 +15,15 @@ use crate::ui::textfield::TextField;
 /// never crosses them.
 const BLOCK_SEP: char = '\u{1}';
 
-const BAR_WIDTH: f32 = 280.0;
+const BAR_WIDTH: f32 = 316.0;
 const BAR_HEIGHT: f32 = 40.0;
 const MARGIN: f32 = 16.0;
 const PAD: f32 = 16.0;
 const RADIUS: f32 = 20.0;
 const QUERY_SIZE: f32 = 15.0;
 const COUNTER_SIZE: f32 = 13.0;
+const TOGGLE_W: f32 = 26.0;
+const TOGGLE_H: f32 = 22.0;
 
 /// Live find session: the query as typed, its matches, and the cursor
 /// among them. `stale` marks the matches for recomputation against the
@@ -32,6 +34,12 @@ const COUNTER_SIZE: f32 = 13.0;
 /// character replaces it.
 pub struct SearchState {
     pub query: TextField,
+    /// Regex matching instead of plain text, flipped by the bar's
+    /// toggle and kept across close and reopen like the query.
+    pub regex: bool,
+    /// The pattern failed to compile or exceeded the backtracking
+    /// limit; the bar shows the caution border and no counter.
+    pub error: bool,
     pub matches: Vec<Selection>,
     /// Highlight rects for the matches inside the band window alone;
     /// the counter and navigation use the full match list.
@@ -68,17 +76,36 @@ pub fn draw_bar(painter: &mut Painter, theme: &Theme, state: &SearchState, width
         );
     }
     painter.fill(x, y, BAR_WIDTH, BAR_HEIGHT, RADIUS, ui.overlay_bg);
-    painter.stroke(
-        x,
-        y,
-        BAR_WIDTH,
-        BAR_HEIGHT,
-        RADIUS,
-        1.0,
-        theme.blocks.table_border,
+    let border = if state.error {
+        theme.alerts.caution
+    } else {
+        theme.blocks.table_border
+    };
+    painter.stroke(x, y, BAR_WIDTH, BAR_HEIGHT, RADIUS, 1.0, border);
+
+    // The regex toggle, drawn on the selection background while active.
+    let toggle_x = x + BAR_WIDTH - 10.0 - TOGGLE_W;
+    let toggle_y = y + (BAR_HEIGHT - TOGGLE_H) / 2.0;
+    if state.regex {
+        painter.fill(toggle_x, toggle_y, TOGGLE_W, TOGGLE_H, 6.0, ui.selection_bg);
+    }
+    let label_w = painter.measure(".*", CODE_FAMILY, COUNTER_SIZE, 600);
+    let label_color = if state.regex {
+        ui.overlay_fg
+    } else {
+        theme.blocks.frontmatter_fg
+    };
+    painter.text(
+        toggle_x + (TOGGLE_W - label_w) / 2.0,
+        toggle_y + 2.0,
+        ".*",
+        CODE_FAMILY,
+        COUNTER_SIZE,
+        600,
+        label_color,
     );
 
-    let counter = if state.query.is_empty() {
+    let counter = if state.query.is_empty() || state.error {
         String::new()
     } else {
         let shown = if state.matches.is_empty() {
@@ -96,7 +123,7 @@ pub fn draw_bar(painter: &mut Painter, theme: &Theme, state: &SearchState, width
     };
     // Tops differ by the ascent difference so both texts share a baseline.
     painter.text(
-        x + BAR_WIDTH - PAD - counter_w,
+        toggle_x - 10.0 - counter_w,
         y + 10.0 + (QUERY_SIZE - COUNTER_SIZE) * 1.1,
         &counter,
         CODE_FAMILY,
@@ -105,7 +132,7 @@ pub fn draw_bar(painter: &mut Painter, theme: &Theme, state: &SearchState, width
         counter_color,
     );
 
-    let avail = BAR_WIDTH - 2.0 * PAD - counter_w - 12.0;
+    let avail = toggle_x - 10.0 - counter_w - 12.0 - (x + PAD);
     let query = state.query.text();
     let (window, cut) = window_fit(painter, query, state.query.caret(), avail);
     let shown = if cut {
@@ -166,6 +193,15 @@ pub fn draw_bar(painter: &mut Painter, theme: &Theme, state: &SearchState, width
         1.0,
         ui.overlay_fg,
     );
+}
+
+/// Whether a point in logical window coordinates lands on the regex
+/// toggle; the geometry mirrors `draw_bar`.
+pub fn toggle_hit(width: f32, px: f32, py: f32) -> bool {
+    let x = (width - BAR_WIDTH - MARGIN).max(MARGIN);
+    let toggle_x = x + BAR_WIDTH - 10.0 - TOGGLE_W;
+    let toggle_y = MARGIN + (BAR_HEIGHT - TOGGLE_H) / 2.0;
+    (toggle_x..toggle_x + TOGGLE_W).contains(&px) && (toggle_y..toggle_y + TOGGLE_H).contains(&py)
 }
 
 /// The slice of a long query that gets drawn, as a byte range that always
@@ -267,11 +303,15 @@ impl Haystack {
         hay
     }
 
-    /// Plants the block separator ahead of a block's first character.
+    /// Plants the block boundary ahead of a block's first character:
+    /// newline, separator, newline, so `^` and `$` treat every block as
+    /// its own line while the separator keeps any match from crossing.
     fn open(&mut self, opened: &mut bool) {
         if !*opened {
             if !self.text.is_empty() {
+                self.text.push('\n');
                 self.text.push(BLOCK_SEP);
+                self.text.push('\n');
             }
             *opened = true;
         }
@@ -286,10 +326,11 @@ impl Haystack {
     }
 
     /// The selection a byte range of `text` converts to, clipped to the
-    /// addressable characters inside it. A range covering the block
-    /// separator or holding no addressable byte converts to nothing.
+    /// addressable characters inside it. An empty range, a range covering
+    /// the block separator, or one holding no addressable byte converts
+    /// to nothing.
     fn selection(&self, range: Range<usize>) -> Option<Selection> {
-        if self.text[range.clone()].contains(BLOCK_SEP) {
+        if range.is_empty() || self.text[range.clone()].contains(BLOCK_SEP) {
             return None;
         }
         let first = self
@@ -333,6 +374,47 @@ pub fn matches(doc: &Document, query: &str) -> Vec<Selection> {
         .into_iter()
         .filter_map(|range| hay.selection(range))
         .collect()
+}
+
+/// Every regex match in document order, or `None` when the pattern does
+/// not compile or exceeds the engine's backtracking limit, which the bar
+/// reports as an invalid pattern. `^` and `$` match at line starts and
+/// ends. Case follows smart case read from the pattern's literal
+/// characters. A match covering the block separator converts to no
+/// selection, so matches still never cross blocks.
+pub fn regex_matches(doc: &Document, pattern: &str) -> Option<Vec<Selection>> {
+    if pattern.is_empty() {
+        return Some(Vec::new());
+    }
+    let flags = if regex_case_sensitive(pattern) {
+        "(?m)"
+    } else {
+        "(?mi)"
+    };
+    let regex = fancy_regex::Regex::new(&format!("{flags}{pattern}")).ok()?;
+    let hay = Haystack::build(doc);
+    let mut out = Vec::new();
+    for found in regex.find_iter(&hay.text) {
+        let found = found.ok()?;
+        if let Some(selection) = hay.selection(found.start()..found.end()) {
+            out.push(selection);
+        }
+    }
+    Some(out)
+}
+
+/// Smart case for a pattern: a capital letter typed literally makes it
+/// case-sensitive; the letter of an escape like `\W` does not count.
+fn regex_case_sensitive(pattern: &str) -> bool {
+    let mut chars = pattern.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            chars.next();
+        } else if c.is_uppercase() {
+            return true;
+        }
+    }
+    false
 }
 
 /// Byte ranges of every occurrence in order, non-overlapping: the scan
@@ -508,5 +590,82 @@ mod tests {
         assert_eq!(step(2, 3, true), 0);
         assert_eq!(step(0, 3, false), 2);
         assert_eq!(step(0, 1, true), 0);
+    }
+
+    #[test]
+    fn regex_finds_a_pattern() {
+        let doc = markdown::parse("alpha beta");
+        let found = regex_matches(&doc, r"b\w+").expect("valid pattern");
+        assert_eq!(
+            found,
+            vec![Selection {
+                start: ModelPos {
+                    block: 0,
+                    span: 0,
+                    byte: 6
+                },
+                end: ModelPos {
+                    block: 0,
+                    span: 0,
+                    byte: 10
+                },
+            }]
+        );
+    }
+
+    #[test]
+    fn regex_smart_case_reads_literals_only() {
+        let doc = markdown::parse("Panel PANEL panel");
+        assert_eq!(regex_matches(&doc, "panel").expect("valid").len(), 3);
+        assert_eq!(regex_matches(&doc, "Panel").expect("valid").len(), 1);
+        let doc = markdown::parse("A B");
+        assert_eq!(regex_matches(&doc, r"a\Wb").expect("valid").len(), 1);
+    }
+
+    #[test]
+    fn regex_zero_width_terminates_and_finds_nothing() {
+        let doc = markdown::parse("abc");
+        assert!(regex_matches(&doc, "x*").expect("valid").is_empty());
+        assert!(regex_matches(&doc, r"\b").expect("valid").is_empty());
+    }
+
+    #[test]
+    fn regex_never_crosses_blocks() {
+        let doc = markdown::parse("one\n\ntwo");
+        assert!(regex_matches(&doc, "one.two").expect("valid").is_empty());
+    }
+
+    #[test]
+    fn regex_crosses_a_joiner_only_when_named() {
+        let doc = markdown::parse("```rust\nlet alpha = 1;\nlet beta = 2;\n```");
+        assert_eq!(regex_matches(&doc, "1;\nlet").expect("valid").len(), 1);
+        assert!(regex_matches(&doc, "1;.let").expect("valid").is_empty());
+    }
+
+    #[test]
+    fn regex_anchors_match_line_starts() {
+        let doc = markdown::parse("```rust\nlet alpha = 1;\nlet beta = 2;\n```");
+        assert_eq!(regex_matches(&doc, "^let").expect("valid").len(), 2);
+    }
+
+    #[test]
+    fn regex_anchors_match_block_edges() {
+        let doc = markdown::parse("off\n\nbeta f\n\ngamma");
+        let found = regex_matches(&doc, "^.*f.*$").expect("valid");
+        assert_eq!(found.len(), 2, "every block holding an f is a line");
+        assert_eq!(found[0].start.block, 0);
+        assert_eq!(found[1].start.block, 1);
+    }
+
+    #[test]
+    fn regex_invalid_pattern_reports_as_invalid() {
+        let doc = markdown::parse("anything");
+        assert!(regex_matches(&doc, "foo(").is_none());
+    }
+
+    #[test]
+    fn regex_backtrack_limit_reports_as_invalid() {
+        let doc = markdown::parse("x".repeat(40));
+        assert!(regex_matches(&doc, r"(?:(x+)\1)+y").is_none());
     }
 }

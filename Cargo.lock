@@ -2326,6 +2326,7 @@ dependencies = [
  "base64",
  "cosmic-text",
  "directories",
+ "fancy-regex",
  "html5ever",
  "ico",
  "image",

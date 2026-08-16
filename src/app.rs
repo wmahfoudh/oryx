@@ -235,6 +235,8 @@ pub fn run(path: Option<PathBuf>, theme_name: Option<String>) -> anyhow::Result<
         search: None,
         search_canvas: None,
         last_query: String::new(),
+        last_regex: false,
+        search_mouse: false,
         pending_band_for: None,
         mode: edit::Mode::Read,
         caret: None,
@@ -575,6 +577,11 @@ struct App {
     search_canvas: Option<OverlayCanvas>,
     /// Query of the last closed search, restored when the bar reopens.
     last_query: String,
+    /// Matching mode of the last search, restored the same way.
+    last_regex: bool,
+    /// The press that opened or hit the search bar's toggle; its release
+    /// must not click the document underneath.
+    search_mouse: bool,
     /// Deferred band rebuild, tagged with the window size it was scheduled
     /// at. Interactive frames (drag, live resize) paint the viewport
     /// directly; the expensive band builds one frame later, once stable.
@@ -2033,6 +2040,8 @@ impl App {
         query.select_all();
         self.search = Some(SearchState {
             query,
+            regex: self.last_regex,
+            error: false,
             matches: Vec::new(),
             rects: Vec::new(),
             rects_scroll: 0.0,
@@ -2047,9 +2056,45 @@ impl App {
     fn close_search(&mut self) {
         if let Some(state) = self.search.take() {
             self.last_query = state.query.text().to_string();
+            self.last_regex = state.regex;
             self.band = None;
             self.request_redraw();
         }
+    }
+
+    /// Flips the search bar between plain and regex matching.
+    fn toggle_search_regex(&mut self) {
+        let Some(state) = self.search.as_mut() else {
+            return;
+        };
+        state.regex = !state.regex;
+        state.stale = true;
+        let regex = state.regex;
+        self.last_regex = regex;
+        self.band = None;
+        self.request_redraw();
+    }
+
+    /// A left press on the search bar's regex toggle, consumed before
+    /// the document sees the click.
+    fn search_toggle_press(&mut self) -> bool {
+        if self.search.is_none() {
+            return false;
+        }
+        let Some(width) = self
+            .gfx
+            .as_ref()
+            .map(|g| g.window.inner_size().width as f32 / self.scale)
+        else {
+            return false;
+        };
+        let (x, y) = self.ui_cursor();
+        if !search::toggle_hit(width, x, y) {
+            return false;
+        }
+        self.search_mouse = true;
+        self.toggle_search_regex();
+        true
     }
 
     /// Moves to the neighboring match; with the bar closed, reopens it.
@@ -2086,6 +2131,14 @@ impl App {
         if self.search.is_none() {
             return false;
         }
+        // Alt chords belong to the desktop, except the bar's own toggle.
+        if self.modifiers.alt_key() {
+            if matches!(key, Key::Character(s) if s.eq_ignore_ascii_case("r")) {
+                self.toggle_search_regex();
+                return true;
+            }
+            return false;
+        }
         match key {
             Key::Named(NamedKey::Escape) => {
                 self.close_search();
@@ -2106,6 +2159,41 @@ impl App {
                     self.push_query(&text);
                 }
                 true
+            }
+            // Copy and cut act on the query's own selection; without one
+            // the key keeps its document meaning.
+            Key::Character(s) if ctrl && s.eq_ignore_ascii_case("c") && !shift => {
+                let selected = self
+                    .search
+                    .as_ref()
+                    .map(|state| state.query.selected_text().to_string())
+                    .filter(|text| !text.is_empty());
+                match selected {
+                    Some(text) => {
+                        self.set_clipboard(text);
+                        true
+                    }
+                    None => false,
+                }
+            }
+            Key::Character(s) if ctrl && s.eq_ignore_ascii_case("x") => {
+                let selected = self
+                    .search
+                    .as_ref()
+                    .map(|state| state.query.selected_text().to_string())
+                    .filter(|text| !text.is_empty());
+                match selected {
+                    Some(text) => {
+                        self.set_clipboard(text);
+                        let state = self.search.as_mut().expect("search open");
+                        state.query.delete_selection();
+                        state.stale = true;
+                        self.band = None;
+                        self.request_redraw();
+                        true
+                    }
+                    None => false,
+                }
             }
             key => {
                 let state = self.search.as_mut().expect("search open");
@@ -2155,7 +2243,13 @@ impl App {
         };
         let scroll = self.scroll_y;
         let state = self.search.as_mut().expect("search open");
-        state.matches = search::matches(&self.document, state.query.text());
+        let found = if state.regex {
+            search::regex_matches(&self.document, state.query.text())
+        } else {
+            Some(search::matches(&self.document, state.query.text()))
+        };
+        state.error = found.is_none();
+        state.matches = found.unwrap_or_default();
         state.stale = false;
         let tops = selection::match_tops(lay, &state.matches);
         state.current = tops.iter().position(|top| *top >= scroll).unwrap_or(0);
@@ -2402,7 +2496,7 @@ impl App {
             );
             let result = overlay.click(x, y);
             self.overlay_result(result);
-        } else if self.sidebar_edge_press() {
+        } else if self.search_toggle_press() || self.sidebar_edge_press() {
         } else if (self.cursor.x as f32) < self.inset() && self.sidebar.is_some() {
             let (x, y) = self.ui_cursor();
             self.sidebar_click(x, y);
@@ -2442,6 +2536,8 @@ impl App {
         self.overlay_mouse = false;
         if let Some(overlay) = self.overlay.as_mut() {
             overlay.release();
+        } else if self.search_mouse {
+            self.search_mouse = false;
         } else if let Some(drag) = self.drag.take() {
             if drag_is_edge(drag) {
                 self.save_sidebar_state();
@@ -3863,6 +3959,10 @@ impl App {
         if text.is_empty() {
             return;
         }
+        self.set_clipboard(text);
+    }
+
+    fn set_clipboard(&mut self, text: String) {
         if self.clipboard.is_none() {
             self.clipboard = arboard::Clipboard::new()
                 .map_err(|err| eprintln!("oryx: no clipboard: {err}"))
@@ -3978,12 +4078,18 @@ impl App {
             .is_some_and(|side| sidebar::on_edge(side.width(), self.cursor.x as f32 / self.scale));
         let x = self.cursor.x as f32 - self.inset();
         let y = self.cursor.y as f32 + self.scroll_y;
-        let hovering = !on_edge
-            && self.layout.as_ref().is_some_and(|l| {
-                l.link_at(&self.document, x, y).is_some()
-                    || l.summary_at(&self.document, x, y).is_some()
-                    || (self.mode == edit::Mode::Read && l.checkbox_at(x, y).is_some())
+        let (ux, uy) = self.ui_cursor();
+        let on_toggle = self.search.is_some()
+            && self.gfx.as_ref().is_some_and(|g| {
+                search::toggle_hit(g.window.inner_size().width as f32 / self.scale, ux, uy)
             });
+        let hovering = on_toggle
+            || (!on_edge
+                && self.layout.as_ref().is_some_and(|l| {
+                    l.link_at(&self.document, x, y).is_some()
+                        || l.summary_at(&self.document, x, y).is_some()
+                        || (self.mode == edit::Mode::Read && l.checkbox_at(x, y).is_some())
+                }));
         if hovering != self.hover_link || on_edge != self.hover_edge {
             self.hover_link = hovering;
             self.hover_edge = on_edge;
