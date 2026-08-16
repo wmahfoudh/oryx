@@ -76,7 +76,7 @@ DRM-protected books and fixed-layout books (usually comics and picture books) ar
 
 ## Tools
 
-- **Find in document**: `Ctrl+F` searches text. The search is smart about case: `oryx` matches Oryx, ORYX and oryx, while `Oryx` performs an exact match. A match can cross styling, so `fast viewer` is found even when it was written as `**fast** *viewer*`, and it can cross a wrapped line. The whole document is searchable even while a big file is still loading.
+- **Find in document**: `Ctrl+F` searches text. The search is smart about case: `oryx` matches Oryx, ORYX and oryx, while `Oryx` performs an exact match. A match can cross styling, so `fast viewer` is found even when it was written as `**fast** *viewer*`, and it can cross a wrapped line. The whole document is searchable even while a big file is still loading. The `.*` button in the search bar (or `Alt+R`) switches to regular expressions, in the Rust `fancy-regex` flavor, so capture groups, backreferences and lookarounds are available. `^` and `$` match at line starts and ends, and on the rendered page each block counts as one line. While a pattern is incomplete, the bar's border changes color instead of showing a match count. Clicking anywhere in the document closes the search bar.
 - **Select and copy**: `Ctrl+C` copies a selection as plain text. `Ctrl+Shift+C` copies the original markdown of the selection. A double click selects the word, a triple click the paragraph, the code line or the table cell. Select all is instant at any file size, a selection survives zooming, theme switches and window resizes, and both copies work before a big file has finished loading.
 - **Sidebar**: `Ctrl+Shift+B` opens a two-tab panel: the folder tree around the open file, and an outline of the document's headings that tracks the reading position, folds its branches, and jumps on a click. For a book, the outline is its table of contents. Both tabs drive entirely from the keyboard.
 - **Open file**: `Ctrl+O` opens the native file dialog.
@@ -86,9 +86,13 @@ DRM-protected books and fixed-layout books (usually comics and picture books) ar
 - **Touch**: On a touch screen, swiping scrolls the document, the sidebar and the dialogs. A swipe released while moving keeps the document scrolling with momentum. Tapping clicks, and a two-finger pinch zooms the document.
 - **Persistence**: Window geometry, the active theme, the sidebar and the last folder are all saved and restored at every start. While Oryx is open, switching between files keeps each file's place: a file left mid-edit comes back in the editor, at the same spot.
 
+<p align="center">
+  <img src="screenshots/settings.png" alt="Settings dialog in Oryx">
+</p>
+
 ## Editing
 
-Press `Ctrl+E` to enter edit mode, with a caret and the usual keys; `Escape` (or `Ctrl+E` again) returns to reading.
+Press `Ctrl+E` to enter edit mode, with a caret and the usual keys; `Escape` (or `Ctrl+E` again) returns to reading. The window title shows `editing` and a thin line in the theme's selection color runs along the top of the page, so the mode is always visible.
 
 Source code and plain text files edit on the page itself. A markdown file shows its own source instead: the page is replaced by the markdown text, drawn in the theme's colors with the markers visible. `Escape` brings the view mode with the edits applied.
 
@@ -100,9 +104,11 @@ Editing works the way a text editor does: typing, selections, `Ctrl+X` and `Ctrl
 
 `Enter` keeps the indentation of the current line. In a markdown file it also continues what you are writing: a list item gets the next marker (numbered lists count on), a task item continues unchecked, and a quoted line keeps its `>`. `Enter` on an empty item ends the list. `Tab` indents and `Shift+Tab` removes an indent, on every line of a selection at once; with the caret at a list marker, `Tab` nests the item. Whether `Tab` inserts a tab or spaces follows what the file already uses.
 
+`Ctrl+H` opens find and replace: a second field appears under the search box. `Enter` replaces the current match and moves to the next, `Ctrl+Enter` replaces every match at once, and one `Ctrl+Z` brings a replace-all back. With regular expressions, the replacement can reuse captured groups: searching `(\w+)/(\w+)` and replacing with `$2/$1` swaps the two sides of every pair. The replace field only exists in the editor; the search itself works everywhere.
+
 A task checkbox can be ticked by clicking it on the page, without entering edit mode. Nothing else on the page moves, `Ctrl+Z` undoes it, and `Ctrl+S` saves it.
 
-`Ctrl+S` saves. Oryx is careful with the file: lines that were not touched are written back unchanged, and every line keeps its own ending, so a file with Windows line endings stays that way. The window title shows a `*` while changes are unsaved. `Ctrl+Shift+S` saves under a new name.
+`Ctrl+S` saves. Oryx is careful with the file: lines that were not touched are written back unchanged, and every line keeps its own ending, so a file with Windows line endings stays that way. The window title shows a dot next to the file name while changes are unsaved. `Ctrl+Shift+S` saves under a new name.
 
 `Ctrl+N` creates a new file: the save dialog opens first, then the empty page is ready to type into. That is how Oryx knows the type of file you created to be able to apply syntax colors.
 
@@ -129,6 +135,10 @@ Nine themes are original designs: `oryx-light` and its dark twin `oryx-dark`, `o
 ## Export to PDF
 
 `Ctrl+Shift+P` opens the export settings: theme, body font and size, code font and size, page size, orientation and page numbers. Six page sizes are available: A4, Letter and Legal, and the book trim sizes. When the document is a book, a justify toggle is also present. Oryx separates the export settings from the app's own appearance and remembers them between runs. The idea is that reading in a dark theme at 22 points and exporting in a light one at 11 should not need switching back and forth each time we need an export.
+
+<p align="center">
+  <img src="screenshots/pdf-export.png" alt="Oryx export settings">
+</p>
 
 `Ctrl+P` exports the document using the configured export settings. After setting your preferences, this is usually the way to go. Markdown headings are converted to PDF outlines, and the fonts are embedded. Emoji render in the PDF as images. A book exports with each chapter starting on a new page, and its table of contents becomes the PDF outline.
 

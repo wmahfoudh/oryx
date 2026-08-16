@@ -10,8 +10,8 @@ looks the way its author intended.
 </p>
 
 <p align="center">
-<b>A fast, native markdown viewer</b><br>
-Reading, PDF export<br>
+<b>A fast, native markdown code, text viewer and editor</b><br>
+Ebook Reader, PDF export<br>
 One binary, no runtime
 </p>
 

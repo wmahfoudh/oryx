@@ -3,7 +3,8 @@
 Every construct Oryx recognizes, markdown and embedded HTML, shown as
 source. Each sample sits in a code block, so this file reads the same
 everywhere, including in Oryx itself. Copy any sample into a document to
-see it rendered.
+see it rendered. For math and alerts, where the result is the point,
+the rendered form also appears right under its source.
 
 ## Headings
 
@@ -65,6 +66,14 @@ Emoji shortcodes: :tada: :rocket: :warning:
 > [!WARNING]
 > [!CAUTION]
 ```
+
+The first two, rendered:
+
+> [!NOTE]
+> A note renders with its own color and title.
+
+> [!TIP]
+> A tip renders in its own color too.
 
 ## Code
 
@@ -138,6 +147,18 @@ $$
 ```
 ````
 
+The same samples, rendered:
+
+Inline math: $e^{i\pi} + 1 = 0$, or fenced: $`a^2 + b^2 = c^2`$
+
+$$
+\sum_{n=1}^{\infty} \frac{1}{n^2} = \frac{\pi^2}{6}
+$$
+
+```math
+\int_{-\infty}^{\infty} e^{-x^2}\,dx = \sqrt{\pi}
+```
+
 All four GitHub notations typeset through the same TeX engine in STIX
 Two Math. Oryx infers whether a dollar sign is a currency or a math
 delimiter: a digit right after a closing dollar, as in `$5-$10`, keeps
@@ -156,6 +177,12 @@ a\,b \quad c\;d \quad e\!f \quad g \qquad h
 \begin{aligned} x &= y \\ z &= w \end{aligned}
 \newcommand{\avg}[1]{\left\langle #1 \right\rangle} \avg{x^2}
 ```
+
+A few of these, rendered:
+
+$$
+\begin{pmatrix} a & b \\ c & d \end{pmatrix} \quad \sqrt[3]{x^3+y^3} \quad \begin{cases} x & x \geq 0 \\ -x & x < 0 \end{cases} \quad \mathbb{R} \quad \hat{x}
+$$
 
 The command vocabulary follows KaTeX's: Greek letters with their
 variants, binary operators, relations and their negations, arrows, big
@@ -285,3 +312,28 @@ x<sup>2</sup> H<sub>2</sub>O line<br>break
 
 The five basic entities decode everywhere in HTML text, verbatim inside
 `<pre>`.
+
+## Useful searches
+
+`Ctrl+F` searches any document, and the `.*` button in the search bar
+(or `Alt+R`) switches to regular expressions, in the Rust `fancy-regex`
+flavor. Some searches worth keeping around:
+
+| Pattern | Finds |
+|---|---|
+| `TODO\|FIXME` | task markers left in a file |
+| `\bhttps?://\S+` | web links written out |
+| `\d{4}-\d{2}-\d{2}` | dates like 2026-08-16 |
+| `\b(\w+) \1\b` | the same word typed twice in a row |
+| `"[^"]*"` | anything between double quotes |
+| `^#+ ` | heading lines, in a markdown source |
+| ` +$` | spaces left at the end of a line |
+
+In the editor, `Ctrl+H` adds a replace field, and a replacement can
+reuse captured groups:
+
+| Search | Replace | Result |
+|---|---|---|
+| `(\w+)/(\w+)` | `$2/$1` | swaps the two sides of every pair |
+| ` +$` | nothing | strips trailing spaces; `Ctrl+Enter` does the whole file |
+| `- \[ \]` | `- [x]` | ticks every open task |
