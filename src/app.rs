@@ -412,11 +412,12 @@ fn justify_pref(config: &Config, doc: &Document) -> bool {
         }
 }
 
-fn window_title(book: Option<&str>, path: Option<&Path>, dirty: bool) -> String {
+fn window_title(book: Option<&str>, path: Option<&Path>, dirty: bool, editing: bool) -> String {
     let name = book.or_else(|| path.and_then(|p| p.file_name()).and_then(|n| n.to_str()));
-    let star = if dirty { "*" } else { "" };
+    let dot = if dirty { "\u{25CF} " } else { "" };
+    let mode = if editing { "editing \u{00B7} " } else { "" };
     match name {
-        Some(name) => format!("{star}{name} \u{00B7} oryx"),
+        Some(name) => format!("{dot}{name} \u{00B7} {mode}oryx"),
         None => "oryx".to_string(),
     }
 }
@@ -910,6 +911,7 @@ impl App {
         self.mode = edit::Mode::Edit;
         self.caret = Some(Caret::at(offset));
         self.ensure_ledger();
+        self.refresh_title();
         let text = Arc::clone(&self.document.source);
         if let Some(source) = edit::source_document(kind, &text) {
             let head = self.undo.as_ref().map_or(0, Undo::head);
@@ -1028,6 +1030,7 @@ impl App {
         }
         self.mode = edit::Mode::Read;
         self.caret = None;
+        self.refresh_title();
         if let Some(path) = self.path.as_ref() {
             self.resume_edit.remove(path);
         }
@@ -1737,8 +1740,9 @@ impl App {
         self.highlighter.start(pending, move || waker());
     }
 
-    /// Repaints the title; the asterisk follows the undo head against
-    /// the save point, correct through undo past a save.
+    /// Repaints the title; the unsaved dot follows the undo head
+    /// against the save point, correct through undo past a save, and
+    /// the mode word follows the editor.
     fn refresh_title(&mut self) {
         let dirty = self.undo.as_ref().is_some_and(Undo::is_dirty);
         if let (Some(gfx), Some(path)) = (self.gfx.as_ref(), self.path.as_deref()) {
@@ -1746,6 +1750,7 @@ impl App {
                 self.document.title.as_deref(),
                 Some(path),
                 dirty,
+                self.mode == edit::Mode::Edit,
             ));
         }
     }
@@ -3649,6 +3654,7 @@ impl App {
                 self.document.title.as_deref(),
                 Some(&path),
                 false,
+                false,
             ));
         }
         // A file left mid-edit reopens in the editor at the caret it
@@ -4743,6 +4749,20 @@ impl App {
                 self.scale,
             );
         }
+        // The editing cue: a hairline in the selection role along the
+        // document's top edge, the title's mode word visible in the
+        // canvas, fullscreen included.
+        if self.mode == edit::Mode::Edit {
+            let color = self.theme.ui.selection_bg;
+            let value = ((color.r as u32) << 16) | ((color.g as u32) << 8) | color.b as u32;
+            let h = (self.scale as u32).max(1).min(size.height);
+            for y in 0..h {
+                let row = (y * size.width) as usize;
+                for x in inset as usize..size.width as usize {
+                    buffer[row + x] = value;
+                }
+            }
+        }
         if self.mode == edit::Mode::Edit && self.blink_visible {
             if let Some(c) = self.caret {
                 if let Some(b) = c.geometry(lay, &self.document, &mut self.fonts) {
@@ -4983,6 +5003,7 @@ impl ApplicationHandler for App {
             .with_title(window_title(
                 self.document.title.as_deref(),
                 self.path.as_deref(),
+                false,
                 false,
             ))
             .with_window_icon(icon);
@@ -5337,18 +5358,31 @@ mod tests {
     fn window_title_carries_the_file_name() {
         use std::path::Path;
         assert_eq!(
-            super::window_title(None, Some(Path::new("/docs/notes/README.md")), false),
+            super::window_title(None, Some(Path::new("/docs/notes/README.md")), false, false),
             "README.md · oryx"
         );
-        assert_eq!(super::window_title(None, None, false), "oryx");
+        assert_eq!(super::window_title(None, None, false, false), "oryx");
     }
 
     #[test]
-    fn a_dirty_buffer_carries_the_asterisk() {
+    fn a_dirty_buffer_carries_the_dot() {
         use std::path::Path;
         assert_eq!(
-            super::window_title(None, Some(Path::new("/docs/notes.txt")), true),
-            "*notes.txt · oryx"
+            super::window_title(None, Some(Path::new("/docs/notes.txt")), true, false),
+            "● notes.txt · oryx"
+        );
+    }
+
+    #[test]
+    fn the_title_names_the_editing_mode() {
+        use std::path::Path;
+        assert_eq!(
+            super::window_title(None, Some(Path::new("/docs/notes.txt")), false, true),
+            "notes.txt · editing · oryx"
+        );
+        assert_eq!(
+            super::window_title(None, Some(Path::new("/docs/notes.txt")), true, true),
+            "● notes.txt · editing · oryx"
         );
     }
 
@@ -5356,7 +5390,12 @@ mod tests {
     fn window_title_prefers_the_book_title() {
         use std::path::Path;
         assert_eq!(
-            super::window_title(Some("Test Book"), Some(Path::new("/books/b.epub")), false),
+            super::window_title(
+                Some("Test Book"),
+                Some(Path::new("/books/b.epub")),
+                false,
+                false
+            ),
             "Test Book · oryx"
         );
     }
