@@ -25,6 +25,7 @@ pub enum Command {
     Find,
     FindNext,
     FindPrev,
+    Replace,
     LineUp,
     LineDown,
     PaneLeft,
@@ -47,7 +48,7 @@ pub enum Command {
 
 impl Command {
     /// Every variant; the coverage test checks each one against the table.
-    pub const ALL: [Command; 36] = [
+    pub const ALL: [Command; 37] = [
         Command::OpenFile,
         Command::Reload,
         Command::Sidebar,
@@ -66,6 +67,7 @@ impl Command {
         Command::Find,
         Command::FindNext,
         Command::FindPrev,
+        Command::Replace,
         Command::LineUp,
         Command::LineDown,
         Command::PaneLeft,
@@ -217,6 +219,12 @@ pub const SHORTCUTS: &[Shortcut] = &[
         action: "Regex matching on/off",
         section: "Find",
         bindings: &[],
+    },
+    Shortcut {
+        keys: "Ctrl+H",
+        action: "Find and replace (editing only)",
+        section: "Find",
+        bindings: &[(Binding::Ctrl("h"), Command::Replace)],
     },
     Shortcut {
         keys: "Ctrl+A",

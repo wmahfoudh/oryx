@@ -236,6 +236,7 @@ pub fn run(path: Option<PathBuf>, theme_name: Option<String>) -> anyhow::Result<
         search_canvas: None,
         last_query: String::new(),
         last_regex: false,
+        last_replace: String::new(),
         search_mouse: false,
         pending_band_for: None,
         mode: edit::Mode::Read,
@@ -579,6 +580,9 @@ struct App {
     last_query: String,
     /// Matching mode of the last search, restored the same way.
     last_regex: bool,
+    /// Replacement text of the last closed replace row, restored the
+    /// same way.
+    last_replace: String,
     /// The press that opened or hit the search bar's toggle; its release
     /// must not click the document underneath.
     search_mouse: bool,
@@ -796,6 +800,7 @@ impl App {
             Command::Find => self.open_search(),
             Command::FindNext => self.step_search(true),
             Command::FindPrev => self.step_search(false),
+            Command::Replace => self.open_replace(),
             Command::LineUp => self.scroll_by(-self.line_step()),
             Command::LineDown => self.scroll_by(self.line_step()),
             Command::PaneLeft => self.move_ownership(PaneAct::Left),
@@ -1012,6 +1017,14 @@ impl App {
     /// whole when no byte changed, and is rebuilt from the buffer when
     /// one did, so unsaved edits show on the page and not just on disk.
     fn leave_edit(&mut self) {
+        // The replace row is an editor tool; reading keeps the plain bar.
+        let dropped = self.search.as_mut().and_then(|state| {
+            state.focus_replace = false;
+            state.replace.take()
+        });
+        if let Some(field) = dropped {
+            self.last_replace = field.text().to_string();
+        }
         let left_at = self.caret.map(|c| c.offset);
         if let (Some(path), Some(c)) = (self.path.clone(), self.caret) {
             self.edit_marks.insert(path, c.offset);
@@ -2033,6 +2046,7 @@ impl App {
     fn open_search(&mut self) {
         if let Some(state) = self.search.as_mut() {
             state.query.select_all();
+            state.focus_replace = false;
             self.request_redraw();
             return;
         }
@@ -2042,6 +2056,8 @@ impl App {
             query,
             regex: self.last_regex,
             error: false,
+            replace: None,
+            focus_replace: false,
             matches: Vec::new(),
             rects: Vec::new(),
             rects_scroll: 0.0,
@@ -2053,10 +2069,39 @@ impl App {
         self.request_redraw();
     }
 
+    /// Opens find and replace: the search bar with the replace row,
+    /// editing only. On an already open bar the focus moves to the
+    /// replace field; a fresh open starts in the query.
+    fn open_replace(&mut self) {
+        if self.mode != edit::Mode::Edit {
+            return;
+        }
+        let was_open = self.search.is_some();
+        self.open_search();
+        let Some(state) = self.search.as_mut() else {
+            return;
+        };
+        if state.replace.is_none() {
+            state.replace = Some(TextField::new(self.last_replace.clone()));
+        }
+        state.focus_replace = was_open;
+        if was_open {
+            state
+                .replace
+                .as_mut()
+                .expect("row just ensured")
+                .select_all();
+        }
+        self.request_redraw();
+    }
+
     fn close_search(&mut self) {
         if let Some(state) = self.search.take() {
             self.last_query = state.query.text().to_string();
             self.last_regex = state.regex;
+            if let Some(field) = state.replace.as_ref() {
+                self.last_replace = field.text().to_string();
+            }
             self.band = None;
             self.request_redraw();
         }
@@ -2072,6 +2117,75 @@ impl App {
         let regex = state.regex;
         self.last_regex = regex;
         self.band = None;
+        self.request_redraw();
+    }
+
+    /// Replaces the current match with the replace field's text as one
+    /// structural edit, then advances to the first match at or after the
+    /// splice. In regex mode the replacement expands the match's own
+    /// captures. Editing only; with no match it does nothing.
+    fn replace_current(&mut self) {
+        if self.mode != edit::Mode::Edit {
+            return;
+        }
+        self.sync_search();
+        let Some(state) = self.search.as_ref() else {
+            return;
+        };
+        if state.error || state.stale || state.matches.is_empty() {
+            return;
+        }
+        let Some(template) = state.replace.as_ref().map(|f| f.text().to_string()) else {
+            return;
+        };
+        let index = state.current.min(state.matches.len() - 1);
+        let (sel, text) = if state.regex {
+            let pairs = search::regex_replacements(&self.document, state.query.text(), &template);
+            let Some(pairs) = pairs else {
+                return;
+            };
+            // The pairs mirror the match list; a length drift means the
+            // matches no longer describe this text, so the replace waits.
+            if pairs.len() != state.matches.len() {
+                return;
+            }
+            pairs
+                .into_iter()
+                .nth(index)
+                .expect("index bounded by the list")
+        } else {
+            (state.matches[index], template)
+        };
+        let Some(range) = caret::selection_range(&self.document, &sel) else {
+            return;
+        };
+        self.selection = None;
+        let after = range.start + text.len();
+        self.type_edit(range, &text, Kind::Structural);
+        self.seek_match(after);
+    }
+
+    /// Recomputes the matches after a splice and seats the current one
+    /// on the first at or after `offset`, wrapping to the first.
+    fn seek_match(&mut self, offset: usize) {
+        self.sync_search();
+        let Some(state) = self.search.as_ref() else {
+            return;
+        };
+        if state.matches.is_empty() {
+            return;
+        }
+        let next = state
+            .matches
+            .iter()
+            .position(|sel| {
+                caret::model_offset(&self.document, &sel.ordered().0).is_some_and(|at| at >= offset)
+            })
+            .unwrap_or(0);
+        let state = self.search.as_mut().expect("search open");
+        state.current = next;
+        self.band = None;
+        self.scroll_match_into_view();
         self.request_redraw();
     }
 
@@ -2145,8 +2259,28 @@ impl App {
                 true
             }
             Key::Named(NamedKey::Enter) => {
-                self.step_search(!shift);
+                if self
+                    .search
+                    .as_ref()
+                    .is_some_and(SearchState::replace_focused)
+                {
+                    self.replace_current();
+                } else {
+                    self.step_search(!shift);
+                }
                 true
+            }
+            // Tab moves between the two fields while the replace row is
+            // shown; without it the key keeps its editor meaning.
+            Key::Named(NamedKey::Tab) => {
+                let state = self.search.as_mut().expect("search open");
+                if state.replace.is_some() {
+                    state.focus_replace = !state.focus_replace;
+                    self.request_redraw();
+                    true
+                } else {
+                    false
+                }
             }
             Key::Character(s) if ctrl && s.eq_ignore_ascii_case("v") => {
                 if self.clipboard.is_none() {
@@ -2160,13 +2294,13 @@ impl App {
                 }
                 true
             }
-            // Copy and cut act on the query's own selection; without one
-            // the key keeps its document meaning.
+            // Copy and cut act on the focused field's own selection;
+            // without one the key keeps its document meaning.
             Key::Character(s) if ctrl && s.eq_ignore_ascii_case("c") && !shift => {
                 let selected = self
                     .search
                     .as_ref()
-                    .map(|state| state.query.selected_text().to_string())
+                    .map(|state| state.focused().selected_text().to_string())
                     .filter(|text| !text.is_empty());
                 match selected {
                     Some(text) => {
@@ -2180,15 +2314,18 @@ impl App {
                 let selected = self
                     .search
                     .as_ref()
-                    .map(|state| state.query.selected_text().to_string())
+                    .map(|state| state.focused().selected_text().to_string())
                     .filter(|text| !text.is_empty());
                 match selected {
                     Some(text) => {
                         self.set_clipboard(text);
                         let state = self.search.as_mut().expect("search open");
-                        state.query.delete_selection();
-                        state.stale = true;
-                        self.band = None;
+                        let on_query = !state.replace_focused();
+                        state.focused_mut().delete_selection();
+                        if on_query {
+                            state.stale = true;
+                            self.band = None;
+                        }
                         self.request_redraw();
                         true
                     }
@@ -2197,15 +2334,18 @@ impl App {
             }
             key => {
                 let state = self.search.as_mut().expect("search open");
-                match state.query.key(key, ctrl, shift) {
+                let on_query = !state.replace_focused();
+                match state.focused_mut().key(key, ctrl, shift) {
                     Edit::Ignored => false,
                     Edit::Handled => {
                         self.request_redraw();
                         true
                     }
                     Edit::Changed => {
-                        state.stale = true;
-                        self.band = None;
+                        if on_query {
+                            state.stale = true;
+                            self.band = None;
+                        }
                         self.request_redraw();
                         true
                     }
@@ -2214,18 +2354,21 @@ impl App {
         }
     }
 
-    /// Inserts into the query at the caret, replacing the selection. The
-    /// field drops control characters a paste may carry, since a tab or
-    /// newline could otherwise cross line boundaries.
+    /// Inserts into the focused field at its caret, replacing the
+    /// selection. The field drops control characters a paste may carry,
+    /// since a tab or newline could otherwise cross line boundaries.
     fn push_query(&mut self, text: &str) {
         let Some(state) = self.search.as_mut() else {
             return;
         };
-        if state.query.insert(text) != Edit::Changed {
+        let on_query = !state.replace_focused();
+        if state.focused_mut().insert(text) != Edit::Changed {
             return;
         }
-        state.stale = true;
-        self.band = None;
+        if on_query {
+            state.stale = true;
+            self.band = None;
+        }
         self.request_redraw();
     }
 

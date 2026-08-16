@@ -24,6 +24,7 @@ const QUERY_SIZE: f32 = 15.0;
 const COUNTER_SIZE: f32 = 13.0;
 const TOGGLE_W: f32 = 26.0;
 const TOGGLE_H: f32 = 22.0;
+const ROW_H: f32 = 34.0;
 
 /// Live find session: the query as typed, its matches, and the cursor
 /// among them. `stale` marks the matches for recomputation against the
@@ -40,6 +41,12 @@ pub struct SearchState {
     /// The pattern failed to compile or exceeded the backtracking
     /// limit; the bar shows the caution border and no counter.
     pub error: bool,
+    /// The replace field while find and replace is open; edit mode
+    /// only, dropped on leaving the editor.
+    pub replace: Option<TextField>,
+    /// The replace field takes the typing; read through
+    /// `replace_focused`, which also requires the row to be shown.
+    pub focus_replace: bool,
     pub matches: Vec<Selection>,
     /// Highlight rects for the matches inside the band window alone;
     /// the counter and navigation use the full match list.
@@ -54,18 +61,45 @@ pub struct SearchState {
     pub settle: bool,
 }
 
+impl SearchState {
+    /// The replace row is shown and takes the typing.
+    pub fn replace_focused(&self) -> bool {
+        self.focus_replace && self.replace.is_some()
+    }
+
+    /// The field the keyboard feeds.
+    pub fn focused(&self) -> &TextField {
+        match self.replace.as_ref() {
+            Some(field) if self.focus_replace => field,
+            _ => &self.query,
+        }
+    }
+
+    pub fn focused_mut(&mut self) -> &mut TextField {
+        match self.replace.as_mut() {
+            Some(field) if self.focus_replace => field,
+            _ => &mut self.query,
+        }
+    }
+}
+
 /// The floating pill over the document's top-right corner: query on the
 /// left, match counter on the right, in the theme's overlay colors.
 pub fn draw_bar(painter: &mut Painter, theme: &Theme, state: &SearchState, width: f32) {
     let ui = &theme.ui;
     let x = (width - BAR_WIDTH - MARGIN).max(MARGIN);
     let y = MARGIN;
+    let height = if state.replace.is_some() {
+        BAR_HEIGHT + ROW_H
+    } else {
+        BAR_HEIGHT
+    };
     for (grow, alpha) in [(6.0, 16), (3.0, 28)] {
         painter.fill(
             x - grow,
             y - grow + 1.5,
             BAR_WIDTH + 2.0 * grow,
-            BAR_HEIGHT + 2.0 * grow,
+            height + 2.0 * grow,
             RADIUS + grow,
             Rgba {
                 r: 0,
@@ -75,13 +109,13 @@ pub fn draw_bar(painter: &mut Painter, theme: &Theme, state: &SearchState, width
             },
         );
     }
-    painter.fill(x, y, BAR_WIDTH, BAR_HEIGHT, RADIUS, ui.overlay_bg);
+    painter.fill(x, y, BAR_WIDTH, height, RADIUS, ui.overlay_bg);
     let border = if state.error {
         theme.alerts.caution
     } else {
         theme.blocks.table_border
     };
-    painter.stroke(x, y, BAR_WIDTH, BAR_HEIGHT, RADIUS, 1.0, border);
+    painter.stroke(x, y, BAR_WIDTH, height, RADIUS, 1.0, border);
 
     // The regex toggle, drawn on the selection background while active.
     let toggle_x = x + BAR_WIDTH - 10.0 - TOGGLE_W;
@@ -133,12 +167,60 @@ pub fn draw_bar(painter: &mut Painter, theme: &Theme, state: &SearchState, width
     );
 
     let avail = toggle_x - 10.0 - counter_w - 12.0 - (x + PAD);
-    let query = state.query.text();
-    let (window, cut) = window_fit(painter, query, state.query.caret(), avail);
+    draw_field(
+        painter,
+        theme,
+        &state.query,
+        x + PAD,
+        y + 10.0,
+        avail,
+        "find",
+        !state.replace_focused(),
+    );
+
+    if let Some(field) = state.replace.as_ref() {
+        painter.line(
+            x + PAD,
+            y + BAR_HEIGHT - 1.0,
+            x + BAR_WIDTH - PAD,
+            y + BAR_HEIGHT - 1.0,
+            1.0,
+            theme.blocks.table_border,
+        );
+        draw_field(
+            painter,
+            theme,
+            field,
+            x + PAD,
+            y + BAR_HEIGHT + 6.0,
+            BAR_WIDTH - 2.0 * PAD,
+            "replace",
+            state.replace_focused(),
+        );
+    }
+}
+
+/// One field row: windowed text with the caret kept visible, the
+/// placeholder when empty, selection and caret drawn only on the field
+/// the keyboard feeds.
+#[allow(clippy::too_many_arguments)]
+fn draw_field(
+    painter: &mut Painter,
+    theme: &Theme,
+    field: &TextField,
+    left: f32,
+    top: f32,
+    avail: f32,
+    placeholder: &str,
+    focused: bool,
+) {
+    let ui = &theme.ui;
+    let text = field.text();
+    let (window, cut) = window_fit(painter, text, field.caret(), avail);
     let shown = if cut {
-        format!("\u{2026}{}", &query[window.clone()])
+        format!("\u{2026}{}", &text[window.clone()])
     } else {
-        query[window.clone()].to_string()
+        text[window.clone()].to_string()
     };
     let lead = if cut {
         painter.measure("\u{2026}", BODY_FAMILY, QUERY_SIZE, 400)
@@ -146,29 +228,30 @@ pub fn draw_bar(painter: &mut Painter, theme: &Theme, state: &SearchState, width
         0.0
     };
     // Offsets are taken inside the drawn window, so a caret in the middle
-    // of a query too long for the pill still lands under its character.
+    // of a text too long for the pill still lands under its character.
     let x_of = |painter: &mut Painter, at: usize| {
         let at = at.clamp(window.start, window.end);
-        lead + painter.measure(&query[window.start..at], BODY_FAMILY, QUERY_SIZE, 400)
+        lead + painter.measure(&text[window.start..at], BODY_FAMILY, QUERY_SIZE, 400)
     };
-    if let Some(range) = state.query.selection() {
-        let from = x_of(painter, range.start);
-        let to = x_of(painter, range.end);
-        painter.fill(
-            x + PAD + from - 2.0,
-            y + 9.0,
-            to - from + 4.0,
-            BAR_HEIGHT - 18.0,
-            4.0,
-            ui.selection_bg,
-        );
+    if focused {
+        if let Some(range) = field.selection() {
+            let from = x_of(painter, range.start);
+            let to = x_of(painter, range.end);
+            painter.fill(
+                left + from - 2.0,
+                top - 1.0,
+                to - from + 4.0,
+                BAR_HEIGHT - 18.0,
+                4.0,
+                ui.selection_bg,
+            );
+        }
     }
-    let caret_x = x + PAD + x_of(painter, state.query.caret()) + 1.0;
-    if query.is_empty() {
+    if text.is_empty() {
         painter.text(
-            x + PAD + 6.0,
-            y + 10.0,
-            "find",
+            left + 6.0,
+            top,
+            placeholder,
             BODY_FAMILY,
             QUERY_SIZE,
             400,
@@ -176,8 +259,8 @@ pub fn draw_bar(painter: &mut Painter, theme: &Theme, state: &SearchState, width
         );
     } else {
         painter.text(
-            x + PAD,
-            y + 10.0,
+            left,
+            top,
             &shown,
             BODY_FAMILY,
             QUERY_SIZE,
@@ -185,14 +268,10 @@ pub fn draw_bar(painter: &mut Painter, theme: &Theme, state: &SearchState, width
             ui.overlay_fg,
         );
     }
-    painter.line(
-        caret_x,
-        y + 11.0,
-        caret_x,
-        y + BAR_HEIGHT - 11.0,
-        1.0,
-        ui.overlay_fg,
-    );
+    if focused {
+        let caret_x = left + x_of(painter, field.caret()) + 1.0;
+        painter.line(caret_x, top + 1.0, caret_x, top + 19.0, 1.0, ui.overlay_fg);
+    }
 }
 
 /// Whether a point in logical window coordinates lands on the regex
@@ -386,12 +465,7 @@ pub fn regex_matches(doc: &Document, pattern: &str) -> Option<Vec<Selection>> {
     if pattern.is_empty() {
         return Some(Vec::new());
     }
-    let flags = if regex_case_sensitive(pattern) {
-        "(?m)"
-    } else {
-        "(?mi)"
-    };
-    let regex = fancy_regex::Regex::new(&format!("{flags}{pattern}")).ok()?;
+    let regex = compile(pattern)?;
     let hay = Haystack::build(doc);
     let mut out = Vec::new();
     for found in regex.find_iter(&hay.text) {
@@ -401,6 +475,43 @@ pub fn regex_matches(doc: &Document, pattern: &str) -> Option<Vec<Selection>> {
         }
     }
     Some(out)
+}
+
+/// Every regex match beside its expanded replacement: `$1`, `$0` and
+/// `${name}` read the match's own captures and `$$` is a literal dollar.
+/// The selections equal `regex_matches` for the same pattern, index for
+/// index, and `None` reports the same failures.
+pub fn regex_replacements(
+    doc: &Document,
+    pattern: &str,
+    template: &str,
+) -> Option<Vec<(Selection, String)>> {
+    if pattern.is_empty() {
+        return Some(Vec::new());
+    }
+    let regex = compile(pattern)?;
+    let hay = Haystack::build(doc);
+    let expander = fancy_regex::Expander::default();
+    let mut out = Vec::new();
+    for captures in regex.captures_iter(&hay.text) {
+        let captures = captures.ok()?;
+        let found = captures.get(0).expect("a match always captures group 0");
+        if let Some(selection) = hay.selection(found.start()..found.end()) {
+            out.push((selection, expander.expansion(template, &captures)));
+        }
+    }
+    Some(out)
+}
+
+/// The pattern with the standing flags: anchors match per line, and
+/// smart case adds insensitivity.
+fn compile(pattern: &str) -> Option<fancy_regex::Regex> {
+    let flags = if regex_case_sensitive(pattern) {
+        "(?m)"
+    } else {
+        "(?mi)"
+    };
+    fancy_regex::Regex::new(&format!("{flags}{pattern}")).ok()
 }
 
 /// Smart case for a pattern: a capital letter typed literally makes it
@@ -646,6 +757,27 @@ mod tests {
     fn regex_anchors_match_line_starts() {
         let doc = markdown::parse("```rust\nlet alpha = 1;\nlet beta = 2;\n```");
         assert_eq!(regex_matches(&doc, "^let").expect("valid").len(), 2);
+    }
+
+    #[test]
+    fn regex_replacements_expand_captures() {
+        let doc = markdown::parse("ab cd");
+        let pairs = regex_replacements(&doc, r"(\w)(\w)", "$2$1").expect("valid");
+        let texts: Vec<&str> = pairs.iter().map(|(_, text)| text.as_str()).collect();
+        assert_eq!(texts, ["ba", "dc"]);
+        let sels: Vec<Selection> = pairs.iter().map(|(sel, _)| *sel).collect();
+        assert_eq!(
+            sels,
+            regex_matches(&doc, r"(\w)(\w)").expect("valid"),
+            "the pairs mirror the match list index for index"
+        );
+    }
+
+    #[test]
+    fn regex_replacement_dollar_forms() {
+        let doc = markdown::parse("cat");
+        let pairs = regex_replacements(&doc, "c(a)t", "[$0|$1|$$]").expect("valid");
+        assert_eq!(pairs[0].1, "[cat|a|$]");
     }
 
     #[test]
