@@ -226,6 +226,13 @@ pub const SHORTCUTS: &[Shortcut] = &[
         section: "Find",
         bindings: &[(Binding::Ctrl("h"), Command::Replace)],
     },
+    // Handled by the open search bar itself, so no command binding.
+    Shortcut {
+        keys: "Ctrl+Enter",
+        action: "Replace all (replace open)",
+        section: "Find",
+        bindings: &[],
+    },
     Shortcut {
         keys: "Ctrl+A",
         action: "Select all",

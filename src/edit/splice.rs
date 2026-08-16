@@ -24,6 +24,27 @@ pub struct Splice {
     pub text: String,
 }
 
+/// Combines ordered, non-overlapping per-match edits into one region
+/// splice: the covering range and its replacement text, built in one
+/// pass over the source. `None` for no edits, or for edits out of order
+/// or overlapping, which a caller treats as a refused burst.
+pub fn combine(source: &str, edits: &[(Range<usize>, String)]) -> Option<(Range<usize>, String)> {
+    let first = edits.first()?;
+    let last = edits.last()?;
+    let region = first.0.start..last.0.end;
+    let mut text = String::with_capacity(region.len());
+    let mut at = region.start;
+    for (range, replacement) in edits {
+        if range.start < at || range.end < range.start {
+            return None;
+        }
+        text.push_str(&source[at..range.start]);
+        text.push_str(replacement);
+        at = range.end;
+    }
+    Some((region, text))
+}
+
 pub struct Ledger {
     /// The normalized text fixed at edit entry; splice ranges index it.
     base: Arc<str>,
@@ -439,6 +460,34 @@ mod tests {
             b"alpha\r\nbeta\n",
             "committing twice is stable"
         );
+    }
+
+    #[test]
+    fn combine_builds_one_region_over_ordered_edits() {
+        let source = "one two three two one";
+        let edits = vec![(4..7, "TWO".to_string()), (14..17, "2".to_string())];
+        let (region, text) = combine(source, &edits).expect("ordered edits");
+        assert_eq!(region, 4..17);
+        assert_eq!(text, "TWO three 2");
+        let mut whole = source.to_string();
+        whole.replace_range(region, &text);
+        assert_eq!(whole, "one TWO three 2 one");
+    }
+
+    #[test]
+    fn combine_takes_one_edit_as_it_is() {
+        let (region, text) = combine("abc", &[(1..2, "B".to_string())]).expect("one edit");
+        assert_eq!(region, 1..2);
+        assert_eq!(text, "B");
+    }
+
+    #[test]
+    fn combine_refuses_empty_and_disordered_edits() {
+        assert!(combine("abc", &[]).is_none());
+        let disordered = vec![(2..3, String::new()), (0..1, String::new())];
+        assert!(combine("abc", &disordered).is_none());
+        let overlapping = vec![(0..2, String::new()), (1..3, String::new())];
+        assert!(combine("abc", &overlapping).is_none());
     }
 
     #[test]

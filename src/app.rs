@@ -12,7 +12,7 @@ use oryx::doc::stream::{self, ParseWorker};
 use oryx::edit::{
     self,
     caret::{self, Caret, CaretBox, Motion},
-    splice::Ledger,
+    splice::{self, Ledger},
     undo::{Kind, Undo},
 };
 use oryx::export::{self, ExportPass, ExportSettings};
@@ -2171,6 +2171,60 @@ impl App {
         self.request_redraw();
     }
 
+    /// Replaces every match in one region splice, one undo unit and one
+    /// relayout, and reports the count in the corner notice. Editing
+    /// only; with no match it does nothing and records nothing.
+    fn replace_all(&mut self) {
+        if self.mode != edit::Mode::Edit {
+            return;
+        }
+        self.sync_search();
+        let Some(state) = self.search.as_ref() else {
+            return;
+        };
+        if state.error || state.stale || state.matches.is_empty() {
+            return;
+        }
+        let Some(template) = state.replace.as_ref().map(|f| f.text().to_string()) else {
+            return;
+        };
+        let edits: Vec<(std::ops::Range<usize>, String)> = if state.regex {
+            let pairs = search::regex_replacements(&self.document, state.query.text(), &template);
+            let Some(pairs) = pairs else {
+                return;
+            };
+            if pairs.len() != state.matches.len() {
+                return;
+            }
+            pairs
+                .into_iter()
+                .filter_map(|(sel, text)| {
+                    caret::selection_range(&self.document, &sel).map(|range| (range, text))
+                })
+                .collect()
+        } else {
+            state
+                .matches
+                .iter()
+                .filter_map(|sel| {
+                    caret::selection_range(&self.document, sel)
+                        .map(|range| (range, template.clone()))
+                })
+                .collect()
+        };
+        let count = edits.len();
+        let Some((region, text)) = splice::combine(&self.document.source, &edits) else {
+            return;
+        };
+        self.selection = None;
+        let after = region.start + text.len();
+        self.type_edit(region, &text, Kind::Structural);
+        if let Some(state) = self.search.as_mut() {
+            state.seek = Some(after);
+        }
+        self.show_notice(&format!("{count} replaced"));
+    }
+
     /// A left press on the search bar's regex toggle, consumed before
     /// the document sees the click.
     fn search_toggle_press(&mut self) -> bool {
@@ -2241,14 +2295,17 @@ impl App {
                 true
             }
             // While the replace row is open, Enter replaces from either
-            // field, since Ctrl+H announced the intent; F3 and
-            // Shift+Enter still step without replacing.
+            // field, since Ctrl+H announced the intent, and Ctrl+Enter
+            // replaces every match; F3 and Shift+Enter still step
+            // without replacing.
             Key::Named(NamedKey::Enter) => {
                 let replacing = self
                     .search
                     .as_ref()
                     .is_some_and(|state| state.replace.is_some());
-                if replacing && !shift {
+                if replacing && ctrl {
+                    self.replace_all();
+                } else if replacing && !shift {
                     self.replace_current();
                 } else {
                     self.step_search(!shift);
