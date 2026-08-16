@@ -907,6 +907,15 @@ fn prefix_width(
             if glyph.start >= byte {
                 return glyph.x;
             }
+            // The boundary falls inside the glyph's cluster: a ligature
+            // such as fi is one glyph over two characters, and its width
+            // splits evenly per character so a highlight can end between
+            // them.
+            if byte < glyph.end {
+                let within = text[glyph.start..byte].chars().count() as f32;
+                let total = text[glyph.start..glyph.end].chars().count() as f32;
+                return glyph.x + glyph.w * within / total.max(1.0);
+            }
         }
     }
     run.width
@@ -1336,6 +1345,31 @@ mod tests {
                 span: 0,
                 byte: l.run_text(&doc, run).len()
             }
+        );
+    }
+
+    #[test]
+    fn a_highlight_splits_a_ligature() {
+        let (doc, l, mut fonts) = lay_doc("field");
+        let pos = |byte| ModelPos {
+            block: 0,
+            span: 0,
+            byte,
+        };
+        let f_only = Selection {
+            start: pos(0),
+            end: pos(1),
+        };
+        let fi = Selection {
+            start: pos(0),
+            end: pos(2),
+        };
+        let w_f = rects(&f_only, &l, &doc, &mut fonts)[0].2;
+        let w_fi = rects(&fi, &l, &doc, &mut fonts)[0].2;
+        assert!(w_f > 0.0);
+        assert!(
+            w_f < w_fi,
+            "the f alone ({w_f}) is narrower than the fi ligature ({w_fi})"
         );
     }
 

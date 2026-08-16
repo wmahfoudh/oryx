@@ -47,6 +47,11 @@ pub struct SearchState {
     /// The replace field takes the typing; read through
     /// `replace_focused`, which also requires the row to be shown.
     pub focus_replace: bool,
+    /// A replace happened at this source offset: once the matches
+    /// recompute, the current one seats on the first at or after it,
+    /// wrapping to the first. Consumed by the recompute, however many
+    /// frames the relayout takes to let it run.
+    pub seek: Option<usize>,
     pub matches: Vec<Selection>,
     /// Highlight rects for the matches inside the band window alone;
     /// the counter and navigation use the full match list.

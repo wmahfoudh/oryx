@@ -2058,6 +2058,7 @@ impl App {
             error: false,
             replace: None,
             focus_replace: false,
+            seek: None,
             matches: Vec::new(),
             rects: Vec::new(),
             rects_scroll: 0.0,
@@ -2162,30 +2163,11 @@ impl App {
         self.selection = None;
         let after = range.start + text.len();
         self.type_edit(range, &text, Kind::Structural);
-        self.seek_match(after);
-    }
-
-    /// Recomputes the matches after a splice and seats the current one
-    /// on the first at or after `offset`, wrapping to the first.
-    fn seek_match(&mut self, offset: usize) {
-        self.sync_search();
-        let Some(state) = self.search.as_ref() else {
-            return;
-        };
-        if state.matches.is_empty() {
-            return;
+        // The splice marked the matches stale; the recompute honors the
+        // seek once the relayout lets it run.
+        if let Some(state) = self.search.as_mut() {
+            state.seek = Some(after);
         }
-        let next = state
-            .matches
-            .iter()
-            .position(|sel| {
-                caret::model_offset(&self.document, &sel.ordered().0).is_some_and(|at| at >= offset)
-            })
-            .unwrap_or(0);
-        let state = self.search.as_mut().expect("search open");
-        state.current = next;
-        self.band = None;
-        self.scroll_match_into_view();
         self.request_redraw();
     }
 
@@ -2258,12 +2240,15 @@ impl App {
                 self.close_search();
                 true
             }
+            // While the replace row is open, Enter replaces from either
+            // field, since Ctrl+H announced the intent; F3 and
+            // Shift+Enter still step without replacing.
             Key::Named(NamedKey::Enter) => {
-                if self
+                let replacing = self
                     .search
                     .as_ref()
-                    .is_some_and(SearchState::replace_focused)
-                {
+                    .is_some_and(|state| state.replace.is_some());
+                if replacing && !shift {
                     self.replace_current();
                 } else {
                     self.step_search(!shift);
@@ -2386,6 +2371,7 @@ impl App {
         };
         let scroll = self.scroll_y;
         let state = self.search.as_mut().expect("search open");
+        let prev = state.matches.get(state.current).copied();
         let found = if state.regex {
             search::regex_matches(&self.document, state.query.text())
         } else {
@@ -2394,9 +2380,34 @@ impl App {
         state.error = found.is_none();
         state.matches = found.unwrap_or_default();
         state.stale = false;
-        let tops = selection::match_tops(lay, &state.matches);
-        state.current = tops.iter().position(|top| *top >= scroll).unwrap_or(0);
-        self.scroll_match_into_view();
+        let seek = state.seek.take();
+        // When the recompute yields the same match (a recolor or layout
+        // growth went stale, not the text or the query), the current one
+        // keeps its identity and the view stays put. Otherwise a replace
+        // seek beats the viewport rule, so the current match moves past
+        // the splice instead of re-seating at the top of the screen.
+        let kept = match seek {
+            Some(_) => None,
+            None => prev.and_then(|p| state.matches.iter().position(|s| *s == p)),
+        };
+        if let Some(index) = kept {
+            state.current = index;
+        } else {
+            let document = &self.document;
+            let tops = selection::match_tops(lay, &state.matches);
+            state.current = match seek {
+                Some(offset) => state
+                    .matches
+                    .iter()
+                    .position(|sel| {
+                        caret::model_offset(document, &sel.ordered().0)
+                            .is_some_and(|at| at >= offset)
+                    })
+                    .unwrap_or(0),
+                None => tops.iter().position(|top| *top >= scroll).unwrap_or(0),
+            };
+            self.scroll_match_into_view();
+        }
         self.refresh_search_rects();
     }
 
