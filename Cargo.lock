@@ -2335,6 +2335,7 @@ dependencies = [
  "miniz_oxide",
  "noad",
  "open",
+ "palmbook",
  "pdf-writer",
  "pulldown-cmark",
  "resvg",

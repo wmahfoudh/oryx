@@ -159,6 +159,8 @@ pub struct Book<'a> {
     title: Option<String>,
     exth: Vec<(u32, Vec<u8>)>,
     kf8: Option<Kf8Header>,
+    /// The INDX record field at 0xF4, the NCX of a MOBI6 book.
+    mobi6_indx: u32,
 }
 
 impl<'a> Book<'a> {
@@ -242,6 +244,11 @@ impl<'a> Book<'a> {
         } else {
             None
         };
+        let mobi6_indx = if version < 8 && header_len >= 232 {
+            be32(record0, 244).unwrap_or(0xFFFF_FFFF)
+        } else {
+            0xFFFF_FFFF
+        };
         Ok(Book {
             pdb,
             start,
@@ -257,12 +264,24 @@ impl<'a> Book<'a> {
             title,
             exth,
             kf8,
+            mobi6_indx,
         })
     }
 
     /// The MOBI header version: 6 for the old flow, 8 and up for KF8.
     pub fn version(&self) -> u32 {
         self.version
+    }
+
+    /// Bytes to text per the book's declared encoding.
+    pub fn text(&self, bytes: &[u8]) -> String {
+        decode(bytes, self.encoding)
+    }
+
+    /// The MOBI6 NCX index record, when the header carries one.
+    pub fn mobi6_ncx(&self) -> Option<usize> {
+        (self.version < 8 && self.mobi6_indx != 0xFFFF_FFFF && self.mobi6_indx != 0)
+            .then_some(self.mobi6_indx as usize)
     }
 
     /// The KF8 index fields, present on version 8 books.
@@ -363,7 +382,7 @@ impl<'a> Book<'a> {
 
 /// Bytes to text per the declared encoding, replacement on the bytes
 /// the encoding cannot carry.
-fn decode(bytes: &[u8], encoding: TextEncoding) -> String {
+pub fn decode(bytes: &[u8], encoding: TextEncoding) -> String {
     match encoding {
         TextEncoding::Utf8 => String::from_utf8_lossy(bytes).into_owned(),
         TextEncoding::Cp1252 => bytes.iter().map(|&b| cp1252(b)).collect(),

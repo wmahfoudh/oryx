@@ -26,6 +26,8 @@ pub enum FileKind {
     Epub,
     /// An FB2 book, plain XML or zip-wrapped; routed before the sniff.
     Fb2,
+    /// A Kindle book (MOBI, AZW3, AZW); a Palm database, never text.
+    Kindle,
     /// A format Oryx knows it cannot display (PDF). Refused by name:
     /// some PDFs open with an all-ASCII head the content sniff passes.
     Undisplayable,
@@ -60,6 +62,9 @@ pub fn detect(path: &Path) -> FileKind {
     }
     if ext == "fb2" || ext == "fbz" {
         return FileKind::Fb2;
+    }
+    if ext == "mobi" || ext == "azw3" || ext == "azw" {
+        return FileKind::Kindle;
     }
     if ext == "pdf" {
         return FileKind::Undisplayable;
@@ -100,6 +105,7 @@ pub fn is_text_file(path: &Path) -> bool {
 pub enum BookJob {
     Epub(super::epub::BookJob),
     Fb2(super::fb2::Job),
+    Kindle(super::kindle::Job),
 }
 
 impl BookJob {
@@ -107,6 +113,7 @@ impl BookJob {
         match self {
             BookJob::Epub(job) => job.has_chapters(),
             BookJob::Fb2(job) => job.has_chapters(),
+            BookJob::Kindle(job) => job.has_chapters(),
         }
     }
 
@@ -114,6 +121,7 @@ impl BookJob {
         match self {
             BookJob::Epub(job) => job.take_sources(),
             BookJob::Fb2(job) => job.take_sources(),
+            BookJob::Kindle(job) => job.take_sources(),
         }
     }
 
@@ -127,6 +135,7 @@ impl BookJob {
         match self {
             BookJob::Epub(job) => super::epub::run(job, bail, sources),
             BookJob::Fb2(job) => super::fb2::run(job, bail, sources),
+            BookJob::Kindle(job) => super::kindle::run(job, bail, sources),
         }
     }
 }
@@ -165,11 +174,15 @@ pub fn open(path: &Path, deadline: Option<Instant>) -> anyhow::Result<Opened> {
     }
     // A book may be a zip full of NUL bytes; it routes before the sniff.
     let book_kind = detect(path);
-    if matches!(book_kind, FileKind::Epub | FileKind::Fb2) {
+    if matches!(book_kind, FileKind::Epub | FileKind::Fb2 | FileKind::Kindle) {
         let (mut document, toc, book) = match book_kind {
             FileKind::Epub => {
                 let (document, toc, job) = super::epub::open_prefix(bytes)?;
                 (document, toc, job.map(BookJob::Epub))
+            }
+            FileKind::Kindle => {
+                let (document, toc, job) = super::kindle::open_prefix(bytes)?;
+                (document, toc, job.map(BookJob::Kindle))
             }
             _ => {
                 let (document, toc, job) = super::fb2::open_prefix(bytes)?;
@@ -234,7 +247,9 @@ pub fn open(path: &Path, deadline: Option<Instant>) -> anyhow::Result<Opened> {
         },
         FileKind::Code(token) => code_document(Some(token), &text),
         FileKind::Text => text_document(&text),
-        FileKind::Epub | FileKind::Fb2 => unreachable!("books returned before the sniff"),
+        FileKind::Epub | FileKind::Fb2 | FileKind::Kindle => {
+            unreachable!("books returned before the sniff")
+        }
         FileKind::Undisplayable => unreachable!("refused before the sniff"),
         FileKind::Unknown => code_document(None, &text),
     };
@@ -354,10 +369,12 @@ pub fn message(text: &str) -> Document {
 
 /// Every extension Oryx renders intentionally, for dialog filters.
 pub fn recognized_extensions() -> Vec<&'static str> {
-    ["md", "markdown", "txt", "epub", "fb2", "fbz"]
-        .into_iter()
-        .chain(CODE_EXTENSIONS.iter().map(|(ext, _)| *ext))
-        .collect()
+    [
+        "md", "markdown", "txt", "epub", "fb2", "fbz", "mobi", "azw3", "azw",
+    ]
+    .into_iter()
+    .chain(CODE_EXTENSIONS.iter().map(|(ext, _)| *ext))
+    .collect()
 }
 
 fn source_lines(text: &str) -> Vec<Range<u32>> {

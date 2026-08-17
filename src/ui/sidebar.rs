@@ -135,7 +135,7 @@ fn icon_for(path: &Path) -> Icon {
         FileKind::Code(token) if DATA_TOKENS.contains(&token) => Icon::Config,
         FileKind::Code(_) => Icon::Code,
         FileKind::Text => Icon::Text,
-        FileKind::Epub | FileKind::Fb2 => Icon::Document,
+        FileKind::Epub | FileKind::Fb2 | FileKind::Kindle => Icon::Document,
         FileKind::Undisplayable | FileKind::Unknown => Icon::Unknown,
     }
 }

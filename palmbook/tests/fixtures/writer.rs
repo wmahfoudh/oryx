@@ -32,6 +32,9 @@ pub struct BookBuilder {
     /// Overrides the declared text length; real KF8 books declare flow
     /// 0's length while the records carry every flow.
     pub declared_text_length: Option<u32>,
+    /// Overrides the first-image record index; the default points at
+    /// the first record after the text.
+    pub first_image: Option<u32>,
     /// KF8 record indexes, absolute in the record list; 0xFFFFFFFF when
     /// absent. `fdst` pairs the record index with the flow count.
     pub fdst: (u32, u32),
@@ -58,6 +61,7 @@ pub fn book(text: &str) -> BookBuilder {
         huff_records: Vec::new(),
         version: 6,
         declared_text_length: None,
+        first_image: None,
         fdst: (0xFFFF_FFFF, 0),
         skelidx: 0xFFFF_FFFF,
         fragidx: 0xFFFF_FFFF,
@@ -156,7 +160,8 @@ impl BookBuilder {
         put32(&mut out, 88, self.title.len() as u32);
         put32(&mut out, 92, 9); // locale
         put32(&mut out, 104, self.version); // min version
-        put32(&mut out, 108, 1 + record_count as u32); // first image
+        let first_image = self.first_image.unwrap_or(1 + record_count as u32);
+        put32(&mut out, 108, first_image);
         put32(&mut out, 112, huff_offset);
         put32(&mut out, 116, self.huff_records.len() as u32);
         put32(&mut out, 128, if self.exth.is_empty() { 0 } else { 0x40 });

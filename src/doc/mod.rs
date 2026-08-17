@@ -3,6 +3,7 @@ pub mod fb2;
 pub mod fetch;
 pub mod html;
 pub mod images;
+pub mod kindle;
 pub mod load;
 pub mod markdown;
 pub mod model;
