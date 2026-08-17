@@ -344,6 +344,23 @@ fn read_binaries(root: roxmltree::Node) -> HashMap<String, BookSource> {
     out
 }
 
+/// Whether a paragraph holds at least one image and nothing else but
+/// whitespace.
+fn images_only(node: roxmltree::Node) -> bool {
+    let mut image = false;
+    for child in node.children() {
+        if child.is_element() {
+            if child.tag_name().name() != "image" {
+                return false;
+            }
+            image = true;
+        } else if child.text().is_some_and(|t| !t.trim().is_empty()) {
+            return false;
+        }
+    }
+    image
+}
+
 /// The image reference an `<image>` element carries, without its `#`.
 fn href_key(node: roxmltree::Node) -> Option<String> {
     node.attributes()
@@ -545,7 +562,7 @@ fn emit_chapter(chapter: &Planned, ids: &HashMap<String, String>) -> String {
                 e.heading(*title, 1, None);
             }
             if let Some(cover) = cover {
-                e.out.push_str("<p><img src=\"");
+                e.out.push_str("<p align=\"center\"><img src=\"");
                 esc(cover, &mut e.out);
                 e.out.push_str("\"/></p>");
             }
@@ -620,13 +637,24 @@ impl Emitter<'_> {
             self.out.push('"');
         }
         self.out.push('>');
+        // The schema wraps a title's lines in paragraphs, but real
+        // books also write the text bare; both shapes read.
         let mut first = true;
-        for p in title.children().filter(|n| n.tag_name().name() == "p") {
-            if !first {
-                self.out.push_str("<br/>");
+        for child in title.children() {
+            if child.is_element() && child.tag_name().name() == "p" {
+                if !first {
+                    self.out.push_str("<br/>");
+                }
+                first = false;
+                self.inline_children(child);
+            } else if child.is_element() && child.tag_name().name() == "empty-line" {
+                continue;
+            } else if child.is_element()
+                || child.text().is_some_and(|t| !t.trim().is_empty())
+            {
+                first = false;
+                self.inline_node(child);
             }
-            first = false;
-            self.inline_children(p);
         }
         self.out.push_str(&format!("</h{level}>"));
     }
@@ -634,6 +662,14 @@ impl Emitter<'_> {
     /// A block-level FB2 element into its XHTML counterpart.
     fn flow(&mut self, node: roxmltree::Node) {
         match node.tag_name().name() {
+            // A paragraph holding only images is a block image in
+            // paragraph clothing, the shape real books use; it centers
+            // like the bare element. An image among text stays inline.
+            "p" if images_only(node) => {
+                self.out.push_str("<p align=\"center\">");
+                self.inline_children(node);
+                self.out.push_str("</p>");
+            }
             "p" => {
                 self.out.push_str("<p>");
                 self.inline_children(node);
@@ -645,8 +681,11 @@ impl Emitter<'_> {
                 self.out.push_str("</strong></p>");
             }
             "empty-line" => self.out.push_str("<p>&#160;</p>"),
+            // A block image centers: FB2 carries no stylesheet, so the
+            // presentation is the reader's call, and centered is the
+            // convention FB2 readers follow.
             "image" => {
-                self.out.push_str("<p>");
+                self.out.push_str("<p align=\"center\">");
                 self.image(node);
                 self.out.push_str("</p>");
             }
@@ -730,25 +769,30 @@ impl Emitter<'_> {
     /// Inline content: text and the FB2 style elements.
     fn inline_children(&mut self, node: roxmltree::Node) {
         for child in node.children() {
-            if let Some(text) = child.text().filter(|_| child.is_text()) {
-                esc(text, &mut self.out);
-                continue;
-            }
-            if !child.is_element() {
-                continue;
-            }
-            match child.tag_name().name() {
-                "emphasis" => self.styled("em", child),
-                "strong" => self.styled("strong", child),
-                "strikethrough" => self.styled("s", child),
-                "code" => self.styled("code", child),
-                "sub" => self.styled("sub", child),
-                "sup" => self.styled("sup", child),
-                "style" => self.inline_children(child),
-                "image" => self.image(child),
-                "a" => self.link(child),
-                _ => self.inline_children(child),
-            }
+            self.inline_node(child);
+        }
+    }
+
+    /// One inline node: text escapes, the FB2 style elements map.
+    fn inline_node(&mut self, child: roxmltree::Node) {
+        if let Some(text) = child.text().filter(|_| child.is_text()) {
+            esc(text, &mut self.out);
+            return;
+        }
+        if !child.is_element() {
+            return;
+        }
+        match child.tag_name().name() {
+            "emphasis" => self.styled("em", child),
+            "strong" => self.styled("strong", child),
+            "strikethrough" => self.styled("s", child),
+            "code" => self.styled("code", child),
+            "sub" => self.styled("sub", child),
+            "sup" => self.styled("sup", child),
+            "style" => self.inline_children(child),
+            "image" => self.image(child),
+            "a" => self.link(child),
+            _ => self.inline_children(child),
         }
     }
 

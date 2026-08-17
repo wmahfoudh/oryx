@@ -45,7 +45,8 @@ fn sections_become_chapters_and_the_outline() {
          <section><title><p>One</p></title><p>First chapter text.</p>\
          <section id=\"part2\"><title><p>Inside One</p></title><p>Nested text.</p></section>\
          </section>\
-         <section><title><p>Two</p></title><p>Second chapter text.</p></section></body>",
+         <section><title><p>Two</p></title><p>Second chapter text.</p></section>\
+         <section><title>Three / III</title><p>Third chapter text.</p></section></body>",
         "",
     );
     let opened = fb2::open_book(bytes).unwrap();
@@ -69,8 +70,9 @@ fn sections_become_chapters_and_the_outline() {
             (1, "One".to_string()),
             (2, "Inside One".to_string()),
             (1, "Two".to_string()),
+            (1, "Three / III".to_string()),
         ],
-        "the body title and each section title become headings by depth"
+        "each section title heads its chapter, the bare-text shape real books use included"
     );
 
     let toc: Vec<(String, u8, Option<String>)> = opened
@@ -78,7 +80,7 @@ fn sections_become_chapters_and_the_outline() {
         .iter()
         .map(|e| (e.label.clone(), e.depth, e.fragment.clone()))
         .collect();
-    assert_eq!(toc.len(), 3, "titled sections make the outline: {toc:?}");
+    assert_eq!(toc.len(), 4, "titled sections make the outline: {toc:?}");
     assert_eq!(toc[0], ("One".to_string(), 0, None));
     assert_eq!(
         toc[1],
@@ -230,25 +232,50 @@ fn a_binary_image_arrives_with_dimensions() {
     let encoded = base64::engine::general_purpose::STANDARD.encode(&png);
     let bytes = book(
         "<body><section><title><p>One</p></title>\
-         <p>Before the picture.</p><image l:href=\"#pic\"/></section></body>",
-        &format!("<binary id=\"pic\" content-type=\"image/png\">{encoded}</binary>"),
+         <p>Before the picture.</p><image l:href=\"#pic\"/>\
+         <p><image l:href=\"#pic2\"/></p>\
+         <p>Inline <image l:href=\"#pic3\"/> stays in the text.</p></section></body>",
+        &format!(
+            "<binary id=\"pic\" content-type=\"image/png\">{encoded}</binary>\
+             <binary id=\"pic2\" content-type=\"image/png\">{encoded}</binary>\
+             <binary id=\"pic3\" content-type=\"image/png\">{encoded}</binary>"
+        ),
     );
 
     let opened = fb2::open_book(bytes.clone()).unwrap();
-    assert_eq!(opened.images.len(), 1);
-    let (key, img) = &opened.images[0];
-    assert_eq!(key, "pic");
-    assert_eq!(img.dimensions(), (8, 4));
-    let span = opened
-        .document
-        .blocks
+    assert_eq!(opened.images.len(), 3);
+    let (key, img) = opened
+        .images
         .iter()
-        .find_map(|b| match &b.kind {
-            BlockKind::Paragraph { spans } => spans.iter().find(|s| s.image.is_some()),
-            _ => None,
-        })
-        .expect("the image span is in the document");
-    assert_eq!(span.image.as_ref().unwrap().src, *key);
+        .find(|(k, _)| k == "pic")
+        .expect("the section image decodes");
+    assert_eq!(img.dimensions(), (8, 4));
+    let block_of = |src: &str| {
+        opened
+            .document
+            .blocks
+            .iter()
+            .find(|b| match &b.kind {
+                BlockKind::Paragraph { spans } => spans
+                    .iter()
+                    .any(|s| s.image.as_ref().is_some_and(|i| i.src == src)),
+                _ => false,
+            })
+            .unwrap_or_else(|| panic!("no block holds image {src:?}"))
+    };
+    let section_level = block_of(key);
+    assert!(
+        section_level.centered,
+        "a section-level image centers; FB2 has no stylesheet, so the choice is the reader's"
+    );
+    assert!(
+        block_of("pic2").centered,
+        "a paragraph holding only an image is a block image and centers, the shape real books use"
+    );
+    assert!(
+        !block_of("pic3").centered,
+        "an image among text stays in the text flow"
+    );
 
     let (_, _, job) = fb2::open_prefix(bytes).unwrap();
     let mut job = job.expect("a book with images carries a job");
