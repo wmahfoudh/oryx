@@ -27,6 +27,18 @@ pub struct BookBuilder {
     pub extra_records: Vec<Vec<u8>>,
     /// HuffCdic tables appended when the compression asks for them.
     pub huff_records: Vec<Vec<u8>>,
+    /// The MOBI header version: 6 for the old flow, 8 for KF8.
+    pub version: u32,
+    /// Overrides the declared text length; real KF8 books declare flow
+    /// 0's length while the records carry every flow.
+    pub declared_text_length: Option<u32>,
+    /// KF8 record indexes, absolute in the record list; 0xFFFFFFFF when
+    /// absent. `fdst` pairs the record index with the flow count.
+    pub fdst: (u32, u32),
+    pub skelidx: u32,
+    pub fragidx: u32,
+    pub ncxidx: u32,
+    pub guideidx: u32,
 }
 
 pub fn book(text: &str) -> BookBuilder {
@@ -44,11 +56,31 @@ pub fn book(text: &str) -> BookBuilder {
         extra_flags: 0,
         extra_records: Vec::new(),
         huff_records: Vec::new(),
+        version: 6,
+        declared_text_length: None,
+        fdst: (0xFFFF_FFFF, 0),
+        skelidx: 0xFFFF_FFFF,
+        fragidx: 0xFFFF_FFFF,
+        ncxidx: 0xFFFF_FFFF,
+        guideidx: 0xFFFF_FFFF,
     }
+}
+
+fn put16(out: &mut [u8], at: usize, value: u16) {
+    out[at..at + 2].copy_from_slice(&value.to_be_bytes());
+}
+
+fn put32(out: &mut [u8], at: usize, value: u32) {
+    out[at..at + 4].copy_from_slice(&value.to_be_bytes());
 }
 
 impl BookBuilder {
     pub fn build(&self) -> Vec<u8> {
+        pdb(self.name, self.type_code, self.creator, &self.records())
+    }
+
+    /// The record list before the PDB shell, for composing dual files.
+    pub fn records(&self) -> Vec<Vec<u8>> {
         let mut chunks: Vec<Vec<u8>> = self
             .text
             .chunks(self.record_size)
@@ -65,7 +97,13 @@ impl BookBuilder {
         records.extend(chunks);
         records.extend(self.huff_records.iter().cloned());
         records.extend(self.extra_records.iter().cloned());
-        pdb(self.name, self.type_code, self.creator, &records)
+        records
+    }
+
+    /// How many records precede the extra records, for computing the
+    /// absolute index of an appended table.
+    pub fn extra_base(&self) -> u32 {
+        (1 + self.text.chunks(self.record_size).count() + self.huff_records.len()) as u32
     }
 
     fn record0(&self, record_count: u16) -> Vec<u8> {
@@ -89,60 +127,57 @@ impl BookBuilder {
                 exth.push(0);
             }
         }
-        let header_len = 232u32;
-        let name_offset = 16 + header_len as usize + exth.len();
+        let header_len: usize = if self.version >= 8 { 264 } else { 232 };
+        let name_offset = 16 + header_len + exth.len();
         let huff_offset = if self.huff_records.is_empty() {
             0
         } else {
             1 + record_count as u32
         };
 
-        let mut out = Vec::new();
+        let mut out = vec![0u8; 16 + header_len];
         // The 16-byte PalmDOC header.
-        out.extend_from_slice(&self.compression.to_be_bytes());
-        out.extend_from_slice(&[0, 0]);
-        out.extend_from_slice(&(self.text.len() as u32).to_be_bytes());
-        out.extend_from_slice(&record_count.to_be_bytes());
-        out.extend_from_slice(&(self.record_size as u16).to_be_bytes());
-        out.extend_from_slice(&self.encryption.to_be_bytes());
-        out.extend_from_slice(&[0, 0]);
-        // The MOBI header, 232 bytes from its magic.
-        out.extend_from_slice(b"MOBI");
-        out.extend_from_slice(&header_len.to_be_bytes());
-        out.extend_from_slice(&2u32.to_be_bytes());
-        out.extend_from_slice(&self.encoding.to_be_bytes());
-        out.extend_from_slice(&7u32.to_be_bytes());
-        out.extend_from_slice(&6u32.to_be_bytes());
-        out.extend_from_slice(&[0xFF; 40]);
-        out.extend_from_slice(&0xFFFF_FFFFu32.to_be_bytes()); // 80: first non-book index
-        out.extend_from_slice(&(name_offset as u32).to_be_bytes()); // 84
-        out.extend_from_slice(&(self.title.len() as u32).to_be_bytes()); // 88
-        out.extend_from_slice(&9u32.to_be_bytes()); // 92: locale
-        out.extend_from_slice(&[0; 8]); // 96: input, output language
-        out.extend_from_slice(&6u32.to_be_bytes()); // 104: min version
-        out.extend_from_slice(&(1 + record_count as u32).to_be_bytes()); // 108: first image
-        out.extend_from_slice(&huff_offset.to_be_bytes()); // 112
-        out.extend_from_slice(&(self.huff_records.len() as u32).to_be_bytes()); // 116
-        out.extend_from_slice(&[0; 8]); // 120: huff table offset and length
-        out.extend_from_slice(&if self.exth.is_empty() { 0u32 } else { 0x40u32 }.to_be_bytes()); // 128
-        out.extend_from_slice(&[0; 32]); // 132: unknown
-        out.extend_from_slice(&[0xFF; 4]); // 164
-        out.extend_from_slice(&0xFFFF_FFFFu32.to_be_bytes()); // 168: drm offset
-        out.extend_from_slice(&0xFFFF_FFFFu32.to_be_bytes()); // 172: drm count
-        out.extend_from_slice(&[0; 8]); // 176: drm size, flags
-        out.extend_from_slice(&[0; 8]); // 184: unknown
-        out.extend_from_slice(&1u16.to_be_bytes()); // 192: first content record
-        out.extend_from_slice(&record_count.to_be_bytes()); // 194: last content record
-        out.extend_from_slice(&1u32.to_be_bytes()); // 196
-        out.extend_from_slice(&[0; 40]); // 200: fcis, flis, unknown
-        out.extend_from_slice(&[0, 0]); // 240
-        out.extend_from_slice(&self.extra_flags.to_be_bytes()); // 242
-        out.extend_from_slice(&0xFFFF_FFFFu32.to_be_bytes()); // 244: indx record
-        assert_eq!(
-            out.len(),
-            16 + header_len as usize,
-            "record 0 layout drifted"
-        );
+        put16(&mut out, 0, self.compression);
+        let declared = self.declared_text_length.unwrap_or(self.text.len() as u32);
+        put32(&mut out, 4, declared);
+        put16(&mut out, 8, record_count);
+        put16(&mut out, 10, self.record_size as u16);
+        put16(&mut out, 12, self.encryption);
+        // The MOBI header, addressed by offset.
+        out[16..20].copy_from_slice(b"MOBI");
+        put32(&mut out, 20, header_len as u32);
+        put32(&mut out, 24, 2); // mobi type: book
+        put32(&mut out, 28, self.encoding);
+        put32(&mut out, 32, 7); // unique id
+        put32(&mut out, 36, self.version);
+        out[40..80].fill(0xFF); // reserved
+        put32(&mut out, 80, 0xFFFF_FFFF); // first non-book index
+        put32(&mut out, 84, name_offset as u32);
+        put32(&mut out, 88, self.title.len() as u32);
+        put32(&mut out, 92, 9); // locale
+        put32(&mut out, 104, self.version); // min version
+        put32(&mut out, 108, 1 + record_count as u32); // first image
+        put32(&mut out, 112, huff_offset);
+        put32(&mut out, 116, self.huff_records.len() as u32);
+        put32(&mut out, 128, if self.exth.is_empty() { 0 } else { 0x40 });
+        put32(&mut out, 168, 0xFFFF_FFFF); // drm offset
+        put32(&mut out, 172, 0xFFFF_FFFF); // drm count
+        if self.version >= 8 {
+            put32(&mut out, 192, self.fdst.0);
+            put32(&mut out, 196, self.fdst.1);
+            put16(&mut out, 242, self.extra_flags);
+            put32(&mut out, 244, self.ncxidx);
+            put32(&mut out, 248, self.fragidx);
+            put32(&mut out, 252, self.skelidx);
+            put32(&mut out, 256, 0xFFFF_FFFF); // datp index
+            put32(&mut out, 260, self.guideidx);
+        } else {
+            put16(&mut out, 192, 1); // first content record
+            put16(&mut out, 194, record_count);
+            put32(&mut out, 196, 1);
+            put16(&mut out, 242, self.extra_flags);
+            put32(&mut out, 244, 0xFFFF_FFFF); // indx record
+        }
         out.extend_from_slice(&exth);
         out.extend_from_slice(self.title.as_bytes());
         out.extend_from_slice(&[0, 0]);
@@ -217,6 +252,211 @@ pub fn palmdoc_compress(text: &[u8]) -> Vec<u8> {
         i += 1;
     }
     out
+}
+
+/// One index entry under construction: the name bytes and the tag
+/// values, which must match the TAGX table handed to `indx_records`.
+pub struct IndxEntry {
+    pub name: Vec<u8>,
+    pub tags: Vec<(u8, Vec<u64>)>,
+}
+
+/// A forward variable-width value: seven bits per byte, the final byte
+/// flagged with 0x80.
+pub fn varint(value: u64) -> Vec<u8> {
+    let mut groups = Vec::new();
+    let mut v = value;
+    loop {
+        groups.push((v & 0x7F) as u8);
+        v >>= 7;
+        if v == 0 {
+            break;
+        }
+    }
+    groups.reverse();
+    *groups.last_mut().expect("at least one group") |= 0x80;
+    groups
+}
+
+/// An INDX pair (header record and one data record) plus the CNCX
+/// record when given. The TAGX quads are `(tag, values, mask, end)`
+/// with single-bit masks in one control byte.
+pub fn indx_records(
+    tagx: &[(u8, u8, u8, u8)],
+    entries: &[IndxEntry],
+    cncx: Option<Vec<u8>>,
+) -> Vec<Vec<u8>> {
+    let mut header = vec![0u8; 56];
+    header[0..4].copy_from_slice(b"INDX");
+    put32(&mut header, 4, 56); // header length: TAGX follows
+    put32(&mut header, 24, 1); // one data record
+    put32(&mut header, 28, 65001);
+    put32(&mut header, 36, entries.len() as u32); // total entries
+    put32(&mut header, 52, cncx.iter().len() as u32); // cncx records
+    header.extend_from_slice(b"TAGX");
+    header.extend_from_slice(&(12 + tagx.len() as u32 * 4).to_be_bytes());
+    header.extend_from_slice(&1u32.to_be_bytes()); // one control byte
+    for &(tag, values, mask, end) in tagx {
+        header.extend_from_slice(&[tag, values, mask, end]);
+    }
+
+    let mut body = Vec::new();
+    let mut offsets = Vec::new();
+    for entry in entries {
+        offsets.push(56 + body.len());
+        body.push(entry.name.len() as u8);
+        body.extend_from_slice(&entry.name);
+        let mut control = 0u8;
+        for &(tag, _, mask, end) in tagx {
+            if end == 0 && entry.tags.iter().any(|(t, _)| *t == tag) {
+                control |= mask;
+            }
+        }
+        body.push(control);
+        for &(tag, _, _, end) in tagx {
+            if end != 0 {
+                continue;
+            }
+            if let Some((_, values)) = entry.tags.iter().find(|(t, _)| *t == tag) {
+                for &value in values {
+                    body.extend_from_slice(&varint(value));
+                }
+            }
+        }
+    }
+    let idxt_at = 56 + body.len();
+    let mut data = vec![0u8; 56];
+    data[0..4].copy_from_slice(b"INDX");
+    put32(&mut data, 4, 56);
+    put32(&mut data, 20, idxt_at as u32);
+    put32(&mut data, 24, entries.len() as u32);
+    data.extend_from_slice(&body);
+    data.extend_from_slice(b"IDXT");
+    for offset in offsets {
+        data.extend_from_slice(&(offset as u16).to_be_bytes());
+    }
+
+    let mut out = vec![header, data];
+    out.extend(cncx);
+    out
+}
+
+/// A CNCX record from strings, returning the record and each string's
+/// offset for tag values.
+pub fn cncx(strings: &[&str]) -> (Vec<u8>, Vec<u64>) {
+    let mut record = Vec::new();
+    let mut offsets = Vec::new();
+    for text in strings {
+        offsets.push(record.len() as u64);
+        record.extend_from_slice(&varint(text.len() as u64));
+        record.extend_from_slice(text.as_bytes());
+    }
+    (record, offsets)
+}
+
+/// The FDST record over flow boundaries.
+pub fn fdst(bounds: &[(u32, u32)]) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(b"FDST");
+    out.extend_from_slice(&12u32.to_be_bytes());
+    out.extend_from_slice(&(bounds.len() as u32).to_be_bytes());
+    for &(start, end) in bounds {
+        out.extend_from_slice(&start.to_be_bytes());
+        out.extend_from_slice(&end.to_be_bytes());
+    }
+    out
+}
+
+/// One skeleton for the KF8 composite: its text and the fragments that
+/// stitch into it, each with its position in the growing skeleton.
+pub struct Skeleton {
+    pub text: &'static str,
+    pub fragments: Vec<(usize, &'static str)>,
+}
+
+/// A whole KF8 book: flow 0 laid out as skeletons with their fragments
+/// behind them, a CSS flow after it, the FDST, and the skeleton and
+/// fragment indexes with their CNCX of aid names.
+pub fn kf8_book(skeletons: &[Skeleton], css: &str) -> BookBuilder {
+    let mut flow0 = Vec::new();
+    let mut skel_entries = Vec::new();
+    let mut frag_entries = Vec::new();
+    let mut aids = Vec::new();
+    for (index, skeleton) in skeletons.iter().enumerate() {
+        let skelpos = flow0.len();
+        flow0.extend_from_slice(skeleton.text.as_bytes());
+        for (fragment, _) in skeleton.fragments.iter().zip(0u64..) {
+            flow0.extend_from_slice(fragment.1.as_bytes());
+            aids.push(format!("aid-{index}-{}", fragment.0));
+        }
+        skel_entries.push((skelpos, skeleton.text.len(), index));
+    }
+    let aid_refs: Vec<&str> = aids.iter().map(String::as_str).collect();
+    let (cncx_record, offsets) = cncx(&aid_refs);
+    let mut aid = 0usize;
+    let mut seq = 0u64;
+    for (index, skeleton) in skeletons.iter().enumerate() {
+        let (skelpos, _, _) = skel_entries[index];
+        for &(insert, fragment) in &skeleton.fragments {
+            frag_entries.push(IndxEntry {
+                name: (skelpos + insert).to_string().into_bytes(),
+                tags: vec![
+                    (2, vec![offsets[aid]]),
+                    (3, vec![index as u64]),
+                    (4, vec![seq]),
+                    (6, vec![0, fragment.len() as u64]),
+                ],
+            });
+            aid += 1;
+            seq += 1;
+        }
+    }
+    let skel_indx = indx_records(
+        &[(1, 1, 0x01, 0), (6, 2, 0x02, 0), (0, 0, 0, 1)],
+        &skel_entries
+            .iter()
+            .map(|&(pos, len, index)| IndxEntry {
+                name: format!("SKEL{index:010}").into_bytes(),
+                tags: vec![
+                    (1, vec![skeletons[index].fragments.len() as u64]),
+                    (6, vec![pos as u64, len as u64]),
+                ],
+            })
+            .collect::<Vec<_>>(),
+        None,
+    );
+    let frag_indx = indx_records(
+        &[
+            (2, 1, 0x01, 0),
+            (3, 1, 0x02, 0),
+            (4, 1, 0x04, 0),
+            (6, 2, 0x08, 0),
+            (0, 0, 0, 1),
+        ],
+        &frag_entries,
+        Some(cncx_record),
+    );
+
+    let flow0_len = flow0.len() as u32;
+    let mut rawml = flow0;
+    rawml.extend_from_slice(css.as_bytes());
+    let rawml_len = rawml.len() as u32;
+
+    let mut builder = book("");
+    builder.text = rawml;
+    builder.version = 8;
+    builder.declared_text_length = Some(flow0_len);
+    let base = builder.extra_base();
+    builder.skelidx = base;
+    builder.fragidx = base + skel_indx.len() as u32;
+    let fdst_index = builder.fragidx + frag_indx.len() as u32;
+    builder.fdst = (fdst_index, 2);
+    builder.extra_records = skel_indx;
+    builder.extra_records.extend(frag_indx);
+    builder
+        .extra_records
+        .push(fdst(&[(0, flow0_len), (flow0_len, rawml_len)]));
+    builder
 }
 
 /// A hand-built HuffCdic table pair: every code is one terminal byte,

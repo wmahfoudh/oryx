@@ -6,6 +6,8 @@
 //! The layouts follow the MobileRead format documentation.
 
 pub mod huffcdic;
+pub mod indx;
+pub mod kf8;
 pub mod palmdoc;
 
 /// Why a container cannot be read. `Drm` is a refusal to relay to the
@@ -126,10 +128,26 @@ pub enum TextEncoding {
     Utf8,
 }
 
+/// The KF8 header fields, record indexes relative to the book's own
+/// record 0; 0xFFFFFFFF marks an absent table.
+#[derive(Debug, Clone, Copy)]
+pub struct Kf8Header {
+    pub fdst: u32,
+    pub fdst_count: u32,
+    pub ncx: u32,
+    pub frag: u32,
+    pub skel: u32,
+    pub guide: u32,
+}
+
 /// A MOBI book over its container: record 0 parsed, the text records
 /// decompressable, the metadata at hand.
 pub struct Book<'a> {
     pdb: Pdb<'a>,
+    /// The book's record 0 inside the PDB; nonzero for the KF8 half of
+    /// a dual file. Every record index in the headers is relative to it.
+    start: usize,
+    version: u32,
     compression: Compression,
     encoding: TextEncoding,
     text_length: usize,
@@ -140,15 +158,22 @@ pub struct Book<'a> {
     first_image: Option<usize>,
     title: Option<String>,
     exth: Vec<(u32, Vec<u8>)>,
+    kf8: Option<Kf8Header>,
 }
 
 impl<'a> Book<'a> {
     pub fn open(bytes: &'a [u8]) -> Result<Book<'a>> {
+        Book::open_at(bytes, 0)
+    }
+
+    /// Opens the book whose record 0 sits at `start`, the KF8 half of a
+    /// dual file when `start` is its boundary.
+    pub fn open_at(bytes: &'a [u8], start: usize) -> Result<Book<'a>> {
         let pdb = Pdb::open(bytes)?;
         if &pdb.creator() != b"MOBI" || &pdb.type_code() != b"BOOK" {
             return Err(Error::NotPalm);
         }
-        let record0 = pdb.record(0)?;
+        let record0 = pdb.record(start)?;
         let compression = match be16(record0, 0)? {
             1 => Compression::None,
             2 => Compression::PalmDoc,
@@ -168,6 +193,7 @@ impl<'a> Book<'a> {
             65001 => TextEncoding::Utf8,
             _ => TextEncoding::Cp1252,
         };
+        let version = be32(record0, 36)?;
         let name_offset = be32(record0, 84)? as usize;
         let name_length = be32(record0, 88)? as usize;
         let title = record0
@@ -193,11 +219,33 @@ impl<'a> Book<'a> {
         } else {
             Vec::new()
         };
-        if record_count >= pdb.len() {
+        if record_count >= pdb.len() - start {
             return Err(Error::Truncated);
         }
+        // The KF8 index fields, read only where the header reaches them.
+        let kf8 = if version >= 8 {
+            let field = |offset: usize| -> Result<u32> {
+                if offset + 4 <= 16 + header_len {
+                    be32(record0, offset)
+                } else {
+                    Ok(0xFFFF_FFFF)
+                }
+            };
+            Some(Kf8Header {
+                fdst: field(192)?,
+                fdst_count: field(196)?,
+                ncx: field(244)?,
+                frag: field(248)?,
+                skel: field(252)?,
+                guide: field(260)?,
+            })
+        } else {
+            None
+        };
         Ok(Book {
             pdb,
+            start,
+            version,
             compression,
             encoding,
             text_length,
@@ -208,7 +256,28 @@ impl<'a> Book<'a> {
             first_image,
             title,
             exth,
+            kf8,
         })
+    }
+
+    /// The MOBI header version: 6 for the old flow, 8 and up for KF8.
+    pub fn version(&self) -> u32 {
+        self.version
+    }
+
+    /// The KF8 index fields, present on version 8 books.
+    pub fn kf8_header(&self) -> Option<Kf8Header> {
+        self.kf8
+    }
+
+    /// Where the KF8 half of a dual file starts, from EXTH 121.
+    pub fn kf8_boundary(&self) -> Option<usize> {
+        self.exth
+            .iter()
+            .find(|(kind, _)| *kind == 121)
+            .and_then(|(_, data)| data.get(..4))
+            .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as usize)
+            .filter(|&at| at != 0xFFFF_FFFF)
     }
 
     pub fn compression(&self) -> Compression {
@@ -241,12 +310,14 @@ impl<'a> Book<'a> {
         self.first_image
     }
 
+    /// A record by book-relative index; the KF8 half of a dual file
+    /// counts from its own record 0.
     pub fn record(&self, index: usize) -> Result<&'a [u8]> {
-        self.pdb.record(index)
+        self.pdb.record(self.start + index)
     }
 
     pub fn record_count(&self) -> usize {
-        self.pdb.len()
+        self.pdb.len() - self.start
     }
 
     /// The book text whole: every text record stripped of its trailing
@@ -257,10 +328,10 @@ impl<'a> Book<'a> {
                 if self.huff_count == 0 {
                     return Err(Error::Corrupt("no huffman tables"));
                 }
-                let huff = self.pdb.record(self.huff_record)?;
+                let huff = self.record(self.huff_record)?;
                 let mut cdics = Vec::with_capacity(self.huff_count - 1);
                 for index in 1..self.huff_count {
-                    cdics.push(self.pdb.record(self.huff_record + index)?);
+                    cdics.push(self.record(self.huff_record + index)?);
                 }
                 Some(huffcdic::HuffCdic::new(huff, &cdics)?)
             }
@@ -268,7 +339,7 @@ impl<'a> Book<'a> {
         };
         let mut out = Vec::with_capacity(self.text_length);
         for index in 1..=self.record_count {
-            let record = self.pdb.record(index)?;
+            let record = self.record(index)?;
             let cut = record.len() - trailing_size(record, self.extra_flags).min(record.len());
             let body = &record[..cut];
             match self.compression {
@@ -280,7 +351,12 @@ impl<'a> Book<'a> {
                 }
             }
         }
-        out.truncate(self.text_length);
+        // A MOBI6 book pads its last record past the declared length; a
+        // KF8 book declares only flow 0's length while the records
+        // carry every flow, so its assembly is trusted whole.
+        if self.version < 8 {
+            out.truncate(self.text_length);
+        }
         Ok(out)
     }
 }
