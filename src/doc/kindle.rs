@@ -360,7 +360,7 @@ fn prepare_kf8(book: &palmbook::Book) -> anyhow::Result<Shaped> {
         .into_iter()
         .zip(injections)
         .map(|(part, mut injections)| {
-            injections.sort_by(|a, b| b.0.cmp(&a.0));
+            injections.sort_by_key(|&(offset, _)| std::cmp::Reverse(offset));
             Pending {
                 body: part.body,
                 injections,

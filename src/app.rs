@@ -413,10 +413,22 @@ fn justify_pref(config: &Config, doc: &Document) -> bool {
 }
 
 fn window_title(book: Option<&str>, path: Option<&Path>, dirty: bool, editing: bool) -> String {
-    let name = book.or_else(|| path.and_then(|p| p.file_name()).and_then(|n| n.to_str()));
     let dot = if dirty { "\u{25CF} " } else { "" };
     let mode = if editing { "editing \u{00B7} " } else { "" };
-    match name {
+    // A book shows its metadata title, which two containers of the same
+    // book share; the extension keeps the editions apart on screen. A
+    // file's name already carries its own.
+    if let Some(title) = book {
+        let container = path
+            .and_then(|p| p.extension())
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_ascii_lowercase());
+        return match container {
+            Some(ext) => format!("{dot}{title} \u{00B7} {ext} \u{00B7} {mode}oryx"),
+            None => format!("{dot}{title} \u{00B7} {mode}oryx"),
+        };
+    }
+    match path.and_then(|p| p.file_name()).and_then(|n| n.to_str()) {
         Some(name) => format!("{dot}{name} \u{00B7} {mode}oryx"),
         None => "oryx".to_string(),
     }
@@ -5355,6 +5367,30 @@ mod tests {
     }
 
     #[test]
+    fn a_book_title_names_its_container() {
+        use std::path::Path;
+        assert_eq!(
+            super::window_title(
+                Some("Flutter in Action"),
+                Some(Path::new("/books/flutter.mobi")),
+                false,
+                false
+            ),
+            "Flutter in Action · mobi · oryx",
+            "the container keeps two editions of one book apart"
+        );
+        assert_eq!(
+            super::window_title(
+                Some("Flutter in Action"),
+                Some(Path::new("/books/flutter.epub")),
+                false,
+                false
+            ),
+            "Flutter in Action · epub · oryx"
+        );
+    }
+
+    #[test]
     fn window_title_carries_the_file_name() {
         use std::path::Path;
         assert_eq!(
@@ -5396,7 +5432,7 @@ mod tests {
                 false,
                 false
             ),
-            "Test Book · oryx"
+            "Test Book · epub · oryx"
         );
     }
 

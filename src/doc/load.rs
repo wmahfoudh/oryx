@@ -190,9 +190,19 @@ pub fn open(path: &Path, deadline: Option<Instant>) -> anyhow::Result<Opened> {
             }
         };
         // Position memory falls back to the canonical path when the
-        // metadata carries no identifier.
+        // metadata carries no identifier. A metadata id is shared by
+        // every container of the same book while positions are offsets
+        // into one container's text, so the key carries the extension;
+        // EPUB keys predate the multi-format shelf and stay bare so no
+        // saved place is lost.
         if document.book_id.is_none() {
             document.book_id = path.canonicalize().ok().map(|p| p.display().to_string());
+        } else if book_kind != FileKind::Epub {
+            if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                if let Some(id) = document.book_id.take() {
+                    document.book_id = Some(format!("{id}|{}", ext.to_ascii_lowercase()));
+                }
+            }
         }
         let pending = apply_budget(&mut document, deadline);
         let streamed = book.as_ref().is_some_and(|job| job.has_chapters());

@@ -269,13 +269,21 @@ fn detection_covers_the_kindle_family() {
 
 #[test]
 fn a_kindle_file_opens_through_load() {
-    let bytes = kf8_fixture().build();
+    let mut builder = kf8_fixture();
+    builder.exth = vec![(113, b"B0TEST99".to_vec())];
+    let bytes = builder.build();
     let path = std::env::temp_dir().join(format!("oryx-kindle-load-{}.azw3", std::process::id()));
     std::fs::write(&path, &bytes).unwrap();
     let opened = load::open(&path, None).unwrap();
     std::fs::remove_file(&path).ok();
     assert_eq!(opened.document.title.as_deref(), Some("Test Book"));
     assert!(plain_text(&opened.document).contains("Chapter One"));
+    assert_eq!(
+        opened.document.book_id.as_deref(),
+        Some("B0TEST99|azw3"),
+        "the position key carries the container, so the MOBI twin of \
+         this book keeps its own place"
+    );
 }
 
 /// Stage probe for real Kindle books; run with

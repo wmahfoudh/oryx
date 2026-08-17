@@ -427,8 +427,9 @@ fn an_fb2_file_opens_through_load() {
     assert_eq!(opened.toc.len(), 1);
     assert_eq!(
         opened.document.book_id.as_deref(),
-        Some("fb2-test-1"),
-        "the document id keys position memory"
+        Some("fb2-test-1|fb2"),
+        "the position key carries the container, so the same book in \
+         another format keeps its own place"
     );
     assert!(plain_text(&opened.document).contains("Loaded text."));
 }
