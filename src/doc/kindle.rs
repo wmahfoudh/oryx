@@ -276,7 +276,12 @@ fn open_palm(bytes: &[u8]) -> anyhow::Result<palmbook::Book<'_>> {
 fn refuse(error: palmbook::Error) -> anyhow::Error {
     match error {
         palmbook::Error::Drm => Refusal::Drm.into(),
-        _ => anyhow::anyhow!("This file is not a readable Kindle book."),
+        palmbook::Error::Truncated | palmbook::Error::Corrupt(_) => {
+            anyhow::anyhow!("This Kindle book is damaged and cannot be opened.")
+        }
+        palmbook::Error::NotPalm => {
+            anyhow::anyhow!("This file is not a readable Kindle book.")
+        }
     }
 }
 

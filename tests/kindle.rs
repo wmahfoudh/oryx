@@ -258,6 +258,21 @@ fn a_drm_kindle_refuses_plainly() {
 }
 
 #[test]
+fn a_damaged_kindle_says_so() {
+    let bytes = writer::book("a book cut short mid-download").build();
+    let err = kindle::open_book(bytes[..bytes.len() - 40].to_vec()).unwrap_err();
+    assert!(
+        err.to_string().contains("damaged"),
+        "a truncated book reads as damaged, not as a foreign file: {err}"
+    );
+    let err = kindle::open_book(b"just some text".to_vec()).unwrap_err();
+    assert!(
+        err.to_string().contains("not a readable"),
+        "a foreign file stays a foreign file: {err}"
+    );
+}
+
+#[test]
 fn detection_covers_the_kindle_family() {
     use std::path::Path;
     assert_eq!(load::detect(Path::new("b.mobi")), FileKind::Kindle);

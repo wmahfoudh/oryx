@@ -58,7 +58,9 @@ pub struct Pdb<'a> {
 
 impl<'a> Pdb<'a> {
     pub fn open(bytes: &'a [u8]) -> Result<Pdb<'a>> {
-        let head = bytes.get(..78).ok_or(Error::Truncated)?;
+        // Too short for the header: not a Palm file at all, rather than
+        // a truncated one; nothing identifies it as a book.
+        let head = bytes.get(..78).ok_or(Error::NotPalm)?;
         let name_end = head[..32].iter().position(|&b| b == 0).unwrap_or(32);
         let name = String::from_utf8_lossy(&head[..name_end]).into_owned();
         let type_code = [head[60], head[61], head[62], head[63]];

@@ -772,3 +772,89 @@ fn crossing_measured() {
         );
     }
 }
+
+/// Resident memory from the kernel's view, in kilobytes.
+fn vm_rss_kb() -> usize {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|status| {
+            status.lines().find_map(|line| {
+                line.strip_prefix("VmRSS:")?
+                    .trim()
+                    .trim_end_matches(" kB")
+                    .trim()
+                    .parse()
+                    .ok()
+            })
+        })
+        .unwrap_or(0)
+}
+
+/// The container-parity bench: one real book, opened as the app opens
+/// it, timed to the first frame and through the whole walk. The bar it
+/// serves: a book must not open slower because it arrived in a
+/// different container. Run once per container of the same title, each
+/// in its own process so memory reads clean:
+/// ORYX_BOOK=<path> cargo test --release --test perf book_bench -- --ignored --nocapture --test-threads=1
+#[test]
+#[ignore]
+fn book_bench() {
+    use oryx::doc::load;
+    use oryx::doc::model::Document;
+    let path = std::env::var("ORYX_BOOK").expect("set ORYX_BOOK");
+    let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+
+    let t = Instant::now();
+    let opened = load::open(
+        std::path::Path::new(&path),
+        Some(Instant::now() + load::OPEN_BUDGET),
+    )
+    .expect("the book opens");
+    let open_ms = t.elapsed().as_millis();
+    let (prefix_laid, _) = measure_layout(&opened.document, Some(&pool()));
+
+    let t = Instant::now();
+    let mut walk_ms = 0;
+    let mut images = 0usize;
+    let full_doc = match opened.book {
+        Some(job) => {
+            let counter = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let seen = std::sync::Arc::clone(&counter);
+            let sink: oryx::doc::images::SourceSink = std::sync::Arc::new(move |sources| {
+                seen.fetch_add(sources.len(), std::sync::atomic::Ordering::Relaxed);
+            });
+            let delivered = job.run(&|| false, sink);
+            walk_ms = t.elapsed().as_millis();
+            images = counter.load(std::sync::atomic::Ordering::Relaxed);
+            match delivered {
+                Some(delivered) => Document {
+                    blocks: delivered.blocks,
+                    source: delivered
+                        .source
+                        .unwrap_or_else(|| std::sync::Arc::clone(&opened.document.source)),
+                    details: delivered.details,
+                    title: opened.document.title.clone(),
+                    anchors: delivered.anchors.into_iter().collect(),
+                    book_id: opened.document.book_id.clone(),
+                    code_file: false,
+                    plain_file: false,
+                },
+                None => opened.document,
+            }
+        }
+        None => opened.document,
+    };
+    let (full_laid, _) = measure_layout(&full_doc, Some(&pool()));
+    println!(
+        "{path}\n  {size} bytes, open {open_ms}ms, first slice {}ms, prefix pass {}ms\n  \
+         walk {walk_ms}ms, {} blocks, {} source chars, {images} image sources\n  \
+         full pass {}ms, height {:.0}px, rss {}MB",
+        prefix_laid.first_ms,
+        prefix_laid.ms,
+        full_doc.blocks.len(),
+        full_doc.source.len(),
+        full_laid.ms,
+        full_laid.height,
+        vm_rss_kb() / 1024
+    );
+}
