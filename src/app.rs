@@ -3001,14 +3001,14 @@ impl App {
     /// prefix's image sources adopt here, before the first layout, so
     /// every prefix size is known from the first frame; pixels decode
     /// on demand as paint reaches them.
-    fn start_book(&mut self, mut job: epub::BookJob) {
+    fn start_book(&mut self, mut job: load::BookJob) {
         self.media.adopt(job.take_sources());
         if job.has_chapters() {
             let sources = self.media.source_sink();
             self.parse_pending = true;
             let waker = self.waker.clone();
             self.parser
-                .start_with(move |bail| epub::run(job, bail, sources), move || waker());
+                .start_with(move |bail| job.run(bail, sources), move || waker());
         }
     }
 

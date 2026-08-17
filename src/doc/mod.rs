@@ -1,4 +1,5 @@
 pub mod epub;
+pub mod fb2;
 pub mod fetch;
 pub mod html;
 pub mod images;

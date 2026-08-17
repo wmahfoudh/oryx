@@ -50,7 +50,7 @@ pub fn toggle(mode: Mode, kind: FileKind, lossy: bool) -> Result<Mode, Refusal> 
     match kind {
         // Undisplayable never becomes a document; the arm keeps the
         // match total.
-        FileKind::Epub | FileKind::Undisplayable => Err(Refusal::Book),
+        FileKind::Epub | FileKind::Fb2 | FileKind::Undisplayable => Err(Refusal::Book),
         _ if lossy => Err(Refusal::Lossy),
         FileKind::Markdown | FileKind::Code(_) | FileKind::Text | FileKind::Unknown => {
             Ok(Mode::Edit)

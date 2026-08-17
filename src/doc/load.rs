@@ -24,6 +24,8 @@ pub enum FileKind {
     Text,
     /// An EPUB book; a zip, so it never meets the binary sniff.
     Epub,
+    /// An FB2 book, plain XML or zip-wrapped; routed before the sniff.
+    Fb2,
     /// A format Oryx knows it cannot display (PDF). Refused by name:
     /// some PDFs open with an all-ASCII head the content sniff passes.
     Undisplayable,
@@ -36,6 +38,11 @@ pub fn detect(path: &Path) -> FileKind {
     if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
         if let Ok(i) = WELL_KNOWN_NAMES.binary_search_by_key(&name, |(k, _)| k) {
             return FileKind::Code(WELL_KNOWN_NAMES[i].1);
+        }
+        // The double extension libraries ship FB2 under; `.zip` alone
+        // stays unknown.
+        if name.to_ascii_lowercase().ends_with(".fb2.zip") {
+            return FileKind::Fb2;
         }
     }
     let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
@@ -50,6 +57,9 @@ pub fn detect(path: &Path) -> FileKind {
     }
     if ext == "epub" {
         return FileKind::Epub;
+    }
+    if ext == "fb2" || ext == "fbz" {
+        return FileKind::Fb2;
     }
     if ext == "pdf" {
         return FileKind::Undisplayable;
@@ -84,6 +94,43 @@ pub fn is_text_file(path: &Path) -> bool {
     }
 }
 
+/// A book's continuation past the open prefix, whichever format built
+/// it. The app drives it through one surface; each variant walks its
+/// own container.
+pub enum BookJob {
+    Epub(super::epub::BookJob),
+    Fb2(super::fb2::Job),
+}
+
+impl BookJob {
+    pub fn has_chapters(&self) -> bool {
+        match self {
+            BookJob::Epub(job) => job.has_chapters(),
+            BookJob::Fb2(job) => job.has_chapters(),
+        }
+    }
+
+    pub fn take_sources(&mut self) -> Vec<super::images::SourceEntry> {
+        match self {
+            BookJob::Epub(job) => job.take_sources(),
+            BookJob::Fb2(job) => job.take_sources(),
+        }
+    }
+
+    /// Continues the book on the parse worker; the delivery is the full
+    /// model over the grown source.
+    pub fn run(
+        self,
+        bail: &dyn Fn() -> bool,
+        sources: super::images::SourceSink,
+    ) -> Option<super::stream::Delivered> {
+        match self {
+            BookJob::Epub(job) => super::epub::run(job, bail, sources),
+            BookJob::Fb2(job) => super::fb2::run(job, bail, sources),
+        }
+    }
+}
+
 /// An opened document and the code blocks whose highlighting did not
 /// finish inside the deadline.
 pub struct Opened {
@@ -94,7 +141,7 @@ pub struct Opened {
     pub streamed: bool,
     /// A book's continuation: the walk past the prefix and the images
     /// not yet decoded. The app starts it once the media cache exists.
-    pub book: Option<super::epub::BookJob>,
+    pub book: Option<BookJob>,
     /// A book's table of contents as authored; empty for files.
     pub toc: Vec<super::epub::TocEntry>,
     /// True when the bytes decoded only through lossy UTF-8
@@ -116,9 +163,19 @@ pub fn open(path: &Path, deadline: Option<Instant>) -> anyhow::Result<Opened> {
             path.display()
         );
     }
-    // A book is a zip and full of NUL bytes; it routes before the sniff.
-    if detect(path) == FileKind::Epub {
-        let (mut document, toc, book) = super::epub::open_prefix(bytes)?;
+    // A book may be a zip full of NUL bytes; it routes before the sniff.
+    let book_kind = detect(path);
+    if matches!(book_kind, FileKind::Epub | FileKind::Fb2) {
+        let (mut document, toc, book) = match book_kind {
+            FileKind::Epub => {
+                let (document, toc, job) = super::epub::open_prefix(bytes)?;
+                (document, toc, job.map(BookJob::Epub))
+            }
+            _ => {
+                let (document, toc, job) = super::fb2::open_prefix(bytes)?;
+                (document, toc, job.map(BookJob::Fb2))
+            }
+        };
         // Position memory falls back to the canonical path when the
         // metadata carries no identifier.
         if document.book_id.is_none() {
@@ -177,7 +234,7 @@ pub fn open(path: &Path, deadline: Option<Instant>) -> anyhow::Result<Opened> {
         },
         FileKind::Code(token) => code_document(Some(token), &text),
         FileKind::Text => text_document(&text),
-        FileKind::Epub => unreachable!("books returned before the sniff"),
+        FileKind::Epub | FileKind::Fb2 => unreachable!("books returned before the sniff"),
         FileKind::Undisplayable => unreachable!("refused before the sniff"),
         FileKind::Unknown => code_document(None, &text),
     };
@@ -297,7 +354,7 @@ pub fn message(text: &str) -> Document {
 
 /// Every extension Oryx renders intentionally, for dialog filters.
 pub fn recognized_extensions() -> Vec<&'static str> {
-    ["md", "markdown", "txt", "epub"]
+    ["md", "markdown", "txt", "epub", "fb2", "fbz"]
         .into_iter()
         .chain(CODE_EXTENSIONS.iter().map(|(ext, _)| *ext))
         .collect()

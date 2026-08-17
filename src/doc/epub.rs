@@ -262,7 +262,8 @@ fn is_font(package: &Package, path: &str) -> bool {
 }
 
 /// Chapter bytes to text: UTF-16 by BOM, UTF-8 otherwise, both lossy.
-fn decode(bytes: &[u8]) -> String {
+/// The FB2 reader shares it for its own BOM handling.
+pub(crate) fn decode(bytes: &[u8]) -> String {
     let wide = |bytes: &[u8], read: fn([u8; 2]) -> u16| {
         char::decode_utf16(bytes.chunks_exact(2).map(|pair| read([pair[0], pair[1]])))
             .map(|c| c.unwrap_or(char::REPLACEMENT_CHARACTER))
