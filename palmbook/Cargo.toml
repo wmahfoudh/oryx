@@ -1,0 +1,9 @@
+[package]
+name = "palmbook"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+rust-version = "1.80"
+description = "Reader for Palm-database books: the PDB container, PalmDOC and HuffCdic decompression, MOBI and KF8"
+
+[dependencies]

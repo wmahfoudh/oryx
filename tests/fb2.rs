@@ -392,7 +392,11 @@ fn field_probe() {
         book.images.len()
     );
     for (key, img) in &book.images {
-        println!("  image {key}: {}x{}", img.dimensions().0, img.dimensions().1);
+        println!(
+            "  image {key}: {}x{}",
+            img.dimensions().0,
+            img.dimensions().1
+        );
     }
     for entry in book.toc.iter().take(12) {
         println!(

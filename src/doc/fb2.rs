@@ -649,9 +649,7 @@ impl Emitter<'_> {
                 self.inline_children(child);
             } else if child.is_element() && child.tag_name().name() == "empty-line" {
                 continue;
-            } else if child.is_element()
-                || child.text().is_some_and(|t| !t.trim().is_empty())
-            {
+            } else if child.is_element() || child.text().is_some_and(|t| !t.trim().is_empty()) {
                 first = false;
                 self.inline_node(child);
             }
