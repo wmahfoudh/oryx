@@ -1,3 +1,4 @@
+pub mod comic;
 pub mod epub;
 pub mod fb2;
 pub mod fetch;

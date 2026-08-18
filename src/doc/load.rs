@@ -28,6 +28,9 @@ pub enum FileKind {
     Fb2,
     /// A Kindle book (MOBI, AZW3, AZW); a Palm database, never text.
     Kindle,
+    /// A comic book archive (CBZ); a zip of page images, so it never
+    /// meets the binary sniff.
+    Comic,
     /// A format Oryx knows it cannot display (PDF). Refused by name:
     /// some PDFs open with an all-ASCII head the content sniff passes.
     Undisplayable,
@@ -65,6 +68,9 @@ pub fn detect(path: &Path) -> FileKind {
     }
     if ext == "mobi" || ext == "azw3" || ext == "azw" {
         return FileKind::Kindle;
+    }
+    if ext == "cbz" {
+        return FileKind::Comic;
     }
     if ext == "pdf" {
         return FileKind::Undisplayable;
@@ -106,6 +112,8 @@ pub enum BookJob {
     Epub(super::epub::BookJob),
     Fb2(super::fb2::Job),
     Kindle(super::kindle::Job),
+    /// Carries the page sources only; a comic streams nothing.
+    Comic(super::comic::Job),
 }
 
 impl BookJob {
@@ -114,6 +122,7 @@ impl BookJob {
             BookJob::Epub(job) => job.has_chapters(),
             BookJob::Fb2(job) => job.has_chapters(),
             BookJob::Kindle(job) => job.has_chapters(),
+            BookJob::Comic(job) => job.has_chapters(),
         }
     }
 
@@ -122,6 +131,7 @@ impl BookJob {
             BookJob::Epub(job) => job.take_sources(),
             BookJob::Fb2(job) => job.take_sources(),
             BookJob::Kindle(job) => job.take_sources(),
+            BookJob::Comic(job) => job.take_sources(),
         }
     }
 
@@ -136,6 +146,8 @@ impl BookJob {
             BookJob::Epub(job) => super::epub::run(job, bail, sources),
             BookJob::Fb2(job) => super::fb2::run(job, bail, sources),
             BookJob::Kindle(job) => super::kindle::run(job, bail, sources),
+            // Never reached: a comic has no chapters, so no worker starts.
+            BookJob::Comic(_) => None,
         }
     }
 }
@@ -174,7 +186,10 @@ pub fn open(path: &Path, deadline: Option<Instant>) -> anyhow::Result<Opened> {
     }
     // A book may be a zip full of NUL bytes; it routes before the sniff.
     let book_kind = detect(path);
-    if matches!(book_kind, FileKind::Epub | FileKind::Fb2 | FileKind::Kindle) {
+    if matches!(
+        book_kind,
+        FileKind::Epub | FileKind::Fb2 | FileKind::Kindle | FileKind::Comic
+    ) {
         let (mut document, toc, book) = match book_kind {
             FileKind::Epub => {
                 let (document, toc, job) = super::epub::open_prefix(bytes)?;
@@ -183,6 +198,12 @@ pub fn open(path: &Path, deadline: Option<Instant>) -> anyhow::Result<Opened> {
             FileKind::Kindle => {
                 let (document, toc, job) = super::kindle::open_prefix(bytes)?;
                 (document, toc, job.map(BookJob::Kindle))
+            }
+            FileKind::Comic => {
+                // A comic has no metadata; the file stem names the book.
+                let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("Comic");
+                let (document, toc, job) = super::comic::open_prefix(bytes, stem)?;
+                (document, toc, job.map(BookJob::Comic))
             }
             _ => {
                 let (document, toc, job) = super::fb2::open_prefix(bytes)?;
@@ -257,7 +278,7 @@ pub fn open(path: &Path, deadline: Option<Instant>) -> anyhow::Result<Opened> {
         },
         FileKind::Code(token) => code_document(Some(token), &text),
         FileKind::Text => text_document(&text),
-        FileKind::Epub | FileKind::Fb2 | FileKind::Kindle => {
+        FileKind::Epub | FileKind::Fb2 | FileKind::Kindle | FileKind::Comic => {
             unreachable!("books returned before the sniff")
         }
         FileKind::Undisplayable => unreachable!("refused before the sniff"),
@@ -380,7 +401,7 @@ pub fn message(text: &str) -> Document {
 /// Every extension Oryx renders intentionally, for dialog filters.
 pub fn recognized_extensions() -> Vec<&'static str> {
     [
-        "md", "markdown", "txt", "epub", "fb2", "fbz", "mobi", "azw3", "azw",
+        "md", "markdown", "txt", "epub", "fb2", "fbz", "mobi", "azw3", "azw", "cbz",
     ]
     .into_iter()
     .chain(CODE_EXTENSIONS.iter().map(|(ext, _)| *ext))

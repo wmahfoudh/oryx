@@ -87,6 +87,27 @@ pub type ImageSink = Arc<dyn Fn(String, Option<RgbaImage>) + Send + Sync>;
 pub enum BookSource {
     Raster(Vec<u8>),
     Svg(String),
+    /// A raw deflate stream around the encoded image, as a zip entry
+    /// stores it; it stays compressed until a decode asks, so opening a
+    /// deflated comic never inflates the whole book.
+    Deflated(Vec<u8>),
+}
+
+/// The most a single deflated image may inflate to.
+const INFLATE_CEILING: usize = 1 << 28;
+
+/// How much of a deflated image inflates for a header probe; every
+/// raster header sits well inside it.
+const PROBE_WINDOW: usize = 1 << 18;
+
+/// The head of a raw deflate stream, up to `limit` bytes: whatever
+/// inflated cleanly when the stream is short, the filled window when it
+/// is not.
+fn inflate_head(raw: &[u8], limit: usize) -> Vec<u8> {
+    match miniz_oxide::inflate::decompress_to_vec_with_limit(raw, limit) {
+        Ok(bytes) => bytes,
+        Err(err) => err.output,
+    }
 }
 
 /// Decodes a stored source into pixels.
@@ -94,6 +115,11 @@ pub fn decode_source(source: &BookSource) -> Option<RgbaImage> {
     match source {
         BookSource::Raster(bytes) => decode(bytes),
         BookSource::Svg(markup) => decode(markup.as_bytes()),
+        BookSource::Deflated(raw) => {
+            let bytes =
+                miniz_oxide::inflate::decompress_to_vec_with_limit(raw, INFLATE_CEILING).ok()?;
+            decode(&bytes)
+        }
     }
 }
 
@@ -107,14 +133,21 @@ pub fn probe_source(source: &BookSource) -> Option<(u32, u32)> {
         let size = tree.size().to_int_size();
         Some((size.width().max(1), size.height().max(1)))
     }
-    match source {
-        BookSource::Svg(markup) => svg_size(markup.as_bytes()),
-        BookSource::Raster(bytes) if looks_svg(bytes) => svg_size(bytes),
-        BookSource::Raster(bytes) => image::ImageReader::new(std::io::Cursor::new(bytes))
+    fn raster_size(bytes: &[u8]) -> Option<(u32, u32)> {
+        image::ImageReader::new(std::io::Cursor::new(bytes))
             .with_guessed_format()
             .ok()?
             .into_dimensions()
-            .ok(),
+            .ok()
+    }
+    match source {
+        BookSource::Svg(markup) => svg_size(markup.as_bytes()),
+        BookSource::Raster(bytes) if looks_svg(bytes) => svg_size(bytes),
+        BookSource::Raster(bytes) => raster_size(bytes),
+        // A few KB cover almost every header; the wide window only pays
+        // for the rare image whose metadata pushes the header deep.
+        BookSource::Deflated(raw) => raster_size(&inflate_head(raw, 1 << 13))
+            .or_else(|| raster_size(&inflate_head(raw, PROBE_WINDOW))),
     }
 }
 
