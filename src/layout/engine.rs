@@ -28,6 +28,10 @@ pub struct ViewConfig {
     /// it only for EPUB documents; paragraphs, list items, and quote
     /// text justify, everything else keeps its natural width.
     pub justify: bool,
+    /// A comic's display state; layout reads it only when the document
+    /// is a comic. The page states carry the viewport height, which the
+    /// app refreshes on resize.
+    pub comic: ComicFit,
 }
 
 impl Default for ViewConfig {
@@ -39,8 +43,19 @@ impl Default for ViewConfig {
             code_size: 20.0,
             zoom: 1.0,
             justify: false,
+            comic: ComicFit::Width,
         }
     }
+}
+
+/// How a comic shows its pages, stepped by the zoom keys: the strip
+/// scales every page to the window width; the page states fit one page,
+/// or the cover and then pairs, entirely inside the window.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ComicFit {
+    Width,
+    Page { height: f32 },
+    Two { height: f32 },
 }
 
 /// Where a run's display text lives. A run references text instead of
@@ -1485,6 +1500,15 @@ pub fn layout_more(
     pass: &mut LayoutPass,
     deadline: Option<Instant>,
 ) -> bool {
+    // A comic's pass is one loop over its page blocks: geometry comes
+    // from stored header dimensions, nothing shapes and nothing decodes,
+    // so it always completes inside any slice.
+    if doc.comic_file {
+        if !pass.done {
+            layout_comic(doc, media, cfg, out, pass);
+        }
+        return true;
+    }
     pool_sync(doc, theme, cfg, pass);
     // Seed before the first deadline check, so even an expired slice
     // leaves the workers fed for the next one.
@@ -1502,6 +1526,123 @@ pub fn layout_more(
         out.compact_side();
     }
     true
+}
+
+/// Places a comic's pages under the active fit. The strip fills the
+/// viewport width edge to edge with no gap, so webtoon strips stay
+/// unbroken; the page states give every page (or pair row) one slot of
+/// exactly the viewport height with the drawn page centered inside, so
+/// a snapped scroll shows one whole slot. Pair members share their
+/// row's slot top in the block table, which is what the outline jump
+/// and the page snap read.
+fn layout_comic(
+    doc: &Document,
+    media: &mut MediaCache,
+    cfg: &ViewConfig,
+    out: &mut LayoutDoc,
+    pass: &mut LayoutPass,
+) {
+    let viewport = pass.content_width + 2.0 * pass.margin;
+    let mut cursor = 0.0f32;
+    // A pair row stays open while its left page waits for the right.
+    let mut open_row = false;
+    let mut page = 0usize;
+    for (block_index, block) in doc.blocks.iter().enumerate() {
+        let BlockKind::Image { path, .. } = &block.kind else {
+            out.table.push(
+                block_index,
+                BlockEntry {
+                    block: block_index as u32,
+                    y: cursor,
+                    content_y: cursor,
+                    height: 0.0,
+                    deco_top: f32::NAN,
+                    line_height: 0.0,
+                    pad: 0.0,
+                    flags: ENTRY_SILENT,
+                },
+            );
+            continue;
+        };
+        // A page whose header would not read keeps a slot in the page
+        // ratio; its pixels never arrive and the slot stays background.
+        let (iw, ih) = media
+            .dimensions(path)
+            .map(|(w, h)| (w as f32, h as f32))
+            .unwrap_or((3.0, 4.0));
+        let (x, y, w, h, slot_top, advance) = match cfg.comic {
+            ComicFit::Width => {
+                let w = viewport;
+                let h = w * ih / iw;
+                (0.0, cursor, w, h, cursor, h)
+            }
+            ComicFit::Page { height } => {
+                let slot = height.max(50.0);
+                let scale = (viewport / iw).min(slot / ih);
+                let (w, h) = (iw * scale, ih * scale);
+                let x = (viewport - w) / 2.0;
+                (x, cursor + (slot - h) / 2.0, w, h, cursor, slot)
+            }
+            ComicFit::Two { height } => {
+                let slot = height.max(50.0);
+                if page == 0 {
+                    let scale = (viewport / iw).min(slot / ih);
+                    let (w, h) = (iw * scale, ih * scale);
+                    let x = (viewport - w) / 2.0;
+                    (x, cursor + (slot - h) / 2.0, w, h, cursor, slot)
+                } else {
+                    let half = viewport / 2.0;
+                    let scale = (half / iw).min(slot / ih);
+                    let (w, h) = (iw * scale, ih * scale);
+                    let left = page % 2 == 1;
+                    let x = if left { half - w } else { half };
+                    let y = cursor + (slot - h) / 2.0;
+                    // The left page holds its row open at the cursor;
+                    // the right page closes it and the cursor moves on.
+                    let advance = if left { 0.0 } else { slot };
+                    open_row = left;
+                    (x, y, w, h, cursor, advance)
+                }
+            }
+        };
+        out.images.push(ImagePlace {
+            src: path.clone(),
+            x,
+            y,
+            width: w,
+            height: h,
+            link: None,
+        });
+        out.table.push(
+            block_index,
+            BlockEntry {
+                block: block_index as u32,
+                y: slot_top,
+                content_y: slot_top,
+                height: match cfg.comic {
+                    ComicFit::Width => h,
+                    ComicFit::Page { height } | ComicFit::Two { height } => height.max(50.0),
+                },
+                deco_top: f32::NAN,
+                line_height: 0.0,
+                pad: 0.0,
+                flags: 0,
+            },
+        );
+        cursor += advance;
+        page += 1;
+    }
+    if open_row {
+        // A last odd page left its row open; the row still spans a slot.
+        if let ComicFit::Two { height } = cfg.comic {
+            cursor += height.max(50.0);
+        }
+    }
+    out.height = cursor;
+    pass.cursor = cursor;
+    pass.first = false;
+    pass.position = pass.order.len();
+    pass.done = true;
 }
 
 /// Claims the pool when attached and not current: a fresh pass, a model

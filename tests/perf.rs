@@ -838,6 +838,7 @@ fn book_bench() {
                     book_id: opened.document.book_id.clone(),
                     code_file: false,
                     plain_file: false,
+                    comic_file: false,
                 },
                 None => opened.document,
             }

@@ -269,6 +269,7 @@ impl ExportPass {
                 code_size: settings.code_size,
                 zoom: 1.0,
                 justify: settings.justify,
+                comic: crate::layout::ComicFit::Width,
             },
             geometry,
             target,

@@ -33,6 +33,9 @@ pub struct Document {
     /// are real rows inside the blocks, and layout adds no gap between
     /// blocks.
     pub plain_file: bool,
+    /// True for comic books, whose blocks are all page images; layout
+    /// places them by the comic display state instead of the text flow.
+    pub comic_file: bool,
 }
 
 impl Default for Document {
@@ -46,6 +49,7 @@ impl Default for Document {
             book_id: None,
             code_file: false,
             plain_file: false,
+            comic_file: false,
         }
     }
 }

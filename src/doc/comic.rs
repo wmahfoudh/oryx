@@ -182,6 +182,7 @@ pub fn open_prefix(
         source: Arc::from(source.as_str()),
         title: Some(name.to_string()),
         anchors,
+        comic_file: true,
         ..Document::default()
     };
     Ok((document, toc, Some(Job { sources })))

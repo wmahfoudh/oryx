@@ -22,8 +22,8 @@ use oryx::input::{
     touch,
 };
 use oryx::layout::{
-    self, layout_begin, layout_extend, layout_more, metrics, recolor_batch, window_to, DecoRect,
-    LayoutDoc, LayoutPass, ShapePool, ViewConfig, OPEN_SLICE, SLICE,
+    self, layout_begin, layout_extend, layout_more, metrics, recolor_batch, window_to, ComicFit,
+    DecoRect, LayoutDoc, LayoutPass, ShapePool, ViewConfig, OPEN_SLICE, SLICE,
 };
 use oryx::paint;
 use oryx::paint::painter::Painter;
@@ -412,6 +412,34 @@ fn justify_pref(config: &Config, doc: &Document) -> bool {
         }
 }
 
+/// The comic display ladder, ordered by magnification: page width,
+/// full page, two pages. Down shows more at smaller size, up shows
+/// less at larger size, and the ends stand still.
+fn comic_fit_step(fit: ComicFit, dir: i32, height: f32) -> ComicFit {
+    match fit {
+        ComicFit::Width if dir < 0 => ComicFit::Page { height },
+        ComicFit::Page { .. } if dir < 0 => ComicFit::Two { height },
+        ComicFit::Page { .. } if dir > 0 => ComicFit::Width,
+        ComicFit::Two { .. } if dir > 0 => ComicFit::Page { height },
+        other => other,
+    }
+}
+
+/// The next page top in the given direction, from the sorted tops of a
+/// comic layout. None past the last top going down; going up from
+/// anywhere below the first page answers the start.
+fn page_step_target(tops: &[f32], current: f32, dir: i32) -> Option<f32> {
+    if dir > 0 {
+        tops.iter().copied().find(|&t| t > current + 1.0)
+    } else {
+        tops.iter()
+            .rev()
+            .copied()
+            .find(|&t| t < current - 1.0)
+            .or(Some(0.0))
+    }
+}
+
 fn window_title(book: Option<&str>, path: Option<&Path>, dirty: bool, editing: bool) -> String {
     let dot = if dirty { "\u{25CF} " } else { "" };
     let mode = if editing { "editing \u{00B7} " } else { "" };
@@ -794,17 +822,32 @@ impl App {
             Command::Help => self.toggle_help(),
             Command::Settings => self.toggle_settings(),
             Command::ThemeBrowser => self.toggle_theme_browser(),
+            // In a comic the zoom triad walks the display states
+            // instead: the same keys, discrete fits.
             Command::ZoomIn => {
-                self.user_zoom = settings::step_zoom(self.user_zoom, settings::ZOOM_STEP);
-                self.apply_zoom();
+                if self.document.comic_file {
+                    self.step_comic_fit(1);
+                } else {
+                    self.user_zoom = settings::step_zoom(self.user_zoom, settings::ZOOM_STEP);
+                    self.apply_zoom();
+                }
             }
             Command::ZoomOut => {
-                self.user_zoom = settings::step_zoom(self.user_zoom, -settings::ZOOM_STEP);
-                self.apply_zoom();
+                if self.document.comic_file {
+                    self.step_comic_fit(-1);
+                } else {
+                    self.user_zoom = settings::step_zoom(self.user_zoom, -settings::ZOOM_STEP);
+                    self.apply_zoom();
+                }
             }
             Command::ZoomReset => {
-                self.user_zoom = 1.0;
-                self.apply_zoom();
+                if self.document.comic_file {
+                    let height = self.viewport_h();
+                    self.set_comic_fit(ComicFit::Page { height });
+                } else {
+                    self.user_zoom = 1.0;
+                    self.apply_zoom();
+                }
             }
             Command::Justify => self.toggle_justify(),
             Command::SelectAll => self.select_all(),
@@ -814,13 +857,40 @@ impl App {
             Command::FindNext => self.step_search(true),
             Command::FindPrev => self.step_search(false),
             Command::Replace => self.open_replace(),
-            Command::LineUp => self.scroll_by(-self.line_step()),
-            Command::LineDown => self.scroll_by(self.line_step()),
+            // The page states fit whole pages, so the vertical keys turn
+            // them; the strip scrolls freely but its page keys snap to
+            // page tops, so a page turn always means the drawn page.
+            Command::LineUp => {
+                if self.comic_paged() {
+                    self.comic_page_step(-1);
+                } else {
+                    self.scroll_by(-self.line_step());
+                }
+            }
+            Command::LineDown => {
+                if self.comic_paged() {
+                    self.comic_page_step(1);
+                } else {
+                    self.scroll_by(self.line_step());
+                }
+            }
             Command::PaneLeft => self.move_ownership(PaneAct::Left),
             Command::PaneRight => self.move_ownership(PaneAct::Right),
             Command::SidebarTab => self.switch_sidebar_tab(),
-            Command::PageUp => self.scroll_by(-self.page_step()),
-            Command::PageDown => self.scroll_by(self.page_step()),
+            Command::PageUp => {
+                if self.document.comic_file {
+                    self.comic_page_step(-1);
+                } else {
+                    self.scroll_by(-self.page_step());
+                }
+            }
+            Command::PageDown => {
+                if self.document.comic_file {
+                    self.comic_page_step(1);
+                } else {
+                    self.scroll_by(self.page_step());
+                }
+            }
             Command::Top => self.scroll_to(0.0),
             Command::Bottom => {
                 self.scroll_to(self.doc_height());
@@ -967,6 +1037,9 @@ impl App {
         self.pending_row = None;
         self.selection = None;
         self.sel_anchor = None;
+        // Every comic opens in the strip; the state never follows a
+        // document swap.
+        self.cfg.comic = ComicFit::Width;
         self.close_search();
         self.start_highlight(load::pending(&self.document));
     }
@@ -4021,6 +4094,99 @@ impl App {
         self.set_zoom(self.user_zoom * self.scale);
     }
 
+    /// Whether the open comic is in a page state, where the vertical
+    /// keys turn pages instead of scrolling.
+    fn comic_paged(&self) -> bool {
+        self.document.comic_file && !matches!(self.cfg.comic, ComicFit::Width)
+    }
+
+    /// One rung on the comic display ladder; the ends do nothing.
+    fn step_comic_fit(&mut self, dir: i32) {
+        let height = self.viewport_h();
+        let next = comic_fit_step(self.cfg.comic, dir, height);
+        self.set_comic_fit(next);
+    }
+
+    /// Switches the comic display state, holding the page being read
+    /// across the relayout through the pending target.
+    fn set_comic_fit(&mut self, fit: ComicFit) {
+        if fit == self.cfg.comic {
+            return;
+        }
+        if let Some(offset) = self.top_offset() {
+            self.pending_offset = Some(offset);
+        }
+        self.cfg.comic = fit;
+        self.layout = None;
+        self.band = None;
+        self.request_redraw();
+    }
+
+    /// The page states carry the viewport height inside the fit; a
+    /// resize refreshes it and the stale layout drops.
+    fn sync_comic_viewport(&mut self, height: f32) {
+        if !self.document.comic_file {
+            return;
+        }
+        let refreshed = match self.cfg.comic {
+            ComicFit::Page { height: h } if h != height => Some(ComicFit::Page { height }),
+            ComicFit::Two { height: h } if h != height => Some(ComicFit::Two { height }),
+            _ => None,
+        };
+        if let Some(fit) = refreshed {
+            self.cfg.comic = fit;
+            self.layout = None;
+            self.band = None;
+        }
+    }
+
+    /// Steps to a neighboring page top: the turn in the page states,
+    /// the snap in the strip. Past the last page top, down means the
+    /// end of the book.
+    fn comic_page_step(&mut self, dir: i32) {
+        let Some(lay) = self.layout.as_ref() else {
+            return;
+        };
+        let mut tops: Vec<f32> = (0..self.document.blocks.len())
+            .filter_map(|i| lay.approx_top(i, 0))
+            .collect();
+        // Pair members share their row's top.
+        tops.dedup();
+        match page_step_target(&tops, self.scroll_y, dir) {
+            Some(y) => self.scroll_to(y),
+            None if dir > 0 => self.scroll_to(self.doc_height()),
+            None => {}
+        }
+    }
+
+    /// Asks decodes for the pages around the viewport ahead of paint,
+    /// so a page turn meets pixels instead of a decode; the book LRU
+    /// bounds what this can accumulate.
+    fn prefetch_comic(&mut self) {
+        if !self.document.comic_file {
+            return;
+        }
+        let Some(lay) = self.layout.as_ref() else {
+            return;
+        };
+        let vh = self.viewport_h();
+        let (lo, hi) = (self.scroll_y - vh, self.scroll_y + 2.0 * vh);
+        let keys: Vec<String> = self
+            .document
+            .blocks
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| lay.approx_top(*i, 0).is_some_and(|y| y >= lo && y <= hi))
+            .filter_map(|(_, b)| match &b.kind {
+                BlockKind::Image { path, .. } => Some(path.clone()),
+                _ => None,
+            })
+            .collect();
+        for key in keys {
+            self.media.prefetch(&key);
+        }
+    }
+
     /// Session zoom around the current scroll position; never persisted.
     fn set_zoom(&mut self, zoom: f32) {
         if (zoom - self.cfg.zoom).abs() < f32::EPSILON {
@@ -4568,6 +4734,7 @@ impl App {
         };
         let avail_px = size.width.saturating_sub(inset).max(1);
         let avail = avail_px as f32;
+        self.sync_comic_viewport(size.height as f32);
         let budget = if self.start_pass(avail) {
             OPEN_SLICE
         } else {
@@ -4581,6 +4748,7 @@ impl App {
             self.slice(budget);
         }
         self.resolve_pending();
+        self.prefetch_comic();
         // An open search counts as interactive: every keystroke edits the
         // highlights, so frames paint direct and the expensive band
         // rebuild waits until the bar closes.
@@ -5387,6 +5555,54 @@ mod tests {
                 false
             ),
             "Flutter in Action · epub · oryx"
+        );
+    }
+
+    #[test]
+    fn the_comic_ladder_steps_and_stops_at_the_ends() {
+        use super::comic_fit_step;
+        use oryx::layout::ComicFit;
+        let h = 700.0;
+        assert_eq!(
+            comic_fit_step(ComicFit::Width, -1, h),
+            ComicFit::Page { height: h }
+        );
+        assert_eq!(
+            comic_fit_step(ComicFit::Page { height: h }, -1, h),
+            ComicFit::Two { height: h }
+        );
+        assert_eq!(
+            comic_fit_step(ComicFit::Two { height: h }, 1, h),
+            ComicFit::Page { height: h }
+        );
+        assert_eq!(
+            comic_fit_step(ComicFit::Page { height: h }, 1, h),
+            ComicFit::Width
+        );
+        assert_eq!(comic_fit_step(ComicFit::Width, 1, h), ComicFit::Width);
+        assert_eq!(
+            comic_fit_step(ComicFit::Two { height: h }, -1, h),
+            ComicFit::Two { height: h }
+        );
+    }
+
+    #[test]
+    fn page_steps_snap_to_neighboring_tops() {
+        use super::page_step_target;
+        let tops = [0.0, 700.0, 1400.0];
+        assert_eq!(page_step_target(&tops, 0.0, 1), Some(700.0));
+        assert_eq!(page_step_target(&tops, 350.0, 1), Some(700.0));
+        assert_eq!(
+            page_step_target(&tops, 1400.0, 1),
+            None,
+            "past the last top"
+        );
+        assert_eq!(page_step_target(&tops, 1400.0, -1), Some(700.0));
+        assert_eq!(page_step_target(&tops, 350.0, -1), Some(0.0));
+        assert_eq!(
+            page_step_target(&tops, 0.0, -1),
+            Some(0.0),
+            "up from the top holds the start"
         );
     }
 

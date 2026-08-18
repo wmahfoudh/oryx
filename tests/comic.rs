@@ -1,15 +1,21 @@
 //! Comic reading: page order, header dimensions, the outline,
-//! detection and refusals.
+//! detection, refusals, and the three display states.
 
 #[path = "fixtures/comic_common.rs"]
 mod comic_common;
 
+use std::path::PathBuf;
+
 use comic_common::{cbz, cbz_deflated, encrypted_cbz, jpeg_bytes, png_bytes};
 use oryx::doc::comic;
 use oryx::doc::epub;
-use oryx::doc::images::{self, BookSource};
+use oryx::doc::images::{self, BookSource, MediaCache};
 use oryx::doc::load::{self, FileKind};
+use oryx::doc::markdown;
 use oryx::doc::model::{BlockKind, Document};
+use oryx::layout::{layout, ComicFit, LayoutDoc, ViewConfig};
+use oryx::style::fonts::FontStore;
+use oryx::style::theme::Theme;
 
 /// The image blocks' keys and alt texts, in document order.
 fn pages(doc: &Document) -> Vec<(String, String)> {
@@ -174,6 +180,139 @@ fn refusals_speak_plainly() {
         encrypted.to_string(),
         "This comic archive is encrypted and cannot be opened."
     );
+}
+
+/// Lays out a comic built from the given pages under one display state.
+fn comic_layout(entries: &[(&str, &[u8])], comic: ComicFit, width: f32) -> LayoutDoc {
+    let book = comic::open_book(cbz(entries), "T").unwrap();
+    let mut media = MediaCache::new(PathBuf::from("."));
+    media.adopt(book.pages);
+    let cfg = ViewConfig {
+        comic,
+        ..ViewConfig::default()
+    };
+    let mut fonts = FontStore::new();
+    layout(
+        &book.document,
+        &Theme::default_dark(),
+        &mut fonts,
+        &mut media,
+        &cfg,
+        width,
+    )
+}
+
+fn rect(place: &oryx::layout::ImagePlace) -> (f32, f32, f32, f32) {
+    (place.x, place.y, place.width, place.height)
+}
+
+#[test]
+fn the_strip_fills_the_window_width() {
+    let l = comic_layout(
+        &[
+            ("1.png", &png_bytes(100, 50)),
+            ("2.png", &png_bytes(40, 80)),
+        ],
+        ComicFit::Width,
+        600.0,
+    );
+    assert_eq!(l.images.len(), 2);
+    assert_eq!(
+        rect(&l.images[0]),
+        (0.0, 0.0, 600.0, 300.0),
+        "a page fills the width edge to edge, upscaling freely"
+    );
+    assert_eq!(
+        rect(&l.images[1]),
+        (0.0, 300.0, 600.0, 1200.0),
+        "pages meet with no gap, the webtoon strip unbroken"
+    );
+    assert_eq!(l.height, 1500.0);
+}
+
+#[test]
+fn full_page_fits_both_dimensions_and_centers() {
+    let l = comic_layout(
+        &[
+            ("1.png", &png_bytes(100, 50)),
+            ("2.png", &png_bytes(40, 80)),
+        ],
+        ComicFit::Page { height: 400.0 },
+        600.0,
+    );
+    assert_eq!(
+        rect(&l.images[0]),
+        (0.0, 50.0, 600.0, 300.0),
+        "a wide page fills the width and centers vertically in its slot"
+    );
+    assert_eq!(
+        rect(&l.images[1]),
+        (200.0, 400.0, 200.0, 400.0),
+        "a tall page fills the height and centers horizontally"
+    );
+    assert_eq!(l.height, 800.0, "every page occupies one viewport slot");
+}
+
+#[test]
+fn two_pages_pair_after_the_cover() {
+    let pages: Vec<(String, Vec<u8>)> = (1..=4)
+        .map(|n| (format!("{n}.png"), png_bytes(100, 100)))
+        .collect();
+    let entries: Vec<(&str, &[u8])> = pages
+        .iter()
+        .map(|(n, b)| (n.as_str(), b.as_slice()))
+        .collect();
+    let l = comic_layout(&entries, ComicFit::Two { height: 400.0 }, 600.0);
+    assert_eq!(
+        rect(&l.images[0]),
+        (100.0, 0.0, 400.0, 400.0),
+        "the cover stands alone, centered"
+    );
+    assert_eq!(
+        rect(&l.images[1]),
+        (0.0, 450.0, 300.0, 300.0),
+        "the left page sits against the gutter"
+    );
+    assert_eq!(
+        rect(&l.images[2]),
+        (300.0, 450.0, 300.0, 300.0),
+        "the right page continues the spread"
+    );
+    assert_eq!(
+        rect(&l.images[3]),
+        (0.0, 850.0, 300.0, 300.0),
+        "a last odd page takes the left of its own row"
+    );
+    assert_eq!(l.height, 1200.0, "the cover and two rows");
+}
+
+#[test]
+fn a_text_document_ignores_the_comic_fit() {
+    let doc = markdown::parse("# Title\n\nSome prose under it.");
+    let mut media = MediaCache::new(PathBuf::from("."));
+    let mut fonts = FontStore::new();
+    let plain = layout(
+        &doc,
+        &Theme::default_dark(),
+        &mut fonts,
+        &mut media,
+        &ViewConfig::default(),
+        600.0,
+    );
+    let cfg = ViewConfig {
+        comic: ComicFit::Page { height: 400.0 },
+        ..ViewConfig::default()
+    };
+    let paged = layout(
+        &doc,
+        &Theme::default_dark(),
+        &mut fonts,
+        &mut media,
+        &cfg,
+        600.0,
+    );
+    assert_eq!(plain.height, paged.height);
+    assert_eq!(plain.runs.len(), paged.runs.len());
 }
 
 /// Stage-timing probe for real comics; run with

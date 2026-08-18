@@ -372,6 +372,15 @@ impl MediaCache {
         self.adopt_pixels(src.to_string(), image);
     }
 
+    /// Queues a book image's decode ahead of paint, for the pages
+    /// around a comic viewport; a warm or non-book key is untouched.
+    pub fn prefetch(&mut self, src: &str) {
+        if self.originals.contains_key(src) || !self.book.contains_key(src) {
+            return;
+        }
+        self.queue_decode(src);
+    }
+
     /// Queues a stored source on the pool once; the arrival folds in
     /// through the queue like any decoded image.
     fn queue_decode(&mut self, src: &str) {

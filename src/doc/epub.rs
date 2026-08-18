@@ -411,6 +411,7 @@ pub fn open_prefix(bytes: Vec<u8>) -> anyhow::Result<(Document, Vec<TocEntry>, O
         book_id: job.package.identifier.clone(),
         code_file: false,
         plain_file: false,
+        comic_file: false,
     };
     let job = (job.has_chapters() || !job.sources.is_empty()).then_some(job);
     Ok((document, toc, job))
@@ -689,6 +690,7 @@ pub fn open_book(bytes: Vec<u8>) -> anyhow::Result<Book> {
             book_id,
             code_file: false,
             plain_file: false,
+            comic_file: false,
         },
         images,
         toc,
