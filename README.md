@@ -13,7 +13,7 @@
 </summary>
 
 - [Oryx Scope](#oryx-scope)
-- [Reading Books](#books-epub)
+- [Reading Books](#books)
 - [Editing](#editing)
 - [Themes](#themes)
 - [PDF Export](#export-to-pdf)
@@ -64,15 +64,15 @@ The command vocabulary is KaTeX compatible: Greek, binary operators, relations a
 
 ![Typeset math in Oryx](screenshots/math.png)
 
-## Books (EPUB)
+## Books
 
-Oryx opens EPUB books and renders them as one continuous document, in the active theme rather than the book's own styling. The book keeps its structure: chapter headings, italics and bold (including the ones its stylesheet sets), images and the cover, tables and highlighted code. The first chapters display immediately and the rest of the book loads in the background.
+Oryx opens EPUB, FB2, MOBI and AZW3 (Kindle) books and renders them as one continuous document, in the active theme rather than the book's own styling. The book keeps its structure: chapter headings, italics and bold (including the ones its stylesheet sets), images and the cover, tables and highlighted code. The first chapters display immediately and the rest of the book loads in the background. The window title shows the book's title and its format, which helps when the same book exists in several formats. FB2 files zipped as `.fb2.zip` or `.fbz` open too.
 
 Book text is justified: lines end at the same right edge, and the last line of each paragraph stays ragged, like print. `Ctrl+J` turns justification off and on. Markdown files can justify too; they start ragged, and each kind remembers its own choice.
 
 The sidebar's Outline tab shows the book's own table of contents, follows the reading position and jumps on a click. Links inside the book work, so a footnote reference jumps to its note and back. Ebooks reopen where reading stopped, even after Oryx is closed; other files open at the top on a new start.
 
-DRM-protected books and fixed-layout books (usually comics and picture books) are not supported. The [examples](examples/) folder installed with Oryx includes *The Adventures of Sherlock Holmes* to try it on.
+DRM-protected books and fixed-layout EPUB books (usually comics and picture books) are not supported; Oryx says so instead of showing a broken page. The [examples](examples/) folder installed with Oryx includes *The Adventures of Sherlock Holmes* to try it on.
 
 ## Tools
 
@@ -159,7 +159,7 @@ Download the archive for your platform from the releases page on [Codeberg](http
 tar -xzf oryx-*-linux-x86_64.tar.gz && cd oryx && ./install.sh
 ```
 
-On Windows, extract the zip and run `install.ps1` in PowerShell. The installer copies the binary, the themes and the example documents, and registers the file association, so markdown files and EPUB books open with Oryx from the file manager. `./install.sh --uninstall` removes everything.
+On Windows, extract the zip and run `install.ps1` in PowerShell. The installer copies the binary, the themes and the example documents, and registers the file association, so markdown files and books open with Oryx from the file manager. `./install.sh --uninstall` removes everything.
 
 ### From source
 

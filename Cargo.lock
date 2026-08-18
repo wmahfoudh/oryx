@@ -2319,7 +2319,7 @@ dependencies = [
 
 [[package]]
 name = "oryx"
-version = "0.15.4"
+version = "0.15.5"
 dependencies = [
  "anyhow",
  "arboard",
