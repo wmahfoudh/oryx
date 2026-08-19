@@ -7,30 +7,23 @@
 
 </div>
 
-<details>
-<Summary>
 <b>Quick Links</b>
-</summary>
 
-- [Oryx Scope](#oryx-scope)
-- [Reading Books](#books)
-- [Editing](#editing)
-- [Themes](#themes)
-- [PDF Export](#export-to-pdf)
 - [Installation](#install)
-- [Using Oryx](#using-oryx)
 - [Performance](#performance)
 
-</details>
+## Philosophy
 
-Oryx started as a personal project. I work with markdown files and did not find a (very) fast tool that could render them beautifully on the desktop without a browser or an Electron app. Exporting to PDF would have been a plus. That was the first version of the functional specs. Oryx has grown a lot since, and it stayed fast and beautiful.
+Oryx started as a personal project. I work with markdown files and did not find a (very) fast tool that could render them beautifully on the desktop without a browser or an Electron app and without a third party watching my personal notes. Exporting to (a nice-looking) PDF would have been a plus. That was the first version of the functional specs. Oryx has grown a lot since: it became a universal reader and a light editor, and it stayed fast and beautiful.
 
-- **Instant**: A document displays in under 100 ms from cold, even an 8 MB file.
-- **Light**: Memory stays flat however you scroll, whatever is the file size.
+Most markdown editors start by showing the code and then trying to render it. I think the fact that Oryx was designed to be a renderer and not an editor made it something different; after all, nobody develops a browser to start by showing raw HTML. Afterwards, editing and reading ebooks came along the way; it was a consequence. Some ideas like rendering PDF files were tested and rejected. PDF reading would have grown the binary by 5.5 MB and would not have added anything better to the community. Features that will remain within `Fast & Beautiful` could be added in the future. Others like git or agentic work integration probably won't. Hopefully, Oryx will remain:  
+
+- **Instant**: A document displays in under 100 ms from cold, even an 8 MB markdown file or a 200 MB ebook.
+- **Light**: Memory stays flat however you scroll, whatever the file size. The same speed on a new laptop or an old machine with no graphics card (like mine).
 - **Distraction-free**: No panes, no toolbars, no menus. `F1` lists the shortcuts, `Esc` closes whatever is open.
 - **Beautiful**: 30+ themes, with 51 color roles each, for reading and for PDF export alike.
-- **Self-contained**: One binary and a folder of themes and examples. No browser engine, no runtime, no GPU requirement.
-- **Runs anywhere**: The same speed on a new laptop or an old machine with no graphics card.
+- **Self-contained**: One binary and a folder of themes and examples. No browser engine, no runtime, no GPU requirement and no need to download themes or syntax highlighting stuff. 
+- **Opinionated**: Nobody renders justified markdown :smile: and most ebook readers do not dare to strip the books' CSS and apply their own. 
 
 ## Oryx Scope
 
@@ -42,7 +35,7 @@ Headings, bold, italic, strikethrough, inline code, links and bare URLs (a link 
 
 ### Source code
 
-Oryx displays fenced blocks in a bordered panel with syntax colors for code. A a code line too wraps inside it the panel. Oryx also opens source files directly and renders them as one highlighted document. Over a hundred extensions are supported, from Rust and Python to Terraform and Zig. Some file s like a `Dockerfile` or a `Makefile` are recognized by name. Any other text file opens in the code font.
+Oryx displays fenced blocks in a bordered panel with syntax colors for code. A code line too long wraps inside the panel. Oryx also opens source files directly and renders them as one highlighted document. Over a hundred extensions are supported, from Rust and Python to Terraform and Zig. Some files like a `Dockerfile` or a `Makefile` are recognized by name. Any other text file opens in the code font.
 
 ![Oryx rendering highlighted code](screenshots/code.png)
 
@@ -58,7 +51,7 @@ The five GitHub alerts are styled, each with its own color and title. Oryx shows
 
 ### Math
 
-Oryx typesets TeX math in the STIX Two Math font: fractions, radicals, matrices, stretched delimiters and stacked limits. It recognizes all four GitHub notations: `$...$`, `$$...$$`, a `math` fence, and the backtick form ``$`...`$``. Oryx infers whether a dollar sign is a currency or a math delimiter, so prices like `$5-$10` do not mess rendering.
+Oryx typesets TeX math in the STIX Two Math font: fractions, radicals, matrices, stretched delimiters and stacked limits. It recognizes all four GitHub notations: `$...$`, `$$...$$`, a `math` fence, and the backtick form ``$`...`$``. Oryx infers whether a dollar sign is a currency or a math delimiter, so prices like `$5-$10` do not mess up rendering.
 
 The command vocabulary is KaTeX compatible: Greek, binary operators, relations and their negations, arrows, accents, the seven math alphabets, operator names, spacing, the matrix environments, and `\newcommand` macros. If Oryx encounters an unknown command, it will render it as its literal source, and the rest of the equation renders normally. An equation wider than the window shrinks to fit (to a reasonable extent). PDF export includes the typeset math, and text copied from the PDF reads back as the equation's characters. The supported commands are listed in [SYNTAX.md](SYNTAX.md#math), and [examples/sample-math.md](examples/sample-math.md) shows many of them in one document.
 
@@ -72,13 +65,13 @@ Book text is justified: lines end at the same right edge, and the last line of e
 
 The sidebar's Outline tab shows the book's own table of contents, follows the reading position and jumps on a click. Links inside the book work, so a footnote reference jumps to its note, and `Alt+Left` comes back, one jump at a time. Ebooks reopen where reading stopped, even after Oryx is closed; other files open at the top on a new start.
 
-DRM-protected books and fixed-layout EPUB books are not supported; Oryx says so instead of showing a broken page. The [examples](examples/) folder installed with Oryx includes *The Adventures of Sherlock Holmes* to try it on.
+DRM-protected books and fixed-layout EPUB books are not supported. The [examples](examples/) folder installed with Oryx includes *The Adventures of Sherlock Holmes* to try it on.
 
 ### Comic books
 
-Oryx opens CBZ and CBR comic book archives and shows the pages in reading order. A comic starts as a vertical strip, every page at the window's width, which reads naturally for webtoons. `Ctrl+Minus` switches to one whole page per screen, and once more to two pages side by side, like an open book; `Ctrl+Plus` goes back up, and `Ctrl+0` shows the whole page from anywhere. In the page views, `Up`, `Down` and `Space` turn pages. The outline lists the pages, and a comic reopens at the page reading stopped.
+Oryx opens CBZ and CBR comic book archives and shows the pages in reading order. A comic starts as a vertical strip, every page at the window's width, which reads naturally for webtoons. Ctrl+Minus switches to one whole page per screen, and once more to two pages side by side, like an open book; Ctrl+Plus goes back up, and Ctrl+0 shows the whole page from anywhere. In the page views, Up, Down and Space turn pages. The outline lists the pages, and Oryx reopens a comic at the page where reading stopped.
 
-The file's content decides how it opens, not its name, so a `.cbr` that is really a zip (they are common) works anyway. A password-protected or damaged archive says so plainly. CBR files almost always store their pages uncompressed, which Oryx reads; the rare compressed one is refused with a clear message.
+Comic book contents are analyzed and files processed accordingly, not by name, so a `.cbr` that is really a `zip` (they are common) works anyway. When an archive is password-protected or damaged, Oryx displays the problem. Compressed `CBR` files are rare and not supported.
 
 ## Tools
 
@@ -130,13 +123,16 @@ Press `Ctrl+T` to open the theme browser. Arrow keys move through the list and p
   <img src="screenshots/themes.png" alt="The theme browser">
 </p>
 
-The theme editor changes any color role with through color picker while the document restyles live. Editing a bundled theme creates a copy, so the shipped files remain unchanged. A custom theme is a TOML file saved in the themes directory.
+The theme editor changes any color role through a color picker while the document restyles live. Editing a bundled theme creates a copy, so the shipped files remain unchanged. A custom theme is a TOML file saved in the themes directory.
 
 <p align="center">
   <img src="screenshots/themes-editor.png" alt="The theme editor">
 </p>
 
 Ten themes are original designs: `oryx-light` and its dark twin `oryx-dark`, `oryx-hero`, `oryx-sand` and `oryx-night`, `inkstone`, `ember`, `meadow`, `slate`, and `be-vendible`. The rest adapt permissively licensed editor palettes, [credited below](#credits).
+
+> [!TIP]
+> You can drop an existing theme file into Claude Design or Gemini, describe or share a link to something you love and ask it to generate an Oryx-compatible theme.
 
 ## Export to PDF
 
@@ -243,7 +239,7 @@ oryx --version          # print the version
 
 ## Performance
 
-Performance is one of the reasons behind Oryx. Most markdown viewers start struggling above one megabyte of file size, without even offering decent look. Oryx offers the same beautiful reading experience, whatever the file size and whatever the machine. Here is how it works:
+Performance is one of the reasons behind Oryx. Most markdown viewers start struggling above one megabyte of file size, without even offering a decent look. Oryx offers the same beautiful reading experience, whatever the file size and whatever the machine. Here is how it works:
 
 For a big markdown file, Oryx parses only its first screens before the first paint and the rest arrives from a background thread. It uses all CPU cores to build the layout, for the wash-in below the first screens as well as every zoom or resize. Only the part of the document around the reading position is kept in drawn form, and scrolling rebuilds the landing from recorded positions in about a millisecond; memory stays flat however long the document is. Painting covers a band around the viewport, a couple of screens either side, and scrolling inside that band is a memory copy: the cost of a scroll frame does not depend on the document's length. Syntax highlighting and the layout below follow in the background, a slice at a time, without moving anything already on screen.
 
