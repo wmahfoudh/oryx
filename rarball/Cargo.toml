@@ -1,0 +1,9 @@
+[package]
+name = "rarball"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+rust-version = "1.80"
+description = "Reader for RAR archives: both container generations, the entry walk, and stored extraction with CRC verification"
+
+[dependencies]
