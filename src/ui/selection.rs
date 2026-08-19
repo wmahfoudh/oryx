@@ -778,19 +778,38 @@ fn rects_for(
             TextRef::Side { .. } => 0,
         };
         let precise = matches!(run.text, TextRef::Model { .. });
-        let x0 = if precise && iv_start < a {
-            let byte = a.byte.saturating_sub(run_base).min(text.len());
-            let ch = text[..floor_boundary(text, byte)].chars().count();
-            run.x + prefix_width(cache, fonts, index, run, text, family, ch)
+        // Boundary x of each selection end. A fully covered end sits at
+        // the run's logical edge, which is the right edge on an RTL
+        // run; the box spans whatever order the two land in.
+        let cut_start = precise && iv_start < a;
+        let cut_end = precise && b < iv_end;
+        let (x0, x1) = if !cut_start && !cut_end {
+            (run.x, run.x + run.width)
         } else {
-            run.x
-        };
-        let x1 = if precise && b < iv_end {
-            let byte = b.byte.saturating_sub(run_base).min(text.len());
-            let ch = text[..floor_boundary(text, byte)].chars().count();
-            run.x + prefix_width(cache, fonts, index, run, text, family, ch)
-        } else {
-            run.x + run.width
+            let rtl = run_rtl(cache, fonts, index, run, text, family);
+            let edge = |logical_start: bool| {
+                if logical_start != rtl {
+                    run.x
+                } else {
+                    run.x + run.width
+                }
+            };
+            let boundary = |cache: &mut ShapeCache, fonts: &mut FontStore, pos: &ModelPos| {
+                let byte = pos.byte.saturating_sub(run_base).min(text.len());
+                let ch = text[..floor_boundary(text, byte)].chars().count();
+                run.x + prefix_width(cache, fonts, index, run, text, family, ch)
+            };
+            let bx_a = if cut_start {
+                boundary(cache, fonts, &a)
+            } else {
+                edge(true)
+            };
+            let bx_b = if cut_end {
+                boundary(cache, fonts, &b)
+            } else {
+                edge(false)
+            };
+            (bx_a.min(bx_b), bx_a.max(bx_b))
         };
         if x1 <= x0 {
             prev = None;
@@ -812,8 +831,19 @@ fn rects_for(
         if let Some((prev_end, prev_y)) = seam {
             if prev_y == run.y && prev_end == iv_start && a <= iv_start {
                 if let Some(last) = out.last_mut() {
-                    if last.1 == run.y {
-                        last.2 = (x1 - last.0).max(last.2);
+                    // Bridging is for the stretched space between two
+                    // adjacent justified words, so the boxes must also
+                    // near-touch: at a direction seam the byte-contiguous
+                    // neighbor can sit across the line, with unselected
+                    // text between the boxes that must stay unlit.
+                    let gap = (last.0.max(x0)) - ((last.0 + last.2).min(x1));
+                    if last.1 == run.y && gap <= 1.5 * run.size {
+                        // The union of the two boxes: on an RTL line the
+                        // byte-contiguous neighbor sits to the left, so
+                        // the merge can grow either side.
+                        let hi = (last.0 + last.2).max(x1);
+                        last.0 = last.0.min(x0);
+                        last.2 = hi - last.0;
                         continue;
                     }
                 }
@@ -853,8 +883,11 @@ pub(crate) fn shape_run(fonts: &mut FontStore, run: &TextRun, text: &str, family
     buffer
 }
 
-/// The character boundary nearest to an x offset inside a run, by glyph
-/// midpoints.
+/// The character boundary nearest to an x offset inside a run, measured
+/// with the same boundary math the highlight boxes use, so a click and
+/// its highlight always agree. Works in either direction: every
+/// character boundary is a candidate and the nearest one wins, which
+/// also answers clicks outside the run with the correct logical end.
 pub(crate) fn char_index_at(
     fonts: &mut FontStore,
     run: &TextRun,
@@ -862,25 +895,38 @@ pub(crate) fn char_index_at(
     family: &str,
     x_local: f32,
 ) -> usize {
-    if x_local <= 0.0 {
-        return 0;
-    }
-    if x_local >= run.width {
-        return text.chars().count();
-    }
     let buffer = shape_run(fonts, run, text, family);
-    if let Some(line) = buffer.layout_runs().next() {
-        for glyph in line.glyphs {
-            if x_local < glyph.x + glyph.w / 2.0 {
-                return text[..glyph.start].chars().count();
+    let Some(line) = buffer.layout_runs().next() else {
+        return 0;
+    };
+    let anchor = if line.rtl {
+        run.width - line.line_w
+    } else {
+        0.0
+    };
+    let x = x_local - anchor;
+    let end_x = if line.rtl { 0.0 } else { line.line_w };
+    let mut chars = 0;
+    let mut best = (f32::MAX, 0usize);
+    for (i, (byte, _)) in text.char_indices().enumerate() {
+        if let Some(bx) = boundary_x(line.glyphs, text, byte) {
+            let d = (x - bx).abs();
+            if d < best.0 {
+                best = (d, i);
             }
         }
+        chars = i + 1;
     }
-    text.chars().count()
+    if (x - end_x).abs() < best.0 {
+        return chars;
+    }
+    best.1
 }
 
-/// Advance width of the first `ch` characters of a run, shaping through
-/// the cache so a run shapes once per pass however often it is asked.
+/// X offset (from the run's x) of the boundary before character `ch`,
+/// shaping through the cache so a run shapes once per pass however
+/// often it is asked. The offset carries the paint anchor, so an RTL
+/// fragment's boundaries land where paint draws its glyphs.
 #[allow(clippy::too_many_arguments)]
 fn prefix_width(
     cache: &mut ShapeCache,
@@ -891,38 +937,67 @@ fn prefix_width(
     family: &str,
     ch: usize,
 ) -> f32 {
-    if ch == 0 {
-        return 0.0;
-    }
-    let byte = byte_of_char(text, ch);
-    if byte >= text.len() {
-        return run.width;
-    }
     let buffer = cache
         .buffers
         .entry(index)
         .or_insert_with(|| shape_run(fonts, run, text, family));
-    if let Some(line) = buffer.layout_runs().next() {
+    let Some(line) = buffer.layout_runs().next() else {
+        return 0.0;
+    };
+    let rtl = line.rtl;
+    let anchor = if rtl { run.width - line.line_w } else { 0.0 };
+    let byte = byte_of_char(text, ch);
+    if byte < text.len() {
         if let Some(x) = boundary_x(line.glyphs, text, byte) {
-            return x;
+            return anchor + x;
         }
     }
-    run.width
+    // The boundary after the last character: the line's logical end.
+    if rtl {
+        anchor
+    } else {
+        run.width
+    }
 }
 
-/// X offset of a byte boundary among shaped glyphs. A boundary inside a
-/// glyph's cluster (a ligature such as fi is one glyph over two
-/// characters) splits the glyph's width evenly per character, so carets
-/// and highlights land between the characters and always agree.
+/// Whether a run's shaped line reads right to left, from the cache.
+fn run_rtl(
+    cache: &mut ShapeCache,
+    fonts: &mut FontStore,
+    index: usize,
+    run: &TextRun,
+    text: &str,
+    family: &str,
+) -> bool {
+    let buffer = cache
+        .buffers
+        .entry(index)
+        .or_insert_with(|| shape_run(fonts, run, text, family));
+    buffer.layout_runs().next().is_some_and(|line| line.rtl)
+}
+
+/// X offset of a byte boundary among shaped glyphs, which arrive in
+/// logical order. An LTR glyph's boundary sits at its left edge; an RTL
+/// glyph's at its right, since the character before it draws to its
+/// right. A boundary inside a glyph's cluster (a ligature such as fi is
+/// one glyph over two characters) splits the glyph's width evenly per
+/// character, mirrored for RTL, so carets and highlights land between
+/// the characters and always agree.
 pub(crate) fn boundary_x(glyphs: &[LayoutGlyph], text: &str, byte: usize) -> Option<f32> {
     for glyph in glyphs {
+        let rtl = glyph.level.is_rtl();
         if glyph.start >= byte {
-            return Some(glyph.x);
+            return Some(if rtl { glyph.x + glyph.w } else { glyph.x });
         }
         if byte < glyph.end {
             let within = text[glyph.start..byte].chars().count() as f32;
             let total = text[glyph.start..glyph.end].chars().count() as f32;
-            return Some(glyph.x + glyph.w * within / total.max(1.0));
+            let frac = within / total.max(1.0);
+            return Some(if rtl {
+                glyph.x + glyph.w * (1.0 - frac)
+            } else {
+                glyph.x + glyph.w * frac
+            });
         }
     }
     None
@@ -1391,5 +1466,186 @@ mod tests {
         assert!((x - run.x).abs() < 0.5);
         assert!((w - run.width).abs() < 0.5);
         assert!(h > run.size, "box covers the line height");
+    }
+
+    // ---- RTL lines: hit testing, boxes, the justified merge ----
+
+    const RTL_LINE: &str = "اعلم أن فن التاريخ فن عزيز المذهب";
+
+    #[test]
+    fn rtl_edges_map_to_the_logical_ends() {
+        let (doc, l, mut fonts) = lay_doc(RTL_LINE);
+        let run = l.runs.iter().find(|r| r.width > 100.0).expect("the run");
+        let (x, y) = (run.x, run.y + 2.0);
+        let right = pos_at(&l, &doc, &mut fonts, x + run.width + 10.0, y).expect("a position");
+        let left = pos_at(&l, &doc, &mut fonts, x - 10.0, y).expect("a position");
+        assert_eq!(right.byte, 0, "past the right edge is the logical start");
+        assert_eq!(
+            left.byte,
+            RTL_LINE.len(),
+            "past the left edge is the logical end"
+        );
+    }
+
+    #[test]
+    fn a_drag_across_an_rtl_run_selects_the_logical_middle() {
+        let (doc, l, mut fonts) = lay_doc(RTL_LINE);
+        let run = l.runs.iter().find(|r| r.width > 100.0).expect("the run");
+        let y = run.y + 2.0;
+        let from_right = pos_at(&l, &doc, &mut fonts, run.x + run.width - 2.0, y).expect("a hit");
+        let from_left = pos_at(&l, &doc, &mut fonts, run.x + 2.0, y).expect("a hit");
+        assert!(
+            from_right.byte < from_left.byte,
+            "the right edge reads before the left: {} vs {}",
+            from_right.byte,
+            from_left.byte
+        );
+        let sel = Selection {
+            start: from_right,
+            end: from_left,
+        };
+        let text = plain_text(&sel, &doc);
+        assert!(
+            RTL_LINE.contains(text.trim()),
+            "the drag copies logical text: {text:?}"
+        );
+        assert!(
+            text.chars().count() > 20,
+            "the drag covered most of the line: {text:?}"
+        );
+    }
+
+    #[test]
+    fn a_logical_prefix_highlights_at_the_right_edge() {
+        let (doc, l, mut fonts) = lay_doc(RTL_LINE);
+        let run = l.runs.iter().find(|r| r.width > 100.0).expect("the run");
+        let (iv_start, _) = run_interval(run).expect("the interval");
+        let word = "اعلم";
+        let sel = Selection {
+            start: iv_start,
+            end: ModelPos {
+                byte: iv_start.byte + word.len(),
+                ..iv_start
+            },
+        };
+        let boxes = rects(&sel, &l, &doc, &mut fonts);
+        assert_eq!(boxes.len(), 1, "one word, one box");
+        let (x, _, w, _) = boxes[0];
+        assert!(w > 5.0, "the box has the word's width, got {w}");
+        assert!(
+            (run.x + run.width) - (x + w) < 1.0,
+            "the first word's box hugs the right edge: box right {}, run right {}",
+            x + w,
+            run.x + run.width
+        );
+        assert!(
+            x > run.x + 5.0,
+            "the box leaves the rest of the line unlit: box x {}, run x {}",
+            x,
+            run.x
+        );
+    }
+
+    #[test]
+    fn a_cross_script_selection_boxes_each_side_inside_its_run() {
+        let source = "قبل history بعد";
+        let (doc, l, mut fonts) = lay_doc(source);
+        let arabic = l
+            .runs
+            .iter()
+            .find(|r| l.run_text(&doc, r).contains("قبل"))
+            .expect("the arabic run");
+        let (arabic_start, _) = run_interval(arabic).expect("the interval");
+        let sel = Selection {
+            start: ModelPos {
+                byte: arabic_start.byte + 2,
+                ..arabic_start
+            },
+            end: ModelPos {
+                byte: arabic_start.byte + source.find("story").expect("the latin word"),
+                ..arabic_start
+            },
+        };
+        let boxes = rects(&sel, &l, &doc, &mut fonts);
+        assert!(boxes.len() >= 2, "one box per script side, got {boxes:?}");
+        for (x, y, w, _) in &boxes {
+            assert!(*w > 0.0, "every box spans left to right, got {boxes:?}");
+            assert!(
+                l.runs.iter().any(|r| (r.y - y).abs() < 0.5
+                    && *x >= r.x - 1.0
+                    && x + w <= r.x + r.width + 1.0),
+                "a box stays inside its run: [{x}..{}]",
+                x + w
+            );
+        }
+        let cut = boxes
+            .iter()
+            .find(|(x, _, w, _)| x + w < arabic.x + arabic.width - 2.0 && *x < arabic.x + 1.0)
+            .is_some();
+        assert!(
+            cut,
+            "the arabic box starts at the run's left and stops short of its right edge, \
+             the selected middle of an RTL run: {boxes:?}, run [{}..{}]",
+            arabic.x,
+            arabic.x + arabic.width
+        );
+    }
+
+    #[test]
+    fn a_selected_justified_rtl_line_is_one_full_box() {
+        let source = format!("{}الغاية.\n", "اعلم أن فن التاريخ فن عزيز ".repeat(8));
+        let doc = markdown::parse(source);
+        let mut fonts = FontStore::new();
+        let mut media = MediaCache::new(PathBuf::from("."));
+        let l = layout(
+            &doc,
+            &Theme::default_dark(),
+            &mut fonts,
+            &mut media,
+            &ViewConfig {
+                justify: true,
+                ..ViewConfig::default()
+            },
+            600.0,
+        );
+        let sel = select_all(&doc);
+        let boxes = rects(&sel, &l, &doc, &mut fonts);
+        let mut ys: Vec<i32> = boxes.iter().map(|b| b.1.round() as i32).collect();
+        ys.dedup();
+        assert_eq!(
+            boxes.len(),
+            ys.len(),
+            "a fully selected justified RTL line is one unbroken box"
+        );
+        for (x, y, w, _) in &boxes {
+            let (left, right) = l
+                .runs
+                .iter()
+                .filter(|r| (r.y - y).abs() < 0.5)
+                .fold((f32::MAX, f32::MIN), |(lo, hi), r| {
+                    (lo.min(r.x), hi.max(r.x + r.width))
+                });
+            assert!(
+                *x <= left + 1.0 && x + w >= right - 1.0,
+                "the box covers its line: box [{x}..{}], line [{left}..{right}]",
+                x + w
+            );
+        }
+    }
+
+    #[test]
+    fn a_double_click_selects_the_arabic_word() {
+        let (doc, _, _) = lay_doc(RTL_LINE);
+        let inside = RTL_LINE.find("أن").expect("the word") + 2;
+        let sel = word_at(
+            &doc,
+            ModelPos {
+                block: 0,
+                span: 0,
+                byte: inside,
+            },
+        )
+        .expect("a word");
+        assert_eq!(plain_text(&sel, &doc).trim(), "أن");
     }
 }
