@@ -309,7 +309,7 @@ pub const SHORTCUTS: &[Shortcut] = &[
     },
     Shortcut {
         keys: "Ctrl+Plus / Ctrl+Minus",
-        action: "Zoom in / out",
+        action: "Zoom in / out (in a comic: page width, whole page, two pages)",
         section: "View",
         bindings: &[
             (Binding::Ctrl("+"), Command::ZoomIn),
@@ -319,7 +319,7 @@ pub const SHORTCUTS: &[Shortcut] = &[
     },
     Shortcut {
         keys: "Ctrl+0",
-        action: "Reset zoom",
+        action: "Reset zoom (in a comic: whole page)",
         section: "View",
         bindings: &[(Binding::Ctrl("0"), Command::ZoomReset)],
     },

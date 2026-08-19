@@ -225,8 +225,8 @@ oryx --version          # print the version
 | **View** | |
 | `Ctrl+T` | Choose a theme |
 | `Ctrl+,` | Change fonts and sizes |
-| `Ctrl+Plus` / `Ctrl+Minus` | Zoom in / out |
-| `Ctrl+0` | Reset zoom |
+| `Ctrl+Plus` / `Ctrl+Minus` | Zoom in / out; in a comic, switch between page views |
+| `Ctrl+0` | Reset zoom; in a comic, show the whole page |
 | `Ctrl+J` | Justify prose (markdown and books) |
 | **Export** | |
 | `Ctrl+P` | Export to PDF |
