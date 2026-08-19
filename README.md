@@ -11,6 +11,7 @@
 
 - [Installation](#install)
 - [Performance](#performance)
+- [Credits](#credits)
 
 ## Philosophy
 
@@ -67,9 +68,25 @@ The sidebar's Outline tab shows the book's own table of contents, follows the re
 
 DRM-protected books and fixed-layout EPUB books are not supported. The [examples](examples/) folder installed with Oryx includes *The Adventures of Sherlock Holmes* to try it on.
 
+### Arabic and Hebrew
+
+Oryx reads right-to-left books. The direction is detected paragraph by paragraph from the text itself (book metadata is often wrong about this), so a book that mixes English and Arabic shows each paragraph on its correct side. Justified Arabic stretches to both edges with the last line of each paragraph ending on the right, the way printed Arabic does. Lists, quotes and headings follow the direction of their text, and selection, search and PDF export work as in any other document.
+
+Two fonts are embedded for this: Amiri for Arabic (a revival of the typeface classical Arabic books were printed in) and David Libre for Hebrew (a digitization of David, a typeface widely used in Hebrew books). Arabic and Hebrew text is rendered in them whatever the selected body font is.
+
+<p align="center">
+  <img src="screenshots/rtl-ar.png" alt="An Arabic book in Oryx">
+</p>
+
+<p align="center">
+  <img src="screenshots/rtl-he.png" alt="A Hebrew book in Oryx">
+</p>
+
+If Oryx reads a book's direction wrong, `Ctrl+D` switches it: automatic, right to left, left to right. The choice is remembered for each book.
+
 ### Comic books
 
-Oryx opens CBZ and CBR comic book archives and shows the pages in reading order. A comic starts as a vertical strip, every page at the window's width, which reads naturally for webtoons. `Ctrl+Minus` switches to one whole page per screen, and once more to two pages side by side, like an open book; `Ctrl+Plus` goes back up, and `Ctrl+0` shows the whole page from anywhere. In the page views, Up, Down and Space turn pages. The outline lists the pages, and Oryx reopens a comic at the page where reading stopped.
+Oryx opens CBZ and CBR comic book archives and shows the pages in reading order. A comic starts as a vertical strip, every page at the window's width, which reads naturally for webtoons. `Ctrl+Minus` switches to one whole page per screen, and once more to two pages side by side, like an open book; `Ctrl+Plus` goes back up, and `Ctrl+0` shows the whole page from anywhere. In the page views, Up, Down and Space turn pages. For comics that read right to left, like manga, `Ctrl+D` flips the two-page order, and Oryx remembers it for that comic. The outline lists the pages, and Oryx reopens a comic at the page where reading stopped.
 
 Comic book contents are analyzed and files processed accordingly, not by name, so a `.cbr` that is really a `zip` (they are common) works anyway. When an archive is password-protected or damaged, Oryx displays the problem. Compressed `CBR` files are rare and not supported.
 
@@ -176,7 +193,7 @@ make install
 `make install` builds the release binary, installs it to `~/.local/bin`, copies the themes and examples to `~/.local/share/oryx` and registers the file association. Plain `cargo build --release` works too; the binary looks for `themes/` next to itself, in the XDG data directory, and in the working directory.
 
 > [!TIP]
-> Use a release build for everyday reading, because a debug build is noticeably slower on code-heavy documents.
+> Use a release build, because a debug build is noticeably slower on code-heavy documents.
 
 ## Using Oryx
 
@@ -228,6 +245,7 @@ oryx --version          # print the version
 | `Ctrl+Plus` / `Ctrl+Minus` | Zoom in / out; in a comic, switch between page views |
 | `Ctrl+0` | Reset zoom; in a comic, show the whole page |
 | `Ctrl+J` | Justify prose (markdown and books) |
+| `Ctrl+D` | Reading direction: automatic, right to left, left to right |
 | **Export** | |
 | `Ctrl+P` | Export to PDF |
 | `Ctrl+Shift+P` | Choose export settings, then export |
@@ -239,7 +257,7 @@ oryx --version          # print the version
 
 ## Performance
 
-Performance is one of the reasons behind Oryx. Most markdown viewers start struggling above one megabyte of file size, without even offering a decent look. Oryx offers the same beautiful reading experience, whatever the file size and whatever the machine. Here is how it works:
+Performance is one of the motivations behind Oryx. Many markdown viewers start struggling above one megabyte of file size, without even offering a decent look. Oryx keeps the same beautiful reading experience, whatever the file size and whatever the machine. Benchmarks have been reproduced for all supported file types, like ebooks. Here is how it works:
 
 For a big markdown file, Oryx parses only its first screens before the first paint and the rest arrives from a background thread. It uses all CPU cores to build the layout, for the wash-in below the first screens as well as every zoom or resize. Only the part of the document around the reading position is kept in drawn form, and scrolling rebuilds the landing from recorded positions in about a millisecond; memory stays flat however long the document is. Painting covers a band around the viewport, a couple of screens either side, and scrolling inside that band is a memory copy: the cost of a scroll frame does not depend on the document's length. Syntax highlighting and the layout below follow in the background, a slice at a time, without moving anything already on screen.
 
@@ -268,7 +286,7 @@ The 8 MB markdown export writes a 9219-page file. While open, the 8 MB markdown 
 
 ## Credits
 
-DejaVu Sans, Courier Prime and STIX Two Math are embedded in the binary. DejaVu is distributed under the DejaVu Fonts License, Courier Prime and STIX Two Math under the SIL Open Font License. STIX renders the math and stays out of the font picker. The settings dialog can switch the text fonts to any family installed on the system.
+DejaVu Sans, Courier Prime, STIX Two Math, Amiri and David Libre are embedded in the binary. DejaVu is distributed under the DejaVu Fonts License, the other four under the SIL Open Font License. STIX renders the math and stays out of the font picker; Amiri renders Arabic and David Libre renders Hebrew. The settings dialog can switch the text fonts to any family installed on the system.
 
 The sample book in [examples](examples/) is the [Standard Ebooks](https://standardebooks.org) edition of *The Adventures of Sherlock Holmes*, in the public domain and dedicated with CC0 by its producers.
 
@@ -310,6 +328,8 @@ The sample book in [examples](examples/) is the [Standard Ebooks](https://standa
 Each grammar ships with its license text beside the source under `assets/syntaxes/`.
 
 </details>
+
+<br>
 
 <div align="center">
 
