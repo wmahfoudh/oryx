@@ -143,6 +143,7 @@ pub struct Positions {
 pub struct BookPosition {
     pub key: String,
     pub offset: usize,
+    pub direction: crate::layout::DirectionMode,
 }
 
 impl Positions {
@@ -175,13 +176,14 @@ impl Positions {
         }
     }
 
-    /// Files a book's position, most recent last, the oldest pruned
-    /// past the cap.
-    pub fn remember(&mut self, key: &str, offset: usize) {
+    /// Files a book's position and reading direction, most recent last,
+    /// the oldest pruned past the cap.
+    pub fn remember(&mut self, key: &str, offset: usize, direction: crate::layout::DirectionMode) {
         self.book.retain(|b| b.key != key);
         self.book.push(BookPosition {
             key: key.to_string(),
             offset,
+            direction,
         });
         if self.book.len() > POSITIONS_KEPT {
             let excess = self.book.len() - POSITIONS_KEPT;
@@ -195,6 +197,16 @@ impl Positions {
             .rev()
             .find(|b| b.key == key)
             .map(|b| b.offset)
+    }
+
+    /// The remembered reading direction, automatic when the book is new.
+    pub fn direction(&self, key: &str) -> crate::layout::DirectionMode {
+        self.book
+            .iter()
+            .rev()
+            .find(|b| b.key == key)
+            .map(|b| b.direction)
+            .unwrap_or_default()
     }
 }
 
@@ -232,6 +244,26 @@ mod tests {
 
     fn temp_path(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("oryx-config-{}-{name}", std::process::id()))
+    }
+
+    #[test]
+    fn a_position_carries_its_direction() {
+        use crate::layout::DirectionMode;
+        let mut p = Positions::default();
+        p.remember("book", 10, DirectionMode::Rtl);
+        assert_eq!(p.lookup("book"), Some(10));
+        assert_eq!(p.direction("book"), DirectionMode::Rtl);
+        let path = temp_path("direction.toml");
+        p.save_to(&path);
+        let loaded = Positions::load_from(&path);
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(loaded.direction("book"), DirectionMode::Rtl);
+        let old: Positions = toml::from_str("[[book]]\nkey = \"k\"\noffset = 3\n").unwrap();
+        assert_eq!(
+            old.direction("k"),
+            DirectionMode::Auto,
+            "an entry from before the field reads automatic"
+        );
     }
 
     #[test]

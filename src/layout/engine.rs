@@ -32,6 +32,9 @@ pub struct ViewConfig {
     /// is a comic. The page states carry the viewport height, which the
     /// app refreshes on resize.
     pub comic: ComicFit,
+    /// The file's reading direction, cycled by Ctrl+D and remembered
+    /// per file.
+    pub direction: DirectionMode,
 }
 
 impl Default for ViewConfig {
@@ -44,6 +47,31 @@ impl Default for ViewConfig {
             zoom: 1.0,
             justify: false,
             comic: ComicFit::Width,
+            direction: DirectionMode::Auto,
+        }
+    }
+}
+
+/// The per-file reading direction. Automatic reads each text block's
+/// first strong character; the forced states override every text block
+/// and flip a comic's two-page pairing, for manga, Arabic comics and
+/// books whose text Oryx misreads. Code and tables never turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DirectionMode {
+    #[default]
+    Auto,
+    Rtl,
+    Ltr,
+}
+
+impl DirectionMode {
+    /// The Ctrl+D cycle: automatic, right to left, left to right.
+    pub fn step(self) -> DirectionMode {
+        match self {
+            DirectionMode::Auto => DirectionMode::Rtl,
+            DirectionMode::Rtl => DirectionMode::Ltr,
+            DirectionMode::Ltr => DirectionMode::Auto,
         }
     }
 }
@@ -1594,13 +1622,15 @@ fn layout_comic(
                     let half = viewport / 2.0;
                     let scale = (half / iw).min(slot / ih);
                     let (w, h) = (iw * scale, ih * scale);
-                    let left = page % 2 == 1;
+                    let first = page % 2 == 1;
+                    let left = first != (cfg.direction == DirectionMode::Rtl);
                     let x = if left { half - w } else { half };
                     let y = cursor + (slot - h) / 2.0;
-                    // The left page holds its row open at the cursor;
-                    // the right page closes it and the cursor moves on.
-                    let advance = if left { 0.0 } else { slot };
-                    open_row = left;
+                    // The first page of a spread holds its row open at
+                    // the cursor; its pair closes it and the cursor
+                    // moves on. Forced RTL seats the first page right.
+                    let advance = if first { 0.0 } else { slot };
+                    open_row = first;
                     (x, y, w, h, cursor, advance)
                 }
             }
@@ -1811,20 +1841,24 @@ fn block_metrics(block: &Block, cfg: &ViewConfig, plain: bool) -> Option<(Option
 }
 
 /// A block's base direction, the bidi rule: its first strong character
-/// decides. Only the text-bearing kinds answer; tables keep their
-/// column order and code is always LTR.
-fn block_rtl(block: &Block, source: &str) -> bool {
+/// decides, unless the file's direction is forced. Only the text-bearing
+/// kinds answer; tables keep their column order and code is always LTR.
+fn block_rtl(block: &Block, source: &str, mode: DirectionMode) -> bool {
     let spans: &[Span] = match &block.kind {
         BlockKind::Paragraph { spans } => spans,
         BlockKind::Heading { spans, .. } => spans,
         BlockKind::ListItem { spans, .. } => spans,
         _ => return false,
     };
-    spans
-        .iter()
-        .flat_map(|span| span.text(source).chars())
-        .find_map(crate::style::fonts::strong_rtl)
-        .unwrap_or(false)
+    match mode {
+        DirectionMode::Rtl => true,
+        DirectionMode::Ltr => false,
+        DirectionMode::Auto => spans
+            .iter()
+            .flat_map(|span| span.text(source).chars())
+            .find_map(crate::style::fonts::strong_rtl)
+            .unwrap_or(false),
+    }
 }
 
 /// The x origin and available width a block shapes against, derived from
@@ -1844,7 +1878,7 @@ fn block_geometry(
     } else {
         0.0
     };
-    let x_base = if block.quote_depth > 0 && block_rtl(block, source) {
+    let x_base = if block.quote_depth > 0 && block_rtl(block, source, cfg.direction) {
         margin + quote_pad
     } else {
         margin + quote_indent + quote_pad
@@ -3029,7 +3063,7 @@ fn quote_decoration(
     source: &str,
 ) -> Vec<DecoRect> {
     let panel_h = bottom - top;
-    let rtl = block_rtl(block, source);
+    let rtl = block_rtl(block, source, cfg.direction);
     let mut decoration = vec![DecoRect::fill(
         margin,
         top,
@@ -3535,6 +3569,24 @@ fn shape_segment(
         for line in buffer.lines.iter_mut() {
             line.set_align(Some(Align::Justified));
         }
+    } else if cfg.direction != DirectionMode::Auto {
+        // A forced direction aligns every line to the forced side; a
+        // line already reading that way keeps its natural alignment.
+        let forced_rtl = cfg.direction == DirectionMode::Rtl;
+        for line in buffer.lines.iter_mut() {
+            let natural = line
+                .text()
+                .chars()
+                .find_map(crate::style::fonts::strong_rtl)
+                .unwrap_or(false);
+            if natural != forced_rtl {
+                line.set_align(Some(if forced_rtl {
+                    Align::Right
+                } else {
+                    Align::Left
+                }));
+            }
+        }
     }
     buffer.shape_until_scroll(&mut fonts.font_system, false);
 
@@ -3702,11 +3754,15 @@ fn layout_list_item(
     let indent = metrics::INDENT * cfg.zoom * (depth as f32 + 1.0);
     // An RTL item mirrors: the text column keeps the left edge and
     // steps its right edge in, and the marker sits in the right gutter.
-    let rtl = spans
-        .iter()
-        .flat_map(|span| span.text(source).chars())
-        .find_map(crate::style::fonts::strong_rtl)
-        .unwrap_or(false);
+    let rtl = match cfg.direction {
+        DirectionMode::Rtl => true,
+        DirectionMode::Ltr => false,
+        DirectionMode::Auto => spans
+            .iter()
+            .flat_map(|span| span.text(source).chars())
+            .find_map(crate::style::fonts::strong_rtl)
+            .unwrap_or(false),
+    };
     let text_x = if rtl { x0 } else { x0 + indent };
     let text_w = (avail - indent).max(40.0);
     let gutter = 10.0 * cfg.zoom;
@@ -3804,6 +3860,14 @@ fn layout_table(
     avail: f32,
     out: &mut LayoutDoc,
 ) -> f32 {
+    // Cells keep their own natural direction whatever the file forces:
+    // tables hold their column order, and forcing a cell's alignment
+    // would tear the grid.
+    let cell_cfg = ViewConfig {
+        direction: DirectionMode::Auto,
+        ..cfg.clone()
+    };
+    let cfg = &cell_cfg;
     let size = cfg.body_size * cfg.zoom;
     let line_height = metrics::LINE_HEIGHT * size;
     let pad = 8.0 * cfg.zoom;

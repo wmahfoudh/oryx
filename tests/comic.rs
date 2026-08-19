@@ -16,7 +16,7 @@ use oryx::doc::images::{self, BookSource, MediaCache};
 use oryx::doc::load::{self, FileKind};
 use oryx::doc::markdown;
 use oryx::doc::model::{BlockKind, Document};
-use oryx::layout::{layout, ComicFit, LayoutDoc, ViewConfig};
+use oryx::layout::{layout, ComicFit, DirectionMode, LayoutDoc, ViewConfig};
 use oryx::style::fonts::FontStore;
 use oryx::style::theme::Theme;
 
@@ -476,5 +476,53 @@ fn a_comic_opens_through_the_load_path() {
     assert!(
         opened.document.book_id.is_some(),
         "positions need a memory key"
+    );
+}
+
+#[test]
+fn rtl_pairing_puts_the_right_page_first() {
+    let pages: Vec<(String, Vec<u8>)> = (1..=4)
+        .map(|n| (format!("{n}.png"), png_bytes(100, 100)))
+        .collect();
+    let entries: Vec<(&str, &[u8])> = pages
+        .iter()
+        .map(|(n, b)| (n.as_str(), b.as_slice()))
+        .collect();
+    let book = comic::open_book(cbz(&entries), "T").unwrap();
+    let mut media = MediaCache::new(PathBuf::from("."));
+    media.adopt(book.pages);
+    let cfg = ViewConfig {
+        comic: ComicFit::Two { height: 400.0 },
+        direction: DirectionMode::Rtl,
+        ..ViewConfig::default()
+    };
+    let mut fonts = FontStore::new();
+    let l = layout(
+        &book.document,
+        &Theme::default_dark(),
+        &mut fonts,
+        &mut media,
+        &cfg,
+        600.0,
+    );
+    assert_eq!(
+        rect(&l.images[0]),
+        (100.0, 0.0, 400.0, 400.0),
+        "the cover stands alone, centered, whatever the direction"
+    );
+    assert_eq!(
+        rect(&l.images[1]),
+        (300.0, 450.0, 300.0, 300.0),
+        "the first page of a spread sits right"
+    );
+    assert_eq!(
+        rect(&l.images[2]),
+        (0.0, 450.0, 300.0, 300.0),
+        "its pair continues on the left"
+    );
+    assert_eq!(
+        rect(&l.images[3]),
+        (300.0, 850.0, 300.0, 300.0),
+        "a last odd page takes the right of its own row"
     );
 }

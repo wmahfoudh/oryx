@@ -23,7 +23,7 @@ use oryx::input::{
 };
 use oryx::layout::{
     self, layout_begin, layout_extend, layout_more, metrics, recolor_batch, window_to, ComicFit,
-    DecoRect, LayoutDoc, LayoutPass, ShapePool, ViewConfig, OPEN_SLICE, SLICE,
+    DecoRect, DirectionMode, LayoutDoc, LayoutPass, ShapePool, ViewConfig, OPEN_SLICE, SLICE,
 };
 use oryx::paint;
 use oryx::paint::painter::Painter;
@@ -245,6 +245,7 @@ pub fn run(path: Option<PathBuf>, theme_name: Option<String>) -> anyhow::Result<
         lossy,
         edit_marks: HashMap::new(),
         read_marks: HashMap::new(),
+        direction_marks: HashMap::new(),
         ledger: None,
         undo: None,
         rehighlight_at: None,
@@ -273,8 +274,20 @@ pub fn run(path: Option<PathBuf>, theme_name: Option<String>) -> anyhow::Result<
         .book_id
         .as_deref()
         .and_then(|key| app.positions.lookup(key));
+    if let Some(key) = app.document.book_id.as_deref() {
+        app.cfg.direction = app.positions.direction(key);
+    }
     event_loop.run_app(&mut app)?;
     Ok(())
+}
+
+/// The corner notice naming each direction state.
+fn direction_notice(mode: DirectionMode) -> &'static str {
+    match mode {
+        DirectionMode::Auto => "reading direction: automatic",
+        DirectionMode::Rtl => "reading direction: right to left",
+        DirectionMode::Ltr => "reading direction: left to right",
+    }
 }
 
 /// Window title: the open file's name, path stripped.
@@ -661,6 +674,9 @@ struct App {
     /// source offset by canonical path. In memory only: a revisit in
     /// the same session resumes there, a new session starts at the top.
     read_marks: HashMap<PathBuf, usize>,
+    /// Session memory of each plain file's reading direction; a book's
+    /// rides the persisted positions store instead.
+    direction_marks: HashMap<PathBuf, DirectionMode>,
     /// The splice ledger, from the first edit-mode entry until the file
     /// closes or saves; unsaved edits survive mode flips inside it.
     ledger: Option<Ledger>,
@@ -866,6 +882,7 @@ impl App {
                 }
             }
             Command::Justify => self.toggle_justify(),
+            Command::Direction => self.cycle_direction(),
             Command::SelectAll => self.select_all(),
             Command::CopyText => self.copy_selection(false),
             Command::CopyMarkdown => self.copy_selection(true),
@@ -3531,11 +3548,12 @@ impl App {
             return;
         };
         if let Some(key) = self.document.book_id.clone() {
-            self.positions.remember(&key, offset);
+            self.positions.remember(&key, offset, self.cfg.direction);
             self.positions.save();
         } else if self.mode == edit::Mode::Read {
             if let Some(path) = self.path.clone() {
-                self.read_marks.insert(path, offset);
+                self.read_marks.insert(path.clone(), offset);
+                self.direction_marks.insert(path, self.cfg.direction);
             }
         }
     }
@@ -3742,6 +3760,12 @@ impl App {
         self.sel_anchor = None;
         self.pending_recolor.clear();
         self.cfg.justify = justify_pref(&self.config, &self.document);
+        // The reading direction is per file: a book's from the store, a
+        // plain file's from the session map, automatic for a fresh one.
+        self.cfg.direction = match self.document.book_id.as_deref() {
+            Some(key) => self.positions.direction(key),
+            None => self.direction_marks.get(&path).copied().unwrap_or_default(),
+        };
         self.layout = None;
         self.band = None;
         // Both hold targets in the old document's coordinates; left
@@ -3906,7 +3930,9 @@ impl App {
         let Some(target) = target else {
             return;
         };
-        let pass = ExportPass::new(&settings, theme, target).with_toc(self.book_toc.clone());
+        let pass = ExportPass::new(&settings, theme, target)
+            .with_toc(self.book_toc.clone())
+            .with_direction(self.cfg.direction);
         self.overlay = Some(Box::new(ExportProgress::new(pass.progress())));
         self.export_warning = fell_back.then(|| format!("theme {} is gone", settings.theme));
         self.export = Some(pass);
@@ -4257,6 +4283,26 @@ impl App {
         let value = *pref;
         config::save(&self.config);
         self.cfg.justify = value;
+        self.layout = None;
+        self.band = None;
+        self.request_redraw();
+    }
+
+    /// Ctrl+D cycles the file's reading direction: automatic, right to
+    /// left, left to right. The state is per file, a book's in the
+    /// persisted positions store and a plain file's in the session map,
+    /// and the corner notice names each state as it lands.
+    fn cycle_direction(&mut self) {
+        let next = self.cfg.direction.step();
+        self.cfg.direction = next;
+        if let Some(key) = self.document.book_id.clone() {
+            let offset = self.top_offset().unwrap_or(0);
+            self.positions.remember(&key, offset, next);
+            self.positions.save();
+        } else if let Some(path) = self.path.clone() {
+            self.direction_marks.insert(path, next);
+        }
+        self.show_notice(direction_notice(next));
         self.layout = None;
         self.band = None;
         self.request_redraw();
@@ -5480,6 +5526,23 @@ impl ApplicationHandler for App {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_direction_notice_names_each_state() {
+        use oryx::layout::DirectionMode;
+        assert_eq!(
+            super::direction_notice(DirectionMode::Auto),
+            "reading direction: automatic"
+        );
+        assert_eq!(
+            super::direction_notice(DirectionMode::Rtl),
+            "reading direction: right to left"
+        );
+        assert_eq!(
+            super::direction_notice(DirectionMode::Ltr),
+            "reading direction: left to right"
+        );
+    }
+
     #[test]
     fn key_ownership_follows_the_last_touched_pane() {
         use super::{owner_after, KeyPane, PaneAct};

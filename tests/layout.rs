@@ -8,8 +8,8 @@ use oryx::doc::model::{BlockKind, Document, Marker, SpanScript};
 use oryx::doc::stream::{self, Swap};
 use oryx::layout::{
     code_lines_in, layout, layout_begin, layout_extend, layout_more, layout_step, metrics,
-    recolor_batch, recolor_code_lines, window_to, DecoRect, LayoutDoc, ShapePool, TextRef, TextRun,
-    ViewConfig,
+    recolor_batch, recolor_code_lines, window_to, DecoRect, DirectionMode, LayoutDoc, ShapePool,
+    TextRef, TextRun, ViewConfig,
 };
 use oryx::style::fonts::{FontStore, ARABIC_FAMILY, BODY_FAMILY, CODE_FAMILY, HEBREW_FAMILY};
 use oryx::style::highlight::{self, Arrival};
@@ -3897,4 +3897,98 @@ fn mixed_direction_blocks_interleave() {
         ((hebrew.x + hebrew.width) - (arabic.x + arabic.width)).abs() < 1.0,
         "hebrew and arabic share the right edge"
     );
+}
+
+// ---- The direction cycle: forced RTL and LTR ----
+
+fn lay_dir(source: &str, width: f32, direction: DirectionMode) -> (Document, LayoutDoc) {
+    let doc = markdown::parse(source);
+    let mut media = MediaCache::new(PathBuf::from("."));
+    let c = ViewConfig { direction, ..cfg() };
+    let mut f = fonts();
+    let l = layout(&doc, &Theme::default_dark(), &mut f, &mut media, &c, width);
+    (doc, l)
+}
+
+#[test]
+fn the_direction_cycle_steps_auto_rtl_ltr() {
+    assert_eq!(DirectionMode::Auto.step(), DirectionMode::Rtl);
+    assert_eq!(DirectionMode::Rtl.step(), DirectionMode::Ltr);
+    assert_eq!(DirectionMode::Ltr.step(), DirectionMode::Auto);
+}
+
+#[test]
+fn a_latin_paragraph_under_forced_rtl_aligns_right() {
+    let text = "plain latin words keep their own order ".repeat(4);
+    let (_, l) = lay_dir(&text, 500.0, DirectionMode::Rtl);
+    let lines = line_edges(&l);
+    assert!(lines.len() >= 2, "the fixture wraps, got {}", lines.len());
+    let right = lines.iter().map(|(_, e)| *e).fold(f32::MIN, f32::max);
+    assert!(right > 400.0, "the paragraph uses the width, got {right}");
+    for (y, edge) in &lines {
+        assert!(
+            (edge - right).abs() < 1.0,
+            "forced RTL is flush right: the line at y {y} ends at {edge}, the paragraph at {right}"
+        );
+    }
+}
+
+#[test]
+fn a_latin_list_item_under_forced_rtl_mirrors_its_bullet() {
+    let (doc, l) = lay_dir("- latin item", 600.0, DirectionMode::Rtl);
+    let text = find_containing(&l, &doc, "latin");
+    let marker = find_text(&l, &doc, "\u{2022}");
+    assert!(
+        marker.x >= text.x + text.width - 0.5,
+        "the bullet mirrors to the right: bullet x {}, text ends {}",
+        marker.x,
+        text.x + text.width
+    );
+}
+
+#[test]
+fn an_arabic_paragraph_under_forced_ltr_aligns_left() {
+    let (_, l) = lay_dir(ARABIC_PARAGRAPH, 500.0, DirectionMode::Ltr);
+    let mut lines: Vec<(f32, f32)> = Vec::new();
+    for r in &l.runs {
+        match lines.iter_mut().find(|(y, _)| (*y - r.y).abs() < 0.5) {
+            Some((_, lo)) => *lo = lo.min(r.x),
+            None => lines.push((r.y, r.x)),
+        }
+    }
+    assert!(lines.len() >= 3, "the fixture wraps, got {}", lines.len());
+    let left = lines.iter().map(|(_, lo)| *lo).fold(f32::MAX, f32::min);
+    for (y, lo) in &lines {
+        assert!(
+            (lo - left).abs() < 1.0,
+            "forced LTR is flush left: the line at y {y} starts at {lo}, the paragraph at {left}"
+        );
+    }
+    let (doc, l) = lay_dir("- سلام عليكم", 600.0, DirectionMode::Ltr);
+    let text = find_containing(&l, &doc, "سلام");
+    let marker = find_text(&l, &doc, "\u{2022}");
+    assert!(
+        marker.x < text.x,
+        "the bullet returns to the left: bullet x {}, text x {}",
+        marker.x,
+        text.x
+    );
+}
+
+#[test]
+fn code_and_tables_ignore_the_forced_direction() {
+    let code = "```\nlet x = 1;\n```";
+    let (_, auto) = lay_dir(code, 600.0, DirectionMode::Auto);
+    let (_, forced) = lay_dir(code, 600.0, DirectionMode::Rtl);
+    assert_eq!(auto.runs.len(), forced.runs.len());
+    for (a, f) in auto.runs.iter().zip(&forced.runs) {
+        assert!((a.x - f.x).abs() < 0.01, "code lays out identically");
+    }
+    let table = "| alpha | beta |\n|---|---|\n| gamma | delta |";
+    let (_, auto) = lay_dir(table, 600.0, DirectionMode::Auto);
+    let (_, forced) = lay_dir(table, 600.0, DirectionMode::Rtl);
+    assert_eq!(auto.runs.len(), forced.runs.len());
+    for (a, f) in auto.runs.iter().zip(&forced.runs) {
+        assert!((a.x - f.x).abs() < 0.01, "columns keep their order");
+    }
 }

@@ -19,6 +19,7 @@ pub enum Command {
     ZoomOut,
     ZoomReset,
     Justify,
+    Direction,
     SelectAll,
     CopyText,
     CopyMarkdown,
@@ -329,6 +330,12 @@ pub const SHORTCUTS: &[Shortcut] = &[
         bindings: &[(Binding::Ctrl("j"), Command::Justify)],
     },
     Shortcut {
+        keys: "Ctrl+D",
+        action: "Reading direction: automatic, right to left, left to right",
+        section: "View",
+        bindings: &[(Binding::Ctrl("d"), Command::Direction)],
+    },
+    Shortcut {
         keys: "Ctrl+P",
         action: "Export to PDF",
         section: "Export",
@@ -507,6 +514,11 @@ mod tests {
         // every shifted Ctrl chord; the block lens claims it later with
         // a CtrlShift binding, which the shifted pass resolves first.
         assert_eq!(command(&chr("E"), true, true), Some(Command::Edit));
+    }
+
+    #[test]
+    fn ctrl_d_cycles_the_reading_direction() {
+        assert_eq!(command(&chr("d"), true, false), Some(Command::Direction));
     }
 
     #[test]

@@ -595,14 +595,15 @@ fn book_id_prefers_identifier_and_falls_back_to_the_path() {
 
 #[test]
 fn positions_remember_prune_and_move_back() {
+    use oryx::layout::DirectionMode;
     use oryx::platform::config::Positions;
     let mut positions = Positions::default();
     for i in 0..105 {
-        positions.remember(&format!("book-{i}"), i * 10);
+        positions.remember(&format!("book-{i}"), i * 10, DirectionMode::Auto);
     }
     assert_eq!(positions.lookup("book-0"), None, "the oldest are pruned");
     assert_eq!(positions.lookup("book-104"), Some(1040));
-    positions.remember("book-10", 777);
+    positions.remember("book-10", 777, DirectionMode::Auto);
     assert_eq!(positions.lookup("book-10"), Some(777));
 
     let path = std::env::temp_dir().join("oryx_positions_test.toml");

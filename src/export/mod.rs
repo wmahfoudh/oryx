@@ -251,6 +251,13 @@ impl ExportPass {
         self
     }
 
+    /// Carries the open file's reading direction into the export, so a
+    /// forced direction prints as it reads.
+    pub fn with_direction(mut self, direction: crate::layout::DirectionMode) -> ExportPass {
+        self.cfg.direction = direction;
+        self
+    }
+
     pub fn new(settings: &ExportSettings, theme: Theme, target: PathBuf) -> ExportPass {
         let geometry = PageGeometry::new(settings.page, settings.orientation, settings.body_size);
         let title = target
@@ -270,6 +277,7 @@ impl ExportPass {
                 zoom: 1.0,
                 justify: settings.justify,
                 comic: crate::layout::ComicFit::Width,
+                direction: crate::layout::DirectionMode::Auto,
             },
             geometry,
             target,
