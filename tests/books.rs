@@ -8,11 +8,14 @@ mod writer;
 #[path = "../rarball/tests/fixtures/writer.rs"]
 mod rar_writer;
 
+#[path = "fixtures/epub_common.rs"]
+mod epub_common;
+
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use oryx::doc::load::{self, FileKind};
-use oryx::doc::{comic, fb2, kindle};
+use oryx::doc::{comic, epub, fb2, kindle};
 
 /// A generated FB2 in the class of the library's real ones: hundreds of
 /// titled chapters of styled prose, no images.
@@ -118,6 +121,79 @@ fn a_generated_mobi_meets_the_open_budget() {
     }
 }
 
+/// A generated Arabic EPUB in the class of the Muqaddimah: many short
+/// chapters of unvocalized prose with styled words, Arabic chapter
+/// titles for the outline.
+fn generated_arabic_epub() -> Vec<u8> {
+    let mut builder = epub_common::book();
+    for chapter in 0..120 {
+        let mut body = format!("<html><body><h1>الفصل {chapter}</h1>");
+        for _ in 0..12 {
+            body.push_str(
+                "<p>اعلم أن فن التاريخ فن عزيز المذهب جم الفوائد شريف الغاية، \
+                 إذ هو يوقفنا على أحوال الماضين من الأمم في أخلاقهم، \
+                 والأنبياء في سيرهم، والملوك في دولهم وسياستهم، مع كلمة \
+                 <i>مائلة</i> وأخرى <b>غليظة</b> حتى يلتف السطر على الصفحة \
+                 كما يلتف في كتاب حقيقي ويقيس الممر ما يستحق القياس.</p>",
+            );
+        }
+        body.push_str("</body></html>");
+        builder = builder.chapter(&format!("ch{chapter}.xhtml"), &body);
+    }
+    builder.build()
+}
+
+/// The product promise holds for Arabic books: a real-sized EPUB opens
+/// its prefix inside the startup budget, and the prefix lays out with
+/// its runs routed to the Arabic face.
+#[test]
+#[ignore = "timing asserts only hold in release mode"]
+fn a_generated_arabic_epub_meets_the_open_budget() {
+    use oryx::doc::images::MediaCache;
+    use oryx::layout::{layout, ViewConfig};
+    use oryx::style::fonts::{FontStore, ARABIC_FAMILY};
+    use oryx::style::theme::Theme;
+
+    let bytes = generated_arabic_epub();
+    let size = bytes.len();
+    let t = std::time::Instant::now();
+    let (doc, toc, job) = epub::open_prefix(bytes).unwrap();
+    let prefix_ms = t.elapsed().as_millis();
+
+    let mut fonts = FontStore::new();
+    let mut media = MediaCache::new(PathBuf::from("."));
+    let t = std::time::Instant::now();
+    let l = layout(
+        &doc,
+        &Theme::default_dark(),
+        &mut fonts,
+        &mut media,
+        &ViewConfig {
+            justify: true,
+            ..ViewConfig::default()
+        },
+        900.0,
+    );
+    let layout_ms = t.elapsed().as_millis();
+    println!(
+        "generated arabic epub: {size} bytes, prefix {prefix_ms}ms, layout {layout_ms}ms, \
+         {} source bytes, {} toc entries, worker owed: {}",
+        doc.source.len(),
+        toc.len(),
+        job.is_some()
+    );
+    assert!(
+        l.runs.iter().any(|r| l.run_family(r) == ARABIC_FAMILY),
+        "the measured layout routed its runs to the Arabic face"
+    );
+    if !cfg!(debug_assertions) {
+        assert!(
+            prefix_ms < 100,
+            "the prefix must open inside the budget: {prefix_ms}ms"
+        );
+    }
+}
+
 /// Pages in the class of the library's real comics: 1200x1700 JPEGs,
 /// each its own shade so no two compress alike.
 fn comic_pages() -> Vec<(String, Vec<u8>)> {
@@ -192,7 +268,7 @@ fn collect_books(dir: &Path, out: &mut Vec<PathBuf>) {
             collect_books(&path, out);
         } else if matches!(
             load::detect(&path),
-            FileKind::Fb2 | FileKind::Kindle | FileKind::Comic
+            FileKind::Epub | FileKind::Fb2 | FileKind::Kindle | FileKind::Comic
         ) {
             out.push(path);
         }

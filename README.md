@@ -69,7 +69,7 @@ DRM-protected books and fixed-layout EPUB books are not supported. The [examples
 
 ### Comic books
 
-Oryx opens CBZ and CBR comic book archives and shows the pages in reading order. A comic starts as a vertical strip, every page at the window's width, which reads naturally for webtoons. Ctrl+Minus switches to one whole page per screen, and once more to two pages side by side, like an open book; Ctrl+Plus goes back up, and Ctrl+0 shows the whole page from anywhere. In the page views, Up, Down and Space turn pages. The outline lists the pages, and Oryx reopens a comic at the page where reading stopped.
+Oryx opens CBZ and CBR comic book archives and shows the pages in reading order. A comic starts as a vertical strip, every page at the window's width, which reads naturally for webtoons. `Ctrl+Minus` switches to one whole page per screen, and once more to two pages side by side, like an open book; `Ctrl+Plus` goes back up, and `Ctrl+0` shows the whole page from anywhere. In the page views, Up, Down and Space turn pages. The outline lists the pages, and Oryx reopens a comic at the page where reading stopped.
 
 Comic book contents are analyzed and files processed accordingly, not by name, so a `.cbr` that is really a `zip` (they are common) works anyway. When an archive is password-protected or damaged, Oryx displays the problem. Compressed `CBR` files are rare and not supported.
 
