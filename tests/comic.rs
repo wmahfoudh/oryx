@@ -4,6 +4,9 @@
 #[path = "fixtures/comic_common.rs"]
 mod comic_common;
 
+#[path = "../rarball/tests/fixtures/writer.rs"]
+mod rar_writer;
+
 use std::path::PathBuf;
 
 use comic_common::{cbz, cbz_deflated, encrypted_cbz, jpeg_bytes, png_bytes};
@@ -154,6 +157,98 @@ fn detection_routes_cbz() {
     use std::path::Path;
     assert_eq!(load::detect(Path::new("x/book.cbz")), FileKind::Comic);
     assert_eq!(load::detect(Path::new("x/BOOK.CBZ")), FileKind::Comic);
+    assert_eq!(load::detect(Path::new("x/book.cbr")), FileKind::Comic);
+    assert_eq!(load::detect(Path::new("x/BOOK.CBR")), FileKind::Comic);
+}
+
+/// A RAR comic of the given pages, stored, the wild's pattern.
+fn cbr(entries: &[(&str, &[u8])]) -> Vec<u8> {
+    let files: Vec<rar_writer::FileSpec> = entries
+        .iter()
+        .map(|(name, data)| rar_writer::file(name, data))
+        .collect();
+    rar_writer::rar4(&files, 0)
+}
+
+#[test]
+fn a_rar_comic_opens_with_pages_in_order() {
+    for bytes in [
+        cbr(&[
+            ("Page 10.jpg", &jpeg_bytes(30, 40)),
+            ("Page 2.jpg", &jpeg_bytes(20, 10)),
+            ("Page 1.png", &png_bytes(8, 4)),
+        ]),
+        {
+            let files = vec![
+                rar_writer::file("Page 10.jpg", &jpeg_bytes(30, 40)),
+                rar_writer::file("Page 2.jpg", &jpeg_bytes(20, 10)),
+                rar_writer::file("Page 1.png", &png_bytes(8, 4)),
+            ];
+            rar_writer::rar5(&files, false)
+        },
+    ] {
+        let book = comic::open_book(bytes, "Rar Comic").unwrap();
+        assert_eq!(book.document.title.as_deref(), Some("Rar Comic"));
+        let dims: Vec<Option<(u32, u32)>> = book.pages.iter().map(|(_, _, d)| *d).collect();
+        assert_eq!(
+            dims,
+            [Some((8, 4)), Some((20, 10)), Some((30, 40))],
+            "pages sort naturally and carry header dimensions, both generations"
+        );
+        assert_eq!(book.toc.len(), 3);
+    }
+}
+
+#[test]
+fn the_container_is_sniffed_not_trusted() {
+    // The same open serves both containers whatever the file was
+    // named: dispatch reads the signature, mislabels being common.
+    let zip_bytes = cbz(&[("p1.jpg", &jpeg_bytes(6, 8))]);
+    let rar_bytes = cbr(&[("p1.jpg", &jpeg_bytes(6, 8))]);
+    assert_eq!(comic::open_book(zip_bytes, "z").unwrap().pages.len(), 1);
+    assert_eq!(comic::open_book(rar_bytes, "r").unwrap().pages.len(), 1);
+}
+
+#[test]
+fn a_compressed_rar_comic_refuses_plainly() {
+    let mut files = vec![rar_writer::file("Page 1.jpg", &jpeg_bytes(6, 8))];
+    files[0].method = 3;
+    let bytes = rar_writer::rar4(&files, 0);
+    let refused = comic::open_book(bytes, "x").map(|_| ()).unwrap_err();
+    assert_eq!(
+        refused.to_string(),
+        "This comic archive uses RAR compression that Oryx cannot read."
+    );
+}
+
+#[test]
+fn an_encrypted_rar_comic_refuses_plainly() {
+    let files = vec![rar_writer::file("Page 1.jpg", &jpeg_bytes(6, 8))];
+    let whole = rar_writer::rar4(&files, 0x0080);
+    let refused = comic::open_book(whole, "x").map(|_| ()).unwrap_err();
+    assert_eq!(
+        refused.to_string(),
+        "This comic archive is encrypted and cannot be opened."
+    );
+    let mut files = vec![rar_writer::file("Page 1.jpg", &jpeg_bytes(6, 8))];
+    files[0].encrypted = true;
+    let entry = rar_writer::rar4(&files, 0);
+    let refused = comic::open_book(entry, "x").map(|_| ()).unwrap_err();
+    assert_eq!(
+        refused.to_string(),
+        "This comic archive is encrypted and cannot be opened."
+    );
+}
+
+#[test]
+fn a_damaged_rar_comic_says_damaged() {
+    let full = cbr(&[("Page 1.jpg", &jpeg_bytes(6, 8))]);
+    let cut = full[..full.len() - 20].to_vec();
+    let refused = comic::open_book(cut, "x").map(|_| ()).unwrap_err();
+    assert_eq!(
+        refused.to_string(),
+        "This comic archive is damaged and cannot be read."
+    );
 }
 
 #[test]

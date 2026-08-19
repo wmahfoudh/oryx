@@ -5,10 +5,14 @@
 #[path = "../palmbook/tests/fixtures/writer.rs"]
 mod writer;
 
+#[path = "../rarball/tests/fixtures/writer.rs"]
+mod rar_writer;
+
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use oryx::doc::load::{self, FileKind};
-use oryx::doc::{fb2, kindle};
+use oryx::doc::{comic, fb2, kindle};
 
 /// A generated FB2 in the class of the library's real ones: hundreds of
 /// titled chapters of styled prose, no images.
@@ -114,6 +118,70 @@ fn a_generated_mobi_meets_the_open_budget() {
     }
 }
 
+/// Pages in the class of the library's real comics: 1200x1700 JPEGs,
+/// each its own shade so no two compress alike.
+fn comic_pages() -> Vec<(String, Vec<u8>)> {
+    (0..40)
+        .map(|n| {
+            let shade = image::Rgb([(40 + n * 5) as u8, 90, (200 - n * 4) as u8]);
+            let img = image::RgbImage::from_pixel(1200, 1700, shade);
+            let mut bytes = std::io::Cursor::new(Vec::new());
+            img.write_to(&mut bytes, image::ImageFormat::Jpeg).unwrap();
+            (format!("Page {:02}.jpg", n + 1), bytes.into_inner())
+        })
+        .collect()
+}
+
+/// A generated CBZ, stored, the wild's dominant form.
+fn generated_cbz(pages: &[(String, Vec<u8>)]) -> Vec<u8> {
+    let stored =
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    for (name, bytes) in pages {
+        writer.start_file(name.as_str(), stored).unwrap();
+        writer.write_all(bytes).unwrap();
+    }
+    writer.finish().unwrap().into_inner()
+}
+
+/// A generated CBR, stored, as every comic RAR in the corpus is.
+fn generated_cbr(pages: &[(String, Vec<u8>)]) -> Vec<u8> {
+    let files: Vec<rar_writer::FileSpec> = pages
+        .iter()
+        .map(|(name, bytes)| rar_writer::file(name, bytes))
+        .collect();
+    rar_writer::rar4(&files, 0)
+}
+
+/// The product promise holds for comics: a real-sized book opens whole
+/// inside the startup budget, from either container.
+#[test]
+#[ignore = "timing asserts only hold in release mode"]
+fn a_generated_comic_meets_the_open_budget() {
+    let pages = comic_pages();
+    for (label, bytes) in [
+        ("cbz", generated_cbz(&pages)),
+        ("cbr", generated_cbr(&pages)),
+    ] {
+        let size = bytes.len();
+        let t = std::time::Instant::now();
+        let (doc, toc, job) = comic::open_prefix(bytes, "Generated Comic").unwrap();
+        let open_ms = t.elapsed().as_millis();
+        println!(
+            "generated {label}: {size} bytes, open {open_ms}ms, {} pages, worker owed: {}",
+            doc.blocks.len(),
+            job.is_some()
+        );
+        assert_eq!(toc.len(), 40, "every page outlines");
+        if !cfg!(debug_assertions) {
+            assert!(
+                open_ms < 100,
+                "the {label} must open inside the budget: {open_ms}ms"
+            );
+        }
+    }
+}
+
 fn collect_books(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
@@ -122,14 +190,17 @@ fn collect_books(dir: &Path, out: &mut Vec<PathBuf>) {
         let path = entry.path();
         if path.is_dir() {
             collect_books(&path, out);
-        } else if matches!(load::detect(&path), FileKind::Fb2 | FileKind::Kindle) {
+        } else if matches!(
+            load::detect(&path),
+            FileKind::Fb2 | FileKind::Kindle | FileKind::Comic
+        ) {
             out.push(path);
         }
     }
 }
 
-/// The corpus sweep: every FB2, MOBI and AZW3 under a directory opens
-/// and walks whole, headless. Clean opens, refusals with their reasons
+/// The corpus sweep: every FB2, MOBI, AZW3, CBZ and CBR under a
+/// directory opens and walks whole, headless. Clean opens, refusals with their reasons
 /// and the slowest books are reported; a panic anywhere fails the
 /// sweep. Run with
 /// ORYX_CORPUS=<dir> cargo test --release --test books corpus_sweep -- --ignored --nocapture

@@ -1,7 +1,9 @@
-//! Comic book archives: a zip (CBZ) of page images in reading order.
-//! Every page becomes one image block; the encoded sources land in the
-//! media cache with header-probed dimensions, and pixels decode on
-//! demand as the viewport reaches them, so open never decodes a page.
+//! Comic book archives: a zip (CBZ) or RAR (CBR) of page images in
+//! reading order, dispatched on the signature since the wild mislabels
+//! the two freely. Every page becomes one image block; the encoded
+//! sources land in the media cache with header-probed dimensions, and
+//! pixels decode on demand as the viewport reaches them, so open never
+//! decodes a page.
 
 use std::collections::HashMap;
 use std::io::{Cursor, Read};
@@ -20,6 +22,8 @@ pub enum Refusal {
     NotComic,
     NoPages,
     Encrypted,
+    Compressed,
+    Damaged,
     TooLarge,
 }
 
@@ -29,6 +33,8 @@ impl std::fmt::Display for Refusal {
             Refusal::NotComic => "This file is not a readable comic book archive.",
             Refusal::NoPages => "This comic archive holds no page images.",
             Refusal::Encrypted => "This comic archive is encrypted and cannot be opened.",
+            Refusal::Compressed => "This comic archive uses RAR compression that Oryx cannot read.",
+            Refusal::Damaged => "This comic archive is damaged and cannot be read.",
             Refusal::TooLarge => "This book is too large to open.",
         })
     }
@@ -108,11 +114,25 @@ fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
 
 /// Opens a comic whole: the archive is walked once, page entries sort
 /// by name, and every page's header gives its dimensions. The job
-/// carries the encoded sources and nothing else.
+/// carries the encoded sources and nothing else. Dispatch reads the
+/// signature, not the extension: a zip named `.cbr` and a RAR named
+/// `.cbz` both open.
 pub fn open_prefix(
     bytes: Vec<u8>,
     name: &str,
 ) -> anyhow::Result<(Document, Vec<TocEntry>, Option<Job>)> {
+    let pages = if bytes.starts_with(b"Rar!\x1a\x07") {
+        rar_pages(&bytes)?
+    } else {
+        zip_pages(bytes)?
+    };
+    Ok(assemble(pages, name))
+}
+
+/// The page sources of a zip comic, in reading order. Raw reads keep
+/// open cheap: a stored page is a copy, a deflated page stays
+/// compressed until its decode asks.
+fn zip_pages(bytes: Vec<u8>) -> anyhow::Result<Vec<BookSource>> {
     let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|_| Refusal::NotComic)?;
     let mut entries: Vec<(usize, String)> = Vec::new();
     let mut declared = 0u64;
@@ -134,13 +154,75 @@ pub fn open_prefix(
         return Err(Refusal::NoPages.into());
     }
     entries.sort_by(|(_, a), (_, b)| natural_cmp(a, b));
+    let mut pages = Vec::with_capacity(entries.len());
+    for (index, _) in &entries {
+        let mut entry = zip.by_index_raw(*index).map_err(|_| Refusal::NotComic)?;
+        let method = entry.compression();
+        let mut raw = Vec::with_capacity(entry.compressed_size() as usize);
+        entry.read_to_end(&mut raw).map_err(|_| Refusal::NotComic)?;
+        pages.push(match method {
+            zip::CompressionMethod::Stored => BookSource::Raster(raw),
+            zip::CompressionMethod::Deflated => BookSource::Deflated(raw),
+            _ => return Err(Refusal::NotComic.into()),
+        });
+    }
+    Ok(pages)
+}
 
+/// The page sources of a RAR comic, in reading order. The wild stores
+/// comic pages (JPEG does not compress further), so a compressed entry
+/// refuses by name rather than half-opening the book.
+fn rar_pages(bytes: &[u8]) -> anyhow::Result<Vec<BookSource>> {
+    let archive = rarball::Archive::open(bytes).map_err(rar_refusal)?;
+    let mut entries: Vec<&rarball::Entry> = Vec::new();
+    let mut declared = 0u64;
+    for entry in archive.entries() {
+        if entry.directory || !is_page(&entry.name) {
+            continue;
+        }
+        if entry.encrypted {
+            return Err(Refusal::Encrypted.into());
+        }
+        if !matches!(entry.method, rarball::Method::Stored) {
+            return Err(Refusal::Compressed.into());
+        }
+        declared = declared.saturating_add(entry.unpacked_size);
+        entries.push(entry);
+    }
+    if declared > CEILING {
+        return Err(Refusal::TooLarge.into());
+    }
+    if entries.is_empty() {
+        return Err(Refusal::NoPages.into());
+    }
+    entries.sort_by(|a, b| natural_cmp(&a.name, &b.name));
+    let mut pages = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let data = archive.extract(entry).map_err(rar_refusal)?;
+        pages.push(BookSource::Raster(data.into_owned()));
+    }
+    Ok(pages)
+}
+
+/// RAR errors in the comic's refusal vocabulary.
+fn rar_refusal(error: rarball::Error) -> anyhow::Error {
+    match error {
+        rarball::Error::NotRar => Refusal::NotComic.into(),
+        rarball::Error::Truncated | rarball::Error::Corrupt(_) => Refusal::Damaged.into(),
+        rarball::Error::Encrypted => Refusal::Encrypted.into(),
+        rarball::Error::Unsupported(_) => Refusal::Compressed.into(),
+    }
+}
+
+/// One image block per page over a synthetic one-line-per-page source,
+/// with the outline and the media-cache sources.
+fn assemble(pages: Vec<BookSource>, name: &str) -> (Document, Vec<TocEntry>, Option<Job>) {
     let mut source = String::new();
     let mut blocks = Vec::new();
     let mut anchors = HashMap::new();
     let mut toc = Vec::new();
     let mut sources = Vec::new();
-    for (position, (index, _)) in entries.iter().enumerate() {
+    for (position, page) in pages.into_iter().enumerate() {
         let number = position + 1;
         let key = format!("page{number}");
         let label = format!("Page {number}");
@@ -161,18 +243,6 @@ pub fn open_prefix(
         });
         block.range = range;
         blocks.push(block);
-        // Raw reads keep open cheap: a stored page is a copy, a deflated
-        // page stays compressed until its decode; only the header probe
-        // inflates, and only a window.
-        let mut entry = zip.by_index_raw(*index).map_err(|_| Refusal::NotComic)?;
-        let method = entry.compression();
-        let mut raw = Vec::with_capacity(entry.compressed_size() as usize);
-        entry.read_to_end(&mut raw).map_err(|_| Refusal::NotComic)?;
-        let page = match method {
-            zip::CompressionMethod::Stored => BookSource::Raster(raw),
-            zip::CompressionMethod::Deflated => BookSource::Deflated(raw),
-            _ => return Err(Refusal::NotComic.into()),
-        };
         let dims = images::probe_source(&page);
         sources.push((key, page, dims));
     }
@@ -185,7 +255,7 @@ pub fn open_prefix(
         comic_file: true,
         ..Document::default()
     };
-    Ok((document, toc, Some(Job { sources })))
+    (document, toc, Some(Job { sources }))
 }
 
 /// The whole book at once, for tests: the document, the outline, and

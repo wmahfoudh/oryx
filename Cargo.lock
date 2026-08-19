@@ -2338,6 +2338,7 @@ dependencies = [
  "palmbook",
  "pdf-writer",
  "pulldown-cmark",
+ "rarball",
  "resvg",
  "rfd",
  "roxmltree",

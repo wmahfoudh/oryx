@@ -22,6 +22,7 @@ miniz_oxide = "0.8"
 noad = { path = "noad" }
 open = "5"
 palmbook = { path = "palmbook" }
+rarball = { path = "rarball" }
 pdf-writer = "0.15"
 pulldown-cmark = "0.13"
 resvg = "0.45.1"

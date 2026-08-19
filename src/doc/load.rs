@@ -28,8 +28,9 @@ pub enum FileKind {
     Fb2,
     /// A Kindle book (MOBI, AZW3, AZW); a Palm database, never text.
     Kindle,
-    /// A comic book archive (CBZ); a zip of page images, so it never
-    /// meets the binary sniff.
+    /// A comic book archive (CBZ or CBR); a zip or RAR of page images,
+    /// so it never meets the binary sniff. The reader dispatches on the
+    /// signature, since the wild mislabels the two freely.
     Comic,
     /// A format Oryx knows it cannot display (PDF). Refused by name:
     /// some PDFs open with an all-ASCII head the content sniff passes.
@@ -69,7 +70,7 @@ pub fn detect(path: &Path) -> FileKind {
     if ext == "mobi" || ext == "azw3" || ext == "azw" {
         return FileKind::Kindle;
     }
-    if ext == "cbz" {
+    if ext == "cbz" || ext == "cbr" {
         return FileKind::Comic;
     }
     if ext == "pdf" {
@@ -401,7 +402,7 @@ pub fn message(text: &str) -> Document {
 /// Every extension Oryx renders intentionally, for dialog filters.
 pub fn recognized_extensions() -> Vec<&'static str> {
     [
-        "md", "markdown", "txt", "epub", "fb2", "fbz", "mobi", "azw3", "azw", "cbz",
+        "md", "markdown", "txt", "epub", "fb2", "fbz", "mobi", "azw3", "azw", "cbz", "cbr",
     ]
     .into_iter()
     .chain(CODE_EXTENSIONS.iter().map(|(ext, _)| *ext))
