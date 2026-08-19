@@ -70,6 +70,17 @@ fn script_class(c: char) -> ScriptClass {
     }
 }
 
+/// The bidi strength of one character: `Some(true)` for Arabic and
+/// Hebrew, `Some(false)` for any other alphabetic, `None` for neutrals.
+/// The first non-`None` answer over a text decides its base direction.
+pub(crate) fn strong_rtl(c: char) -> Option<bool> {
+    match script_class(c) {
+        ScriptClass::Arabic | ScriptClass::Hebrew => Some(true),
+        ScriptClass::Other => Some(false),
+        ScriptClass::Neutral => None,
+    }
+}
+
 fn family_for(class: ScriptClass) -> Option<&'static str> {
     match class {
         ScriptClass::Arabic => Some(ARABIC_FAMILY),

@@ -693,6 +693,7 @@ impl Builder {
             job.settings.code_size,
             0.0,
             0.0,
+            0.0,
             job.theme.text.body,
         );
         let width = segments
@@ -1202,6 +1203,7 @@ fn shape(fonts: &mut FontStore, doc: &Document, lay: &LayoutDoc, run: &TextRun) 
         run.italic,
         run.size,
         run.x,
+        run.width,
         run.baseline,
         run.color,
     )
@@ -1242,6 +1244,7 @@ fn shape_text(
     italic: bool,
     size: f32,
     x: f32,
+    width: f32,
     baseline: f32,
     color: Rgba,
 ) -> Vec<Segment> {
@@ -1252,6 +1255,7 @@ fn shape_text(
         italic,
         size,
         x,
+        width,
     };
     segments_from(shape_text_data(fonts, &job), size, color, baseline)
 }

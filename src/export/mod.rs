@@ -313,6 +313,7 @@ impl ExportPass {
                     italic: run.italic,
                     size: run.size,
                     x: run.x,
+                    width: run.width,
                 })
                 .collect();
             pool.submit(Job {

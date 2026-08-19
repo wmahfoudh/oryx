@@ -3712,3 +3712,189 @@ fn a_hebrew_heading_routes_like_body_text() {
     let heading = find_containing(&l, &doc, "שלום");
     assert_eq!(l.run_family(heading), HEBREW_FAMILY);
 }
+
+// ---- RTL paragraphs: paint agreement and mirrored furniture ----
+
+const ARABIC_PARAGRAPH: &str = "اعلم أن فن التاريخ فن عزيز المذهب جم الفوائد شريف الغاية إذ هو يوقفنا على أحوال الماضين من الأمم في أخلاقهم والأنبياء في سيرهم والملوك في دولهم وسياستهم";
+
+fn lay_justified(source: &str, width: f32) -> (Document, LayoutDoc) {
+    let doc = markdown::parse(source);
+    let mut media = MediaCache::new(PathBuf::from("."));
+    let mut c = cfg();
+    c.justify = true;
+    let mut f = fonts();
+    let l = layout(&doc, &Theme::default_dark(), &mut f, &mut media, &c, width);
+    (doc, l)
+}
+
+/// Right extents of every visual line, keyed by the runs' line top.
+fn line_edges(l: &LayoutDoc) -> Vec<(f32, f32)> {
+    let mut lines: Vec<(f32, f32)> = Vec::new();
+    for r in &l.runs {
+        match lines.iter_mut().find(|(y, _)| (*y - r.y).abs() < 0.5) {
+            Some((_, edge)) => *edge = edge.max(r.x + r.width),
+            None => lines.push((r.y, r.x + r.width)),
+        }
+    }
+    lines
+}
+
+#[test]
+fn a_ragged_rtl_paragraph_stays_inside_the_column_and_ends_flush_right() {
+    let (_, l) = lay2(ARABIC_PARAGRAPH, 500.0);
+    for r in &l.runs {
+        assert!(r.x >= -0.5, "a run starts left of the page: x {}", r.x);
+        assert!(
+            r.x + r.width <= 500.5,
+            "a run leaves the column: x {} width {}",
+            r.x,
+            r.width
+        );
+    }
+    let lines = line_edges(&l);
+    assert!(
+        lines.len() >= 3,
+        "the fixture wraps, got {} lines",
+        lines.len()
+    );
+    let right = lines.iter().map(|(_, e)| *e).fold(f32::MIN, f32::max);
+    for (y, edge) in &lines {
+        assert!(
+            (edge - right).abs() < 1.0,
+            "flush right: the line at y {y} ends at {edge}, the paragraph at {right}"
+        );
+    }
+}
+
+#[test]
+fn a_justified_rtl_paragraph_tiles_without_overlap() {
+    let (doc, l) = lay_justified(ARABIC_PARAGRAPH, 500.0);
+    let mut lines: Vec<(f32, Vec<&TextRun>)> = Vec::new();
+    for r in &l.runs {
+        match lines.iter_mut().find(|(y, _)| (*y - r.y).abs() < 0.5) {
+            Some((_, runs)) => runs.push(r),
+            None => lines.push((r.y, vec![r])),
+        }
+    }
+    assert!(
+        lines.len() >= 3,
+        "the fixture wraps, got {} lines",
+        lines.len()
+    );
+    for (y, runs) in lines.iter_mut() {
+        runs.sort_by(|a, b| a.x.partial_cmp(&b.x).unwrap());
+        for pair in runs.windows(2) {
+            assert!(
+                pair[1].x >= pair[0].x + pair[0].width - 0.5,
+                "runs overlap on the line at y {y}: [{} + {}] then [{}]",
+                pair[0].x,
+                pair[0].width,
+                pair[1].x
+            );
+        }
+    }
+    for r in &l.runs {
+        assert!(
+            r.width > 0.0,
+            "every run spans left to right: x {} width {}",
+            r.x,
+            r.width
+        );
+        let t = l.run_text(&doc, r);
+        assert!(
+            ARABIC_PARAGRAPH.contains(t.trim()),
+            "a run's text is not a piece of the source: {t:?}"
+        );
+        assert!(
+            !t.trim().contains(' '),
+            "a stretched space hides inside a group: {t:?}"
+        );
+    }
+}
+
+#[test]
+fn an_rtl_list_item_carries_its_bullet_on_the_right() {
+    let (doc, l) = lay2("- سلام عليكم", 600.0);
+    let text = find_containing(&l, &doc, "سلام");
+    let marker = find_text(&l, &doc, "\u{2022}");
+    assert!(
+        marker.x >= text.x + text.width - 0.5,
+        "the bullet sits right of the text: bullet x {}, text ends {}",
+        marker.x,
+        text.x + text.width
+    );
+}
+
+#[test]
+fn nested_rtl_items_indent_from_the_right() {
+    let (doc, l) = lay2("- خارجي\n  - داخلي", 800.0);
+    let outer = find_containing(&l, &doc, "خارجي");
+    let inner = find_containing(&l, &doc, "داخلي");
+    assert!(
+        inner.x + inner.width <= outer.x + outer.width - 24.0 + 0.5,
+        "the nested item steps in from the right: outer ends {}, inner ends {}",
+        outer.x + outer.width,
+        inner.x + inner.width
+    );
+}
+
+#[test]
+fn an_rtl_quote_carries_its_bar_on_the_right() {
+    let (doc, l) = lay2("> سلام عليكم", 600.0);
+    let t = Theme::default_dark();
+    let text = find_containing(&l, &doc, "سلام");
+    let bar = l
+        .rects
+        .iter()
+        .filter(|r| r.color == t.blocks.quote_bar)
+        .max_by(|a, b| a.x.partial_cmp(&b.x).unwrap())
+        .expect("the quote bar exists");
+    assert!(
+        bar.x >= text.x + text.width - 0.5,
+        "the bar sits right of the text: bar x {}, text ends {}",
+        bar.x,
+        text.x + text.width
+    );
+}
+
+#[test]
+fn an_rtl_heading_ends_flush_right() {
+    let (doc, l) = lay2("# مقدمة\n\nاعلم أن فن التاريخ فن عزيز المذهب", 600.0);
+    let heading = find_containing(&l, &doc, "مقدمة");
+    let body = find_containing(&l, &doc, "اعلم");
+    let body_right = l
+        .runs
+        .iter()
+        .filter(|r| (r.y - body.y).abs() < 0.5)
+        .map(|r| r.x + r.width)
+        .fold(f32::MIN, f32::max);
+    assert!(
+        (heading.x + heading.width - body_right).abs() < 1.0,
+        "the heading ends where the body does: heading {}, body {}",
+        heading.x + heading.width,
+        body_right
+    );
+}
+
+#[test]
+fn mixed_direction_blocks_interleave() {
+    let (doc, l) = lay2(
+        "اعلم أن فن التاريخ\n\nplain latin paragraph\n\nשלום עולם",
+        600.0,
+    );
+    let arabic = find_containing(&l, &doc, "اعلم");
+    let latin = find_containing(&l, &doc, "plain");
+    let hebrew = find_containing(&l, &doc, "שלום");
+    assert!(
+        latin.x < arabic.x,
+        "the latin block starts at the left, the arabic at the right"
+    );
+    assert!(
+        (arabic.x + arabic.width) > (latin.x + latin.width),
+        "the arabic block reaches the right edge"
+    );
+    assert!(
+        ((hebrew.x + hebrew.width) - (arabic.x + arabic.width)).abs() < 1.0,
+        "hebrew and arabic share the right edge"
+    );
+}

@@ -1702,7 +1702,13 @@ fn pool_top_up(doc: &Document, pass: &mut LayoutPass) {
             }
             // Mirrors open_code: the pad and wrap width the assembler
             // will place the line against.
-            let (x_base, avail) = block_geometry(block, pass.margin, pass.content_width, &ctx.cfg);
+            let (x_base, avail) = block_geometry(
+                block,
+                pass.margin,
+                pass.content_width,
+                &ctx.cfg,
+                &doc.source,
+            );
             let size = code_face(doc.plain_file, &ctx.cfg).1 * ctx.cfg.zoom;
             let pad = if code_framed(doc) {
                 metrics::CODE_PAD * ctx.cfg.zoom
@@ -1736,7 +1742,13 @@ fn pool_top_up(doc: &Document, pass: &mut LayoutPass) {
             else {
                 continue;
             };
-            let (x_base, avail) = block_geometry(block, pass.margin, pass.content_width, &ctx.cfg);
+            let (x_base, avail) = block_geometry(
+                block,
+                pass.margin,
+                pass.content_width,
+                &ctx.cfg,
+                &doc.source,
+            );
             pool.submit(Job {
                 generation: pass.pool_generation,
                 key: StepKey::step(position, 0),
@@ -1798,17 +1810,45 @@ fn block_metrics(block: &Block, cfg: &ViewConfig, plain: bool) -> Option<(Option
     Some((heading, is_list, base_size))
 }
 
+/// A block's base direction, the bidi rule: its first strong character
+/// decides. Only the text-bearing kinds answer; tables keep their
+/// column order and code is always LTR.
+fn block_rtl(block: &Block, source: &str) -> bool {
+    let spans: &[Span] = match &block.kind {
+        BlockKind::Paragraph { spans } => spans,
+        BlockKind::Heading { spans, .. } => spans,
+        BlockKind::ListItem { spans, .. } => spans,
+        _ => return false,
+    };
+    spans
+        .iter()
+        .flat_map(|span| span.text(source).chars())
+        .find_map(crate::style::fonts::strong_rtl)
+        .unwrap_or(false)
+}
+
 /// The x origin and available width a block shapes against, derived from
 /// its quote depth and the pass geometry alone, so seeding and assembly
-/// agree by construction.
-fn block_geometry(block: &Block, margin: f32, content_width: f32, cfg: &ViewConfig) -> (f32, f32) {
+/// agree by construction. An RTL block's quote indents step in from the
+/// right, so its column keeps the left edge and loses the right.
+fn block_geometry(
+    block: &Block,
+    margin: f32,
+    content_width: f32,
+    cfg: &ViewConfig,
+    source: &str,
+) -> (f32, f32) {
     let quote_indent = block.quote_depth as f32 * metrics::INDENT * cfg.zoom;
     let quote_pad = if block.quote_depth > 0 {
         12.0 * cfg.zoom
     } else {
         0.0
     };
-    let x_base = margin + quote_indent + quote_pad;
+    let x_base = if block.quote_depth > 0 && block_rtl(block, source) {
+        margin + quote_pad
+    } else {
+        margin + quote_indent + quote_pad
+    };
     let avail = (content_width - quote_indent - 2.0 * quote_pad).max(40.0);
     (x_base, avail)
 }
@@ -1915,7 +1955,7 @@ fn place_block(
         out.anchors.push((anchor.clone(), pass.cursor));
     }
 
-    let (x_base, avail) = block_geometry(block, pass.margin, pass.content_width, cfg);
+    let (x_base, avail) = block_geometry(block, pass.margin, pass.content_width, cfg, &doc.source);
     let marks = Marks {
         rects: out.rects.len(),
         runs: out.runs.len(),
@@ -2009,7 +2049,16 @@ fn place_block(
         pass.scratch = scratch;
         let mut ready = shaped.scratch;
         out.splice(&mut ready, pass.cursor);
-        finish_block(theme, cfg, block, frame, shaped.height, out, pass);
+        finish_block(
+            theme,
+            cfg,
+            block,
+            frame,
+            shaped.height,
+            out,
+            pass,
+            &doc.source,
+        );
         settle_retention(out, pass, &counts, 0..0);
         return;
     }
@@ -2034,7 +2083,7 @@ fn place_block(
     );
     out.splice(&mut scratch, pass.cursor);
     pass.scratch = scratch;
-    finish_block(theme, cfg, block, frame, height, out, pass);
+    finish_block(theme, cfg, block, frame, height, out, pass, &doc.source);
     settle_retention(out, pass, &counts, 0..0);
 }
 
@@ -2509,7 +2558,13 @@ fn seed_plan(
         else {
             return;
         };
-        let (x_base, avail) = block_geometry(block, table.margin, table.content_width, &ctx.cfg);
+        let (x_base, avail) = block_geometry(
+            block,
+            table.margin,
+            table.content_width,
+            &ctx.cfg,
+            &doc.source,
+        );
         for line in lines {
             let text = source_lines.line(&doc.source, line);
             if text.is_empty() {
@@ -2559,7 +2614,13 @@ fn seed_plan(
         let Some((heading, _, base_size)) = block_metrics(block, &ctx.cfg, doc.plain_file) else {
             continue;
         };
-        let (x_base, avail) = block_geometry(block, table.margin, table.content_width, &ctx.cfg);
+        let (x_base, avail) = block_geometry(
+            block,
+            table.margin,
+            table.content_width,
+            &ctx.cfg,
+            &doc.source,
+        );
         pool.submit(Job {
             generation,
             key: StepKey::step(position, 0),
@@ -2683,7 +2744,8 @@ fn replay_position(
     let block = &doc.blocks[entry.block as usize];
     let (heading, _, base_size) =
         block_metrics(block, cfg, doc.plain_file).expect("a non-silent entry has metrics");
-    let (x_base, avail) = block_geometry(block, table.margin, table.content_width, cfg);
+    let (x_base, avail) =
+        block_geometry(block, table.margin, table.content_width, cfg, &doc.source);
     let run_mark = out.runs.len();
     let rect_mark = out.rects.len();
     let image_mark = out.images.len();
@@ -2765,6 +2827,7 @@ fn replay_position(
             table.content_width,
             entry.deco_top,
             entry.bottom(),
+            &doc.source,
         );
         out.rects.splice(rect_mark..rect_mark, decoration);
     }
@@ -2797,7 +2860,8 @@ fn replay_code_lines(
     else {
         return;
     };
-    let (x_base, avail) = block_geometry(block, table.margin, table.content_width, cfg);
+    let (x_base, avail) =
+        block_geometry(block, table.margin, table.content_width, cfg, &doc.source);
     let x0 = x_base + entry.pad;
     let wrap_width = (avail - 2.0 * entry.pad).max(40.0);
     let size = code_face(doc.plain_file, cfg).1 * cfg.zoom;
@@ -2850,6 +2914,7 @@ fn replay_code_lines(
 
 /// The tail every block runs once its height is known: centering, the
 /// quote decoration, and the advance of the carried state.
+#[allow(clippy::too_many_arguments)]
 fn finish_block(
     theme: &Theme,
     cfg: &ViewConfig,
@@ -2858,6 +2923,7 @@ fn finish_block(
     height: f32,
     out: &mut LayoutDoc,
     pass: &mut LayoutPass,
+    source: &str,
 ) {
     if block.centered {
         center_lines(
@@ -2895,6 +2961,7 @@ fn finish_block(
             pass.content_width,
             top,
             pass.cursor + height,
+            source,
         );
         out.rects
             .splice(frame.marks.rects..frame.marks.rects, decoration);
@@ -2950,6 +3017,7 @@ fn shape_alert_title(
 /// The quote region's panel and bars wrapping a block from `top` to
 /// `bottom`, in paint order: shared by the pass's tail and the window
 /// replay so both produce the same rectangles.
+#[allow(clippy::too_many_arguments)]
 fn quote_decoration(
     theme: &Theme,
     cfg: &ViewConfig,
@@ -2958,8 +3026,10 @@ fn quote_decoration(
     content_width: f32,
     top: f32,
     bottom: f32,
+    source: &str,
 ) -> Vec<DecoRect> {
     let panel_h = bottom - top;
+    let rtl = block_rtl(block, source);
     let mut decoration = vec![DecoRect::fill(
         margin,
         top,
@@ -2972,13 +3042,14 @@ fn quote_decoration(
             Some(kind) if level == 0 => alert_color(theme, kind),
             _ => theme.blocks.quote_bar,
         };
-        decoration.push(DecoRect::fill(
-            margin + level as f32 * metrics::INDENT * cfg.zoom,
-            top,
-            3.0 * cfg.zoom,
-            panel_h,
-            bar,
-        ));
+        let bar_w = 3.0 * cfg.zoom;
+        let step = level as f32 * metrics::INDENT * cfg.zoom;
+        let bar_x = if rtl {
+            margin + content_width - bar_w - step
+        } else {
+            margin + step
+        };
+        decoration.push(DecoRect::fill(bar_x, top, bar_w, panel_h, bar));
     }
     decoration
 }
@@ -3094,7 +3165,16 @@ fn place_code_line(
     };
     if open.line >= lines.len() {
         let height = open.line_top() - open.y0 + open.pad;
-        finish_block(theme, cfg, block, open.frame, height, out, pass);
+        finish_block(
+            theme,
+            cfg,
+            block,
+            open.frame,
+            height,
+            out,
+            pass,
+            &doc.source,
+        );
         let kept = open.kept.unwrap_or(0..0);
         settle_retention(out, pass, &open.counts, kept);
         return;
@@ -3620,24 +3700,45 @@ fn layout_list_item(
     let size = cfg.body_size * cfg.zoom;
     let line_height = metrics::LINE_HEIGHT * size;
     let indent = metrics::INDENT * cfg.zoom * (depth as f32 + 1.0);
-    let text_x = x0 + indent;
+    // An RTL item mirrors: the text column keeps the left edge and
+    // steps its right edge in, and the marker sits in the right gutter.
+    let rtl = spans
+        .iter()
+        .flat_map(|span| span.text(source).chars())
+        .find_map(crate::style::fonts::strong_rtl)
+        .unwrap_or(false);
+    let text_x = if rtl { x0 } else { x0 + indent };
     let text_w = (avail - indent).max(40.0);
     let gutter = 10.0 * cfg.zoom;
 
     match marker {
         Marker::Bullet => {
             let (runs, width) = shape_marker(fonts, cfg, "\u{2022}", size, theme.text.body, out);
-            place_marker(runs, text_x - width - gutter, y0, block_index, out);
+            let x = if rtl {
+                text_x + text_w + gutter
+            } else {
+                text_x - width - gutter
+            };
+            place_marker(runs, x, y0, block_index, out);
         }
         Marker::Number(n) => {
             let text = format!("{n}.");
             let (runs, width) = shape_marker(fonts, cfg, &text, size, theme.text.body, out);
-            place_marker(runs, text_x - width - gutter, y0, block_index, out);
+            let x = if rtl {
+                text_x + text_w + gutter
+            } else {
+                text_x - width - gutter
+            };
+            place_marker(runs, x, y0, block_index, out);
         }
         Marker::None => {}
         Marker::Task { checked, .. } => {
             let side = 0.8 * size;
-            let bx = text_x - side - gutter;
+            let bx = if rtl {
+                text_x + text_w + gutter
+            } else {
+                text_x - side - gutter
+            };
             let by = y0 + (line_height - side) / 2.0;
             // The square is the click's hit target, recorded with the
             // same values it is drawn from.
@@ -5347,6 +5448,7 @@ pub fn edit_code_lines(
         lay.table.margin,
         lay.table.content_width,
         cfg,
+        &doc.source,
     );
     let x0 = x_base + pad;
     let wrap_width = (avail - 2.0 * pad).max(40.0);
@@ -5657,8 +5759,6 @@ fn glyph_groups<'a>(
         {
             end += 1;
         }
-        let first = &glyphs[g];
-        let last = &glyphs[end - 1];
         let start = glyphs[g..end]
             .iter()
             .map(|gl| gl.start)
@@ -5669,11 +5769,22 @@ fn glyph_groups<'a>(
             .map(|gl| gl.end)
             .max()
             .expect("a glyph");
+        // Glyphs arrive in logical order; on an RTL line their x runs
+        // right to left, so the extent comes from min and max, never
+        // from the first and last of the walk.
+        let left = glyphs[g..end]
+            .iter()
+            .map(|gl| gl.x)
+            .fold(f32::MAX, f32::min);
+        let right = glyphs[g..end]
+            .iter()
+            .map(|gl| gl.x + gl.w)
+            .fold(f32::MIN, f32::max);
         let group = GlyphGroup {
             meta,
             bytes: start..stop,
-            x: first.x,
-            width: last.x + last.w - first.x,
+            x: left,
+            width: right - left,
         };
         g = end;
         Some(group)

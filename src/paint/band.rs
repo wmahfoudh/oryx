@@ -227,7 +227,15 @@ fn draw_run(
         .next()
         .map(|lr| lr.line_y)
         .unwrap_or(run.size);
-    let (origin_x, origin_y) = (run.x, run.baseline - paint_baseline - y_top);
+    // An RTL fragment anchors at the run's right edge, so a justified
+    // group's stretched space falls on its left, where the line put it.
+    let anchor = buffer
+        .layout_runs()
+        .next()
+        .filter(|lr| lr.rtl)
+        .map(|lr| run.width - lr.line_w)
+        .unwrap_or(0.0);
+    let (origin_x, origin_y) = (run.x + anchor, run.baseline - paint_baseline - y_top);
     let width = pixmap.width() as i32;
     let height = pixmap.height() as i32;
     let data = pixmap.data_mut();

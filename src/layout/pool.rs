@@ -92,6 +92,9 @@ pub(crate) struct TextJob {
     pub italic: bool,
     pub size: f32,
     pub x: f32,
+    /// The run's recorded width. An RTL fragment anchors at its right
+    /// edge, so a justified group's stretched space falls on its left.
+    pub width: f32,
 }
 
 /// One shaped run for emission, split by the face the shaper resolved.
@@ -137,6 +140,17 @@ pub(crate) fn shape_text_data(
     );
     buffer.shape_until_scroll(&mut fonts.font_system, false);
 
+    // An RTL fragment shapes at its natural width from x zero; anchoring
+    // its right edge to the run's recorded right edge leaves a justified
+    // group's stretched space on its left, where the line put it. An LTR
+    // fragment anchors left as always, and an unstretched fragment moves
+    // by nothing either way.
+    let anchor = buffer
+        .layout_runs()
+        .next()
+        .filter(|lr| lr.rtl)
+        .map(|lr| job.width - lr.line_w)
+        .unwrap_or(0.0);
     let mut segments: Vec<SegmentData> = Vec::new();
     for line in buffer.layout_runs() {
         for glyph in line.glyphs {
@@ -144,14 +158,14 @@ pub(crate) fn shape_text_data(
             if !open {
                 segments.push(SegmentData {
                     face: glyph.font_id,
-                    x: job.x + glyph.x,
+                    x: job.x + anchor + glyph.x,
                     glyphs: Vec::new(),
                 });
             }
             let segment = segments.last_mut().expect("just opened");
             segment.glyphs.push(GlyphData {
                 id: glyph.glyph_id,
-                x: job.x + glyph.x,
+                x: job.x + anchor + glyph.x,
                 width: glyph.w,
                 start: glyph.start,
                 end: glyph.end,
