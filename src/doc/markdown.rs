@@ -2009,6 +2009,16 @@ mod tests {
         assert_eq!(d.blocks[1].details, Some(0));
     }
 
+    /// A heading's range starts past its `#` marker, so offset zero
+    /// sits before every block; it still belongs to the document head,
+    /// or a saved or remembered top position resolves to nothing.
+    #[test]
+    fn an_offset_before_the_first_block_belongs_to_it() {
+        let d = parse("# Title\n\nSome prose under it.");
+        assert!(d.blocks[0].range.start > 0, "the marker precedes the text");
+        assert_eq!(d.block_at_offset(0), Some(0));
+    }
+
     /// The synthesized summary carries its neighbor's offset, keeping
     /// blocks ordered by source offset for the offset-to-block search.
     #[test]

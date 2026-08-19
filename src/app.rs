@@ -197,6 +197,7 @@ pub fn run(path: Option<PathBuf>, theme_name: Option<String>) -> anyhow::Result<
         pending_scroll: None,
         pending_anchor: None,
         pending_offset: None,
+        jump_stack: Vec::new(),
         book_toc,
         positions: config::Positions::load(),
         layout_width: 0.0,
@@ -412,6 +413,18 @@ fn justify_pref(config: &Config, doc: &Document) -> bool {
         }
 }
 
+/// Records the position a jump is leaving. Jumping again from the same
+/// place stacks one return, not two, and the depth stays bounded.
+fn push_jump_position(stack: &mut Vec<usize>, offset: usize) {
+    if stack.last() == Some(&offset) {
+        return;
+    }
+    stack.push(offset);
+    if stack.len() > 100 {
+        stack.remove(0);
+    }
+}
+
 /// The comic display ladder, ordered by magnification: page width,
 /// full page, two pages. Down shows more at smaller size, up shows
 /// less at larger size, and the ends stand still.
@@ -536,6 +549,9 @@ struct App {
     /// A book source offset to land on once delivered and placed: a
     /// restored reading position or an internal link's target.
     pending_offset: Option<usize>,
+    /// The positions jumps left behind, newest last; Alt+Left returns
+    /// through them one level at a time. Lives with the document.
+    jump_stack: Vec<usize>,
     /// A book's table of contents as authored; empty for files, whose
     /// outline scans headings instead.
     book_toc: Vec<epub::TocEntry>,
@@ -891,6 +907,7 @@ impl App {
                     self.scroll_by(self.page_step());
                 }
             }
+            Command::Back => self.pop_jump(),
             Command::Top => self.scroll_to(0.0),
             Command::Bottom => {
                 self.scroll_to(self.doc_height());
@@ -3434,6 +3451,27 @@ impl App {
         self.request_redraw();
     }
 
+    /// Remembers where the reader is standing, so Alt+Left can bring
+    /// them back after a jump carries them away.
+    fn push_jump(&mut self) {
+        if let Some(offset) = self.top_offset() {
+            push_jump_position(&mut self.jump_stack, offset);
+        }
+    }
+
+    /// Returns to the position the last jump left, one level at a time;
+    /// an empty stack does nothing. Read mode only: the editor moves by
+    /// caret, not by jumps.
+    fn pop_jump(&mut self) {
+        if self.mode != edit::Mode::Read {
+            return;
+        }
+        if let Some(offset) = self.jump_stack.pop() {
+            self.pending_offset = Some(offset);
+            self.request_redraw();
+        }
+    }
+
     /// Scrolls to a heading block: a placed anchor jumps now; a folded
     /// or unplaced one reveals and lands through the pending target.
     fn jump_to_heading(&mut self, block: usize) {
@@ -3456,6 +3494,7 @@ impl App {
         match self.document.blocks.get(block).map(|b| &b.kind) {
             Some(BlockKind::Heading { anchor, .. }) => {
                 let target = format!("#{anchor}");
+                self.push_jump();
                 if let Some(y) = self.layout.as_ref().and_then(|l| l.anchor_y(&target)) {
                     self.scroll_to(y);
                     return;
@@ -3471,6 +3510,7 @@ impl App {
             // covers placed and not-yet-placed alike. An unresolved
             // entry has no block and goes nowhere.
             Some(_) => {
+                self.push_jump();
                 let offset = self.document.blocks[block].range.start;
                 if self.document.reveal(block) {
                     self.restart_layout();
@@ -3642,6 +3682,8 @@ impl App {
         self.undo = None;
         self.rehighlight_at = None;
         self.notice = None;
+        // Return positions belong to the file being left.
+        self.jump_stack.clear();
         let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         let loaded = load::open(&path, Some(Instant::now() + load::OPEN_BUDGET));
         let opened = loaded.is_ok();
@@ -4428,6 +4470,7 @@ impl App {
             return;
         };
         if let Some(anchor) = lay.anchor_y(&target) {
+            self.push_jump();
             self.scroll_to(anchor);
         } else if let Some(rest) = target.strip_prefix("book:") {
             // An internal book link: the whole model first, so a forward
@@ -4438,6 +4481,7 @@ impl App {
                 None => (rest, None),
             };
             if let Some(offset) = epub::resolve_target(&self.document, path, fragment) {
+                self.push_jump();
                 if let Some(block) = self.document.block_at_offset(offset) {
                     if self.document.reveal(block) {
                         self.restart_layout();
@@ -4470,6 +4514,7 @@ impl App {
             // The heading exists but is not placed: folded away, beyond
             // the pass, or both. Reveal opens the chain and the pending
             // target lands once the pass places it.
+            self.push_jump();
             if self.document.reveal(block) {
                 self.restart_layout();
             }
@@ -4478,6 +4523,7 @@ impl App {
         } else if self.layout_pending() {
             // Not in the model yet either; the parse may still deliver
             // it, so the jump waits instead of doing nothing.
+            self.push_jump();
             self.pending_anchor = Some(target);
         }
     }
@@ -5265,9 +5311,10 @@ impl ApplicationHandler for App {
                 }
                 let ctrl = self.modifiers.control_key();
                 let shift = self.modifiers.shift_key();
+                let alt = self.modifiers.alt_key();
                 // The overlay toggles stay global so their chord closes the
                 // overlay it opened; everything else feeds an open overlay.
-                match keymap::command(&logical_key, ctrl, shift) {
+                match keymap::command(&logical_key, ctrl, shift, alt) {
                     Some(
                         cmd @ (Command::ThemeBrowser
                         | Command::Settings
@@ -5556,6 +5603,20 @@ mod tests {
             ),
             "Flutter in Action · epub · oryx"
         );
+    }
+
+    #[test]
+    fn the_jump_stack_records_and_collapses_positions() {
+        let mut stack = Vec::new();
+        super::push_jump_position(&mut stack, 10);
+        super::push_jump_position(&mut stack, 10);
+        super::push_jump_position(&mut stack, 25);
+        assert_eq!(stack, [10, 25], "re-jumping from one place stacks once");
+        for offset in 0..300 {
+            super::push_jump_position(&mut stack, offset);
+        }
+        assert!(stack.len() <= 100, "the stack stays bounded");
+        assert_eq!(stack.pop(), Some(299), "the newest return pops first");
     }
 
     #[test]

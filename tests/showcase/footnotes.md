@@ -16,6 +16,102 @@ Notes can be as long as they need to be, wrapping across several lines at a
 slightly smaller size than the body so the block reads as apparatus rather
 than as prose[^long].
 
+Footnote references render as raised superscript markers in the flow of the
+sentence[^why], sized down from the body text so they mark without
+interrupting. Clicking one jumps to its definition.
+
+Definitions collect at the end of the document under a rule, in reference
+order, wherever they were written in the source[^order]. The one below was
+written first in the file and still lands in its proper place.
+
+A paragraph can carry several notes at once[^one] without the line spacing
+shifting around them[^two], because a raised marker is laid out inside the
+line box rather than above it[^three].
+
+Notes can be as long as they need to be, wrapping across several lines at a
+slightly smaller size than the body so the block reads as apparatus rather
+than as prose[^long].
+
+Footnote references render as raised superscript markers in the flow of the
+sentence[^why], sized down from the body text so they mark without
+interrupting. Clicking one jumps to its definition.
+
+Definitions collect at the end of the document under a rule, in reference
+order, wherever they were written in the source[^order]. The one below was
+written first in the file and still lands in its proper place.
+
+A paragraph can carry several notes at once[^one] without the line spacing
+shifting around them[^two], because a raised marker is laid out inside the
+line box rather than above it[^three].
+
+Notes can be as long as they need to be, wrapping across several lines at a
+slightly smaller size than the body so the block reads as apparatus rather
+than as prose[^long].
+
+Footnote references render as raised superscript markers in the flow of the
+sentence[^why], sized down from the body text so they mark without
+interrupting. Clicking one jumps to its definition.
+
+Definitions collect at the end of the document under a rule, in reference
+order, wherever they were written in the source[^order]. The one below was
+written first in the file and still lands in its proper place.
+
+A paragraph can carry several notes at once[^one] without the line spacing
+shifting around them[^two], because a raised marker is laid out inside the
+line box rather than above it[^three].
+
+Notes can be as long as they need to be, wrapping across several lines at a
+slightly smaller size than the body so the block reads as apparatus rather
+than as prose[^long].
+
+Footnote references render as raised superscript markers in the flow of the
+sentence[^why], sized down from the body text so they mark without
+interrupting. Clicking one jumps to its definition.
+
+Definitions collect at the end of the document under a rule, in reference
+order, wherever they were written in the source[^order]. The one below was
+written first in the file and still lands in its proper place.
+
+A paragraph can carry several notes at once[^one] without the line spacing
+shifting around them[^two], because a raised marker is laid out inside the
+line box rather than above it[^three].
+
+Notes can be as long as they need to be, wrapping across several lines at a
+slightly smaller size than the body so the block reads as apparatus rather
+than as prose[^long].
+
+Footnote references render as raised superscript markers in the flow of the
+sentence[^why], sized down from the body text so they mark without
+interrupting. Clicking one jumps to its definition.
+
+Definitions collect at the end of the document under a rule, in reference
+order, wherever they were written in the source[^order]. The one below was
+written first in the file and still lands in its proper place.
+
+A paragraph can carry several notes at once[^one] without the line spacing
+shifting around them[^two], because a raised marker is laid out inside the
+line box rather than above it[^three].
+
+Notes can be as long as they need to be, wrapping across several lines at a
+slightly smaller size than the body so the block reads as apparatus rather
+than as prose[^long].
+
+Footnote references render as raised superscript markers in the flow of the
+sentence[^why], sized down from the body text so they mark without
+interrupting. Clicking one jumps to its definition.
+
+Definitions collect at the end of the document under a rule, in reference
+order, wherever they were written in the source[^order]. The one below was
+written first in the file and still lands in its proper place.
+
+A paragraph can carry several notes at once[^one] without the line spacing
+shifting around them[^two], because a raised marker is laid out inside the
+line box rather than above it[^three].
+
+Notes can be as long as they need to be, wrapping across several lines at a
+slightly smaller size than the body so the block reads as apparatus rather
+than as prose[^long].
+
 [^order]: Written first in the source, placed third here, because
     definitions are ordered by the references that point at them.
 

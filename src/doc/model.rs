@@ -116,7 +116,14 @@ impl Document {
     /// before it. Book anchors resolve to blocks through this.
     pub fn block_at_offset(&self, offset: usize) -> Option<usize> {
         let after = self.blocks.partition_point(|b| b.range.start <= offset);
-        after.checked_sub(1)
+        match after.checked_sub(1) {
+            Some(block) => Some(block),
+            // An offset before the first block's content (a heading
+            // marker, front matter) belongs to the document head; a
+            // saved top position must land at the top, not nowhere.
+            None if !self.blocks.is_empty() => Some(0),
+            None => None,
+        }
     }
 
     /// Whether justification applies: prose documents, markdown and

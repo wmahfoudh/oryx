@@ -35,6 +35,7 @@ pub enum Command {
     PageDown,
     Top,
     Bottom,
+    Back,
     Edit,
     Cut,
     Paste,
@@ -48,7 +49,7 @@ pub enum Command {
 
 impl Command {
     /// Every variant; the coverage test checks each one against the table.
-    pub const ALL: [Command; 37] = [
+    pub const ALL: [Command; 38] = [
         Command::OpenFile,
         Command::Reload,
         Command::Sidebar,
@@ -77,6 +78,7 @@ impl Command {
         Command::PageDown,
         Command::Top,
         Command::Bottom,
+        Command::Back,
         Command::Edit,
         Command::Cut,
         Command::Paste,
@@ -102,6 +104,8 @@ enum Binding {
     ShiftNamed(NamedKey),
     /// A named key with Ctrl held; tried before the plain named form.
     CtrlNamed(NamedKey),
+    /// A named key with Alt held; tried before the plain named form.
+    AltNamed(NamedKey),
 }
 
 /// One help-table row: display labels plus the chords the row covers.
@@ -176,6 +180,12 @@ pub const SHORTCUTS: &[Shortcut] = &[
             (Binding::Named(NamedKey::Home), Command::Top),
             (Binding::Named(NamedKey::End), Command::Bottom),
         ],
+    },
+    Shortcut {
+        keys: "Alt+Left",
+        action: "Go back after a link or outline jump",
+        section: "Navigation",
+        bindings: &[(Binding::AltNamed(NamedKey::ArrowLeft), Command::Back)],
     },
     Shortcut {
         keys: "Ctrl+Shift+B",
@@ -347,12 +357,13 @@ pub const SHORTCUTS: &[Shortcut] = &[
 /// Resolves a key event against the table. Chords that require a
 /// modifier are tried first, so Ctrl+Shift+C never falls through to
 /// Ctrl+C and Ctrl+Left never falls through to plain Left.
-pub fn command(key: &Key, ctrl: bool, shift: bool) -> Option<Command> {
+pub fn command(key: &Key, ctrl: bool, shift: bool, alt: bool) -> Option<Command> {
     let bindings = || SHORTCUTS.iter().flat_map(|row| row.bindings.iter());
     let shifted = bindings().find(|(binding, _)| match binding {
         Binding::CtrlShift(c) => ctrl && shift && is_char(key, c),
         Binding::ShiftNamed(n) => shift && is_named(key, n),
         Binding::CtrlNamed(n) => ctrl && is_named(key, n),
+        Binding::AltNamed(n) => alt && is_named(key, n),
         _ => false,
     });
     let plain = || {
@@ -392,6 +403,27 @@ mod tests {
 
     fn chr(s: &str) -> Key {
         Key::Character(s.into())
+    }
+
+    /// The table predates the Alt modifier; the shadow keeps the
+    /// alt-free assertions readable.
+    fn command(key: &Key, ctrl: bool, shift: bool) -> Option<Command> {
+        super::command(key, ctrl, shift, false)
+    }
+
+    #[test]
+    fn alt_left_goes_back_and_plain_left_still_switches_panes() {
+        let left = Key::Named(NamedKey::ArrowLeft);
+        assert_eq!(
+            super::command(&left, false, false, true),
+            Some(Command::Back),
+            "Alt+Left returns from a jump"
+        );
+        assert_eq!(
+            super::command(&left, false, false, false),
+            Some(Command::PaneLeft),
+            "plain Left keeps the pane switch"
+        );
     }
 
     #[test]
