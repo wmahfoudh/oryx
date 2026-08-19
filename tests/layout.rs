@@ -11,7 +11,7 @@ use oryx::layout::{
     recolor_batch, recolor_code_lines, window_to, DecoRect, LayoutDoc, ShapePool, TextRef, TextRun,
     ViewConfig,
 };
-use oryx::style::fonts::{FontStore, CODE_FAMILY};
+use oryx::style::fonts::{FontStore, ARABIC_FAMILY, BODY_FAMILY, CODE_FAMILY, HEBREW_FAMILY};
 use oryx::style::highlight::{self, Arrival};
 use oryx::style::theme::Theme;
 
@@ -3654,4 +3654,61 @@ fn markdown_source_styles_keep_the_grid() {
         l.runs.iter().filter(|r| r.span == 1).any(|r| r.italic),
         "the italic row carries the slanted face"
     );
+}
+
+// ---- Script routing to the designated faces ----
+
+/// The first run whose resolved text contains the needle.
+fn find_containing<'a>(l: &'a LayoutDoc, doc: &'a Document, needle: &str) -> &'a TextRun {
+    l.runs
+        .iter()
+        .find(|r| l.run_text(doc, r).contains(needle))
+        .unwrap_or_else(|| panic!("no run containing {needle:?}"))
+}
+
+#[test]
+fn arabic_and_hebrew_runs_render_in_their_faces() {
+    let (doc, l) = lay2("سلام hello שלום", 600.0);
+    let arabic = find_containing(&l, &doc, "سلام");
+    assert_eq!(l.run_family(arabic), ARABIC_FAMILY);
+    let latin = find_containing(&l, &doc, "hello");
+    assert_eq!(l.run_family(latin), BODY_FAMILY);
+    let hebrew = find_containing(&l, &doc, "שלום");
+    assert_eq!(l.run_family(hebrew), HEBREW_FAMILY);
+}
+
+#[test]
+fn bold_arabic_keeps_its_weight_in_the_arabic_face() {
+    let (doc, l) = lay2("**اعلم** أن", 600.0);
+    let bold = find_containing(&l, &doc, "اعلم");
+    assert_eq!(l.run_family(bold), ARABIC_FAMILY);
+    assert_eq!(bold.weight, 700, "the bold span keeps its weight");
+    let plain = find_containing(&l, &doc, "أن");
+    assert_eq!(l.run_family(plain), ARABIC_FAMILY);
+    assert_eq!(plain.weight, 400);
+}
+
+#[test]
+fn italic_arabic_shapes_upright() {
+    let (doc, l) = lay2("*سلام* عليكم", 600.0);
+    let routed = find_containing(&l, &doc, "سلام");
+    assert_eq!(l.run_family(routed), ARABIC_FAMILY);
+    assert!(
+        !routed.italic,
+        "no italic cut exists; the face stays upright"
+    );
+}
+
+#[test]
+fn arabic_in_inline_code_keeps_the_code_face() {
+    let (doc, l) = lay2("`سلام` text", 600.0);
+    let code = find_containing(&l, &doc, "سلام");
+    assert_eq!(l.run_family(code), CODE_FAMILY);
+}
+
+#[test]
+fn a_hebrew_heading_routes_like_body_text() {
+    let (doc, l) = lay2("# שלום עולם", 600.0);
+    let heading = find_containing(&l, &doc, "שלום");
+    assert_eq!(l.run_family(heading), HEBREW_FAMILY);
 }

@@ -1132,3 +1132,43 @@ fn book_trim_media_boxes_match_their_points() {
         assert_eq!(sizes, vec![0.0, 0.0, w, h], "{page:?}");
     }
 }
+
+/// Units-per-em of every embedded TrueType font file. The subsets keep
+/// the head table, and the value identifies the face: Amiri sits at
+/// 1000, every other bundled face at 2048.
+fn embedded_upems(pdf: &Pdf) -> Vec<u16> {
+    pdf.objects
+        .values()
+        .filter_map(|object| {
+            let dict = object.as_dict().ok()?;
+            let file = dict.get(b"FontFile2").ok()?.as_reference().ok()?;
+            let stream = pdf.get_object(file).ok()?.as_stream().ok()?;
+            let data = stream.decompressed_content().ok()?;
+            let tables = u16::from_be_bytes([data[4], data[5]]) as usize;
+            (0..tables).find_map(|i| {
+                let rec = 12 + i * 16;
+                if &data[rec..rec + 4] == b"head" {
+                    let off = u32::from_be_bytes(data[rec + 8..rec + 12].try_into().ok()?) as usize;
+                    Some(u16::from_be_bytes([data[off + 18], data[off + 19]]))
+                } else {
+                    None
+                }
+            })
+        })
+        .collect()
+}
+
+#[test]
+fn arabic_text_exports_in_the_arabic_face_and_extracts() {
+    let doc = markdown::parse("اعلم أن فن التاريخ فن عزيز المذهب");
+    let pdf = Pdf::load_mem(&export_to_bytes(&doc, PageSize::A4)).unwrap();
+    let upems = embedded_upems(&pdf);
+    assert!(
+        upems.contains(&1000),
+        "the Amiri subset embeds, got units per em {upems:?}"
+    );
+    let text = pdf.extract_text(&[1]).expect("text extracts");
+    for ch in "اعلم".chars() {
+        assert!(text.contains(ch), "{ch:?} extracts, got {text:?}");
+    }
+}

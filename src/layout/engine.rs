@@ -3305,10 +3305,14 @@ fn shape_block(
     out: &mut LayoutDoc,
 ) -> f32 {
     let line_height = metrics::LINE_HEIGHT * base.size;
-    // Math literals expand into script segments at this point only; the
-    // model keeps the raw TeX. Each expanded piece remembers its model
-    // span so selection and copy still map to the source, but its text
-    // is synthesized and lands in the side buffer.
+    // Spans expand into pieces at this point only. Math literals expand
+    // into sup/sub script segments with synthesized text (the model
+    // keeps the raw TeX, so the pieces are non-model and land in the
+    // side buffer). Arabic and Hebrew stretches split into pieces
+    // routed to their designated faces; those pieces keep the span's
+    // exact text, so they stay model spans and selection maps through
+    // the origin. Code spans never route: code is always LTR in the
+    // code face.
     let mut shaped: Vec<Span> = Vec::new();
     let mut origins: Vec<usize> = Vec::new();
     let mut styles: Vec<SpanStyle> = Vec::new();
@@ -3332,10 +3336,37 @@ fn shape_block(
                 model.push(false);
             }
         } else {
-            styles.push(span_style(theme, cfg, base, span));
-            shaped.push(span.clone());
-            origins.push(si);
-            model.push(model_spans);
+            let text = span.text(source);
+            let segments = if span.code {
+                vec![(0..text.len(), None)]
+            } else {
+                crate::style::fonts::script_segments(text)
+            };
+            if let [(_, family)] = segments.as_slice() {
+                let mut style = span_style(theme, cfg, base, span);
+                if let Some(face) = family {
+                    style.family = face.to_string();
+                    style.italic = false;
+                }
+                styles.push(style);
+                shaped.push(span.clone());
+                origins.push(si);
+                model.push(model_spans);
+            } else {
+                for (range, family) in segments {
+                    let mut piece = span.clone();
+                    piece.set_text(text[range].to_string());
+                    let mut style = span_style(theme, cfg, base, &piece);
+                    if let Some(face) = family {
+                        style.family = face.to_string();
+                        style.italic = false;
+                    }
+                    shaped.push(piece);
+                    origins.push(si);
+                    styles.push(style);
+                    model.push(model_spans);
+                }
+            }
         }
     }
 
@@ -3475,9 +3506,13 @@ fn shape_segment(
                 );
             }
             let text = if model[span_index] {
+                // The first piece of this run's origin span: pieces of a
+                // split span concatenate to the span's text, so a model
+                // reference counts from where the origin starts, not
+                // where the piece does.
                 let prefix = prefixes
                     .iter()
-                    .find(|(si, _)| *si == span_index)
+                    .find(|(si, _)| origins[*si] == origins[span_index])
                     .map(|(_, offset)| *offset)
                     .unwrap_or(0);
                 TextRef::Model {

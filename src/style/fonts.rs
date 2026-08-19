@@ -1,7 +1,9 @@
 //! Embedded fonts and the cosmic-text font system.
 //!
-//! DejaVu Sans and Courier Prime ship inside the binary; system fonts are
-//! loaded only as glyph fallback and as choices in the settings dialog.
+//! DejaVu Sans, Courier Prime and the designated script faces (Amiri
+//! for Arabic, David Libre for Hebrew) ship inside the binary; system
+//! fonts are loaded only as glyph fallback and as choices in the
+//! settings dialog.
 
 use cosmic_text::{FontSystem, SwashCache};
 
@@ -10,6 +12,11 @@ pub const CODE_FAMILY: &str = "Courier Prime";
 /// The equation face. Metrics-bound to the math engine, so no picker
 /// offers it; `MATH_FONT` also feeds noad's OpenType MATH reader directly.
 pub const MATH_FAMILY: &str = "STIX Two Math";
+/// The designated script faces. Arabic and Hebrew runs route to them
+/// regardless of the body family, because DejaVu covers both scripts
+/// itself and fallback would never fire; see `script_segments`.
+pub const ARABIC_FAMILY: &str = "Amiri";
+pub const HEBREW_FAMILY: &str = "David Libre";
 
 pub struct FontStore {
     pub font_system: FontSystem,
@@ -33,7 +40,77 @@ pub(crate) static EMBEDDED: &[&[u8]] = &[
     include_bytes!("../../assets/fonts/CourierPrime_Bold.ttf"),
     include_bytes!("../../assets/fonts/CourierPrime_Italic.ttf"),
     include_bytes!("../../assets/fonts/CourierPrime_BoldItalic.ttf"),
+    include_bytes!("../../assets/fonts/Amiri-Regular.ttf"),
+    include_bytes!("../../assets/fonts/Amiri-Bold.ttf"),
+    include_bytes!("../../assets/fonts/DavidLibre-Regular.ttf"),
+    include_bytes!("../../assets/fonts/DavidLibre-Bold.ttf"),
 ];
+
+/// Strong-script class of one character for face routing. Anything
+/// non-alphabetic is neutral and follows its neighboring strong run.
+#[derive(Clone, Copy, PartialEq)]
+enum ScriptClass {
+    Arabic,
+    Hebrew,
+    Other,
+    Neutral,
+}
+
+fn script_class(c: char) -> ScriptClass {
+    match c as u32 {
+        0x0590..=0x05FF | 0xFB1D..=0xFB4F => ScriptClass::Hebrew,
+        0x0600..=0x06FF
+        | 0x0750..=0x077F
+        | 0x0870..=0x089F
+        | 0x08A0..=0x08FF
+        | 0xFB50..=0xFDFF
+        | 0xFE70..=0xFEFF => ScriptClass::Arabic,
+        _ if c.is_alphabetic() => ScriptClass::Other,
+        _ => ScriptClass::Neutral,
+    }
+}
+
+fn family_for(class: ScriptClass) -> Option<&'static str> {
+    match class {
+        ScriptClass::Arabic => Some(ARABIC_FAMILY),
+        ScriptClass::Hebrew => Some(HEBREW_FAMILY),
+        _ => None,
+    }
+}
+
+/// Splits text into byte ranges by strong script, each with the
+/// designated family that renders it, `None` where the span family
+/// keeps the run. Neutral characters (spaces, digits, punctuation)
+/// follow the preceding strong run and leading neutrals join the
+/// first, so a routed run carries its own spaces and mirrored
+/// punctuation. Text without a character at U+0590 or above returns
+/// whole on the fast path.
+pub fn script_segments(text: &str) -> Vec<(std::ops::Range<usize>, Option<&'static str>)> {
+    if !text.chars().any(|c| c >= '\u{0590}') {
+        return vec![(0..text.len(), None)];
+    }
+    let mut out: Vec<(std::ops::Range<usize>, Option<&'static str>)> = Vec::new();
+    let mut open: Option<ScriptClass> = None;
+    let mut start = 0usize;
+    for (i, c) in text.char_indices() {
+        let class = script_class(c);
+        if class == ScriptClass::Neutral {
+            continue;
+        }
+        match open {
+            None => open = Some(class),
+            Some(current) if current == class => {}
+            Some(current) => {
+                out.push((start..i, family_for(current)));
+                start = i;
+                open = Some(class);
+            }
+        }
+    }
+    let last = open.map(family_for).unwrap_or(None);
+    out.push((start..text.len(), last));
+    out
+}
 
 pub(crate) static MATH_FONT: &[u8] = include_bytes!("../../assets/fonts/STIXTwoMath-Regular.otf");
 
@@ -86,10 +163,15 @@ impl FontStore {
         }
     }
 
-    /// Every selectable family: the bundled two first, then system families,
-    /// each group sorted by name.
+    /// Every selectable family: the bundled faces first, defaults then
+    /// the script faces, then system families sorted by name.
     pub fn families(&self) -> Vec<String> {
-        let bundled = [CODE_FAMILY.to_string(), BODY_FAMILY.to_string()];
+        let bundled = [
+            CODE_FAMILY.to_string(),
+            BODY_FAMILY.to_string(),
+            ARABIC_FAMILY.to_string(),
+            HEBREW_FAMILY.to_string(),
+        ];
         let mut system: Vec<String> = self
             .font_system
             .db()
@@ -121,6 +203,8 @@ mod tests {
         let families = store.families();
         assert!(families.contains(&BODY_FAMILY.to_string()));
         assert!(families.contains(&CODE_FAMILY.to_string()));
+        assert!(families.contains(&ARABIC_FAMILY.to_string()));
+        assert!(families.contains(&HEBREW_FAMILY.to_string()));
     }
 
     #[test]
@@ -128,6 +212,70 @@ mod tests {
         let families = FontStore::new().families();
         assert_eq!(families[0], CODE_FAMILY);
         assert_eq!(families[1], BODY_FAMILY);
+        assert_eq!(families[2], ARABIC_FAMILY);
+        assert_eq!(families[3], HEBREW_FAMILY);
+    }
+
+    /// Segments mapped back onto the text they cover, for readable
+    /// assertions.
+    fn segs(text: &str) -> Vec<(&str, Option<&'static str>)> {
+        script_segments(text)
+            .into_iter()
+            .map(|(range, family)| (&text[range], family))
+            .collect()
+    }
+
+    #[test]
+    fn latin_text_routes_nowhere() {
+        assert_eq!(segs("plain body text"), vec![("plain body text", None)]);
+    }
+
+    #[test]
+    fn all_neutral_text_keeps_the_span_family() {
+        assert_eq!(segs("12 + 34"), vec![("12 + 34", None)]);
+    }
+
+    #[test]
+    fn arabic_words_and_their_spaces_stay_one_segment() {
+        assert_eq!(
+            segs("اعلم أن فن التاريخ"),
+            vec![("اعلم أن فن التاريخ", Some(ARABIC_FAMILY))]
+        );
+    }
+
+    #[test]
+    fn hebrew_routes_to_its_face() {
+        assert_eq!(segs("שלום עולם"), vec![("שלום עולם", Some(HEBREW_FAMILY))]);
+    }
+
+    #[test]
+    fn scripts_split_and_neutrals_follow_the_preceding_run() {
+        assert_eq!(
+            segs("abc سلام def"),
+            vec![("abc ", None), ("سلام ", Some(ARABIC_FAMILY)), ("def", None),]
+        );
+    }
+
+    #[test]
+    fn leading_neutrals_join_the_first_strong_run() {
+        assert_eq!(segs("(سلام)"), vec![("(سلام)", Some(ARABIC_FAMILY))]);
+        assert_eq!(segs("«שלום»"), vec![("«שלום»", Some(HEBREW_FAMILY))]);
+    }
+
+    #[test]
+    fn digits_and_marks_follow_their_run() {
+        assert_eq!(
+            segs("سنة 808 هـ"),
+            vec![("سنة 808 هـ", Some(ARABIC_FAMILY))]
+        );
+        assert_eq!(segs("וְאָהַבְתָּ"), vec![("וְאָהַבְתָּ", Some(HEBREW_FAMILY))]);
+    }
+
+    #[test]
+    fn presentation_forms_route_with_their_scripts() {
+        assert_eq!(segs("\u{FB50}"), vec![("\u{FB50}", Some(ARABIC_FAMILY))]);
+        assert_eq!(segs("\u{FEFB}"), vec![("\u{FEFB}", Some(ARABIC_FAMILY))]);
+        assert_eq!(segs("\u{FB1D}"), vec![("\u{FB1D}", Some(HEBREW_FAMILY))]);
     }
 
     #[test]
