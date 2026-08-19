@@ -48,7 +48,7 @@ Oryx displays fenced blocks in a bordered panel with syntax colors for code. A a
 
 ### GitHub flavor and more
 
-The five GitHub alerts are styled, each with its own color and title. Oryx shows a YAML frontmatter header as a small metadata panel above the document. Footnote markers appear raised in the text and link to their definitions, gathered at the foot of the document.
+The five GitHub alerts are styled, each with its own color and title. Oryx shows a YAML frontmatter header as a small metadata panel above the document. Footnote markers appear raised in the text and link to their definitions, gathered at the foot of the document; `Alt+Left` returns to where you were reading.
 
 **Images and badges**: Supported formats are PNG, JPEG, GIF, WebP or SVG. Remote images are fetched in the background and cached on disk, so a file with badges comes up immediately the second time it is opened, and keeps working offline. If a path is broken, the image is replaced by a placeholder with the alt text.
 
@@ -70,9 +70,15 @@ Oryx opens EPUB, FB2, MOBI and AZW3 (Kindle) books and renders them as one conti
 
 Book text is justified: lines end at the same right edge, and the last line of each paragraph stays ragged, like print. `Ctrl+J` turns justification off and on. Markdown files can justify too; they start ragged, and each kind remembers its own choice.
 
-The sidebar's Outline tab shows the book's own table of contents, follows the reading position and jumps on a click. Links inside the book work, so a footnote reference jumps to its note and back. Ebooks reopen where reading stopped, even after Oryx is closed; other files open at the top on a new start.
+The sidebar's Outline tab shows the book's own table of contents, follows the reading position and jumps on a click. Links inside the book work, so a footnote reference jumps to its note, and `Alt+Left` comes back, one jump at a time. Ebooks reopen where reading stopped, even after Oryx is closed; other files open at the top on a new start.
 
-DRM-protected books and fixed-layout EPUB books (usually comics and picture books) are not supported; Oryx says so instead of showing a broken page. The [examples](examples/) folder installed with Oryx includes *The Adventures of Sherlock Holmes* to try it on.
+DRM-protected books and fixed-layout EPUB books are not supported; Oryx says so instead of showing a broken page. The [examples](examples/) folder installed with Oryx includes *The Adventures of Sherlock Holmes* to try it on.
+
+### Comic books
+
+Oryx opens CBZ and CBR comic book archives and shows the pages in reading order. A comic starts as a vertical strip, every page at the window's width, which reads naturally for webtoons. `Ctrl+Minus` switches to one whole page per screen, and once more to two pages side by side, like an open book; `Ctrl+Plus` goes back up, and `Ctrl+0` shows the whole page from anywhere. In the page views, `Up`, `Down` and `Space` turn pages. The outline lists the pages, and a comic reopens at the page reading stopped.
+
+The file's content decides how it opens, not its name, so a `.cbr` that is really a zip (they are common) works anyway. A password-protected or damaged archive says so plainly. CBR files almost always store their pages uncompressed, which Oryx reads; the rare compressed one is refused with a clear message.
 
 ## Tools
 
@@ -204,6 +210,7 @@ oryx --version          # print the version
 | `Up` / `Down` | Scroll by line, or move the sidebar selection |
 | `Page Up` / `Page Down`, `Space` / `Shift+Space` | Scroll by page |
 | `Home` / `End` | Jump to top / bottom |
+| `Alt+Left` | Go back after a link or outline jump |
 | `Ctrl+Shift+B` | Toggle sidebar (files and outline) |
 | `Left` / `Right` | Toggle between sidebar and document |
 | `Ctrl+Tab` | Toggle the sidebar tab |
