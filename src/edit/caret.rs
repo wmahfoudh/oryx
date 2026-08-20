@@ -40,6 +40,17 @@ fn word_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
 
+/// The last position a caret may stand on: the text's end, or the byte
+/// before the final newline, which is a terminator and not a line.
+fn last_offset(doc: &Document) -> usize {
+    let len = doc.source.len();
+    if doc.source.ends_with('\n') {
+        len - 1
+    } else {
+        len
+    }
+}
+
 /// The file's final newline is a terminator, not a line: stepping past
 /// it would land on a row that does not exist, so the step holds.
 fn clamp_final(doc: &Document, from: usize, target: usize) -> usize {
@@ -48,6 +59,19 @@ fn clamp_final(doc: &Document, from: usize, target: usize) -> usize {
     } else {
         target
     }
+}
+
+/// An offset held inside the text: past the last position it becomes
+/// the last position, inside a multi-byte character it steps back to
+/// the character's start. An offset already on a boundary inside the
+/// text is unchanged. Remembered offsets go through here, since the
+/// file may have shrunk on disk since they were taken.
+pub fn clamp(doc: &Document, offset: usize) -> usize {
+    let mut at = offset.min(last_offset(doc));
+    while !doc.source.is_char_boundary(at) {
+        at -= 1;
+    }
+    at
 }
 
 /// The next word boundary to the right: whitespace is skipped, then one
@@ -390,15 +414,7 @@ impl Caret {
         // layout, and they reach blank lines the layout has no runs for.
         match motion {
             Motion::DocStart => return Caret::at(0),
-            Motion::DocEnd => {
-                let len = doc.source.len();
-                let end = if doc.source.ends_with('\n') {
-                    len - 1
-                } else {
-                    len
-                };
-                return Caret::at(end);
-            }
+            Motion::DocEnd => return Caret::at(last_offset(doc)),
             Motion::WordLeft => return Caret::at(word_left(&doc.source, self.offset)),
             Motion::WordRight => return Caret::at(word_right(&doc.source, self.offset)),
             _ => {}
@@ -678,6 +694,8 @@ pub fn place(
 /// The landing offset on entering edit mode, in precedence order: the
 /// selection's start when one exists, else the remembered offset while
 /// its line is visible, else the first text position in the viewport.
+/// The remembered offset is clamped first, since the file may have
+/// shrunk since it was taken.
 pub fn landing(
     lay: &LayoutDoc,
     doc: &Document,
@@ -694,7 +712,7 @@ pub fn landing(
     }
     let lines = lines_of(lay, doc);
     let bottom = view_top + view_h;
-    if let Some(offset) = remembered {
+    if let Some(offset) = remembered.map(|offset| clamp(doc, offset)) {
         if let Some(li) = locate(&lines, offset) {
             let line = &lines[li];
             if line.y >= view_top && line.y + line.h <= bottom {
@@ -1298,5 +1316,69 @@ mod tests {
             140.0,
             "below the view, the caret line closes it"
         );
+    }
+
+    #[test]
+    fn a_memory_past_the_end_clamps_to_the_last_position() {
+        let doc = text_doc("abc\ndef\n");
+        assert_eq!(clamp(&doc, 100), 7, "before the final newline");
+        assert_eq!(clamp(&doc, 5), 5, "an offset inside the text is unchanged");
+        assert_eq!(clamp(&doc, 0), 0);
+        let bare = text_doc("abc");
+        assert_eq!(
+            clamp(&bare, 100),
+            3,
+            "at the end when no newline terminates the file"
+        );
+        assert_eq!(clamp(&text_doc(""), 3), 0);
+    }
+
+    #[test]
+    fn a_memory_inside_a_character_lands_on_its_boundary() {
+        let doc = text_doc("h\u{e9}llo\n");
+        assert_eq!(clamp(&doc, 2), 1);
+        assert_eq!(clamp(&doc, 3), 3);
+    }
+
+    #[test]
+    fn landing_clamps_a_memory_past_the_end() {
+        let source = lines(30);
+        let doc = text_doc(&source);
+        let (l, _fonts) = lay_of(&doc);
+        let advance = run(&l, &doc, "line 01").y - run(&l, &doc, "line 00").y;
+        let view_top = run(&l, &doc, "line 25").y - 0.4 * advance;
+        let got = landing(
+            &l,
+            &doc,
+            None,
+            Some(source.len() + 500),
+            view_top,
+            advance * 6.0,
+        );
+        assert_eq!(
+            got,
+            source.len() - 1,
+            "the last position, before the final newline"
+        );
+    }
+
+    #[test]
+    fn a_caret_at_the_clamped_end_steps_and_edits() {
+        let doc = text_doc("abc\n");
+        let (l, mut fonts) = lay_of(&doc);
+        let caret = Caret::at(clamp(&doc, 9));
+        assert_eq!(caret.offset, 3);
+        assert_eq!(step(caret, Motion::Left, &l, &doc, &mut fonts).offset, 2);
+        assert_eq!(
+            step(caret, Motion::WordLeft, &l, &doc, &mut fonts).offset,
+            0
+        );
+        assert_eq!(step(caret, Motion::Right, &l, &doc, &mut fonts).offset, 3);
+        let mut ledger =
+            crate::edit::splice::Ledger::new(std::sync::Arc::clone(&doc.source), Vec::new());
+        ledger.edit(caret.offset..caret.offset, "x");
+        assert_eq!(ledger.current(), "abcx\n");
+        ledger.edit(caret.offset - 1..caret.offset + 1, "");
+        assert_eq!(ledger.current(), "ab\n");
     }
 }

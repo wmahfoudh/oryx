@@ -290,7 +290,6 @@ fn direction_notice(mode: DirectionMode) -> &'static str {
     }
 }
 
-/// Window title: the open file's name, path stripped.
 /// The outline entry carrying the reading-position highlight, with a
 /// minimal list scroll when the section changes. Free-standing so the
 /// redraw can call it under its buffer borrows.
@@ -315,7 +314,7 @@ fn outline_current(
 /// A link target naming a file on disk: resolved against the document's
 /// folder and split from its `#fragment`. Anchors, URLs, schemes, and
 /// paths that do not exist answer None. `%20` decodes, the one escape
-/// README links carry in practice.
+/// README links carry.
 fn file_link_target(target: &str, base: Option<&Path>) -> Option<(PathBuf, Option<String>)> {
     if target.starts_with('#') || target.contains("://") || target.contains(':') {
         return None;
@@ -360,9 +359,6 @@ fn draw_caret(
     }
 }
 
-/// A book's `dc:title` wins over the file name; files have no title.
-/// A dirty buffer carries the leading asterisk.
-/// Everything the help page displaces, moved back verbatim on return.
 /// The rendered page set aside while its source is edited. A return
 /// that changed no byte puts it back whole, so looking at the source
 /// and coming out costs nothing at any file size.
@@ -381,6 +377,7 @@ struct Parked {
     theme: String,
 }
 
+/// Everything the help page displaces, moved back verbatim on return.
 struct Stash {
     path: Option<PathBuf>,
     document: Document,
@@ -466,6 +463,9 @@ fn page_step_target(tops: &[f32], current: f32, dir: i32) -> Option<f32> {
     }
 }
 
+/// Window title: the open file's name, path stripped. A book's
+/// `dc:title` wins over the file name; files have no title. A dirty
+/// buffer carries the leading dot, the editor its mode word.
 fn window_title(book: Option<&str>, path: Option<&Path>, dirty: bool, editing: bool) -> String {
     let dot = if dirty { "\u{25CF} " } else { "" };
     let mode = if editing { "editing \u{00B7} " } else { "" };
@@ -995,9 +995,9 @@ impl App {
     }
 
     /// Opens the editor on the file's own bytes. A code or text file
-    /// already shows them, so nothing swaps and the caret simply
-    /// appears; markdown parks its rendered page and puts its source
-    /// on screen in its place.
+    /// already shows them, so nothing swaps and the caret appears;
+    /// markdown parks its rendered page and puts its source on screen
+    /// in its place.
     fn enter_edit(&mut self) {
         let Some(kind) = self.path.as_deref().map(load::detect) else {
             return;
@@ -1022,7 +1022,9 @@ impl App {
                 self.scroll_y,
                 view_h,
             ),
-            None => remembered.unwrap_or(0),
+            // The path a reload and a file switch take: the layout is
+            // fresh and the file may have shrunk since the mark was set.
+            None => caret::clamp(&self.document, remembered.unwrap_or(0)),
         };
         self.mode = edit::Mode::Edit;
         self.caret = Some(Caret::at(offset));
@@ -1096,8 +1098,8 @@ impl App {
     /// The y of the row an offset stands on in the editor. Placed runs
     /// answer exactly, which covers a caret near the view. Beyond the
     /// layout window there are no runs to read, and a jump across a
-    /// whole file is exactly that case, so the block table answers by
-    /// line index, which is how a source view is indexed.
+    /// whole file is that case, so the block table answers by line
+    /// index, which is how a source view is indexed.
     fn editor_row_y(&self, offset: usize) -> Option<f32> {
         let lay = self.layout.as_ref()?;
         if let Some(y) = caret::row_top(lay, &self.document, offset) {
@@ -1158,7 +1160,7 @@ impl App {
             let same_look = self.cfg.zoom == parked.zoom && self.config.theme == parked.theme;
             if head == parked.head {
                 // The held outline describes this very page; rebuilding
-                // it here cost 273ms at the 8MB tier for nothing.
+                // it here would cost a parse of the whole page for nothing.
                 self.document = parked.document;
                 self.layout_width = parked.layout_width;
                 self.swapped_document(
@@ -1383,7 +1385,7 @@ impl App {
 
     /// A click on a rendered task checkbox, the one edit reading
     /// allows. The flip replaces one byte with one byte, so nothing on
-    /// the page moves: the model flips in place and the band simply
+    /// the page moves: the model flips in place and the band
     /// re-materializes at its recorded positions. Books and lossy
     /// reads refuse the way the editor's door does, quietly.
     fn click_checkbox(&mut self, block: usize) {
@@ -1428,7 +1430,7 @@ impl App {
     }
 
     /// Steps the history one unit back and applies its inverse; the
-    /// one deliberate view move, the snap to the restored caret. In
+    /// one view move being the snap to the restored caret. In
     /// read mode the checkbox flips are undoable without entering the
     /// editor; deeper text units are legal too and pay the rendered
     /// rebuild.
@@ -3825,8 +3827,6 @@ impl App {
         self.request_redraw();
     }
 
-    /// Re-reads the open file from disk, keeping the scroll position, for
-    /// documents being edited in parallel.
     /// F5 and Ctrl+R: a reload discards the buffer, so unsaved edits
     /// put the confirm in front of it.
     fn reload(&mut self) {
@@ -3835,6 +3835,8 @@ impl App {
         }
     }
 
+    /// Re-reads the open file from disk, keeping the scroll position, for
+    /// documents being edited in parallel.
     fn reload_now(&mut self) {
         let Some(path) = self.path.clone() else {
             return;
@@ -3847,7 +3849,6 @@ impl App {
         self.scroll_y = scroll;
     }
 
-    /// Native open dialog filtered to the recognized extensions.
     /// Starts an export with the saved settings, or the ones seeded from
     /// the appearance settings when nothing was ever exported. Does
     /// nothing without a document, since there would be nothing to write.
@@ -3989,6 +3990,7 @@ impl App {
         self.request_redraw();
     }
 
+    /// Native open dialog filtered to the recognized extensions.
     fn open_dialog(&mut self) {
         let mut dialog = rfd::FileDialog::new()
             .add_filter("Supported files", &load::recognized_extensions())
