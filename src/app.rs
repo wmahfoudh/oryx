@@ -93,6 +93,16 @@ fn chord_pressed(control: bool, command: bool, macos: bool) -> bool {
     control || (macos && command)
 }
 
+/// Whole wheel notches out of a stream of deltas: the fraction left
+/// over waits in `carry` for the next event, so a touchpad's many small
+/// deltas add up to steps instead of vanishing. Positive is wheel up.
+fn wheel_notches(carry: &mut f32, delta: f32) -> i32 {
+    *carry += delta;
+    let whole = carry.trunc();
+    *carry -= whole;
+    whole as i32
+}
+
 /// What the command line opened: nothing, a file, or a folder to
 /// browse in the sidebar.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -254,6 +264,7 @@ pub fn run(launch: Launch, theme_name: Option<String>) -> anyhow::Result<()> {
         touch: touch::Tracker::new(1.0),
         pan_target: PanTarget::Document,
         fling: None,
+        wheel_zoom: 0.0,
         mute_mouse_until: None,
         pinch_base: 1.0,
         band: None,
@@ -635,6 +646,9 @@ struct App {
     pan_target: PanTarget,
     /// A running fling: its velocity and when it last stepped.
     fling: Option<(f32, Instant)>,
+    /// The wheel's fraction of a zoom notch not yet spent, while the
+    /// chord key is held.
+    wheel_zoom: f32,
     /// Emulated mouse events are dropped until then after a touch pan.
     mute_mouse_until: Option<Instant>,
     /// The reader zoom captured when a pinch began.
@@ -3704,21 +3718,54 @@ impl App {
     fn open_sidebar(&mut self, open: bool) {
         if open && self.sidebar.is_none() {
             let dir = config::browse_dir([self.document_dir(), self.remembered_dir()]);
-            let mut side = Sidebar::new(&dir);
-            side.set_tab(self.config.sidebar_tab);
-            if let Some(path) = &self.path {
-                side.set_current(path);
-            }
-            let window_w = self
-                .gfx
-                .as_ref()
-                .map(|g| g.window.inner_size().width as f32 / self.scale)
-                .unwrap_or(f32::MAX);
-            side.set_width(self.config.sidebar_width, window_w);
-            self.sidebar = Some(side);
+            self.sidebar_at(&dir);
         } else {
             self.sidebar = None;
             self.sidebar_canvas = None;
+        }
+        self.layout = None;
+        self.band = None;
+        self.request_redraw();
+    }
+
+    /// A fresh sidebar rooted at `dir`, at the saved width and tab, the
+    /// open file marked current.
+    fn sidebar_at(&mut self, dir: &Path) {
+        let mut side = Sidebar::new(dir);
+        side.set_tab(self.config.sidebar_tab);
+        if let Some(path) = &self.path {
+            side.set_current(path);
+        }
+        let window_w = self
+            .gfx
+            .as_ref()
+            .map(|g| g.window.inner_size().width as f32 / self.scale)
+            .unwrap_or(f32::MAX);
+        side.set_width(self.config.sidebar_width, window_w);
+        self.sidebar = Some(side);
+    }
+
+    /// Shows a folder in the sidebar, opening the panel when it is
+    /// closed and re-rooting it when it is open; the folder is
+    /// remembered as where the reader is browsing.
+    fn show_folder(&mut self, dir: &Path) {
+        let dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+        self.remember_dir(&dir);
+        match self.sidebar.as_mut() {
+            Some(side) if side.root() == dir => {}
+            Some(side) => {
+                let tab = side.tab();
+                *side = Sidebar::new(&dir);
+                side.set_tab(tab);
+                if let Some(path) = &self.path {
+                    side.set_current(path);
+                }
+            }
+            None => {
+                self.sidebar_at(&dir);
+                self.move_ownership(PaneAct::OpenSidebar);
+                self.save_sidebar_state();
+            }
         }
         self.layout = None;
         self.band = None;
@@ -5467,6 +5514,27 @@ impl ApplicationHandler for App {
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 self.fling = None;
+                // With the chord key held the wheel zooms, one step per
+                // notch, wheel up zooming in; a touchpad's pixel deltas
+                // count a notch per three lines, the distance a notch
+                // scrolls. A comic steps its fits the way the keys do.
+                if chord_key(self.modifiers) && self.overlay.is_none() {
+                    let notches = match delta {
+                        MouseScrollDelta::LineDelta(_, lines) => lines,
+                        MouseScrollDelta::PixelDelta(p) => p.y as f32 / (3.0 * self.line_step()),
+                    };
+                    let steps = wheel_notches(&mut self.wheel_zoom, notches);
+                    let command = if steps > 0 {
+                        Command::ZoomIn
+                    } else {
+                        Command::ZoomOut
+                    };
+                    for _ in 0..steps.abs() {
+                        self.run_command(command, event_loop);
+                    }
+                    return;
+                }
+                self.wheel_zoom = 0.0;
                 let lines = match delta {
                     MouseScrollDelta::LineDelta(_, lines) => -lines,
                     MouseScrollDelta::PixelDelta(p) => -p.y as f32 / self.line_step(),
@@ -5482,6 +5550,15 @@ impl ApplicationHandler for App {
                 } else {
                     self.scroll_by(lines * 3.0 * self.line_step());
                     self.move_ownership(PaneAct::WheelDocument);
+                }
+            }
+            // A drop opens the way the dialog does, unsaved edits guarded;
+            // a folder opens the sidebar on it.
+            WindowEvent::DroppedFile(path) => {
+                if path.is_dir() {
+                    self.show_folder(&path);
+                } else if self.guard_unsaved(confirm::Pending::Open(path.clone(), true)) {
+                    self.open_file(&path, true);
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
@@ -5586,6 +5663,41 @@ impl ApplicationHandler for App {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn wheel_deltas_add_up_to_whole_notches() {
+        let mut carry = 0.0;
+        assert_eq!(
+            super::wheel_notches(&mut carry, 1.0),
+            1,
+            "a mouse notch is one step"
+        );
+        assert_eq!(super::wheel_notches(&mut carry, -1.0), -1);
+        assert_eq!(
+            super::wheel_notches(&mut carry, 0.4),
+            0,
+            "a touchpad delta waits"
+        );
+        assert_eq!(super::wheel_notches(&mut carry, 0.4), 0);
+        assert_eq!(
+            super::wheel_notches(&mut carry, 0.4),
+            1,
+            "three add up to one"
+        );
+        assert!((carry - 0.2).abs() < 1e-6, "the rest carries over");
+        assert_eq!(
+            super::wheel_notches(&mut carry, 2.3),
+            2,
+            "a fast swipe is several"
+        );
+        assert_eq!(
+            super::wheel_notches(&mut carry, -0.5),
+            0,
+            "the half left from the swipe cancels"
+        );
+        assert_eq!(super::wheel_notches(&mut carry, -0.5), 0);
+        assert_eq!(super::wheel_notches(&mut carry, -0.5), -1);
+    }
+
     #[test]
     fn the_command_key_is_a_chord_key_on_macos_only() {
         assert!(super::chord_pressed(true, false, false));

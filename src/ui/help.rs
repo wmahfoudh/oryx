@@ -16,7 +16,8 @@ pub fn welcome() -> String {
         "# Oryx\n\n\
          Press `{}` to open a file.\n\n\
          `{}` shows the folder sidebar, to browse and open files from there.\n\n\
-         `{}` lists the shortcuts.\n",
+         `{}` lists the shortcuts.\n\n\
+         A file dropped onto this window opens too.\n",
         keymap::display("Ctrl+O"),
         keymap::display("Ctrl+Shift+B"),
         keymap::display("F1"),
@@ -68,11 +69,14 @@ pub fn page() -> String {
          `Enter` saves, `D` discards, `Escape` keeps editing.\n",
     );
     out.push_str("\n## Mouse and touch\n\n");
-    out.push_str(
+    let _ = writeln!(
+        out,
         "A double click selects the word, a triple click the paragraph or the code line. \
-         The wheel scrolls, and dragging the scrollbar or its track jumps. On a touch \
-         screen, swiping scrolls with momentum, tapping clicks, and a two-finger pinch \
-         zooms.\n",
+         The wheel scrolls, and with `{}` held it zooms; dragging the scrollbar or its \
+         track jumps. A file dropped onto the window opens, and a dropped folder opens \
+         the sidebar on it. On a touch screen, swiping scrolls with momentum, tapping \
+         clicks, and a two-finger pinch zooms.",
+        keymap::display("Ctrl"),
     );
     out
 }
@@ -121,7 +125,15 @@ mod tests {
             );
         }
         assert!(page.starts_with("# Oryx\n"), "the page opens on the name");
-        assert!(page.lines().count() <= 8, "the page stays short: {page}");
+        assert!(page.lines().count() <= 10, "the page stays short: {page}");
+    }
+
+    #[test]
+    fn the_mouse_paragraph_names_dropping_and_the_wheel_zoom() {
+        let page = page();
+        assert!(page.contains("dropped onto the window opens"));
+        assert!(page.contains(&format!("with `{}` held it zooms", keymap::display("Ctrl"))));
+        assert!(welcome().contains("dropped onto this window opens"));
     }
 
     #[test]
