@@ -7,6 +7,22 @@
 
 use crate::input::keymap;
 
+/// The page an empty launch shows in the document area: how to open a
+/// file, where the folder sidebar is, and where the shortcuts are. No
+/// file stands behind it, so it cannot be edited or saved, and the
+/// first file opened replaces it.
+pub fn welcome() -> String {
+    format!(
+        "# Oryx\n\n\
+         Press `{}` to open a file.\n\n\
+         `{}` shows the folder sidebar, to browse and open files from there.\n\n\
+         `{}` lists the shortcuts.\n",
+        keymap::display("Ctrl+O"),
+        keymap::display("Ctrl+Shift+B"),
+        keymap::display("F1"),
+    )
+}
+
 /// The generated page.
 pub fn page() -> String {
     use std::fmt::Write;
@@ -83,6 +99,29 @@ mod tests {
         for section in ["Files", "Navigation", "Edit", "Export"] {
             assert!(page.contains(section), "the page has a {section} caption");
         }
+    }
+
+    #[test]
+    fn the_welcome_page_names_the_three_chords_and_nothing_unbound() {
+        let page = welcome();
+        for keys in ["Ctrl+O", "Ctrl+Shift+B", "F1"] {
+            assert!(
+                page.contains(&format!("`{}`", keymap::display(keys))),
+                "the welcome page names {keys}"
+            );
+        }
+        let bound: Vec<String> = keymap::SHORTCUTS
+            .iter()
+            .map(|row| keymap::display(row.keys))
+            .collect();
+        for chord in page.split('`').skip(1).step_by(2) {
+            assert!(
+                bound.contains(&chord.to_string()),
+                "the welcome page names {chord}, which the keymap does not bind"
+            );
+        }
+        assert!(page.starts_with("# Oryx\n"), "the page opens on the name");
+        assert!(page.lines().count() <= 8, "the page stays short: {page}");
     }
 
     #[test]

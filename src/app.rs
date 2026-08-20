@@ -100,8 +100,11 @@ pub fn run(path: Option<PathBuf>, theme_name: Option<String>) -> anyhow::Result<
                 opened.bom,
             )
         }
+        // No file: the welcome page fills the document area. With no
+        // path behind it, nothing can be edited, saved or reloaded, and
+        // the first file opened replaces it.
         None => (
-            Document::default(),
+            oryx::doc::markdown::parse(help::welcome()),
             Vec::new(),
             false,
             None,
