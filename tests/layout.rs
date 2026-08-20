@@ -2091,10 +2091,42 @@ fn recolor_reports_the_spliced_range() {
     assert!(missing.is_none(), "a no-op recolor reports nothing");
 }
 
+/// The source with its invisible HTML forms cut out: comments, the
+/// doctype, CDATA sections, processing instructions. The model never
+/// holds them, so no copy can reproduce them.
+fn without_invisible_html(source: &str) -> String {
+    const FORMS: [(&str, &str); 4] = [
+        ("<!--", "-->"),
+        ("<![CDATA[", "]]>"),
+        ("<?", "?>"),
+        ("<!", ">"),
+    ];
+    let mut out = String::with_capacity(source.len());
+    let mut rest = source;
+    while let Some(open) = rest.find('<') {
+        let (before, from) = rest.split_at(open);
+        out.push_str(before);
+        let form = FORMS.iter().find(|(opener, _)| from.starts_with(opener));
+        match form {
+            Some((opener, closer)) => match from[opener.len()..].find(closer) {
+                Some(at) => rest = &from[opener.len() + at + closer.len()..],
+                None => return out,
+            },
+            None => {
+                out.push('<');
+                rest = &from[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// The field scenario behind the coverage walk in markdown copy: the
 /// showcase collection carries footnote definitions three files in, the
 /// notes section lays out last, and a select-all copy must still cover
-/// the source tail.
+/// the source tail. Comments and the other invisible HTML forms are
+/// the one thing a copy may drop.
 #[test]
 fn showcase_select_all_markdown_copy_covers_the_whole_source() {
     let mut names: Vec<_> = std::fs::read_dir("tests/showcase")
@@ -2109,11 +2141,12 @@ fn showcase_select_all_markdown_copy_covers_the_whole_source() {
     let doc = markdown::parse(source.as_str());
     let sel = oryx::ui::selection::all(&doc).expect("the document selects");
     let md = oryx::ui::selection::markdown(&sel, &doc);
+    let visible = without_invisible_html(&source);
     assert!(
-        md.len() >= source.trim_end().len(),
-        "the copy dropped {} of {} source bytes",
-        source.len() - md.len(),
-        source.len()
+        md.len() >= visible.trim_end().len(),
+        "the copy dropped {} of {} visible source bytes",
+        visible.len().saturating_sub(md.len()),
+        visible.len()
     );
 }
 

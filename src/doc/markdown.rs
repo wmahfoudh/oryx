@@ -132,6 +132,10 @@ struct Builder {
     /// Unterminated tag carried between HTML events; pulldown delivers
     /// block HTML line by line, and attributes may wrap.
     html_tail: String,
+    /// An invisible HTML form was just dropped after text ending in
+    /// whitespace; the next text's leading whitespace goes with it, so
+    /// the neighbors meet on one space as a browser shows them.
+    html_gap: bool,
     /// One entry per open `<p>`/`<div>`, true when it centers its content.
     html_center: Vec<bool>,
     html_code: u32,
@@ -183,6 +187,30 @@ struct HtmlList {
     next: u64,
     /// An `<li>` is accumulating spans at this level.
     item_open: bool,
+}
+
+/// The HTML forms a page never shows: a comment, the doctype, a CDATA
+/// section, a processing instruction. For text opening one, the byte
+/// past its closer, or `Some(None)` when the closer has not arrived;
+/// `None` for text opening none. A bare `<` before a space or a digit
+/// opens nothing and stays text.
+fn html_invisible(text: &str) -> Option<Option<usize>> {
+    let (opener, closer) = if text.starts_with("<!--") {
+        ("<!--", "-->")
+    } else if text.starts_with("<![CDATA[") {
+        ("<![CDATA[", "]]>")
+    } else if text.starts_with("<?") {
+        ("<?", "?>")
+    } else if text.starts_with("<!") {
+        ("<!", ">")
+    } else {
+        return None;
+    };
+    Some(
+        text[opener.len()..]
+            .find(closer)
+            .map(|at| opener.len() + at + closer.len()),
+    )
 }
 
 /// The five entities HTML text cannot spell literally. Anything else
@@ -257,6 +285,7 @@ impl Builder {
             metadata: Vec::new(),
             html_block: false,
             html_tail: String::new(),
+            html_gap: false,
             html_center: Vec::new(),
             html_code: 0,
             html_sub: 0,
@@ -530,8 +559,30 @@ impl Builder {
             }
             return;
         }
+        let text = if std::mem::take(&mut self.html_gap) {
+            self.close_gap(text)
+        } else {
+            text
+        };
         let replaced = replace_emoji(text);
         self.linkified(&replaced);
+    }
+
+    /// Drops the leading whitespace of text arriving after an invisible
+    /// HTML form when the text before it already ends in whitespace.
+    /// The source cursor moves past the dropped bytes, so the span's
+    /// range keeps matching its text.
+    fn close_gap<'a>(&mut self, text: &'a str) -> &'a str {
+        let joined = self
+            .spans
+            .last()
+            .is_some_and(|s| s.raw_text().ends_with(char::is_whitespace));
+        if !joined {
+            return text;
+        }
+        let trimmed = text.trim_start();
+        self.current.0 += text.len() - trimmed.len();
+        trimmed
     }
 
     /// Splits bare http(s) URLs out of plain text into linked spans. Span
@@ -579,9 +630,14 @@ impl Builder {
         }
     }
 
-    /// The GitHub README subset of embedded HTML: centered p and div,
-    /// sized images, links wrapping images, br, and inline styling tags.
-    /// Everything else is stripped with its inner text kept.
+    /// One HTML event, block or inline, scanned for the GitHub README
+    /// subset: text between tags goes to the spans, tags to `html_tag`,
+    /// which keeps centered p and div, sized images, links wrapping
+    /// images, br and the inline styling tags and strips everything
+    /// else with its inner text kept. The invisible forms (comments,
+    /// the doctype, CDATA sections, processing instructions) vanish. A
+    /// tag or an invisible form cut off at the event's end waits in
+    /// `html_tail` for the next event.
     fn html(&mut self, html: &str) {
         let combined = if self.html_tail.is_empty() {
             html.to_string()
@@ -591,6 +647,19 @@ impl Builder {
         let mut rest = combined.as_str();
         while let Some(open) = rest.find('<') {
             let (before, tag_on) = rest.split_at(open);
+            if let Some(closed) = html_invisible(tag_on) {
+                self.html_text(before);
+                let Some(end) = closed else {
+                    self.html_tail = tag_on.to_string();
+                    return;
+                };
+                self.html_gap = self
+                    .spans
+                    .last()
+                    .is_some_and(|s| s.raw_text().ends_with(char::is_whitespace));
+                rest = &tag_on[end..];
+                continue;
+            }
             // A `<` not starting a tag is ordinary text.
             let tag_like = tag_on[1..]
                 .chars()
@@ -2360,6 +2429,69 @@ mod tests {
         };
         let text: String = spans.iter().map(|s| s.text(&d.source)).collect();
         assert_eq!(text, "before mid after");
+    }
+
+    /// The concatenated text of a paragraph block.
+    fn paragraph_text(d: &Document, index: usize) -> String {
+        let BlockKind::Paragraph { spans } = &d.blocks[index].kind else {
+            panic!(
+                "block {index} is not a paragraph: {:?}",
+                d.blocks[index].kind
+            )
+        };
+        spans.iter().map(|s| s.text(&d.source)).collect()
+    }
+
+    #[test]
+    fn an_html_comment_block_yields_no_block() {
+        let d = parse("<!-- TOC -->\n\ntext");
+        assert_eq!(d.blocks.len(), 1, "{:?}", d.blocks);
+        assert_eq!(paragraph_text(&d, 0), "text");
+    }
+
+    #[test]
+    fn an_inline_comment_leaves_one_space_between_its_neighbors() {
+        let d = parse("before <!-- note --> after");
+        assert_eq!(paragraph_text(&d, 0), "before after");
+        let d = parse("glued<!-- note -->together");
+        assert_eq!(paragraph_text(&d, 0), "gluedtogether");
+    }
+
+    #[test]
+    fn comments_holding_a_close_bracket_or_spanning_lines_vanish() {
+        let d = parse("<!-- a > b -->\n\n<!--\nline one\nline two\n-->\n\nkept");
+        assert_eq!(d.blocks.len(), 1, "{:?}", d.blocks);
+        assert_eq!(paragraph_text(&d, 0), "kept");
+    }
+
+    #[test]
+    fn an_unterminated_comment_hides_the_rest_of_the_file() {
+        let d = parse("shown\n\n<!-- never closed\n\n# hidden\n\nhidden too");
+        assert_eq!(d.blocks.len(), 1, "{:?}", d.blocks);
+        assert_eq!(paragraph_text(&d, 0), "shown");
+    }
+
+    #[test]
+    fn a_bare_angle_bracket_is_still_text() {
+        let d = parse("a < b and c <3 and x<y");
+        assert_eq!(paragraph_text(&d, 0), "a < b and c <3 and x<y");
+    }
+
+    #[test]
+    fn doctype_cdata_and_processing_instructions_vanish() {
+        let d = parse("<!DOCTYPE html>\n<?xml version=\"1.0\"?>\n<![CDATA[ raw <b> ]]>\n\nkept");
+        assert_eq!(d.blocks.len(), 1, "{:?}", d.blocks);
+        assert_eq!(paragraph_text(&d, 0), "kept");
+    }
+
+    #[test]
+    fn a_commented_out_badge_vanishes() {
+        let d = parse("Title <!-- [![b](https://img.tld/b.svg)](https://x.tld) --> here");
+        let BlockKind::Paragraph { spans } = &d.blocks[0].kind else {
+            panic!()
+        };
+        assert!(spans.iter().all(|s| s.image.is_none()), "no image survives");
+        assert_eq!(paragraph_text(&d, 0), "Title here");
     }
 
     #[test]
