@@ -78,6 +78,21 @@ const MOUSE_MUTE: Duration = Duration::from_millis(150);
 /// The window icon raster produced by the build script.
 const ICON_64: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/icon_64.rgba"));
 
+/// Whether the chord modifier is held: Control on every platform, and
+/// on macOS the Command key as well, which the F1 page and the README
+/// show as Cmd.
+fn chord_key(modifiers: ModifiersState) -> bool {
+    chord_pressed(
+        modifiers.control_key(),
+        modifiers.super_key(),
+        cfg!(target_os = "macos"),
+    )
+}
+
+fn chord_pressed(control: bool, command: bool, macos: bool) -> bool {
+    control || (macos && command)
+}
+
 /// What the command line opened: nothing, a file, or a folder to
 /// browse in the sidebar.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -5400,7 +5415,7 @@ impl ApplicationHandler for App {
                     self.confirm_key(&logical_key, event_loop);
                     return;
                 }
-                let ctrl = self.modifiers.control_key();
+                let ctrl = chord_key(self.modifiers);
                 let shift = self.modifiers.shift_key();
                 let alt = self.modifiers.alt_key();
                 // The overlay toggles stay global so their chord closes the
@@ -5571,6 +5586,15 @@ impl ApplicationHandler for App {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_command_key_is_a_chord_key_on_macos_only() {
+        assert!(super::chord_pressed(true, false, false));
+        assert!(super::chord_pressed(true, false, true));
+        assert!(super::chord_pressed(false, true, true));
+        assert!(!super::chord_pressed(false, true, false));
+        assert!(!super::chord_pressed(false, false, true));
+    }
+
     #[test]
     fn the_direction_notice_names_each_state() {
         use oryx::layout::DirectionMode;
