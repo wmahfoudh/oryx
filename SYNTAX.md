@@ -307,11 +307,14 @@ x<sup>2</sup> H<sub>2</sub>O line<br>break
 ### Entities
 
 ```html
-&lt; &gt; &amp; &quot; &#39;
+&lt; &gt; &amp; &quot; &#39; &nbsp; &copy; &mdash; &eacute; &#169; &#x1F600;
 ```
 
-The five basic entities decode everywhere in HTML text, verbatim inside
-`<pre>`.
+Entities decode everywhere in HTML text, `<pre>` included: the five basic
+ones, the Latin-1 set from `&nbsp;` to `&yuml;` with the accented letters,
+the common typographic names (`&mdash;`, `&ndash;`, `&hellip;`, `&ldquo;`,
+`&rdquo;`, `&bull;`, `&euro;`, `&trade;`, the arrows), and numeric
+references in decimal or hex. Anything else stays as typed.
 
 ## Useful searches
 

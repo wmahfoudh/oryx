@@ -213,24 +213,221 @@ fn html_invisible(text: &str) -> Option<Option<usize>> {
     )
 }
 
-/// The five entities HTML text cannot spell literally. Anything else
-/// passes through untouched.
-fn decode_entities(text: &str) -> String {
-    text.replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'")
-        .replace("&amp;", "&")
+/// The named entities HTML text decodes, sorted by name for the
+/// search: the five basic ones, the Latin-1 set (`nbsp` through
+/// `yuml`, the accented letters included) and the typographic names
+/// a README reaches for (dashes, quotes, the ellipsis, the bullet,
+/// currency and trade marks, arrows). Anything else stays as typed.
+static NAMED_ENTITIES: &[(&str, char)] = &[
+    ("AElig", '\u{c6}'),
+    ("Aacute", '\u{c1}'),
+    ("Acirc", '\u{c2}'),
+    ("Agrave", '\u{c0}'),
+    ("Aring", '\u{c5}'),
+    ("Atilde", '\u{c3}'),
+    ("Auml", '\u{c4}'),
+    ("Ccedil", '\u{c7}'),
+    ("Dagger", '\u{2021}'),
+    ("ETH", '\u{d0}'),
+    ("Eacute", '\u{c9}'),
+    ("Ecirc", '\u{ca}'),
+    ("Egrave", '\u{c8}'),
+    ("Euml", '\u{cb}'),
+    ("Iacute", '\u{cd}'),
+    ("Icirc", '\u{ce}'),
+    ("Igrave", '\u{cc}'),
+    ("Iuml", '\u{cf}'),
+    ("Ntilde", '\u{d1}'),
+    ("Oacute", '\u{d3}'),
+    ("Ocirc", '\u{d4}'),
+    ("Ograve", '\u{d2}'),
+    ("Oslash", '\u{d8}'),
+    ("Otilde", '\u{d5}'),
+    ("Ouml", '\u{d6}'),
+    ("THORN", '\u{de}'),
+    ("Uacute", '\u{da}'),
+    ("Ucirc", '\u{db}'),
+    ("Ugrave", '\u{d9}'),
+    ("Uuml", '\u{dc}'),
+    ("Yacute", '\u{dd}'),
+    ("aacute", '\u{e1}'),
+    ("acirc", '\u{e2}'),
+    ("acute", '\u{b4}'),
+    ("aelig", '\u{e6}'),
+    ("agrave", '\u{e0}'),
+    ("amp", '\u{26}'),
+    ("apos", '\u{27}'),
+    ("aring", '\u{e5}'),
+    ("atilde", '\u{e3}'),
+    ("auml", '\u{e4}'),
+    ("bdquo", '\u{201e}'),
+    ("brvbar", '\u{a6}'),
+    ("bull", '\u{2022}'),
+    ("ccedil", '\u{e7}'),
+    ("cedil", '\u{b8}'),
+    ("cent", '\u{a2}'),
+    ("check", '\u{2713}'),
+    ("copy", '\u{a9}'),
+    ("curren", '\u{a4}'),
+    ("dagger", '\u{2020}'),
+    ("darr", '\u{2193}'),
+    ("deg", '\u{b0}'),
+    ("divide", '\u{f7}'),
+    ("eacute", '\u{e9}'),
+    ("ecirc", '\u{ea}'),
+    ("egrave", '\u{e8}'),
+    ("emsp", '\u{2003}'),
+    ("ensp", '\u{2002}'),
+    ("eth", '\u{f0}'),
+    ("euml", '\u{eb}'),
+    ("euro", '\u{20ac}'),
+    ("frac12", '\u{bd}'),
+    ("frac14", '\u{bc}'),
+    ("frac34", '\u{be}'),
+    ("ge", '\u{2265}'),
+    ("gt", '\u{3e}'),
+    ("harr", '\u{2194}'),
+    ("hearts", '\u{2665}'),
+    ("hellip", '\u{2026}'),
+    ("iacute", '\u{ed}'),
+    ("icirc", '\u{ee}'),
+    ("iexcl", '\u{a1}'),
+    ("igrave", '\u{ec}'),
+    ("infin", '\u{221e}'),
+    ("iquest", '\u{bf}'),
+    ("iuml", '\u{ef}'),
+    ("laquo", '\u{ab}'),
+    ("larr", '\u{2190}'),
+    ("ldquo", '\u{201c}'),
+    ("le", '\u{2264}'),
+    ("lsaquo", '\u{2039}'),
+    ("lsquo", '\u{2018}'),
+    ("lt", '\u{3c}'),
+    ("macr", '\u{af}'),
+    ("mdash", '\u{2014}'),
+    ("micro", '\u{b5}'),
+    ("middot", '\u{b7}'),
+    ("minus", '\u{2212}'),
+    ("nbsp", '\u{a0}'),
+    ("ndash", '\u{2013}'),
+    ("ne", '\u{2260}'),
+    ("not", '\u{ac}'),
+    ("ntilde", '\u{f1}'),
+    ("oacute", '\u{f3}'),
+    ("ocirc", '\u{f4}'),
+    ("ograve", '\u{f2}'),
+    ("ordf", '\u{aa}'),
+    ("ordm", '\u{ba}'),
+    ("oslash", '\u{f8}'),
+    ("otilde", '\u{f5}'),
+    ("ouml", '\u{f6}'),
+    ("para", '\u{b6}'),
+    ("permil", '\u{2030}'),
+    ("plusmn", '\u{b1}'),
+    ("pound", '\u{a3}'),
+    ("quot", '\u{22}'),
+    ("raquo", '\u{bb}'),
+    ("rarr", '\u{2192}'),
+    ("rdquo", '\u{201d}'),
+    ("reg", '\u{ae}'),
+    ("rsaquo", '\u{203a}'),
+    ("rsquo", '\u{2019}'),
+    ("sbquo", '\u{201a}'),
+    ("sect", '\u{a7}'),
+    ("shy", '\u{ad}'),
+    ("sup1", '\u{b9}'),
+    ("sup2", '\u{b2}'),
+    ("sup3", '\u{b3}'),
+    ("szlig", '\u{df}'),
+    ("thinsp", '\u{2009}'),
+    ("thorn", '\u{fe}'),
+    ("times", '\u{d7}'),
+    ("trade", '\u{2122}'),
+    ("uacute", '\u{fa}'),
+    ("uarr", '\u{2191}'),
+    ("ucirc", '\u{fb}'),
+    ("ugrave", '\u{f9}'),
+    ("uml", '\u{a8}'),
+    ("uuml", '\u{fc}'),
+    ("yacute", '\u{fd}'),
+    ("yen", '\u{a5}'),
+    ("yuml", '\u{ff}'),
+    ("zwj", '\u{200d}'),
+    ("zwnj", '\u{200c}'),
+];
+
+/// One entity at the head of `text`, which starts with `&`: its byte
+/// length, `;` included, and the character it stands for. Numeric
+/// references decode to any valid scalar value but zero; a name not
+/// in the table, a missing `;` or a body longer than any entity
+/// answers None and the `&` stays literal.
+fn entity(text: &str) -> Option<(usize, char)> {
+    const LONGEST: usize = 12;
+    let end = text
+        .as_bytes()
+        .iter()
+        .take(LONGEST)
+        .position(|&b| b == b';')?;
+    let body = &text[1..end];
+    let c = match body.strip_prefix('#') {
+        Some(number) => {
+            let value = match number.strip_prefix(['x', 'X']) {
+                Some(hex) => u32::from_str_radix(hex, 16).ok()?,
+                None => number.parse::<u32>().ok()?,
+            };
+            if value == 0 {
+                return None;
+            }
+            char::from_u32(value)?
+        }
+        None => {
+            let at = NAMED_ENTITIES
+                .binary_search_by_key(&body, |(name, _)| name)
+                .ok()?;
+            NAMED_ENTITIES[at].1
+        }
+    };
+    Some((end + 1, c))
 }
 
-/// Drops the outer whitespace a cell inherits from source formatting.
-/// Image spans stay whole; their text is the alt.
+/// Decodes the entities of HTML text in one pass, so `&amp;lt;` reads
+/// `&lt;` and never `<`.
+fn decode_entities(text: &str) -> String {
+    if !text.contains('&') {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(amp) = rest.find('&') {
+        out.push_str(&rest[..amp]);
+        let from = &rest[amp..];
+        match entity(from) {
+            Some((len, c)) => {
+                out.push(c);
+                rest = &from[len..];
+            }
+            None => {
+                out.push('&');
+                rest = &from[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Drops the outer whitespace a cell inherits from source formatting,
+/// the ASCII kind; a no-break space is content and stays. Image spans
+/// stay whole; their text is the alt.
 pub(crate) fn trim_cell(spans: &mut Vec<Span>) {
     while let Some(first) = spans.first_mut() {
         if first.image.is_some() {
             break;
         }
-        let trimmed = first.raw_text().trim_start().to_string();
+        let trimmed = first
+            .raw_text()
+            .trim_start_matches(|c: char| c.is_ascii_whitespace())
+            .to_string();
         if trimmed.is_empty() {
             spans.remove(0);
         } else {
@@ -242,7 +439,10 @@ pub(crate) fn trim_cell(spans: &mut Vec<Span>) {
         if last.image.is_some() {
             break;
         }
-        let trimmed = last.raw_text().trim_end().to_string();
+        let trimmed = last
+            .raw_text()
+            .trim_end_matches(|c: char| c.is_ascii_whitespace())
+            .to_string();
         if trimmed.is_empty() {
             spans.pop();
         } else {
@@ -683,25 +883,33 @@ impl Builder {
         self.html_text(rest);
     }
 
-    /// Text between tags; HTML collapses whitespace runs, newlines
-    /// included, except inside `<pre>`, whose body is verbatim.
+    /// Text between tags; HTML collapses runs of its own whitespace,
+    /// the ASCII kind, newlines included, except inside `<pre>`, whose
+    /// body is verbatim. A no-break space is content, not whitespace.
     fn html_text(&mut self, text: &str) {
         if let Some(pre) = self.html_pre.as_mut() {
             pre.text.push_str(&decode_entities(text));
             return;
         }
-        if text.trim().is_empty() {
+        let blank = |c: char| c.is_ascii_whitespace();
+        if text.chars().all(blank) {
             if !text.is_empty() && !self.spans.is_empty() {
                 self.text(" ");
             }
             return;
         }
         let mut collapsed = String::with_capacity(text.len());
-        if text.starts_with(char::is_whitespace) {
+        if text.starts_with(blank) {
             collapsed.push(' ');
         }
-        collapsed.push_str(&text.split_whitespace().collect::<Vec<_>>().join(" "));
-        if text.ends_with(char::is_whitespace) {
+        collapsed.push_str(
+            &text
+                .split(blank)
+                .filter(|word| !word.is_empty())
+                .collect::<Vec<_>>()
+                .join(" "),
+        );
+        if text.ends_with(blank) {
             collapsed.push(' ');
         }
         self.text(&decode_entities(&collapsed));
@@ -2492,6 +2700,65 @@ mod tests {
         };
         assert!(spans.iter().all(|s| s.image.is_none()), "no image survives");
         assert_eq!(paragraph_text(&d, 0), "Title here");
+    }
+
+    #[test]
+    fn html_entities_decode_inside_html_blocks() {
+        let d =
+            parse("<p align=\"center\">&copy; 2024 &mdash; &#169; &#x1F600; &nbsp;x &amp;lt;</p>");
+        assert_eq!(
+            paragraph_text(&d, 0),
+            "\u{a9} 2024 \u{2014} \u{a9} \u{1F600} \u{a0}x &lt;"
+        );
+        let d = parse("Inline <b>bold &copy; html</b> here");
+        assert_eq!(paragraph_text(&d, 0), "Inline bold \u{a9} html here");
+    }
+
+    #[test]
+    fn an_nbsp_cell_holds_its_no_break_space() {
+        let d = parse("<table><tr><td>&nbsp;</td><td> a&nbsp;&nbsp;b </td></tr></table>");
+        let BlockKind::Table { rows, .. } = &d.blocks[0].kind else {
+            panic!("{:?}", d.blocks[0].kind)
+        };
+        assert_eq!(
+            rows[0][0][0].text(&d.source),
+            "\u{a0}",
+            "the cell is not empty"
+        );
+        assert_eq!(
+            rows[0][1][0].text(&d.source),
+            "a\u{a0}\u{a0}b",
+            "source spaces trim, no-break spaces stay"
+        );
+    }
+
+    #[test]
+    fn unknown_and_invalid_entities_stay_literal() {
+        let d = parse("<p>&foo; &#0; &#xD800; &#99999999; &#x110000; & loose &amp</p>");
+        assert_eq!(
+            paragraph_text(&d, 0),
+            "&foo; &#0; &#xD800; &#99999999; &#x110000; & loose &amp"
+        );
+    }
+
+    #[test]
+    fn the_latin_and_typographic_names_decode() {
+        let d = parse(
+            "<p>&eacute;&uuml;&ntilde;&Ccedil; &laquo;&raquo; &hellip; &euro;&pound;&yen;&cent; \
+             &trade;&reg; &times;&divide; &deg;&plusmn; &bull;&middot; &ldquo;&rdquo;&lsquo;&rsquo; \
+             &ndash; &apos; &frac12; &rarr;</p>",
+        );
+        assert_eq!(
+            paragraph_text(&d, 0),
+            "\u{e9}\u{fc}\u{f1}\u{c7} \u{ab}\u{bb} \u{2026} \u{20ac}\u{a3}\u{a5}\u{a2} \
+             \u{2122}\u{ae} \u{d7}\u{f7} \u{b0}\u{b1} \u{2022}\u{b7} \u{201c}\u{201d}\u{2018}\u{2019} \
+             \u{2013} ' \u{bd} \u{2192}"
+        );
+    }
+
+    #[test]
+    fn the_entity_table_is_sorted_for_the_search() {
+        assert!(super::NAMED_ENTITIES.windows(2).all(|w| w[0].0 < w[1].0));
     }
 
     #[test]
