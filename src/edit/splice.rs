@@ -11,7 +11,8 @@
 //! endings are bytes of the file, not of the source: the positions
 //! where the load normalized CRLF away are recorded, untouched line
 //! endings emit exactly as they were, and a newline typed into the
-//! document adopts the file's dominant ending.
+//! document adopts the file's dominant ending. A byte order mark is
+//! the same kind of byte: on record, never in the text, written first.
 
 use std::ops::Range;
 use std::sync::Arc;
@@ -50,6 +51,10 @@ pub struct Ledger {
     base: Arc<str>,
     /// Baseline-text offsets of newlines the load normalized from CRLF.
     crlf: Vec<u32>,
+    /// The file opened with a UTF-8 byte order mark; the emission
+    /// writes it back first. Never part of the text, so no offset
+    /// counts it.
+    bom: bool,
     /// Ordered by start, non-overlapping.
     splices: Vec<Splice>,
 }
@@ -59,8 +64,15 @@ impl Ledger {
         Ledger {
             base,
             crlf,
+            bom: false,
             splices: Vec::new(),
         }
+    }
+
+    /// Marks the ledger's file as opened with a byte order mark.
+    pub fn with_bom(mut self, bom: bool) -> Ledger {
+        self.bom = bom;
+        self
     }
 
     pub fn is_dirty(&self) -> bool {
@@ -225,7 +237,10 @@ impl Ledger {
     fn render(&self) -> (Vec<u8>, Vec<u32>) {
         let newlines = self.base.matches('\n').count();
         let dominant_crlf = self.crlf.len() * 2 > newlines;
-        let mut out = Vec::with_capacity(self.base.len() + self.crlf.len());
+        let mut out = Vec::with_capacity(self.base.len() + self.crlf.len() + 3);
+        if self.bom {
+            out.extend_from_slice(b"\xEF\xBB\xBF");
+        }
         let mut written = Vec::with_capacity(self.crlf.len());
         // The normalized position of the next byte, walked alongside
         // the emission so CRLF positions record in current coordinates.
@@ -283,6 +298,35 @@ mod tests {
 
     fn ledger(base: &str) -> Ledger {
         Ledger::new(Arc::from(base), Vec::new())
+    }
+
+    #[test]
+    fn a_marked_file_emits_its_mark_first_and_keeps_it_through_a_save() {
+        let mut led = Ledger::new(Arc::from("one\ntwo\n"), Vec::new()).with_bom(true);
+        assert_eq!(led.emit(), b"\xEF\xBB\xBFone\ntwo\n");
+        led.edit(0..0, "x");
+        assert_eq!(
+            led.emit(),
+            b"\xEF\xBB\xBFxone\ntwo\n",
+            "an edit on the first line keeps the mark ahead of it"
+        );
+        let saved = led.commit();
+        assert_eq!(saved, b"\xEF\xBB\xBFxone\ntwo\n");
+        assert_eq!(led.emit(), saved, "the mark survives the commit");
+        assert_eq!(
+            ledger("one\n").emit(),
+            b"one\n",
+            "no mark where none was read"
+        );
+    }
+
+    #[test]
+    fn the_mark_shifts_no_crlf_offset() {
+        let mut led = Ledger::new(Arc::from("a\nb\n"), vec![1, 3]).with_bom(true);
+        assert_eq!(led.emit(), b"\xEF\xBB\xBFa\r\nb\r\n");
+        led.commit();
+        assert_eq!(led.crlf, vec![1, 3], "offsets stay in text coordinates");
+        assert_eq!(led.emit(), b"\xEF\xBB\xBFa\r\nb\r\n");
     }
 
     #[test]

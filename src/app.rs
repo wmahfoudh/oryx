@@ -85,7 +85,8 @@ pub fn run(path: Option<PathBuf>, theme_name: Option<String>) -> anyhow::Result<
     // the canonical form; a path as typed on the command line would
     // key the first file differently from the same file reopened.
     let path = path.map(|p| p.canonicalize().unwrap_or(p));
-    let (document, pending, streamed, book, book_toc, lossy, opened_crlf) = match &path {
+    let (document, pending, streamed, book, book_toc, lossy, opened_crlf, opened_bom) = match &path
+    {
         Some(p) => {
             let opened = load::open(p, Some(Instant::now() + load::OPEN_BUDGET))?;
             (
@@ -96,6 +97,7 @@ pub fn run(path: Option<PathBuf>, theme_name: Option<String>) -> anyhow::Result<
                 opened.toc,
                 opened.lossy,
                 opened.crlf,
+                opened.bom,
             )
         }
         None => (
@@ -106,6 +108,7 @@ pub fn run(path: Option<PathBuf>, theme_name: Option<String>) -> anyhow::Result<
             Vec::new(),
             false,
             Vec::new(),
+            false,
         ),
     };
     // Absolute from here on: a bare relative name like `README.md` has the
@@ -260,6 +263,7 @@ pub fn run(path: Option<PathBuf>, theme_name: Option<String>) -> anyhow::Result<
         disk_seen: None,
         disk_check_at: Instant::now(),
         crlf: opened_crlf,
+        bom: opened_bom,
         caret_snap: false,
         blink_visible: true,
         blink_flip: Instant::now(),
@@ -384,6 +388,7 @@ struct Stash {
     ledger: Option<Ledger>,
     undo: Option<Undo>,
     crlf: Vec<u32>,
+    bom: bool,
     lossy: bool,
     mode: edit::Mode,
     caret: Option<Caret>,
@@ -720,6 +725,9 @@ struct App {
     /// Normalized-text offsets of the open file's CRLF endings, for the
     /// ledger's byte-exact emission.
     crlf: Vec<u32>,
+    /// The open file began with a byte order mark, which the ledger
+    /// writes back first.
+    bom: bool,
     /// A typing edit or caret motion moved content under a stale
     /// layout; the next placed frame snaps the view to the caret.
     caret_snap: bool,
@@ -1378,7 +1386,9 @@ impl App {
     /// and the unsaved edits inside it, and the undo stack with them.
     fn ensure_ledger(&mut self) {
         if self.ledger.is_none() {
-            self.ledger = Some(Ledger::new(self.document.source.clone(), self.crlf.clone()));
+            self.ledger = Some(
+                Ledger::new(self.document.source.clone(), self.crlf.clone()).with_bom(self.bom),
+            );
             self.undo = Some(Undo::new());
         }
     }
@@ -3714,6 +3724,7 @@ impl App {
                 self.document = o.document;
                 self.lossy = o.lossy;
                 self.crlf = o.crlf;
+                self.bom = o.bom;
                 book_job = o.book;
                 self.book_toc = o.toc;
                 self.start_highlight(o.pending);
@@ -3732,6 +3743,7 @@ impl App {
                 // it lossy keeps the editing door shut on it.
                 self.lossy = true;
                 self.crlf = Vec::new();
+                self.bom = false;
                 self.start_highlight(Vec::new());
                 self.parser.cancel();
                 self.parse_pending = false;
@@ -4039,6 +4051,7 @@ impl App {
             ledger: self.ledger.take(),
             undo: self.undo.take(),
             crlf: std::mem::take(&mut self.crlf),
+            bom: std::mem::replace(&mut self.bom, false),
             lossy: std::mem::replace(&mut self.lossy, false),
             mode,
             caret: self.caret.take(),
@@ -4089,6 +4102,7 @@ impl App {
         self.ledger = stash.ledger;
         self.undo = stash.undo;
         self.crlf = stash.crlf;
+        self.bom = stash.bom;
         self.lossy = stash.lossy;
         self.mode = stash.mode;
         self.caret = stash.caret;

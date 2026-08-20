@@ -56,14 +56,26 @@ fn corpus() -> Vec<(String, Vec<u8>)> {
     files.push(("synthetic: no terminator".into(), b"one\ntwo".to_vec()));
     files.push(("synthetic: blank tail".into(), b"body\n\n\n".to_vec()));
     files.push(("synthetic: empty".into(), Vec::new()));
+    files.push((
+        "synthetic: byte order mark".into(),
+        b"\xEF\xBB\xBF# Title\nbody\n".to_vec(),
+    ));
+    files.push((
+        "synthetic: byte order mark and crlf".into(),
+        b"\xEF\xBB\xBFone\r\ntwo\r\n".to_vec(),
+    ));
+    files.push((
+        "synthetic: byte order mark alone".into(),
+        b"\xEF\xBB\xBF".to_vec(),
+    ));
     assert!(files.len() > 10, "the corpus found the shipped files");
     files
 }
 
 /// Opens the bytes through the real loader, as the editor would: the
-/// normalized text and the recorded CRLF positions, or None for a
-/// lossy read.
-fn open_normalized(bytes: &[u8]) -> Option<(Arc<str>, Vec<u32>)> {
+/// normalized text, the recorded CRLF positions and the byte order
+/// mark flag, or None for a lossy read.
+fn open_normalized(bytes: &[u8]) -> Option<(Arc<str>, Vec<u32>, bool)> {
     // The two covenant tests walk the corpus concurrently in this
     // process, so the temp path must be unique per call, never derived
     // from the file alone: a shared path lets one test truncate or
@@ -79,7 +91,7 @@ fn open_normalized(bytes: &[u8]) -> Option<(Arc<str>, Vec<u32>)> {
     if opened.lossy {
         return None;
     }
-    Some((Arc::clone(&opened.document.source), opened.crlf))
+    Some((Arc::clone(&opened.document.source), opened.crlf, opened.bom))
 }
 
 fn file_lines(bytes: &[u8]) -> Vec<Vec<u8>> {
@@ -89,10 +101,10 @@ fn file_lines(bytes: &[u8]) -> Vec<Vec<u8>> {
 #[test]
 fn a_zero_edit_save_is_byte_identical_across_the_corpus() {
     for (name, bytes) in corpus() {
-        let Some((source, crlf)) = open_normalized(&bytes) else {
+        let Some((source, crlf, bom)) = open_normalized(&bytes) else {
             continue;
         };
-        let mut ledger = Ledger::new(source, crlf);
+        let mut ledger = Ledger::new(source, crlf).with_bom(bom);
         assert_eq!(
             ledger.commit(),
             bytes,
@@ -105,11 +117,11 @@ fn a_zero_edit_save_is_byte_identical_across_the_corpus() {
 fn a_single_edit_stays_confined_to_its_lines() {
     let mut rng = Lcg(0x6f727978);
     for (name, bytes) in corpus() {
-        let Some((source, crlf)) = open_normalized(&bytes) else {
+        let Some((source, crlf, bom)) = open_normalized(&bytes) else {
             continue;
         };
         for _ in 0..8 {
-            let mut ledger = Ledger::new(Arc::clone(&source), crlf.clone());
+            let mut ledger = Ledger::new(Arc::clone(&source), crlf.clone()).with_bom(bom);
             // One random edit on char boundaries: an insertion, a
             // deletion, or a replacement.
             let pos = {

@@ -174,6 +174,9 @@ pub struct Opened {
     /// the file bytes. The splice ledger restores them on save, so the
     /// normalization the viewer needs never reaches the disk.
     pub crlf: Vec<u32>,
+    /// The file opened with a UTF-8 byte order mark, stripped from the
+    /// text; the splice ledger writes it back first on save.
+    pub bom: bool,
 }
 
 pub fn open(path: &Path, deadline: Option<Instant>) -> anyhow::Result<Opened> {
@@ -236,6 +239,7 @@ pub fn open(path: &Path, deadline: Option<Instant>) -> anyhow::Result<Opened> {
             toc,
             lossy: false,
             crlf: Vec::new(),
+            bom: false,
         });
     }
     if is_binary(&bytes) {
@@ -243,6 +247,18 @@ pub fn open(path: &Path, deadline: Option<Instant>) -> anyhow::Result<Opened> {
     }
     let text = String::from_utf8_lossy(&bytes);
     let lossy = matches!(text, std::borrow::Cow::Owned(_));
+    // A byte order mark is not text: left in, markdown reads it as the
+    // first character of the first line and a heading there is lost.
+    // It leaves the text and goes on record for the save to write back.
+    let bom = text.starts_with('\u{FEFF}');
+    let text = if bom {
+        match text {
+            std::borrow::Cow::Borrowed(t) => std::borrow::Cow::Borrowed(&t[3..]),
+            std::borrow::Cow::Owned(t) => std::borrow::Cow::Owned(t[3..].to_string()),
+        }
+    } else {
+        text
+    };
     // Windows files carry CRLF; the plain-text path strips returns per
     // line, and everything downstream (offsets, rendering, copy as
     // markdown) assumes the source is clean of them. Each stripped
@@ -294,6 +310,7 @@ pub fn open(path: &Path, deadline: Option<Instant>) -> anyhow::Result<Opened> {
         toc: Vec::new(),
         lossy,
         crlf,
+        bom,
     })
 }
 
@@ -421,8 +438,8 @@ fn source_lines(text: &str) -> Vec<Range<u32>> {
 
 /// The whole file as a single code block; the budget pass highlights it.
 /// No token means no grammar, so the block renders in the code font
-/// unstyled. The lines are ranges into the source: a code file was two
-/// full copies of itself before layout ran, now it is one.
+/// unstyled. The lines are ranges into the source, so the file's text
+/// is held once.
 pub(crate) fn code_document(token: Option<&str>, text: &str) -> Document {
     let mut lines = source_lines(text);
     while lines.last().is_some_and(|l| l.is_empty()) {
@@ -531,16 +548,6 @@ fn flush_plain(blocks: &mut Vec<Block>, spans: &mut Vec<Span>) {
     blocks.push(block);
 }
 
-/// Extension to highlight token, sorted by extension for binary search.
-///
-/// The mapping follows the bundled grammars' own extension lists, with one
-/// class of exception: an extension a grammar claims that the wider world
-/// reads as another language is left out, so `.s` stays assembly rather
-/// than R and `.l` stays lex rather than Lisp. `.p`, `.t`, `.inc`, `.tmpl`,
-/// `.tpl` and `.build` are dropped for the same reason.
-///
-/// Every token here reaches a grammar, some through `highlight::ALIASES`
-/// where the grammar ships under another name.
 /// Extensionless file names with a known language, matched exactly
 /// against the file name. `detect` consults it before anything else, so
 /// a `Dockerfile` or a `Makefile` opens colored instead of falling
@@ -554,6 +561,16 @@ static WELL_KNOWN_NAMES: &[(&str, &str)] = &[
     ("makefile", "makefile"),
 ];
 
+/// Extension to highlight token, sorted by extension for binary search.
+///
+/// The mapping follows the bundled grammars' own extension lists, with one
+/// class of exception: an extension a grammar claims that the wider world
+/// reads as another language is left out, so `.s` stays assembly rather
+/// than R and `.l` stays lex rather than Lisp. `.p`, `.t`, `.inc`, `.tmpl`,
+/// `.tpl` and `.build` are dropped for the same reason.
+///
+/// Every token here reaches a grammar, some through `highlight::ALIASES`
+/// where the grammar ships under another name.
 static CODE_EXTENSIONS: &[(&str, &str)] = &[
     ("applescript", "applescript"),
     ("as", "actionscript"),
@@ -741,6 +758,42 @@ mod tests {
         std::fs::write(&clean, "alpha\nbeta\n").unwrap();
         let opened = open(&clean, None).unwrap();
         assert!(opened.crlf.is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_byte_order_mark_is_stripped_and_recorded() {
+        let dir = std::env::temp_dir().join(format!("oryx-bom-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let marked = dir.join("marked.md");
+        std::fs::write(&marked, b"\xEF\xBB\xBF# Title\r\n\r\nbody\r\n").unwrap();
+        let opened = open(&marked, None).unwrap();
+        assert!(opened.bom, "the mark is on record");
+        assert!(
+            !opened.document.source.starts_with('\u{FEFF}'),
+            "the mark left the text"
+        );
+        assert!(
+            matches!(opened.document.blocks[0].kind, BlockKind::Heading { .. }),
+            "the first heading parses: {:?}",
+            opened.document.blocks[0].kind
+        );
+        assert_eq!(
+            opened.crlf,
+            vec![7, 8, 13],
+            "CRLF offsets count from the stripped text"
+        );
+        let code = dir.join("marked.rs");
+        std::fs::write(&code, b"\xEF\xBB\xBFfn main() {}\n").unwrap();
+        let opened = open(&code, None).unwrap();
+        assert!(opened.bom);
+        assert_eq!(&*opened.document.source, "fn main() {}\n");
+        let clean = dir.join("clean.md");
+        std::fs::write(&clean, "# Title\n").unwrap();
+        assert!(
+            !open(&clean, None).unwrap().bom,
+            "a clean file carries no mark"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
