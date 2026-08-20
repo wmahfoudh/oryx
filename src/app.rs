@@ -78,7 +78,21 @@ const MOUSE_MUTE: Duration = Duration::from_millis(150);
 /// The window icon raster produced by the build script.
 const ICON_64: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/icon_64.rgba"));
 
-pub fn run(path: Option<PathBuf>, theme_name: Option<String>) -> anyhow::Result<()> {
+/// What the command line opened: nothing, a file, or a folder to
+/// browse in the sidebar.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Launch {
+    Empty,
+    File(PathBuf),
+    Folder(PathBuf),
+}
+
+pub fn run(launch: Launch, theme_name: Option<String>) -> anyhow::Result<()> {
+    let (path, folder) = match launch {
+        Launch::Empty => (None, None),
+        Launch::File(path) => (Some(path), None),
+        Launch::Folder(dir) => (None, Some(dir.canonicalize().unwrap_or(dir))),
+    };
     // One form of the path for the whole session. Everything keyed on
     // it, the edit marks, the resume note, the disk identity, has to
     // match what `open_file` stores for every later file, and that is
@@ -120,6 +134,7 @@ pub fn run(path: Option<PathBuf>, theme_name: Option<String>) -> anyhow::Result<
     let doc_dir = path
         .as_ref()
         .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .or_else(|| folder.clone())
         .unwrap_or_else(|| PathBuf::from("."));
     let event_loop = EventLoop::with_user_event().build()?;
     event_loop.set_control_flow(ControlFlow::Wait);
@@ -144,10 +159,21 @@ pub fn run(path: Option<PathBuf>, theme_name: Option<String>) -> anyhow::Result<
         parser.start(document.source.clone(), move || waker());
     }
     let mut config = config::load();
-    if path.is_some() {
+    if path.is_some() || folder.is_some() {
         let dir_text = doc_dir.display().to_string();
+        let mut changed = false;
         if !dir_text.is_empty() && config.last_dir != dir_text {
             config.last_dir = dir_text;
+            changed = true;
+        }
+        // A folder on the command line is a request to browse it: the
+        // sidebar opens there, on the welcome page, and stays open the
+        // way the reader leaves it.
+        if folder.is_some() && !config.sidebar_open {
+            config.sidebar_open = true;
+            changed = true;
+        }
+        if changed {
             config::save(&config);
         }
     }

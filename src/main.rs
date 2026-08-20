@@ -20,6 +20,17 @@ fn attach_parent_console() {
     }
 }
 
+/// What the positional argument asks for: a folder opens the sidebar
+/// there over the welcome page; anything else, existing or not, goes
+/// to the loader as a file, whose error names a missing one.
+fn launch(path: Option<PathBuf>) -> app::Launch {
+    match path {
+        None => app::Launch::Empty,
+        Some(p) if p.is_dir() => app::Launch::Folder(p),
+        Some(p) => app::Launch::File(p),
+    }
+}
+
 fn main() -> ExitCode {
     #[cfg(windows)]
     attach_parent_console();
@@ -52,11 +63,34 @@ fn main() -> ExitCode {
         }
         path = Some(PathBuf::from(arg));
     }
-    match app::run(path, theme) {
+    match app::run(launch(path), theme) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("oryx: {error}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_argument_decides_between_nothing_a_file_and_a_folder() {
+        let dir = std::env::temp_dir().join(format!("oryx-launch-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("notes.md");
+        std::fs::write(&file, "# notes\n").unwrap();
+        let missing = dir.join("absent.md");
+        assert_eq!(launch(None), app::Launch::Empty);
+        assert_eq!(launch(Some(file.clone())), app::Launch::File(file));
+        assert_eq!(launch(Some(dir.clone())), app::Launch::Folder(dir.clone()));
+        assert_eq!(
+            launch(Some(missing.clone())),
+            app::Launch::File(missing),
+            "a missing path goes to the loader, whose error names it"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
