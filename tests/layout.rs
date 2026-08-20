@@ -3992,3 +3992,189 @@ fn code_and_tables_ignore_the_forced_direction() {
         assert!((a.x - f.x).abs() < 0.01, "columns keep their order");
     }
 }
+
+// Long lines: one source line at or above `highlight::LONG_LINE` skips
+// the grammar and shapes in chunks, and the runs still read the model
+// byte for byte.
+
+/// A minified JSON object at least `min_len` bytes long; `spaced` puts
+/// a space after each colon and comma, so a chunk can cut after one.
+fn long_json_line(min_len: usize, spaced: bool) -> String {
+    let mut s = String::from("{");
+    let mut i = 0;
+    while s.len() < min_len {
+        if spaced {
+            s.push_str(&format!("\"key{i}\": {i}, "));
+        } else {
+            s.push_str(&format!("\"key{i}\":{i},"));
+        }
+        i += 1;
+    }
+    s.push_str("\"end\":0}");
+    s
+}
+
+fn code_runs(l: &LayoutDoc, block: usize, line: usize) -> Vec<&TextRun> {
+    l.runs
+        .iter()
+        .filter(|r| r.block == block && r.span == line)
+        .collect()
+}
+
+#[test]
+fn a_line_at_the_long_line_threshold_colors_plain_without_the_grammar() {
+    let short = "{\"k\": [1, 2, 3], \"s\": \"v\"}";
+    let long = long_json_line(highlight::LONG_LINE, true);
+    let doc = markdown::parse(format!("```json\n{short}\n{long}\n```").as_str());
+    let BlockKind::CodeBlock {
+        lines, language, ..
+    } = &doc.blocks[0].kind
+    else {
+        panic!("a code block");
+    };
+    let spans = highlight::spans(&doc.source, lines, language.as_deref());
+    assert!(
+        spans[0].len() > 1,
+        "the short line is colored by the grammar"
+    );
+    assert_eq!(
+        spans[1],
+        vec![(0..long.len(), highlight::SyntaxRole::Plain)],
+        "the long line is one plain range"
+    );
+}
+
+#[test]
+fn a_chunked_code_line_tiles_its_bytes_once_in_order() {
+    let line = long_json_line(3 * highlight::LONG_LINE, false);
+    let (doc, l) = lay2(&format!("```json\n{line}\n```"), 600.0);
+    let runs = code_runs(&l, 0, 0);
+    assert!(runs.len() > 10, "a wrapped long line shapes many runs");
+    let mut cursor = 0usize;
+    let mut last_y = f32::MIN;
+    for r in &runs {
+        let TextRef::Model { start, len } = r.text else {
+            panic!("a code run reads the model");
+        };
+        assert_eq!(
+            start as usize, cursor,
+            "a gap or an overlap at byte {cursor}"
+        );
+        assert!(r.y >= last_y, "runs go down the panel in byte order");
+        last_y = r.y;
+        cursor = (start + len) as usize;
+    }
+    assert_eq!(cursor, line.len(), "the runs end where the line ends");
+    assert_eq!(l.run_text(&doc, runs[0]).chars().next(), Some('{'));
+    let rows: std::collections::BTreeSet<i64> = runs.iter().map(|r| r.y as i64).collect();
+    assert!(rows.len() > 20, "the line wraps into rows: {}", rows.len());
+}
+
+#[test]
+fn a_chunked_code_line_with_spaces_leaves_only_spaces_uncovered() {
+    let line = long_json_line(2 * highlight::LONG_LINE + 100, true);
+    let (_doc, l) = lay2(&format!("```json\n{line}\n```"), 600.0);
+    let runs = code_runs(&l, 0, 0);
+    let mut cursor = 0usize;
+    for r in &runs {
+        let TextRef::Model { start, len } = r.text else {
+            panic!("a code run reads the model");
+        };
+        let start = start as usize;
+        assert!(start >= cursor, "runs overlap at byte {start}");
+        assert!(
+            line[cursor..start].bytes().all(|b| b == b' '),
+            "bytes {cursor}..{start} dropped: {:?}",
+            &line[cursor..start]
+        );
+        cursor = start + len as usize;
+    }
+    assert!(
+        line[cursor..].trim().is_empty(),
+        "the tail {:?} dropped",
+        &line[cursor..]
+    );
+}
+
+#[test]
+fn a_selection_across_the_chunk_seam_copies_the_line_between() {
+    let line = long_json_line(2 * highlight::LONG_LINE + 100, true);
+    let (doc, l) = lay2(&format!("```json\n{line}\n```"), 600.0);
+    let mut fonts = fonts();
+    let runs = code_runs(&l, 0, 0);
+    // Every tenth run answers a hit on its first pixel with its own
+    // first byte, whichever chunk shaped it.
+    for r in runs.iter().step_by(10) {
+        let TextRef::Model { start, .. } = r.text else {
+            panic!("a code run reads the model");
+        };
+        let pos = oryx::ui::selection::pos_at(&l, &doc, &mut fonts, r.x + 0.5, r.y + 1.0)
+            .expect("a hit on the run");
+        assert_eq!(
+            pos,
+            oryx::ui::selection::ModelPos {
+                block: 0,
+                span: 0,
+                byte: start as usize
+            },
+            "the run at y {} maps to the wrong byte",
+            r.y
+        );
+    }
+    let first = runs[0];
+    let last = runs[runs.len() - 1];
+    let a = oryx::ui::selection::pos_at(&l, &doc, &mut fonts, first.x + 0.5, first.y + 1.0)
+        .expect("a hit on the first run");
+    let b = oryx::ui::selection::pos_at(&l, &doc, &mut fonts, last.x + 0.5, last.y + 1.0)
+        .expect("a hit on the last run");
+    assert!(
+        b.byte > 2 * highlight::LONG_LINE,
+        "the last run sits past both seams, at byte {}",
+        b.byte
+    );
+    let sel = oryx::ui::selection::Selection { start: a, end: b };
+    assert_eq!(
+        oryx::ui::selection::plain_text(&sel, &doc),
+        line[..b.byte],
+        "the copy between the first and the last run"
+    );
+}
+
+#[test]
+fn a_paragraph_with_thousands_of_inline_spans_keeps_every_span_in_order() {
+    let src: String = (0..1500).map(|i| format!("w{i} *e{i}* ")).collect();
+    let (doc, l) = lay2(&src, 800.0);
+    let spans = match &doc.blocks[0].kind {
+        BlockKind::Paragraph { spans } => spans.len(),
+        other => panic!("a paragraph, not {other:?}"),
+    };
+    assert!(spans > 1000, "the paragraph holds {spans} spans");
+    let runs: Vec<&TextRun> = l.runs.iter().filter(|r| r.block == 0).collect();
+    let mut prev: Option<(usize, u32, f32, f32)> = None;
+    let mut text = String::new();
+    for r in &runs {
+        let TextRef::Model { start, .. } = r.text else {
+            panic!("a prose run reads the model");
+        };
+        if let Some((span, s, y, x)) = prev {
+            assert!(
+                (r.span, start) > (span, s),
+                "runs leave document order at span {} byte {start}",
+                r.span
+            );
+            assert!(
+                r.y > y || (r.y == y && r.x >= x),
+                "runs leave reading order at span {}",
+                r.span
+            );
+        }
+        prev = Some((r.span, start, r.y, r.x));
+        text.push_str(l.run_text(&doc, r));
+    }
+    let squeeze = |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+    assert_eq!(
+        squeeze(&text),
+        squeeze(&src.replace('*', "")),
+        "every span's text reaches the runs once"
+    );
+}

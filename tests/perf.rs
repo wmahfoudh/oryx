@@ -859,3 +859,46 @@ fn book_bench() {
         vm_rss_kb() / 1024
     );
 }
+
+/// Long lines: a 250KB minified JSON on one line, and a paragraph of
+/// 4,000 inline spans. Before the chunked shaping the JSON took 106.8s
+/// to lay out, quadratic in the highlight segment count inside the
+/// span list, and the paragraph 6.5s.
+#[test]
+#[ignore = "timing asserts only hold in release mode"]
+fn long_lines_meet_the_budget() {
+    let mut json = String::from("{");
+    let mut i = 0;
+    while json.len() < 250 * 1024 {
+        json.push_str(&format!(
+            "\"key{i}\":{{\"id\":{i},\"ok\":true,\"tags\":[\"a\",\"b\"]}},"
+        ));
+        i += 1;
+    }
+    json.push_str("\"end\":0}");
+    let (open_ms, _, doc) = measure_open(&json, "json");
+    let (laid, _) = measure_layout(&doc, Some(&pool()));
+    println!(
+        "json line: open {open_ms}ms, first slice {}ms, full pass {}ms, {} runs",
+        laid.first_ms, laid.ms, laid.runs
+    );
+    assert!(laid.height > 0.0, "the json line laid out");
+    if !cfg!(debug_assertions) {
+        assert!(
+            open_ms + laid.ms < 2000,
+            "budget exceeded: open {open_ms}ms + layout {}ms",
+            laid.ms
+        );
+    }
+
+    let paragraph: String = (0..2000).map(|i| format!("w{i} *e{i}* ")).collect();
+    let (open_ms, _, doc) = measure_open(&paragraph, "md");
+    let (laid, _) = measure_layout(&doc, Some(&pool()));
+    println!(
+        "span paragraph: open {open_ms}ms, full pass {}ms, {} runs",
+        laid.ms, laid.runs
+    );
+    if !cfg!(debug_assertions) {
+        assert!(laid.ms < 1000, "budget exceeded: layout {}ms", laid.ms);
+    }
+}

@@ -12,6 +12,14 @@ use crate::doc::model::CodeBody;
 /// Styled ranges for one code line.
 pub type LineSpans = Vec<(Range<usize>, SyntaxRole)>;
 
+/// The byte length from which a source line counts as long: it is
+/// colored plain without visiting the grammar, and the layout shapes
+/// it in chunks of this size. A minified file puts hundreds of
+/// kilobytes on one line, and cosmic-text's span list grows quadratic
+/// in the number of styled pieces on a line: a 250KB JSON line with
+/// 136,001 pieces took 106.8s to lay out, against 134ms plain.
+pub const LONG_LINE: usize = 8 * 1024;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyntaxRole {
     Keyword,
@@ -76,8 +84,8 @@ pub fn spans_until(
 }
 
 /// The parser state carried across a line boundary: equal seams parse
-/// the rest of a block identically, which is what makes the wash
-/// resumable and the early stop sound.
+/// the rest of a block identically, which is what lets a sweep resume
+/// mid-block and stop early.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Seam {
     parse: ParseState,
@@ -111,8 +119,8 @@ pub fn record_seam(table: &mut Vec<(usize, Seam)>, line: usize, seam: &Seam) {
 /// line range with `new`. Entries at or before the region's first line
 /// stand, entries inside it describe replaced lines and drop, and
 /// entries past its end move by the line delta. A shifted entry still
-/// holds the pre-edit state for its line, which is exactly what a
-/// resumed sweep converges against.
+/// holds the pre-edit state for its line, which is what a resumed
+/// sweep converges against.
 pub fn shift_seams(
     table: &mut Vec<(usize, Seam)>,
     old: std::ops::Range<usize>,
@@ -199,9 +207,9 @@ pub const CHUNK_LINES: usize = 512;
 
 /// Colors a band from the cold guess: a fresh parser advanced past one
 /// empty line, which clears syntect's first-line flag and pushes the
-/// base scope. The guess is right for over 99% of lines in practice,
-/// wrong only where the band opens inside a construct, so the result
-/// is display-quality and the exact sweep still overwrites it.
+/// base scope. The guess is right for over 99% of lines, wrong only
+/// where the band opens inside a construct, so the result is
+/// display-quality and the exact sweep still overwrites it.
 pub fn spans_band(
     source: &str,
     lines: &CodeBody,
@@ -229,7 +237,7 @@ pub struct SegmentProbe {
     pub drifted_lines: usize,
 }
 
-/// Design probe for the segmented wash: walks the block in one
+/// Measurement probe for the segmented wash: walks the block in one
 /// sequential truth pass and reports, for each `segment`-line boundary
 /// past the first, whether the parser state carried into that line
 /// equals the state a cold segment would guess, and how many of the
@@ -434,7 +442,7 @@ impl Highlighter {
         });
     }
 
-    /// Whether the live worker still has blocks to colour.
+    /// Whether the live worker still has blocks to color.
     pub fn is_running(&self) -> bool {
         self.done.load(Ordering::SeqCst) < self.generation.load(Ordering::SeqCst)
     }
@@ -494,6 +502,12 @@ impl Parser {
     }
 
     fn line(&mut self, line: &str) -> LineSpans {
+        // A long line never reaches the grammar; the parser state stays
+        // where the previous line left it, so a sweep resumed over the
+        // block still converges.
+        if line.len() >= LONG_LINE {
+            return vec![(0..line.len(), SyntaxRole::Plain)];
+        }
         // The grammar levels only the first two headings, so the rest
         // are read off the line itself.
         let hashes = if self.markdown {

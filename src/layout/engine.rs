@@ -1,6 +1,7 @@
 //! The layout engine: document model in, positioned runs and rects out.
 //! Pure with respect to the window: no pixels, fully testable with numbers.
 
+use std::collections::HashMap;
 use std::ops::Range;
 use std::time::{Duration, Instant};
 
@@ -13,7 +14,7 @@ use crate::doc::model::{
 };
 use crate::layout::pool::{Job, ShapeCtx, StepKey, Work};
 use crate::style::fonts::{FontStore, BODY_FAMILY, CODE_FAMILY};
-use crate::style::highlight::SyntaxRole;
+use crate::style::highlight::{SyntaxRole, LONG_LINE};
 use crate::style::theme::{Rgba, Theme};
 
 #[derive(Debug, Clone)]
@@ -239,10 +240,10 @@ pub struct LayoutDoc {
     /// Materialized-window bookkeeping while retention is bounded.
     window: Option<WindowState>,
     /// The checkbox square every placed task item draws, keyed by
-    /// block, the click's hit targets. Deliberately outside the
-    /// window's eviction: positions are exact wherever the window
-    /// sits, so a recorded box stays valid until the layout itself is
-    /// dropped; re-materialization re-pushes and replaces by key.
+    /// block, the click's hit targets. Outside the window's eviction:
+    /// positions are exact wherever the window sits, so a recorded box
+    /// stays valid until the layout itself is dropped;
+    /// re-materialization re-pushes and replaces by key.
     checkboxes: Vec<TaskBox>,
 }
 
@@ -558,9 +559,9 @@ impl LayoutDoc {
 
     /// Drops the materialized window so the next slide refills the
     /// band from the model at its recorded positions: the cost of a
-    /// far scroll jump, paid deliberately when the model changed
-    /// without its geometry moving, which is the checkbox flip. False
-    /// when the layout is not windowed; the caller restarts instead.
+    /// far scroll jump, paid when the model changed without its
+    /// geometry moving, which is the checkbox flip. False when the
+    /// layout is not windowed; the caller restarts instead.
     pub fn rematerialize(&mut self) -> bool {
         let Some(window) = self.window.as_ref() else {
             return false;
@@ -3519,6 +3520,18 @@ fn shape_block(
     height
 }
 
+/// A prose segment with more pieces than this, or more bytes, shapes
+/// in chunks cut at piece boundaries, each chunk its own buffer
+/// stacked under the previous one. cosmic-text's span list grows
+/// quadratic in the piece count: a paragraph of 32,000 inline spans
+/// took 6.5s. Bytes alone shape in linear time, so the byte cap sits
+/// far above the code line's, since a cut inside a book paragraph
+/// shows as a ragged line.
+const LONG_SEGMENT_PIECES: usize = 1000;
+const LONG_SEGMENT_BYTES: usize = 8 * LONG_LINE;
+
+/// Shapes one hard-break segment of a block: the pieces `segment`
+/// indexes, as one buffer or as stacked chunks. Returns the height.
 #[allow(clippy::too_many_arguments)]
 fn shape_segment(
     fonts: &mut FontStore,
@@ -3529,6 +3542,97 @@ fn shape_segment(
     styles: &[SpanStyle],
     origins: &[usize],
     segment: &[usize],
+    base: &BlockStyle,
+    x0: f32,
+    y0: f32,
+    content_width: f32,
+    line_height: f32,
+    out: &mut LayoutDoc,
+) -> f32 {
+    // Byte offset of each piece inside the whole segment, and of the
+    // first piece of each origin span: the pieces of a split span
+    // concatenate to the span's text, so a model reference counts from
+    // where the origin starts, not where the piece does.
+    let mut offsets: Vec<u32> = Vec::with_capacity(segment.len());
+    let mut origin_starts: HashMap<usize, u32> = HashMap::new();
+    let mut acc = 0u32;
+    for &si in segment {
+        offsets.push(acc);
+        origin_starts.entry(origins[si]).or_insert(acc);
+        acc += spans[si].text(source).len() as u32;
+    }
+    let total = acc as usize;
+    if segment.len() <= LONG_SEGMENT_PIECES && total <= LONG_SEGMENT_BYTES {
+        return shape_segment_chunk(
+            fonts,
+            cfg,
+            source,
+            spans,
+            model,
+            styles,
+            origins,
+            segment,
+            0,
+            &origin_starts,
+            base,
+            x0,
+            y0,
+            content_width,
+            line_height,
+            out,
+        );
+    }
+    let mut height = 0.0_f32;
+    let mut start = 0usize;
+    while start < segment.len() {
+        let mut end = start + 1;
+        while end < segment.len()
+            && end - start < LONG_SEGMENT_PIECES
+            && (offsets[end] - offsets[start]) as usize + spans[segment[end]].text(source).len()
+                <= LONG_SEGMENT_BYTES
+        {
+            end += 1;
+        }
+        height += shape_segment_chunk(
+            fonts,
+            cfg,
+            source,
+            spans,
+            model,
+            styles,
+            origins,
+            &segment[start..end],
+            offsets[start],
+            &origin_starts,
+            base,
+            x0,
+            y0 + height,
+            content_width,
+            line_height,
+            out,
+        );
+        start = end;
+    }
+    height
+}
+
+/// Shapes the pieces `chunk` indexes as one buffer. `chunk_base` is
+/// the chunk's byte offset inside its segment and `origin_starts` the
+/// segment offset of each origin span's first piece, both over the
+/// whole segment, so a model reference lands on the span's own bytes
+/// whichever chunk shaped it.
+#[allow(clippy::too_many_arguments)]
+fn shape_segment_chunk(
+    fonts: &mut FontStore,
+    cfg: &ViewConfig,
+    source: &str,
+    spans: &[Span],
+    model: &[bool],
+    styles: &[SpanStyle],
+    origins: &[usize],
+    segment: &[usize],
+    chunk_base: u32,
+    origin_starts: &HashMap<usize, u32>,
     base: &BlockStyle,
     x0: f32,
     y0: f32,
@@ -3590,21 +3694,12 @@ fn shape_segment(
     }
     buffer.shape_until_scroll(&mut fonts.font_system, false);
 
-    // Byte offset of each segment member inside the shaped line, so a
-    // model reference lands in its own span's display text.
-    let mut prefixes: Vec<(usize, u32)> = Vec::with_capacity(segment.len());
-    let mut acc = 0u32;
-    for &si in segment {
-        prefixes.push((si, acc));
-        acc += spans[si].text(source).len() as u32;
-    }
-
     // A span text may carry embedded newlines; the buffer splits them
     // into separate lines whose glyph offsets are line-local. Each
-    // line's base offset inside the segment counts the stripped newline
+    // line's base offset inside the chunk counts the stripped newline
     // back in, so a model reference lands on the span's own bytes.
     let mut line_offsets: Vec<u32> = Vec::with_capacity(buffer.lines.len());
-    let mut line_acc = 0u32;
+    let mut line_acc = chunk_base;
     for line in &buffer.lines {
         line_offsets.push(line_acc);
         line_acc += line.text().len() as u32 + 1;
@@ -3638,17 +3733,12 @@ fn shape_segment(
                 );
             }
             let text = if model[span_index] {
-                // The first piece of this run's origin span: pieces of a
-                // split span concatenate to the span's text, so a model
-                // reference counts from where the origin starts, not
-                // where the piece does.
-                let prefix = prefixes
-                    .iter()
-                    .find(|(si, _)| origins[*si] == origins[span_index])
-                    .map(|(_, offset)| *offset)
+                let origin_start = origin_starts
+                    .get(&origins[span_index])
+                    .copied()
                     .unwrap_or(0);
                 TextRef::Model {
-                    start: line_base + start_byte as u32 - prefix,
+                    start: line_base + start_byte as u32 - origin_start,
                     len: (end_byte - start_byte) as u32,
                 }
             } else {
@@ -4853,7 +4943,7 @@ fn split_glued_punctuation(
 /// or equation joins the last text line when it fits there, otherwise it
 /// opens its own row. A one-line text chunk that follows an equation on an
 /// open line merges back onto that line, so a sentence flows around its
-/// math; longer continuations start below, a recorded limitation.
+/// math; longer continuations start below.
 #[allow(clippy::too_many_arguments)]
 fn layout_flow(
     fonts: &mut FontStore,
@@ -5650,7 +5740,11 @@ pub(crate) fn shape_code_line_step(
 }
 
 /// Shapes one code line: one row per source line, wrapping inside the
-/// panel, colors from the highlight roles.
+/// panel, colors from the highlight roles. A line longer than
+/// `LONG_LINE` shapes in chunks, each its own buffer stacked under the
+/// previous one, so the cost stays linear in the line's length; the
+/// runs keep their byte offsets into the whole line, so selection,
+/// copy, search and the editor see one line.
 #[allow(clippy::too_many_arguments)]
 fn shape_code_line(
     fonts: &mut FontStore,
@@ -5674,6 +5768,116 @@ fn shape_code_line(
     } else {
         segments
     };
+    if line.len() <= LONG_LINE {
+        let height = shape_code_chunk(
+            fonts,
+            theme,
+            cfg,
+            line,
+            0,
+            line_index,
+            segments,
+            block_index,
+            x0,
+            y0,
+            size,
+            line_height,
+            wrap_width,
+            prose,
+            out,
+        );
+        return height.max(line_height);
+    }
+    let mut height = 0.0_f32;
+    for chunk in long_line_chunks(line) {
+        let local = segments_within(segments, &chunk);
+        height += shape_code_chunk(
+            fonts,
+            theme,
+            cfg,
+            &line[chunk.clone()],
+            chunk.start,
+            line_index,
+            &local,
+            block_index,
+            x0,
+            y0 + height,
+            size,
+            line_height,
+            wrap_width,
+            prose,
+            out,
+        );
+    }
+    height.max(line_height)
+}
+
+/// Cuts a long line into chunks of at most `LONG_LINE` bytes, each
+/// ending on a character boundary and, when one sits in the last few
+/// hundred bytes, after a space, so the cut reads as a wrap. A line
+/// within the threshold is one chunk.
+fn long_line_chunks(line: &str) -> Vec<Range<usize>> {
+    const LOOK_BACK: usize = 256;
+    let bytes = line.as_bytes();
+    let mut chunks = Vec::new();
+    let mut start = 0;
+    while line.len() - start > LONG_LINE {
+        let target = start + LONG_LINE;
+        let floor = target - LOOK_BACK;
+        let mut end = match bytes[floor..target].iter().rposition(|&b| b == b' ') {
+            Some(space) => floor + space + 1,
+            None => target,
+        };
+        while !line.is_char_boundary(end) {
+            end -= 1;
+        }
+        chunks.push(start..end);
+        start = end;
+    }
+    chunks.push(start..line.len());
+    chunks
+}
+
+/// The styled ranges overlapping `chunk`, clipped to it and rebased to
+/// its start. The ranges arrive sorted and disjoint, as the
+/// highlighter emits them.
+fn segments_within(
+    segments: &[(Range<usize>, SyntaxRole)],
+    chunk: &Range<usize>,
+) -> Vec<(Range<usize>, SyntaxRole)> {
+    let first = segments.partition_point(|(range, _)| range.end <= chunk.start);
+    segments[first..]
+        .iter()
+        .take_while(|(range, _)| range.start < chunk.end)
+        .map(|(range, role)| {
+            let lo = range.start.max(chunk.start) - chunk.start;
+            let hi = range.end.min(chunk.end) - chunk.start;
+            (lo..hi, *role)
+        })
+        .collect()
+}
+
+/// Shapes one chunk of a code line, `text` starting `base` bytes into
+/// the line, its styled ranges relative to `text`; the runs' model
+/// references count from the line's start.
+#[allow(clippy::too_many_arguments)]
+fn shape_code_chunk(
+    fonts: &mut FontStore,
+    theme: &Theme,
+    cfg: &ViewConfig,
+    text: &str,
+    base: usize,
+    line_index: usize,
+    segments: &[(Range<usize>, SyntaxRole)],
+    block_index: usize,
+    x0: f32,
+    y0: f32,
+    size: f32,
+    line_height: f32,
+    wrap_width: f32,
+    prose: bool,
+    out: &mut LayoutDoc,
+) -> f32 {
     let face = code_face(prose, cfg).0;
     let mut buffer = Buffer::new(&mut fonts.font_system, Metrics::new(size, line_height));
     buffer.set_size(&mut fonts.font_system, Some(wrap_width), None);
@@ -5691,7 +5895,7 @@ fn shape_code_line(
             if italic {
                 attrs = attrs.style(Style::Italic);
             }
-            (&line[range.clone()], attrs)
+            (&text[range.clone()], attrs)
         })
         .collect();
     let default_attrs = Attrs::new().family(Family::Name(face));
@@ -5712,15 +5916,15 @@ fn shape_code_line(
             let segment_index = group.meta;
             let (start_byte, end_byte) = (group.bytes.start, group.bytes.end);
             let role = segments[segment_index].1;
-            // The rich pieces cover the line contiguously, so an offset
-            // into their concatenation is an offset into the line.
+            // The rich pieces cover the chunk contiguously, so an offset
+            // into their concatenation is an offset into the chunk.
             let family = out.family_id(face);
             // The face the run was shaped with has to travel with it:
             // paint rasterizes from these fields, not from the buffer.
             let (bold, slanted) = crate::style::highlight::role_face(role);
             out.runs.push(TextRun {
                 text: TextRef::Model {
-                    start: start_byte as u32,
+                    start: (base + start_byte) as u32,
                     len: (end_byte - start_byte) as u32,
                 },
                 x: x0 + group.x,
@@ -5745,7 +5949,7 @@ fn shape_code_line(
             });
         }
     }
-    height.max(line_height)
+    height
 }
 
 fn role_color(theme: &Theme, role: SyntaxRole) -> Rgba {
@@ -5783,9 +5987,6 @@ fn role_color(theme: &Theme, role: SyntaxRole) -> Rgba {
     }
 }
 
-/// Drops line-trailing whitespace glyphs so run widths match visible text.
-/// Whether a glyph draws only a stretchable space, U+0020 or U+00A0,
-/// the characters justification widens.
 /// One run of consecutive glyphs sharing a metadata index on a shaped
 /// line: the segment they answer to, their byte span inside the line,
 /// and their x extent.
@@ -5855,10 +6056,13 @@ fn glyph_groups<'a>(
     })
 }
 
+/// Whether a glyph draws only a stretchable space, U+0020 or U+00A0,
+/// the characters justification widens.
 fn glyph_is_space(line_text: &str, glyph: &cosmic_text::LayoutGlyph) -> bool {
     matches!(&line_text[glyph.start..glyph.end], " " | "\u{a0}")
 }
 
+/// Drops line-trailing whitespace glyphs so run widths match visible text.
 fn trim_trailing_spaces<'a>(
     glyphs: &'a [cosmic_text::LayoutGlyph],
     line_text: &str,
