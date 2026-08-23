@@ -59,7 +59,8 @@ pub fn desktop_entry(exe: &Path) -> String {
         "[Desktop Entry]\n\
          Type=Application\n\
          Name=Oryx\n\
-         Comment=Fast viewer for markdown, code and books\n\
+         GenericName=Markdown editor and book reader\n\
+         Comment=Fast editor for markdown and code, reader for ebooks and comics\n\
          Exec={} %f\n\
          Icon=oryx\n\
          Terminal=false\n\
@@ -211,7 +212,9 @@ mod tests {
             entry.contains("application/epub+zip;"),
             "books open from the file manager"
         );
-        assert!(entry.contains("Comment=Fast viewer for markdown, code and books\n"));
+        assert!(entry.contains("GenericName=Markdown editor and book reader\n"));
+        assert!(entry
+            .contains("Comment=Fast editor for markdown and code, reader for ebooks and comics\n"));
     }
 
     #[test]

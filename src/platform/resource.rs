@@ -3,9 +3,16 @@
 // Shared with `build.rs` through `include!`, so it must stay free of
 // crate imports and of inner doc comments.
 
-/// The application name Explorer shows; `--register` also writes it as
-/// FriendlyAppName so already-built executables pick it up.
-pub const FRIENDLY_APP_NAME: &str = "Oryx Viewer";
+/// The application name Explorer's Open with menu shows; `--register`
+/// writes it as FriendlyAppName. Unused in the build script, which
+/// includes this file for the version block alone.
+#[allow(dead_code)]
+pub const FRIENDLY_APP_NAME: &str = "Oryx";
+
+/// The one-line description carried in the executable's version block,
+/// shown in the file's Properties and in Task Manager.
+pub const FILE_DESCRIPTION: &str =
+    "Fast editor for markdown and code, reader for ebooks and comics";
 
 /// The resource script compiled by windres and linked into the Windows
 /// executable. `version_digits` is the comma form (`0,6,0,0`), `version`
@@ -21,7 +28,7 @@ pub fn resource_script(ico_path: &str, version_digits: &str, version: &str) -> S
          BEGIN\n\
          BLOCK \"040904B0\"\n\
          BEGIN\n\
-         VALUE \"FileDescription\", \"{FRIENDLY_APP_NAME}\"\n\
+         VALUE \"FileDescription\", \"{FILE_DESCRIPTION}\"\n\
          VALUE \"ProductName\", \"Oryx\"\n\
          VALUE \"FileVersion\", \"{version}\"\n\
          VALUE \"ProductVersion\", \"{version}\"\n\
@@ -48,7 +55,9 @@ mod tests {
         assert!(rc.contains("1 VERSIONINFO"));
         assert!(rc.contains("FILEVERSION 0,6,0,0"));
         assert!(rc.contains("PRODUCTVERSION 0,6,0,0"));
-        assert!(rc.contains("VALUE \"FileDescription\", \"Oryx Viewer\""));
+        assert!(rc.contains(&format!(
+            "VALUE \"FileDescription\", \"{FILE_DESCRIPTION}\""
+        )));
         assert!(rc.contains("VALUE \"ProductName\", \"Oryx\""));
         assert!(rc.contains("VALUE \"FileVersion\", \"0.6.0\""));
         assert!(rc.contains("VALUE \"OriginalFilename\", \"oryx.exe\""));
