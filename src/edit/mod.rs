@@ -361,17 +361,19 @@ pub enum EscapeAct {
     Quit,
 }
 
-/// The Escape ladder, innermost out, one press each. While editing:
-/// the find bar, then the selection, then the mode itself. While
-/// reading: the find bar, then the app. The sidebar is not a rung:
-/// Escape leaves it as it stands, and hiding belongs to Ctrl+Shift+B
-/// alone. Overlays intercept upstream and never reach here.
+/// The Escape ladder, innermost out, one press each: the find bar,
+/// then the selection, then the mode while editing, then the app. The
+/// sidebar is not a rung: Escape leaves it as it stands, and hiding
+/// belongs to Ctrl+Shift+B alone. Overlays intercept upstream and
+/// never reach here.
 pub fn escape(mode: Mode, find_open: bool, has_selection: bool) -> EscapeAct {
     if find_open {
         return EscapeAct::CloseFind;
     }
+    if has_selection {
+        return EscapeAct::ClearSelection;
+    }
     match mode {
-        Mode::Edit if has_selection => EscapeAct::ClearSelection,
         Mode::Edit => EscapeAct::LeaveEdit,
         Mode::Read => EscapeAct::Quit,
     }
@@ -1022,15 +1024,15 @@ mod tests {
     }
 
     // The sidebar is not a rung: Escape quits with the panel as it
-    // stands, so a quit by Escape no longer saves a sidebar-less
-    // start. Hiding belongs to Ctrl+Shift+B alone.
+    // stands, so a quit by Escape never saves a sidebar-less start.
+    // Hiding belongs to Ctrl+Shift+B alone.
     #[test]
-    fn escape_leaves_the_sidebar_alone() {
-        assert_eq!(escape(Mode::Read, true, false), EscapeAct::CloseFind);
+    fn escape_layers_innermost_out_while_reading_and_leaves_the_sidebar_alone() {
+        assert_eq!(escape(Mode::Read, true, true), EscapeAct::CloseFind);
         assert_eq!(
             escape(Mode::Read, false, true),
-            EscapeAct::Quit,
-            "read mode never spends Escape on the selection"
+            EscapeAct::ClearSelection,
+            "a selection is cleared before the window closes"
         );
         assert_eq!(escape(Mode::Read, false, false), EscapeAct::Quit);
     }

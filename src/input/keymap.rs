@@ -363,7 +363,7 @@ pub const SHORTCUTS: &[Shortcut] = &[
     },
     Shortcut {
         keys: "Escape",
-        action: "Close overlay or sidebar / quit",
+        action: "Close overlay, clear the selection, leave editing, quit",
         section: "Help",
         bindings: &[(Binding::Named(NamedKey::Escape), Command::Quit)],
     },

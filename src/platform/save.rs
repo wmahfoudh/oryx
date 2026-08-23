@@ -9,10 +9,16 @@ use std::path::Path;
 
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    // The temp name is unique per process and per call, so two writes
+    // into one folder at the same moment never rename each other's
+    // bytes over their targets.
+    static SERIAL: AtomicU64 = AtomicU64::new(0);
+    let serial = SERIAL.fetch_add(1, Ordering::Relaxed);
     let dir = path.parent().filter(|p| !p.as_os_str().is_empty());
     let temp = dir
         .unwrap_or_else(|| Path::new("."))
-        .join(format!(".oryx-save-{}", std::process::id()));
+        .join(format!(".oryx-save-{}-{serial}", std::process::id()));
     let mut file = std::fs::File::create(&temp)?;
     let written = file.write_all(bytes).and_then(|()| file.sync_all());
     drop(file);
