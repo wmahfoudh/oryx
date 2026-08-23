@@ -1,5 +1,8 @@
 //! Persistent user configuration: `config.toml` in the user's config
-//! directory. Any read problem yields defaults, never an error.
+//! directory, and the book positions beside it. Any read problem yields
+//! defaults, never an error, and a value outside its range is held to
+//! it. Both files are written whole, through a temporary file renamed
+//! over the old one, so a crash mid-write never leaves a half file.
 
 use std::path::{Path, PathBuf};
 
@@ -7,7 +10,10 @@ use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
 use crate::export::ExportSettings;
+use crate::platform::save;
 use crate::style::fonts::{BODY_FAMILY, CODE_FAMILY};
+use crate::ui::settings::{SIZE_MAX, SIZE_MIN, UI_SCALE_MAX, UI_SCALE_MIN};
+use crate::ui::sidebar::{MAX_WIDTH, MIN_WIDTH};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -171,7 +177,7 @@ impl Positions {
             let _ = std::fs::create_dir_all(dir);
         }
         let text = toml::to_string(self).expect("positions serialize");
-        if let Err(err) = std::fs::write(path, text) {
+        if let Err(err) = save::write_atomic(path, text.as_bytes()) {
             eprintln!("oryx: cannot save positions {}: {err}", path.display());
         }
     }
@@ -215,10 +221,44 @@ pub fn load() -> Config {
 }
 
 pub fn load_from(path: &Path) -> Config {
-    std::fs::read_to_string(path)
+    let mut config: Config = std::fs::read_to_string(path)
         .ok()
         .and_then(|text| toml::from_str(&text).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    config.hold_ranges();
+    config
+}
+
+/// `value` held to `min..=max`; a value that is not a number, which
+/// TOML can spell as `nan`, takes `fallback`.
+fn held(value: f32, fallback: f32, min: f32, max: f32) -> f32 {
+    if value.is_finite() {
+        value.clamp(min, max)
+    } else {
+        fallback
+    }
+}
+
+impl Config {
+    /// Holds every numeric field to the range its settings control
+    /// offers, so a hand-edited file cannot hand the engine a zero font
+    /// size or a scale of nothing.
+    fn hold_ranges(&mut self) {
+        let defaults = Config::default();
+        self.body_size = held(self.body_size, defaults.body_size, SIZE_MIN, SIZE_MAX);
+        self.code_size = held(self.code_size, defaults.code_size, SIZE_MIN, SIZE_MAX);
+        self.ui_scale = held(self.ui_scale, defaults.ui_scale, UI_SCALE_MIN, UI_SCALE_MAX);
+        self.sidebar_width = held(
+            self.sidebar_width,
+            defaults.sidebar_width,
+            MIN_WIDTH,
+            MAX_WIDTH,
+        );
+        if let Some(export) = self.export.as_mut() {
+            export.body_size = held(export.body_size, defaults.body_size, SIZE_MIN, SIZE_MAX);
+            export.code_size = held(export.code_size, defaults.code_size, SIZE_MIN, SIZE_MAX);
+        }
+    }
 }
 
 pub fn save(config: &Config) {
@@ -232,7 +272,7 @@ pub fn save_to(path: &Path, config: &Config) {
         let _ = std::fs::create_dir_all(dir);
     }
     let text = toml::to_string(config).expect("config serializes");
-    if let Err(err) = std::fs::write(path, text) {
+    if let Err(err) = save::write_atomic(path, text.as_bytes()) {
         eprintln!("oryx: cannot save config {}: {err}", path.display());
     }
 }
@@ -566,6 +606,54 @@ mod tests {
             maximized: false,
         };
         assert_eq!(state.position_on(&[(0, 0, 1920, 1080)]), None);
+    }
+
+    /// A hand-edited value outside the settings range is held to it, and
+    /// a value that is not a number at all falls back to the default, so
+    /// nothing unusable reaches the engine.
+    #[test]
+    fn out_of_range_values_are_held_to_the_settings_ranges() {
+        use crate::ui::settings::{SIZE_MAX, SIZE_MIN, UI_SCALE_MIN};
+        use crate::ui::sidebar::MIN_WIDTH;
+        let path = temp_path("held");
+        std::fs::write(
+            &path,
+            "body_size = 0\ncode_size = 100\nui_scale = 0\nsidebar_width = 5\n\
+             [export]\nbody_size = 0\ncode_size = nan\n",
+        )
+        .unwrap();
+        let config = load_from(&path);
+        assert_eq!(config.body_size, SIZE_MIN);
+        assert_eq!(config.code_size, SIZE_MAX);
+        assert_eq!(config.ui_scale, UI_SCALE_MIN);
+        assert_eq!(config.sidebar_width, MIN_WIDTH);
+        let export = config.export.expect("the export table loads");
+        assert_eq!(export.body_size, SIZE_MIN);
+        assert_eq!(export.code_size, Config::default().code_size);
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn a_save_leaves_only_the_file_beside_itself() {
+        let dir = std::env::temp_dir().join(format!("oryx-cfg-save-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let config_path = dir.join("config.toml");
+        save_to(&config_path, &Config::default());
+        let mut positions = Positions::default();
+        positions.remember("book", 7, crate::layout::DirectionMode::default());
+        positions.save_to(&dir.join("positions.toml"));
+        let mut names: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["config.toml", "positions.toml"]);
+        assert_eq!(load_from(&config_path), Config::default());
+        assert_eq!(
+            Positions::load_from(&dir.join("positions.toml")).lookup("book"),
+            Some(7)
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
