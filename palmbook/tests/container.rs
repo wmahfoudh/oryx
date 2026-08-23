@@ -100,6 +100,18 @@ fn huffcdic_decodes_the_hand_built_tables() {
     );
 }
 
+/// A CDIC record whose phrase total falls below the phrases already read
+/// from the records before it is corrupt, and says so.
+#[test]
+fn a_cdic_record_claiming_fewer_phrases_than_already_read_is_corrupt() {
+    let phrases: Vec<(&[u8], bool)> = vec![(b"one", true), (b"two", true), (b"three", true)];
+    let tables = writer::huff_records(&phrases);
+    let mut lying = tables[1].clone();
+    lying[8..12].copy_from_slice(&1u32.to_be_bytes());
+    let result = palmbook::huffcdic::HuffCdic::new(&tables[0], &[&tables[1], &lying]);
+    assert!(result.is_err(), "a lying total is an error, not a panic");
+}
+
 #[test]
 fn a_huffcdic_book_round_trips() {
     let text = "Hello, world! And the dictionary carries every phrase.";

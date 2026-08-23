@@ -52,7 +52,13 @@ impl HuffCdic {
             if bits > 16 {
                 return Err(Error::Corrupt("an oversized CDIC code length"));
             }
-            let here = (1usize << bits).min(total - dictionary.len());
+            // Every record carries the whole dictionary's phrase count;
+            // one claiming fewer than the records before it held is
+            // inconsistent with them.
+            let remaining = total
+                .checked_sub(dictionary.len())
+                .ok_or(Error::Corrupt("a CDIC phrase total below the phrases read"))?;
+            let here = (1usize << bits).min(remaining);
             for index in 0..here {
                 let offset = crate::be16(cdic, 16 + index * 2)? as usize;
                 let flagged = crate::be16(cdic, 16 + offset)? as usize;

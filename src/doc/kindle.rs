@@ -622,7 +622,7 @@ fn rewrite_embeds(text: &str) -> String {
         let mut consumed = needle.len() + id.len();
         let tail = &after[id.len()..];
         if let Some(query) = tail.strip_prefix('?') {
-            let extent: usize = query.chars().take_while(|&c| c != '"' && c != '\'').count();
+            let extent = query.find(['"', '\'']).unwrap_or(query.len());
             consumed += 1 + extent;
         }
         match base32(&id) {
@@ -689,4 +689,28 @@ fn rewrite_recindex(text: &str) -> String {
     }
     out.push_str(rest);
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The `?mime=` query is measured in bytes, so a multibyte character
+    /// inside it leaves the text after the reference intact.
+    #[test]
+    fn an_embed_reference_with_a_multibyte_query_rewrites_whole() {
+        assert_eq!(
+            rewrite_embeds("<img src=\"kindle:embed:0001?mime=é\"/> après"),
+            "<img src=\"res1\"/> après"
+        );
+        assert_eq!(
+            rewrite_embeds("<img src=\"kindle:embed:0002?mime=image/jpeg\"/>"),
+            "<img src=\"res2\"/>"
+        );
+        assert_eq!(
+            rewrite_embeds("kindle:embed:0000?mime=x\" kept"),
+            "kindle:embed:0000?mime=x\" kept",
+            "a zero index is no resource and stays as written"
+        );
+    }
 }

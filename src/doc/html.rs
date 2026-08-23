@@ -1,7 +1,6 @@
 //! XHTML to blocks: the DOM walker book chapters parse through. The
 //! walker owns the growing book, blocks and the synthetic source the
-//! spans index; it knows nothing of EPUB packaging, so a future `.html`
-//! file path can reuse it.
+//! spans index; it knows nothing of EPUB packaging.
 //!
 //! The element mapping is the Embedded HTML table applied from a tree:
 //! the same tags with the same meanings as the markdown scanner, whose
@@ -403,6 +402,9 @@ pub(crate) fn join_href(base: &str, href: &str) -> String {
     parts.join("/")
 }
 
+/// Decodes `%XX` escapes, leaving a `%` that no two hex digits follow as
+/// it is. The digits are read as bytes, so a multibyte character after
+/// the `%` is simply not an escape.
 pub(crate) fn percent_decode(href: &str) -> std::borrow::Cow<'_, str> {
     if !href.contains('%') {
         return std::borrow::Cow::Borrowed(href);
@@ -411,8 +413,8 @@ pub(crate) fn percent_decode(href: &str) -> std::borrow::Cow<'_, str> {
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
-        let hex = (bytes[i] == b'%' && i + 2 < bytes.len())
-            .then(|| u8::from_str_radix(&href[i + 1..i + 3], 16).ok())
+        let hex = (bytes[i] == b'%')
+            .then(|| hex_pair(bytes.get(i + 1..i + 3)?))
             .flatten();
         match hex {
             Some(byte) => {
@@ -426,6 +428,12 @@ pub(crate) fn percent_decode(href: &str) -> std::borrow::Cow<'_, str> {
         }
     }
     std::borrow::Cow::Owned(String::from_utf8_lossy(&out).into_owned())
+}
+
+/// The byte two ASCII hex digits spell, None for anything else.
+fn hex_pair(digits: &[u8]) -> Option<u8> {
+    let digit = |byte: u8| (byte as char).to_digit(16);
+    Some((digit(*digits.first()?)? * 16 + digit(*digits.get(1)?)?) as u8)
 }
 
 /// An inline `<svg>` subtree awaiting rasterization: its serialized
@@ -1396,6 +1404,18 @@ impl Walker {
 mod tests {
     use super::*;
     use crate::doc::model::{DetailsGroup, Marker, SpanScript};
+
+    /// The two characters after a `%` are read as bytes: a multibyte
+    /// character there is no escape, and the `%` stays literal.
+    #[test]
+    fn percent_escapes_beside_multibyte_text_decode_or_stay_literal() {
+        assert_eq!(percent_decode("50%aé"), "50%aé");
+        assert_eq!(percent_decode("%é"), "%é");
+        assert_eq!(percent_decode("%"), "%");
+        assert_eq!(percent_decode("%4"), "%4");
+        assert_eq!(percent_decode("caf%C3%A9.xhtml"), "café.xhtml");
+        assert_eq!(percent_decode("a%20b"), "a b");
+    }
 
     fn walk(xhtml: &str) -> (Vec<Block>, String, Vec<DetailsGroup>) {
         walk_styled("", xhtml)
