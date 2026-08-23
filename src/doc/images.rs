@@ -1,9 +1,11 @@
 //! Image loading and caching. Paths resolve against the document's
-//! directory; failures and remote URLs yield None and render as
-//! placeholders. Originals and scaled variants are memoized so relayout
-//! and repaint never re-decode. A remote image comes from the fetch
-//! cache when it is there, a day-old copy included, and the fetch that
-//! fills or refreshes the cache runs on its own thread.
+//! directory; failures yield None and render as placeholders. Layout
+//! asks sizes, answered from headers without a decode; paint asks
+//! pixels, decoded on demand and held under one memory budget for
+//! every kind of image, the least recently used leaving first. A
+//! remote image comes from the fetch cache when it is there, a day-old
+//! copy included, and the fetch that fills or refreshes the cache runs
+//! on its own thread.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -13,23 +15,82 @@ use image::RgbaImage;
 
 use crate::doc::fetch;
 
-pub fn load(doc_dir: &Path, src: &str) -> Option<RgbaImage> {
+/// A local source's path: relative ones resolve against the document's
+/// folder. None for a remote source, which the cache's fetch path owns.
+fn local_path(doc_dir: &Path, src: &str) -> Option<PathBuf> {
     if src.starts_with("http://") || src.starts_with("https://") {
         return None;
     }
-    let path = if Path::new(src).is_absolute() {
+    Some(if Path::new(src).is_absolute() {
         PathBuf::from(src)
     } else {
         doc_dir.join(src)
-    };
-    if path
-        .extension()
+    })
+}
+
+fn is_svg_path(path: &Path) -> bool {
+    path.extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("svg"))
-    {
+}
+
+/// Reads a local image into pixels. The result is held to the long-side
+/// cap.
+pub fn load(doc_dir: &Path, src: &str) -> Option<RgbaImage> {
+    let path = local_path(doc_dir, src)?;
+    if is_svg_path(&path) {
         let bytes = std::fs::read(path).ok()?;
-        return load_svg(&bytes);
+        return load_svg(&bytes).map(capped);
     }
-    image::open(path).ok().map(|dynamic| dynamic.to_rgba8())
+    image::open(path)
+        .ok()
+        .map(|dynamic| capped(dynamic.to_rgba8()))
+}
+
+/// A local image's stored size from its header alone, no pixel decoded:
+/// the raster header, or the parsed tree for svg, held to the cap the
+/// way the pixels will be. None when the file cannot be read.
+fn local_dimensions(doc_dir: &Path, src: &str) -> Option<(u32, u32)> {
+    let path = local_path(doc_dir, src)?;
+    let (w, h) = if is_svg_path(&path) {
+        svg_size(&std::fs::read(path).ok()?)?
+    } else {
+        image::ImageReader::open(path)
+            .ok()?
+            .with_guessed_format()
+            .ok()?
+            .into_dimensions()
+            .ok()?
+    };
+    Some(capped_size(w, h))
+}
+
+/// The longest side a stored original may have. A camera photograph
+/// decodes to hundreds of megabytes of pixels that no column is ever
+/// wide enough to show; held to this, one never fills the budget alone.
+const LONG_SIDE_CAP: u32 = 4096;
+
+/// The size an image of `w` by `h` is stored at: shrunk so its long
+/// side is at most the cap, aspect kept, or as it is within the cap.
+fn capped_size(w: u32, h: u32) -> (u32, u32) {
+    let long = w.max(h);
+    if long <= LONG_SIDE_CAP {
+        return (w, h);
+    }
+    let scale = |side: u32| {
+        let scaled = u64::from(side) * u64::from(LONG_SIDE_CAP) + u64::from(long) / 2;
+        ((scaled / u64::from(long)) as u32).max(1)
+    };
+    (scale(w), scale(h))
+}
+
+/// The image at its stored size. A box filter is enough for the shrink:
+/// layout resizes the stored pixels again to the column.
+fn capped(image: RgbaImage) -> RgbaImage {
+    let (w, h) = capped_size(image.width(), image.height());
+    if (w, h) == image.dimensions() {
+        return image;
+    }
+    image::imageops::thumbnail(&image, w, h)
 }
 
 /// Rasterizes an SVG at its intrinsic size. Uses resvg's own tiny-skia
@@ -128,13 +189,16 @@ pub fn decode_source(source: &BookSource) -> Option<RgbaImage> {
 /// Pixel dimensions from a source's header alone, no pixel decoded:
 /// the raster header for image files, the parsed tree for svg. The svg
 /// parse takes no font database; the canvas size never depends on text.
+/// An svg's canvas size from its parsed tree, no font database: the
+/// canvas never depends on text.
+fn svg_size(bytes: &[u8]) -> Option<(u32, u32)> {
+    let options = resvg::usvg::Options::default();
+    let tree = resvg::usvg::Tree::from_data(bytes, &options).ok()?;
+    let size = tree.size().to_int_size();
+    Some((size.width().max(1), size.height().max(1)))
+}
+
 pub fn probe_source(source: &BookSource) -> Option<(u32, u32)> {
-    fn svg_size(bytes: &[u8]) -> Option<(u32, u32)> {
-        let options = resvg::usvg::Options::default();
-        let tree = resvg::usvg::Tree::from_data(bytes, &options).ok()?;
-        let size = tree.size().to_int_size();
-        Some((size.width().max(1), size.height().max(1)))
-    }
     fn raster_size(bytes: &[u8]) -> Option<(u32, u32)> {
         image::ImageReader::new(std::io::Cursor::new(bytes))
             .with_guessed_format()
@@ -170,10 +234,11 @@ struct BookImage {
     dims: (u32, u32),
 }
 
-/// The budget for decoded book originals, about twenty screenshots:
-/// enough that the visible region and zoom stay warm, small enough that
-/// a book never holds every original at once.
-const BOOK_BUDGET: usize = 64 << 20;
+/// The budget for decoded originals of every kind, about twenty
+/// screenshots: enough that the visible region and zoom stay warm,
+/// small enough that a book or a page of photographs never holds every
+/// original at once.
+const BUDGET: usize = 64 << 20;
 
 fn rgba_bytes(image: &RgbaImage) -> usize {
     image.width() as usize * image.height() as usize * 4
@@ -228,7 +293,7 @@ fn looks_svg(bytes: &[u8]) -> bool {
 }
 
 /// Decodes fetched bytes: SVG when the head looks like XML, raster
-/// otherwise.
+/// otherwise. The result is held to the long-side cap.
 pub fn decode(bytes: &[u8]) -> Option<RgbaImage> {
     if looks_svg(bytes) {
         load_svg(bytes)
@@ -237,6 +302,7 @@ pub fn decode(bytes: &[u8]) -> Option<RgbaImage> {
             .ok()
             .map(|dynamic| dynamic.to_rgba8())
     }
+    .map(capped)
 }
 
 /// A remote source with a fetch in flight, or one that gave up. A
@@ -276,11 +342,16 @@ pub struct MediaCache {
     book: HashMap<String, BookImage>,
     /// Book keys with a decode in flight, so a repaint asks only once.
     decoding: std::collections::HashSet<String>,
-    /// Decoded book originals by recency, oldest first, and their byte
-    /// total against the budget.
+    /// Local images' header sizes, so layout never decodes one; None
+    /// for a file whose header does not read.
+    sizes: HashMap<String, Option<(u32, u32)>>,
+    /// Decoded originals by recency, oldest first, and their byte total
+    /// against the budget. Every kind is listed: a book image decodes
+    /// again from its stored source, a local one reads its file again,
+    /// a remote one comes back from the fetch cache.
     lru: Vec<String>,
     lru_bytes: usize,
-    book_budget: usize,
+    budget: usize,
     /// The on-demand decode pool, spawned on first use and living with
     /// the cache; dropping the cache closes its queue.
     pool: Option<DecodePool>,
@@ -304,9 +375,10 @@ impl MediaCache {
             remote: HashMap::new(),
             book: HashMap::new(),
             decoding: std::collections::HashSet::new(),
+            sizes: HashMap::new(),
             lru: Vec::new(),
             lru_bytes: 0,
-            book_budget: BOOK_BUDGET,
+            budget: BUDGET,
             pool: None,
             arrivals: Arc::new(Mutex::new(Vec::new())),
             waker: None,
@@ -332,23 +404,23 @@ impl MediaCache {
         }
     }
 
-    /// Lands decoded book pixels under the budget: the newest original
-    /// joins the recency list and the oldest leave until the total
-    /// fits. A None pins the placeholder and costs nothing.
+    /// Lands decoded pixels under the budget: the newest original joins
+    /// the recency list and the oldest leave until the total fits. A
+    /// None pins the placeholder and costs nothing.
     fn adopt_pixels(&mut self, key: String, image: Option<RgbaImage>) {
-        self.drop_book_original(&key);
+        self.drop_original(&key);
         if let Some(image) = &image {
             self.lru_bytes += rgba_bytes(image);
             self.lru.push(key.clone());
         }
         self.originals.insert(key, image);
-        while self.lru_bytes > self.book_budget && self.lru.len() > 1 {
+        while self.lru_bytes > self.budget && self.lru.len() > 1 {
             let oldest = self.lru[0].clone();
-            self.drop_book_original(&oldest);
+            self.drop_original(&oldest);
         }
     }
 
-    fn drop_book_original(&mut self, key: &str) {
+    fn drop_original(&mut self, key: &str) {
         let Some(position) = self.lru.iter().position(|k| k == key) else {
             return;
         };
@@ -358,7 +430,7 @@ impl MediaCache {
         }
     }
 
-    /// Marks a decoded book original as just used.
+    /// Marks a decoded original as just used.
     fn touch(&mut self, key: &str) {
         if let Some(position) = self.lru.iter().position(|k| k == key) {
             let key = self.lru.remove(position);
@@ -443,8 +515,8 @@ impl MediaCache {
                         Folded::Relayout
                     });
                     self.scaled.retain(|(src, _, _), _| src != &url);
-                    self.originals.insert(url.clone(), Some(image));
                     self.remote.remove(&url);
+                    self.adopt_pixels(url, Some(image));
                 }
                 None if placed.is_some() => {
                     folded = folded.max(Folded::Repaint);
@@ -472,7 +544,7 @@ impl MediaCache {
             match self.cached_entry(src) {
                 Some((bytes, stale)) => match decode(&bytes) {
                     Some(image) => {
-                        self.originals.insert(src.to_string(), Some(image));
+                        self.adopt_pixels(src.to_string(), Some(image));
                         if stale {
                             self.spawn_fetch(src);
                         }
@@ -487,6 +559,7 @@ impl MediaCache {
                 None => self.spawn_fetch(src),
             }
         }
+        self.touch(src);
         self.originals.get(src).and_then(|o| o.as_ref())
     }
 
@@ -494,6 +567,7 @@ impl MediaCache {
     /// memory, so the next lookup fetches it again.
     pub fn forget_remote(&mut self, src: &str) {
         self.remove_cached(src);
+        self.drop_original(src);
         self.originals.remove(src);
         self.remote.remove(src);
         self.scaled.retain(|(key, _, _), _| key != src);
@@ -551,7 +625,7 @@ impl MediaCache {
                 return None;
             }
             let loaded = load(&self.doc_dir, src);
-            self.originals.insert(src.to_string(), loaded);
+            self.adopt_pixels(src.to_string(), loaded);
         }
         self.touch(src);
         self.originals.get(src).and_then(|o| o.as_ref())
@@ -594,13 +668,25 @@ impl MediaCache {
         })
     }
 
-    /// Natural pixel dimensions, or None when the image cannot load. A
-    /// book image answers from its stored header without any decode.
+    /// Stored pixel dimensions, or None when the image cannot load. A
+    /// book image answers from its stored header and a local file from
+    /// its own, neither decoding a pixel; a remote image has no header
+    /// to read ahead of its bytes, so its pixels answer.
     pub fn dimensions(&mut self, src: &str) -> Option<(u32, u32)> {
         if let Some(entry) = self.book.get(src) {
             return Some(entry.dims);
         }
-        self.original(src).map(|img| img.dimensions())
+        if Self::is_remote(src) {
+            return self.original(src).map(|img| img.dimensions());
+        }
+        if let Some(Some(image)) = self.originals.get(src) {
+            return Some(image.dimensions());
+        }
+        if !self.sizes.contains_key(src) {
+            let size = local_dimensions(&self.doc_dir, src);
+            self.sizes.insert(src.to_string(), size);
+        }
+        self.sizes[src]
     }
 
     /// Drops the resized buffers. A new layout pass changes the placed
@@ -911,7 +997,7 @@ mod tests {
     fn book_originals_evict_past_the_budget_oldest_first() {
         let mut media = MediaCache::new(temp_dir());
         // Two 8x4 rgba originals fit, a third does not.
-        media.book_budget = 300;
+        media.budget = 300;
         for name in ["a", "b", "c"] {
             media.adopt(vec![(
                 format!("book/{name}.png"),
@@ -937,6 +1023,85 @@ mod tests {
             !media.originals.contains_key("book/b.png"),
             "now the oldest leaves"
         );
+    }
+
+    /// Local images live under the same budget as book images: past it
+    /// the least recently used leave, and a return reads the file again.
+    #[test]
+    fn local_originals_evict_past_the_budget_oldest_first_and_come_back() {
+        let dir = temp_dir().join("local-budget");
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in ["a.png", "b.png", "c.png"] {
+            write_png(&dir, name, 8, 4);
+        }
+        let mut media = MediaCache::with_cache_dir(dir.clone(), None);
+        // Two 8x4 rgba originals fit, a third does not.
+        media.budget = 300;
+        for name in ["a.png", "b.png", "c.png"] {
+            assert_eq!(media.dimensions(name), Some((8, 4)));
+            assert!(
+                !media.originals.contains_key(name),
+                "layout's question decodes nothing"
+            );
+            assert!(media.scaled(name, 4, 2).is_some());
+        }
+        assert!(!media.originals.contains_key("a.png"), "the oldest left");
+        assert!(media.originals.contains_key("b.png"));
+        assert!(media.originals.contains_key("c.png"));
+        assert!(
+            media.scaled("a.png", 2, 1).is_some(),
+            "a return loads again"
+        );
+        assert!(media.originals.contains_key("a.png"));
+        assert!(
+            !media.originals.contains_key("b.png"),
+            "now the oldest leaves"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A photograph past the cap is stored shrunk to it, aspect kept;
+    /// one at or under the cap is stored as it is.
+    #[test]
+    fn an_oversized_image_is_stored_at_the_cap() {
+        let big = capped(RgbaImage::new(6000, 3000));
+        assert_eq!(big.dimensions(), (4096, 2048));
+        let tall = capped(RgbaImage::new(1000, 8192));
+        assert_eq!(tall.dimensions(), (500, 4096));
+        let small = RgbaImage::from_pixel(40, 20, image::Rgba([1, 2, 3, 4]));
+        assert_eq!(capped(small.clone()), small, "under the cap, untouched");
+        let exact = capped(RgbaImage::new(4096, 2000));
+        assert_eq!(exact.dimensions(), (4096, 2000), "at the cap, untouched");
+        let dir = temp_dir().join("capped");
+        std::fs::create_dir_all(&dir).unwrap();
+        write_png(&dir, "wide.png", 5000, 100);
+        let mut media = MediaCache::with_cache_dir(dir.clone(), None);
+        assert_eq!(
+            media.dimensions("wide.png"),
+            Some((4096, 82)),
+            "the header answers the stored size"
+        );
+        assert_eq!(
+            media.original("wide.png").map(RgbaImage::dimensions),
+            Some((4096, 82)),
+            "the pixels are stored at that size"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_remote_arrival_joins_the_recency_list() {
+        let media = MediaCache::with_cache_dir(temp_dir(), None);
+        let url = "https://img.example/listed.png";
+        media
+            .arrivals
+            .lock()
+            .unwrap()
+            .push(Arrival::Pixels(url.to_string(), Some(RgbaImage::new(8, 4))));
+        let mut media = media;
+        assert_eq!(media.drain_remote(), Folded::Relayout);
+        assert_eq!(media.lru, [url.to_string()]);
+        assert_eq!(media.lru_bytes, 8 * 4 * 4);
     }
 
     /// A book image's size is known from its header, so its pixels only
