@@ -760,6 +760,63 @@ fn consecutive_quoted_blocks_tile_without_gap() {
     }
 }
 
+/// An inline image with no pixels draws its alt text inside its box,
+/// italic like the block placeholder, so a broken badge says what it
+/// was; the box keeps the size a later arrival needs.
+#[test]
+fn a_missing_inline_image_shows_its_alt_inside_the_box() {
+    let (doc, l) = lay2("see ![the badge](gone.png) here", 800.0);
+    let img = &l.images[0];
+    let run = find_text(&l, &doc, "the badge");
+    assert!(run.italic, "the placeholder's style");
+    assert!(
+        run.x >= img.x && run.x + run.width <= img.x + img.width + 0.5,
+        "inside the box: run {}..{} in {}..{}",
+        run.x,
+        run.x + run.width,
+        img.x,
+        img.x + img.width
+    );
+    assert!(
+        run.baseline > img.y && run.baseline <= img.y + img.height,
+        "on the box's line: baseline {} in {}..{}",
+        run.baseline,
+        img.y,
+        img.y + img.height
+    );
+    let t = Theme::default_dark();
+    assert!(
+        l.rects
+            .iter()
+            .any(|r| r.color == t.blocks.frontmatter_bg && r.x == img.x && r.y == img.y),
+        "the box is filled like the block placeholder"
+    );
+}
+
+#[test]
+fn a_missing_inline_image_without_alt_names_its_file_and_a_long_alt_is_shortened() {
+    let (doc, l) = lay2(
+        "<p><img src=\"pics/gone.png\" width=\"200\" height=\"40\"> and \
+         <img src=\"x.png\" width=\"60\" height=\"24\" alt=\"a rather long alternative text\"></p>",
+        800.0,
+    );
+    assert_eq!(l.images.len(), 2);
+    assert!(
+        find_text(&l, &doc, "gone.png").width <= 200.0,
+        "the file name stands in for an empty alt"
+    );
+    let narrow = &l.images[1];
+    let shortened = l
+        .runs
+        .iter()
+        .find(|r| l.run_text(&doc, r).ends_with('\u{2026}'))
+        .expect("a shortened alt ending in an ellipsis");
+    assert!(
+        shortened.x >= narrow.x && shortened.x + shortened.width <= narrow.x + narrow.width + 0.5,
+        "the shortened alt fits the narrow box"
+    );
+}
+
 #[test]
 fn badge_row_centers_and_shares_a_line() {
     let l = lay(

@@ -5172,7 +5172,7 @@ fn layout_flow(
         } else {
             let span = &spans[i];
             let image = span.image.as_ref().expect("image span");
-            let (w, h, loaded) = image_size(media, image, cfg, avail);
+            let (w, h, loaded) = image_size(fonts, media, span, image, cfg, source, avail);
             let joins = line
                 .as_ref()
                 .is_some_and(|l| l.end_x + gap + w <= x0 + avail && (l.row || h <= l.height + 2.0));
@@ -5183,7 +5183,21 @@ fn layout_flow(
                 } else {
                     l.top + 0.85 * l.height - h
                 };
-                place_image(out, theme, span, image, l.end_x + gap, iy, w, h, loaded);
+                place_image(
+                    fonts,
+                    cfg,
+                    source,
+                    out,
+                    theme,
+                    span,
+                    image,
+                    base.block_index,
+                    l.end_x + gap,
+                    iy,
+                    w,
+                    h,
+                    loaded,
+                );
                 l.end_x += gap + w;
                 if l.row && h > l.height {
                     l.height = h;
@@ -5200,7 +5214,21 @@ fn layout_flow(
                     images: out.images.len(),
                     math: out.math_glyphs.len(),
                 };
-                place_image(out, theme, span, image, x0, y, w, h, loaded);
+                place_image(
+                    fonts,
+                    cfg,
+                    source,
+                    out,
+                    theme,
+                    span,
+                    image,
+                    base.block_index,
+                    x0,
+                    y,
+                    w,
+                    h,
+                    loaded,
+                );
                 line = Some(FlowLine {
                     top: y,
                     height: h,
@@ -5221,13 +5249,32 @@ fn layout_flow(
     (y - y0).max(line_height)
 }
 
+/// The text a placeholder shows for an inline image: the span's text,
+/// which is the alt, or the file's name when the alt is empty.
+fn image_label<'a>(span: &'a Span, image: &'a SpanImage, source: &'a str) -> &'a str {
+    let alt = span.text(source).trim();
+    if !alt.is_empty() {
+        return alt;
+    }
+    image
+        .src
+        .rsplit('/')
+        .find(|part| !part.is_empty())
+        .unwrap_or(&image.src)
+}
+
 /// Display size of an inline image: attribute pixels win, the natural size
 /// fills in the rest, everything capped to the content width. The flag is
-/// false when no pixels are available yet.
+/// false when no pixels are available yet. With neither attributes nor
+/// pixels the box is one text line sized to the label it will show.
+#[allow(clippy::too_many_arguments)]
 fn image_size(
+    fonts: &mut FontStore,
     media: &mut MediaCache,
+    span: &Span,
     image: &SpanImage,
     cfg: &ViewConfig,
+    source: &str,
     avail: f32,
 ) -> (f32, f32, bool) {
     let natural = media.dimensions(&image.src);
@@ -5241,10 +5288,16 @@ fn image_size(
         (None, None, Some((nw, nh))) => (nw as f32 * scale, nh as f32 * scale),
         (Some(w), None, None) => (w, w * 0.5),
         (None, Some(h), None) => (h * 2.0, h),
-        (None, None, None) => (
-            (120.0 * scale).min(avail),
-            metrics::LINE_HEIGHT * cfg.body_size,
-        ),
+        (None, None, None) => {
+            let size = cfg.body_size * cfg.zoom;
+            let label = image_label(span, image, source);
+            let text_w = side_text_width(fonts, cfg, label, size);
+            let pad = metrics::PLACEHOLDER_PAD * cfg.zoom;
+            (
+                (text_w + 2.0 * pad).max(120.0 * scale).min(avail),
+                metrics::LINE_HEIGHT * size,
+            )
+        }
     };
     if w > avail {
         h *= avail / w;
@@ -5253,14 +5306,21 @@ fn image_size(
     (w, h, natural.is_some())
 }
 
-/// Places one inline image; without pixels yet a bordered placeholder box
-/// holds its spot until the fetch lands.
+/// Places one inline image; without pixels yet a placeholder box holds
+/// its spot, in the block placeholder's style, with the alt text on one
+/// line inside it: the span's text, or the file's name when the alt is
+/// empty, shortened to fit. The box keeps its size either way, so an
+/// arrival moves nothing.
 #[allow(clippy::too_many_arguments)]
 fn place_image(
+    fonts: &mut FontStore,
+    cfg: &ViewConfig,
+    source: &str,
     out: &mut LayoutDoc,
     theme: &Theme,
     span: &Span,
     image: &SpanImage,
+    block_index: usize,
     x: f32,
     y: f32,
     w: f32,
@@ -5275,10 +5335,75 @@ fn place_image(
         height: h,
         link: span.link.clone(),
     });
-    if !loaded {
-        out.rects
-            .push(DecoRect::fill(x, y, w, h, theme.blocks.code_border).stroked(1.0));
+    if loaded {
+        return;
     }
+    out.rects
+        .push(DecoRect::fill(x, y, w, h, theme.blocks.frontmatter_bg));
+    out.rects
+        .push(DecoRect::fill(x, y, w, h, theme.blocks.code_border).stroked(1.0));
+    let label = image_label(span, image, source);
+    // The text takes the body size when the box has the height for it,
+    // and shrinks to the box otherwise; below a legible size the box
+    // stays bare.
+    let size = (cfg.body_size * cfg.zoom).min(0.6 * h);
+    if size < 6.0 {
+        return;
+    }
+    let pad = (metrics::PLACEHOLDER_PAD * cfg.zoom)
+        .min(0.25 * h)
+        .min(0.1 * w);
+    let inner = w - 2.0 * pad;
+    let Some((mut runs, width)) =
+        fit_side_text(fonts, cfg, label, size, theme.text.italic, inner, out)
+    else {
+        return;
+    };
+    for run in &mut runs {
+        run.italic = true;
+    }
+    let line_height = metrics::LINE_HEIGHT * cfg.body_size * cfg.zoom;
+    let text_x = x + pad + (inner - width).max(0.0) / 2.0;
+    let text_y = y + (h - line_height) / 2.0;
+    place_marker(runs, text_x, text_y, block_index, out);
+}
+
+/// Side text shaped to fit `avail` on one line: whole when it fits,
+/// else the longest head that fits with an ellipsis after it. None
+/// when not even one character fits beside the ellipsis.
+fn fit_side_text(
+    fonts: &mut FontStore,
+    cfg: &ViewConfig,
+    text: &str,
+    size: f32,
+    color: Rgba,
+    avail: f32,
+    out: &mut LayoutDoc,
+) -> Option<(Vec<TextRun>, f32)> {
+    let (runs, width) = shape_marker(fonts, cfg, text, size, color, out);
+    if width <= avail {
+        return Some((runs, width));
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let (mut lo, mut hi) = (0usize, chars.len());
+    let mut best = None;
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        let head: String = chars[..mid]
+            .iter()
+            .collect::<String>()
+            .trim_end()
+            .to_string()
+            + "\u{2026}";
+        let (runs, width) = shape_marker(fonts, cfg, &head, size, color, out);
+        if width <= avail {
+            best = Some((runs, width));
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    best
 }
 
 /// Shifts every element of a centered block so each visual line sits in the
@@ -5352,6 +5477,27 @@ fn shape_marker(
 ) -> (Vec<TextRun>, f32) {
     let family = cfg.body_family.clone();
     shape_side_text(fonts, cfg, &family, text, size, color, out)
+}
+
+/// The width side text takes in the body family at `size`, with no run
+/// made: the measure behind a box sized to its label.
+fn side_text_width(fonts: &mut FontStore, cfg: &ViewConfig, text: &str, size: f32) -> f32 {
+    let line_height = metrics::LINE_HEIGHT * cfg.body_size * cfg.zoom;
+    let mut buffer = Buffer::new(&mut fonts.font_system, Metrics::new(size, line_height));
+    buffer.set_size(&mut fonts.font_system, None, None);
+    let attrs = Attrs::new().family(Family::Name(&cfg.body_family));
+    buffer.set_text(
+        &mut fonts.font_system,
+        text,
+        &attrs,
+        Shaping::Advanced,
+        None,
+    );
+    buffer.shape_until_scroll(&mut fonts.font_system, false);
+    buffer
+        .layout_runs()
+        .filter_map(|run| run.glyphs.last().map(|g| g.x + g.w))
+        .fold(0.0, f32::max)
 }
 
 /// Shapes synthesized side text in a given family at origin; the caller
