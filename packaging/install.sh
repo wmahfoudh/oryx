@@ -1,17 +1,28 @@
 #!/bin/sh
-# Installs or removes Oryx for the current user.
+# Installs or removes Oryx for the current user. The desktop entry and
+# the icons are written by `oryx --register`, which also rebuilds the
+# desktop caches; the uninstall rebuilds them here so the entry leaves
+# the file manager without a new login.
 set -e
 here="$(cd "$(dirname "$0")" && pwd)"
 bin="$HOME/.local/bin"
 data="$HOME/.local/share/oryx"
+applications="$HOME/.local/share/applications"
+icons="$HOME/.local/share/icons/hicolor"
 
 if [ "$1" = "--uninstall" ]; then
     rm -f "$bin/oryx"
     rm -rf "$data"
-    rm -f "$HOME/.local/share/applications/oryx.desktop"
+    rm -f "$applications/oryx.desktop"
     for size in 16 32 48 64 128 256; do
-        rm -f "$HOME/.local/share/icons/hicolor/${size}x${size}/apps/oryx.png"
+        rm -f "$icons/${size}x${size}/apps/oryx.png"
     done
+    if command -v update-desktop-database >/dev/null 2>&1; then
+        update-desktop-database -q "$applications" || true
+    fi
+    if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+        gtk-update-icon-cache -q -t -f "$icons" || true
+    fi
     echo "oryx removed"
     exit 0
 fi

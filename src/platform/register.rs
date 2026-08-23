@@ -1,7 +1,8 @@
 //! OS integration installed by `oryx --register`: a desktop entry and
 //! hicolor icons on Linux; ProgId keys per extension and the
 //! Applications entry naming the app in Open with on Windows; bundle
-//! guidance on macOS. Each action prints what it wrote.
+//! guidance on macOS. Each action prints what it wrote, and the Linux one
+//! the desktop caches it rebuilt.
 
 use std::path::{Path, PathBuf};
 
@@ -33,6 +34,24 @@ const ICONS: [(u32, &[u8]); 6] = [
     ),
 ];
 
+/// The types the entry claims, under the names shared-mime-info gives the
+/// formats `load::detect` accepts: markdown and plain text, then each book
+/// and comic container. A file manager offers Open with Oryx only for a
+/// type listed here.
+const MIME_TYPES: [&str; 11] = [
+    "text/markdown",
+    "text/x-markdown",
+    "text/plain",
+    "application/epub+zip",
+    "application/x-mobipocket-ebook",
+    "application/vnd.amazon.ebook",
+    "application/vnd.amazon.mobi8-ebook",
+    "application/x-fictionbook+xml",
+    "application/x-zip-compressed-fb2",
+    "application/vnd.comicbook+zip",
+    "application/vnd.comicbook-rar",
+];
+
 /// The desktop entry content; the app_id `oryx` set on the window matches
 /// StartupWMClass and Icon so Wayland compositors resolve the icon.
 pub fn desktop_entry(exe: &Path) -> String {
@@ -45,9 +64,10 @@ pub fn desktop_entry(exe: &Path) -> String {
          Icon=oryx\n\
          Terminal=false\n\
          Categories=Office;Viewer;\n\
-         MimeType=text/markdown;text/x-markdown;text/plain;application/epub+zip;\n\
+         MimeType={};\n\
          StartupWMClass=oryx\n",
-        exe.display()
+        exe.display(),
+        MIME_TYPES.join(";")
     )
 }
 
@@ -74,6 +94,41 @@ pub fn install_linux(data_dir: &Path, exe: &Path) -> std::io::Result<Vec<PathBuf
     Ok(written)
 }
 
+/// The caches that file managers and launchers read instead of the files
+/// under `data_dir`, each as the tool that rebuilds it and the tool's
+/// arguments. GNOME's file chooser reads the applications cache, so a
+/// fresh entry shows before the next login only once it is rebuilt. The
+/// icon cache takes `-t` because a user's hicolor folder has no
+/// index.theme.
+pub fn cache_refreshers(data_dir: &Path) -> [(&'static str, Vec<PathBuf>); 2] {
+    [
+        (
+            "update-desktop-database",
+            vec![PathBuf::from("-q"), data_dir.join("applications")],
+        ),
+        (
+            "gtk-update-icon-cache",
+            vec![
+                PathBuf::from("-q"),
+                PathBuf::from("-t"),
+                PathBuf::from("-f"),
+                data_dir.join("icons/hicolor"),
+            ],
+        ),
+    ]
+}
+
+/// Runs one cache tool. `None` when the tool is not installed, which is
+/// no failure: the desktop reads the files themselves at the next login.
+/// `Some` carries whether the run succeeded.
+pub fn refresh_cache(tool: &str, args: &[PathBuf]) -> Option<bool> {
+    match std::process::Command::new(tool).args(args).status() {
+        Ok(status) => Some(status.success()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+        Err(_) => Some(false),
+    }
+}
+
 /// Installs the platform integration and prints every path it wrote.
 pub fn register() -> std::io::Result<()> {
     let exe = std::env::current_exe()?;
@@ -83,6 +138,13 @@ pub fn register() -> std::io::Result<()> {
         let data_dir = PathBuf::from(home).join(".local/share");
         for path in install_linux(&data_dir, &exe)? {
             println!("wrote {}", path.display());
+        }
+        for (tool, args) in cache_refreshers(&data_dir) {
+            match refresh_cache(tool, &args) {
+                Some(true) => println!("ran {tool}"),
+                Some(false) => println!("{tool} failed; the entry shows after the next login"),
+                None => {}
+            }
         }
     }
     #[cfg(target_os = "windows")]
@@ -150,6 +212,60 @@ mod tests {
             "books open from the file manager"
         );
         assert!(entry.contains("Comment=Fast viewer for markdown, code and books\n"));
+    }
+
+    #[test]
+    fn the_entry_claims_the_book_and_comic_types() {
+        let entry = desktop_entry(Path::new("/usr/bin/oryx"));
+        let line = entry
+            .lines()
+            .find(|line| line.starts_with("MimeType="))
+            .expect("a MimeType line");
+        assert!(line.ends_with(';'), "the list closes on a semicolon");
+        for kind in [
+            "application/x-mobipocket-ebook",
+            "application/vnd.amazon.ebook",
+            "application/vnd.amazon.mobi8-ebook",
+            "application/x-fictionbook+xml",
+            "application/x-zip-compressed-fb2",
+            "application/vnd.comicbook+zip",
+            "application/vnd.comicbook-rar",
+        ] {
+            assert!(line.contains(&format!(";{kind};")), "{kind} missing");
+        }
+    }
+
+    #[test]
+    fn the_cache_refresh_names_both_tools_and_their_folders() {
+        let data_dir = Path::new("/home/someone/.local/share");
+        let refreshers = cache_refreshers(data_dir);
+        let tools: Vec<&str> = refreshers.iter().map(|(tool, _)| *tool).collect();
+        assert_eq!(tools, ["update-desktop-database", "gtk-update-icon-cache"]);
+        let folders: Vec<&PathBuf> = refreshers
+            .iter()
+            .map(|(_, args)| args.last().unwrap())
+            .collect();
+        assert_eq!(
+            folders,
+            [
+                &data_dir.join("applications"),
+                &data_dir.join("icons/hicolor")
+            ]
+        );
+        assert!(
+            refreshers[1].1.iter().any(|arg| arg == "-t"),
+            "a user's hicolor folder has no index.theme"
+        );
+    }
+
+    #[test]
+    fn a_missing_tool_is_skipped_and_a_present_one_reports_its_exit() {
+        assert_eq!(refresh_cache("oryx-no-such-tool", &[]), None);
+        #[cfg(unix)]
+        {
+            assert_eq!(refresh_cache("true", &[]), Some(true));
+            assert_eq!(refresh_cache("false", &[]), Some(false));
+        }
     }
 
     #[test]
