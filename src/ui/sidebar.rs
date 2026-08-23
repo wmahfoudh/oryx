@@ -2,6 +2,9 @@
 //! tree. Directories sort before files, both alphabetical; the listing
 //! keeps every file Oryx can display, including dot entries, which are
 //! drawn dimmed. Expansion is in place and children are read on demand.
+//! A folder reached through a symbolic link is entered rather than
+//! expanded: the tree moves to the real folder, as if it had been
+//! opened directly.
 
 use std::path::{Path, PathBuf};
 
@@ -145,6 +148,8 @@ pub struct Entry {
     pub name: String,
     pub path: PathBuf,
     pub is_dir: bool,
+    /// A symbolic link to a folder; activating it moves the tree there.
+    pub linked: bool,
     pub depth: usize,
     pub expanded: bool,
     /// Dot entry, rendered dimmed.
@@ -180,9 +185,7 @@ fn recognized(path: &Path, is_dir: bool) -> bool {
 
 /// The recognized entries of one directory, directories first, both
 /// groups alphabetical and case-insensitive. A symbolic link counts as
-/// what it points at, so a linked folder lists and expands; its
-/// children are read on each expand, never ahead, so a link pointing
-/// up the tree cannot loop the scan.
+/// what it points at, so a linked folder lists among the folders.
 fn scan(dir: &Path, depth: usize) -> Vec<Entry> {
     let Ok(read) = std::fs::read_dir(dir) else {
         return Vec::new();
@@ -197,6 +200,7 @@ fn scan(dir: &Path, depth: usize) -> Vec<Entry> {
                 hidden: name.starts_with('.'),
                 path: e.path(),
                 is_dir,
+                linked: is_dir && kind.is_symlink(),
                 depth,
                 expanded: false,
                 name,
@@ -220,6 +224,7 @@ fn tree(root: &Path) -> Vec<Entry> {
             name: "..".to_string(),
             path: parent.to_path_buf(),
             is_dir: true,
+            linked: false,
             depth: 0,
             expanded: false,
             hidden: false,
@@ -271,6 +276,17 @@ impl Sidebar {
         self.scroll_to_selection();
     }
 
+    /// Rebuilds the tree at the real folder a link points to, the first
+    /// entry inside it selected; `..` climbs the real path from there.
+    fn enter_link(&mut self, link: &Path) {
+        let target = std::fs::canonicalize(link).unwrap_or_else(|_| link.to_path_buf());
+        self.root = target.clone();
+        self.entries = tree(&target);
+        self.scroll = 0.0;
+        let first = usize::from(self.entries.first().is_some_and(|e| e.name == ".."));
+        self.selected = first.min(self.entries.len().saturating_sub(1));
+    }
+
     pub fn root(&self) -> &Path {
         &self.root
     }
@@ -312,13 +328,17 @@ impl Sidebar {
     }
 
     /// A row was chosen: a file returns its path to open, a directory
-    /// toggles its expansion.
+    /// toggles its expansion, a linked directory becomes the root.
     pub fn activate(&mut self, index: usize) -> Option<PathBuf> {
         let entry = self.entries.get(index)?;
         self.selected = index;
         if index == 0 && entry.name == ".." {
             let parent = entry.path.clone();
             self.go_up(&parent);
+            None
+        } else if entry.linked {
+            let link = entry.path.clone();
+            self.enter_link(&link);
             None
         } else if entry.is_dir {
             self.toggle_dir(index);
@@ -617,10 +637,17 @@ impl Sidebar {
                 painter.line(x + 1.0, iy + 2.0, x + 5.5, iy - 2.5, 1.6, color);
                 painter.line(x + 5.5, iy - 2.5, x + 10.0, iy + 2.0, 1.6, color);
             } else if entry.is_dir {
-                // Folder icon: a tab over a solid body.
+                // Folder icon: a tab over a solid body. A linked folder
+                // carries an arrow knocked out of the body, since a click
+                // moves the tree there instead of opening it in place.
                 let iy = ry + (ROW_H - 12.0) / 2.0;
                 painter.fill(x, iy, 5.5, 3.0, 1.0, color);
                 painter.fill(x, iy + 2.5, 11.0, 8.0, 1.5, color);
+                if entry.linked {
+                    let ay = iy + 6.5;
+                    painter.line(x + 4.0, ay - 2.0, x + 6.5, ay, 1.4, ui.sidebar_bg);
+                    painter.line(x + 6.5, ay, x + 4.0, ay + 2.0, 1.4, ui.sidebar_bg);
+                }
             } else {
                 let iy = ry + (ROW_H - 12.0) / 2.0;
                 draw_icon(painter, icon_for(&entry.path), x, iy, color, ui.sidebar_bg);
@@ -935,13 +962,12 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// A link to a folder is a folder to the reader: it lists among the
-    /// directories and expands to the target's children. Children are
-    /// read on each expand, so a link pointing up the tree expands one
-    /// level at a time and never loops the scan.
+    /// A link to a folder lists among the folders, and activating it
+    /// moves the tree to the real folder, the way opening that folder
+    /// directly would; `..` then climbs the real path.
     #[cfg(unix)]
     #[test]
-    fn a_symlink_to_a_directory_lists_as_a_folder_and_expands() {
+    fn a_symlink_to_a_directory_lists_as_a_folder_and_is_entered() {
         let dir = temp_tree("symlink");
         std::os::unix::fs::symlink(dir.join("sub"), dir.join("linked")).unwrap();
         std::os::unix::fs::symlink(dir.join("zeta.md"), dir.join("linked.md")).unwrap();
@@ -951,7 +977,7 @@ mod tests {
             .iter()
             .position(|e| e.name == "linked")
             .unwrap();
-        assert!(side.entries[linked].is_dir, "a linked folder is a folder");
+        assert!(side.entries[linked].is_dir && side.entries[linked].linked);
         assert!(
             side.entries
                 .iter()
@@ -964,9 +990,16 @@ mod tests {
             "it sorts with the directories"
         );
         assert!(side.activate(linked).is_none());
-        assert_eq!(side.entries[linked + 1].name, "subsub");
-        assert_eq!(side.entries[linked + 2].name, "inner.md");
-        assert_eq!(side.entries[linked + 1].depth, 1);
+        let real = std::fs::canonicalize(dir.join("sub")).unwrap();
+        assert_eq!(side.root(), real, "the tree moved to the real folder");
+        assert_eq!(names(&side), ["..", "subsub", "inner.md"]);
+        assert_eq!(side.selected, 1, "the first entry inside is selected");
+        assert!(side.activate(0).is_none());
+        assert_eq!(
+            side.root(),
+            real.parent().unwrap(),
+            "the parent row climbs the real path"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
