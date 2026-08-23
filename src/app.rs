@@ -5554,11 +5554,21 @@ impl ApplicationHandler for App {
                         logical_key,
                         physical_key,
                         state: ElementState::Pressed,
+                        repeat,
                         ..
                     },
+                is_synthetic,
                 ..
             } => {
                 self.fling = None;
+                // A synthetic press reports a key that was already held
+                // when focus arrived, not a keystroke. On Windows the
+                // Escape that cancels a native file dialog comes back
+                // exactly so when the window regains focus, and acting
+                // on it quit the app.
+                if is_synthetic {
+                    return;
+                }
                 // The confirm modal owns the keyboard outright until a
                 // decision lands.
                 if self.confirm.is_some() {
@@ -5568,6 +5578,16 @@ impl ApplicationHandler for App {
                 let ctrl = chord_key(self.modifiers);
                 let shift = self.modifiers.shift_key();
                 let alt = self.modifiers.alt_key();
+                // A held Escape repeats, and the ladder must not climb by
+                // itself: each rung, the quit included, takes its own
+                // press. The same held key kept repeating into the window
+                // after a dialog closed on it.
+                if repeat
+                    && keymap::command(&logical_key, physical_key, ctrl, shift, alt)
+                        == Some(Command::Quit)
+                {
+                    return;
+                }
                 // The overlay toggles stay global so their chord closes the
                 // overlay it opened; everything else feeds an open overlay.
                 match keymap::command(&logical_key, physical_key, ctrl, shift, alt) {
