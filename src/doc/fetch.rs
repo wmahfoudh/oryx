@@ -1,9 +1,11 @@
 //! Remote image fetching and the on-disk cache it fills. Cache files are
 //! keyed by a stable hash of the URL so a reopened document renders
-//! instantly and offline.
+//! instantly and offline. An entry older than a day is served the same
+//! way and fetched again behind the page, so a badge that changed
+//! upstream catches up without ever blanking.
 
-use std::path::PathBuf;
-use std::time::Duration;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 /// Total request budget; remote images must never stall the app for long.
 const TIMEOUT: Duration = Duration::from_secs(8);
@@ -28,6 +30,29 @@ pub fn key(url: &str) -> String {
 /// no home.
 pub fn cache_dir() -> Option<PathBuf> {
     directories::ProjectDirs::from("", "", "oryx").map(|dirs| dirs.cache_dir().join("images"))
+}
+
+/// How long a cache entry is served without a refresh.
+const MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Whether an entry written at `modified` is due for a refresh at
+/// `now`. A modification time in the future, a clock set back, counts
+/// as fresh: the file is not old, the clock is wrong.
+pub fn stale(modified: SystemTime, now: SystemTime) -> bool {
+    now.duration_since(modified).is_ok_and(|age| age > MAX_AGE)
+}
+
+/// Removes the cache folder and answers how many files it held. A
+/// folder that does not exist held none.
+pub fn clear_cache(dir: &Path) -> std::io::Result<usize> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(err) => return Err(err),
+    };
+    let count = entries.filter(|entry| entry.is_ok()).count();
+    std::fs::remove_dir_all(dir)?;
+    Ok(count)
 }
 
 /// Downloads a URL with retries, returning the raw bytes on success.
@@ -147,6 +172,7 @@ fn fetch_once(url: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::SystemTime;
 
     #[test]
     fn retry_returns_first_success_without_retrying() {
@@ -202,6 +228,35 @@ mod tests {
         assert_eq!(
             parse_system_proxy(1, "http://proxy.corp:8080"),
             some("http://proxy.corp:8080")
+        );
+    }
+
+    #[test]
+    fn a_cache_entry_is_stale_after_a_day() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(10_000_000);
+        let hour = Duration::from_secs(3600);
+        assert!(!stale(now, now));
+        assert!(!stale(now - 23 * hour, now));
+        assert!(stale(now - 25 * hour, now));
+        assert!(
+            !stale(now + hour, now),
+            "a clock set back is not an old file"
+        );
+    }
+
+    #[test]
+    fn the_clear_removes_the_folder_and_counts_its_files() {
+        let dir = std::env::temp_dir().join(format!("oryx-clear-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(key("https://a.tld/x.png")), b"x").unwrap();
+        std::fs::write(dir.join(key("https://a.tld/y.png")), b"y").unwrap();
+        assert_eq!(clear_cache(&dir).unwrap(), 2);
+        assert!(!dir.exists(), "the folder itself goes");
+        assert_eq!(
+            clear_cache(&dir).unwrap(),
+            0,
+            "a missing folder is an empty one"
         );
     }
 

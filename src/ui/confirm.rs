@@ -11,6 +11,9 @@ use winit::keyboard::{Key, NamedKey};
 pub enum Pending {
     Quit,
     Reload,
+    /// A reload after the document's remote images are dropped from
+    /// the fetch cache.
+    Refetch,
     Open(std::path::PathBuf, bool),
     New,
 }

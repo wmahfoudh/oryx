@@ -133,6 +133,34 @@ impl Document {
         !self.code_file && !self.plain_file
     }
 
+    /// Every image address in the document, block images and the ones
+    /// spans carry, in document order, repeats included.
+    pub fn image_sources(&self) -> Vec<&str> {
+        fn from_spans(spans: &[Span]) -> impl Iterator<Item = &str> {
+            spans
+                .iter()
+                .filter_map(|span| span.image.as_ref().map(|image| image.src.as_str()))
+        }
+        let mut sources = Vec::new();
+        for block in &self.blocks {
+            match &block.kind {
+                BlockKind::Heading { spans, .. }
+                | BlockKind::Paragraph { spans }
+                | BlockKind::ListItem { spans, .. }
+                | BlockKind::FootnoteDef { spans, .. }
+                | BlockKind::Summary { spans, .. } => sources.extend(from_spans(spans)),
+                BlockKind::Table { header, rows } => {
+                    for cell in header.iter().chain(rows.iter().flatten()) {
+                        sources.extend(from_spans(cell));
+                    }
+                }
+                BlockKind::Image { path, .. } => sources.push(path.as_str()),
+                _ => {}
+            }
+        }
+        sources
+    }
+
     /// Opens every closed group enclosing a block, answering whether
     /// anything changed. Navigation into a folded region calls this
     /// before scrolling there.
@@ -597,6 +625,32 @@ mod tests {
 
     fn body(source: &str, keep_trailing: bool) -> CodeBody {
         CodeBody::verbatim(fresh(source, keep_trailing))
+    }
+
+    #[test]
+    fn image_sources_come_from_blocks_and_from_spans_of_every_kind() {
+        let doc = crate::doc::markdown::parse(
+            "# Title ![h](https://x.tld/h.png)\n\n\
+             Para ![p](https://x.tld/p.png) and ![l](local.png)\n\n\
+             - item ![i](https://x.tld/i.png)\n\n\
+             | a | b |\n|---|---|\n| ![c](https://x.tld/c.png) | d |\n\n\
+             ![block](https://x.tld/b.png)\n\n\
+             Note[^1]\n\n[^1]: foot ![f](https://x.tld/f.png)\n",
+        );
+        let mut sources = doc.image_sources();
+        sources.sort_unstable();
+        assert_eq!(
+            sources,
+            [
+                "https://x.tld/b.png",
+                "https://x.tld/c.png",
+                "https://x.tld/f.png",
+                "https://x.tld/h.png",
+                "https://x.tld/i.png",
+                "https://x.tld/p.png",
+                "local.png",
+            ]
+        );
     }
 
     fn ranges(body: &CodeBody, source: &str) -> Vec<Range<u32>> {

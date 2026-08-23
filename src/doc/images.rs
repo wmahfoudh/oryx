@@ -1,7 +1,9 @@
 //! Image loading and caching. Paths resolve against the document's
 //! directory; failures and remote URLs yield None and render as
 //! placeholders. Originals and scaled variants are memoized so relayout
-//! and repaint never re-decode.
+//! and repaint never re-decode. A remote image comes from the fetch
+//! cache when it is there, a day-old copy included, and the fetch that
+//! fills or refreshes the cache runs on its own thread.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -237,7 +239,9 @@ pub fn decode(bytes: &[u8]) -> Option<RgbaImage> {
     }
 }
 
-/// A remote source that has no pixels yet.
+/// A remote source with a fetch in flight, or one that gave up. A
+/// pending source may already have pixels on screen: the day-old copy
+/// the fetch is refreshing.
 enum RemoteState {
     Pending,
     Failed,
@@ -400,8 +404,9 @@ impl MediaCache {
 
     /// Folds arrived results into the cache, answering what changed. A
     /// book image's size was known from its header, so its pixels only
-    /// repaint; a remote fetch's size lands with it, so layout reruns.
-    /// A sources batch registers sizes for blocks not yet laid out and
+    /// repaint; a remote fetch's size lands with it, so layout reruns,
+    /// unless the fetch refreshed a placed copy at the same size. A
+    /// sources batch registers sizes for blocks not yet laid out and
     /// asks nothing by itself.
     pub fn drain_remote(&mut self) -> Folded {
         let arrived: Vec<_> = {
@@ -418,19 +423,35 @@ impl MediaCache {
                 Arrival::Pixels(url, image) => (url, image),
             };
             self.decoding.remove(&url);
-            let book = self.book.contains_key(&url);
-            folded = folded.max(if book {
-                Folded::Repaint
-            } else {
-                Folded::Relayout
-            });
+            if self.book.contains_key(&url) {
+                folded = folded.max(Folded::Repaint);
+                self.adopt_pixels(url, image);
+                continue;
+            }
+            // A refresh arrives over a copy already placed: the same
+            // size repaints, a new size moves the layout, and a failed
+            // fetch leaves the copy where it is.
+            let placed = self
+                .originals
+                .get(&url)
+                .and_then(|o| o.as_ref().map(RgbaImage::dimensions));
             match image {
-                _ if book => self.adopt_pixels(url, image),
                 Some(image) => {
+                    folded = folded.max(if placed == Some(image.dimensions()) {
+                        Folded::Repaint
+                    } else {
+                        Folded::Relayout
+                    });
+                    self.scaled.retain(|(src, _, _), _| src != &url);
                     self.originals.insert(url.clone(), Some(image));
                     self.remote.remove(&url);
                 }
+                None if placed.is_some() => {
+                    folded = folded.max(Folded::Repaint);
+                    self.remote.remove(&url);
+                }
                 None => {
+                    folded = folded.max(Folded::Relayout);
                     self.remote.insert(url, RemoteState::Failed);
                 }
             }
@@ -444,22 +465,38 @@ impl MediaCache {
 
     /// Remote lookup: memory, then the disk cache, then a background
     /// fetch. Always returns at once; missing pixels mean a placeholder.
+    /// A day-old entry is served like a fresh one, with the fetch that
+    /// refreshes it started behind.
     fn remote_original(&mut self, src: &str) -> Option<&RgbaImage> {
         if !self.originals.contains_key(src) && !self.remote.contains_key(src) {
-            match self.cached_bytes(src).as_deref().map(decode) {
-                Some(Some(image)) => {
-                    self.originals.insert(src.to_string(), Some(image));
-                }
-                // A truncated write leaves undecodable bytes on disk;
-                // pinning them would blank the URL for every session.
-                Some(None) => {
-                    self.remove_cached(src);
-                    self.spawn_fetch(src);
-                }
+            match self.cached_entry(src) {
+                Some((bytes, stale)) => match decode(&bytes) {
+                    Some(image) => {
+                        self.originals.insert(src.to_string(), Some(image));
+                        if stale {
+                            self.spawn_fetch(src);
+                        }
+                    }
+                    // A truncated write leaves undecodable bytes on disk;
+                    // pinning them would blank the URL for every session.
+                    None => {
+                        self.remove_cached(src);
+                        self.spawn_fetch(src);
+                    }
+                },
                 None => self.spawn_fetch(src),
             }
         }
         self.originals.get(src).and_then(|o| o.as_ref())
+    }
+
+    /// Drops a remote source's cache file and everything held for it in
+    /// memory, so the next lookup fetches it again.
+    pub fn forget_remote(&mut self, src: &str) {
+        self.remove_cached(src);
+        self.originals.remove(src);
+        self.remote.remove(src);
+        self.scaled.retain(|(key, _, _), _| key != src);
     }
 
     fn remove_cached(&self, src: &str) {
@@ -468,8 +505,15 @@ impl MediaCache {
         }
     }
 
-    fn cached_bytes(&self, src: &str) -> Option<Vec<u8>> {
-        std::fs::read(self.cache_dir.as_ref()?.join(fetch::key(src))).ok()
+    /// The cache file's bytes and whether they are due for a refresh.
+    /// A file whose modification time cannot be read counts as fresh.
+    fn cached_entry(&self, src: &str) -> Option<(Vec<u8>, bool)> {
+        let path = self.cache_dir.as_ref()?.join(fetch::key(src));
+        let bytes = std::fs::read(&path).ok()?;
+        let stale = std::fs::metadata(&path)
+            .and_then(|meta| meta.modified())
+            .is_ok_and(|modified| fetch::stale(modified, std::time::SystemTime::now()));
+        Some((bytes, stale))
     }
 
     fn spawn_fetch(&mut self, src: &str) {
@@ -696,6 +740,87 @@ mod tests {
         let mut media = MediaCache::with_cache_dir(temp_dir(), Some(cache.clone()));
         assert_eq!(media.dimensions(url), Some((8, 4)));
         std::fs::remove_dir_all(&cache).unwrap();
+    }
+
+    /// The offline promise holds for a day-old entry too: it is served
+    /// at once, and the fetch that refreshes it runs behind. TEST-NET
+    /// again, so the attempt goes nowhere.
+    #[test]
+    fn a_stale_cache_entry_is_served_and_refetched() {
+        let cache = temp_dir().join("cache-stale");
+        std::fs::create_dir_all(&cache).unwrap();
+        let url = "https://192.0.2.1/stale.png";
+        let path = cache.join(fetch::key(url));
+        std::fs::write(&path, png_bytes(8, 4)).unwrap();
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 86_400);
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        let mut media = MediaCache::with_cache_dir(temp_dir(), Some(cache.clone()));
+        assert_eq!(media.dimensions(url), Some((8, 4)), "the old copy shows");
+        assert!(media.remote.contains_key(url), "a refetch is under way");
+        assert!(path.exists(), "the old copy stays until the new one lands");
+        let _ = std::fs::remove_dir_all(&cache);
+    }
+
+    /// What a refetch's arrival asks: the same size repaints, a new size
+    /// relayouts, a failure keeps the copy on screen.
+    #[test]
+    fn a_refreshed_image_repaints_relayouts_or_keeps_the_old_copy() {
+        let cache = temp_dir().join("cache-refresh");
+        std::fs::create_dir_all(&cache).unwrap();
+        let url = "https://img.example/live.png";
+        std::fs::write(cache.join(fetch::key(url)), png_bytes(8, 4)).unwrap();
+        let mut media = MediaCache::with_cache_dir(temp_dir(), Some(cache.clone()));
+        assert_eq!(media.dimensions(url), Some((8, 4)));
+        let _ = media.scaled(url, 4, 2);
+        let arrive = |media: &MediaCache, image: Option<RgbaImage>| {
+            media
+                .arrivals
+                .lock()
+                .unwrap()
+                .push(Arrival::Pixels(url.to_string(), image));
+        };
+        media.remote.insert(url.to_string(), RemoteState::Pending);
+        arrive(&media, Some(RgbaImage::new(8, 4)));
+        assert_eq!(media.drain_remote(), Folded::Repaint);
+        assert!(
+            !media.scaled.keys().any(|(src, _, _)| src == url),
+            "the scaled copies of the old pixels go"
+        );
+        media.remote.insert(url.to_string(), RemoteState::Pending);
+        arrive(&media, Some(RgbaImage::new(16, 4)));
+        assert_eq!(media.drain_remote(), Folded::Relayout);
+        assert_eq!(media.dimensions(url), Some((16, 4)));
+        media.remote.insert(url.to_string(), RemoteState::Pending);
+        arrive(&media, None);
+        assert_eq!(media.drain_remote(), Folded::Repaint);
+        assert_eq!(media.dimensions(url), Some((16, 4)), "the copy stays");
+        assert!(
+            !media.remote.contains_key(url),
+            "the failed refresh is over"
+        );
+        let _ = std::fs::remove_dir_all(&cache);
+    }
+
+    #[test]
+    fn forgetting_a_remote_source_drops_its_file_and_its_pixels() {
+        let cache = temp_dir().join("cache-forget");
+        std::fs::create_dir_all(&cache).unwrap();
+        let url = "https://img.example/forget.png";
+        let path = cache.join(fetch::key(url));
+        std::fs::write(&path, png_bytes(8, 4)).unwrap();
+        let mut media = MediaCache::with_cache_dir(temp_dir(), Some(cache.clone()));
+        assert_eq!(media.dimensions(url), Some((8, 4)));
+        let _ = media.scaled(url, 4, 2);
+        media.forget_remote(url);
+        assert!(!path.exists());
+        assert!(!media.originals.contains_key(url));
+        assert!(!media.scaled.keys().any(|(src, _, _)| src == url));
+        let _ = std::fs::remove_dir_all(&cache);
     }
 
     #[test]

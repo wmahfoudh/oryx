@@ -9,6 +9,7 @@ use winit::keyboard::{Key, NamedKey};
 pub enum Command {
     OpenFile,
     Reload,
+    Refetch,
     Sidebar,
     Export,
     ExportSettings,
@@ -50,9 +51,10 @@ pub enum Command {
 
 impl Command {
     /// Every variant; the coverage test checks each one against the table.
-    pub const ALL: [Command; 38] = [
+    pub const ALL: [Command; 39] = [
         Command::OpenFile,
         Command::Reload,
+        Command::Refetch,
         Command::Sidebar,
         Command::Export,
         Command::ExportSettings,
@@ -152,6 +154,12 @@ pub const SHORTCUTS: &[Shortcut] = &[
             (Binding::Named(NamedKey::F5), Command::Reload),
             (Binding::Ctrl("r"), Command::Reload),
         ],
+    },
+    Shortcut {
+        keys: "Ctrl+Shift+R",
+        action: "Reload and refetch remote images",
+        section: "Files",
+        bindings: &[(Binding::CtrlShift("r"), Command::Refetch)],
     },
     Shortcut {
         keys: "Up / Down",
@@ -510,9 +518,8 @@ mod tests {
     #[test]
     fn ctrl_e_toggles_the_editor() {
         assert_eq!(command(&chr("e"), true, false), Some(Command::Edit));
-        // Ctrl+Shift+E falls through to the same command for now, like
-        // every shifted Ctrl chord; the block lens claims it later with
-        // a CtrlShift binding, which the shifted pass resolves first.
+        // Ctrl+Shift+E falls through to the same command, like every
+        // shifted Ctrl chord without a CtrlShift binding of its own.
         assert_eq!(command(&chr("E"), true, true), Some(Command::Edit));
     }
 
@@ -634,6 +641,18 @@ mod tests {
         );
         assert_eq!(command(&chr("r"), true, false), Some(Command::Reload));
         assert_eq!(command(&chr("r"), false, false), None);
+    }
+
+    #[test]
+    fn the_refetch_takes_ctrl_shift_r_and_leaves_the_reload_alone() {
+        assert_eq!(command(&chr("r"), true, true), Some(Command::Refetch));
+        assert_eq!(command(&chr("R"), true, true), Some(Command::Refetch));
+        assert_eq!(command(&chr("r"), true, false), Some(Command::Reload));
+        let row = SHORTCUTS
+            .iter()
+            .find(|row| row.keys == "Ctrl+Shift+R")
+            .expect("a help row");
+        assert_eq!(row.section, "Files");
     }
 
     #[test]

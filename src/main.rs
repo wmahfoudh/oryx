@@ -45,10 +45,30 @@ fn usage() -> String {
          Options:\n\
          \x20 --theme NAME   start with the named theme\n\
          \x20 --register     install the file association and icons\n\
+         \x20 --clear-cache  remove the downloaded remote images\n\
          \x20 --version      print the version\n\
          \x20 --help, -h     print this text\n",
         env!("CARGO_PKG_VERSION")
     )
+}
+
+/// `--clear-cache`: the downloaded remote images go, and the line
+/// printed names the folder and the count so the user sees what went.
+fn clear_cache() -> ExitCode {
+    let Some(dir) = oryx::doc::fetch::cache_dir() else {
+        eprintln!("oryx: no cache folder on this system");
+        return ExitCode::FAILURE;
+    };
+    match oryx::doc::fetch::clear_cache(&dir) {
+        Ok(count) => {
+            println!("removed {count} cached images from {}", dir.display());
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("oryx: cannot clear {}: {error}", dir.display());
+            ExitCode::FAILURE
+        }
+    }
 }
 
 /// What the command line asks for, read from the arguments after the
@@ -62,6 +82,7 @@ enum Cli {
     },
     Version,
     Register,
+    ClearCache,
     Help,
     /// A refused command line and the message naming why.
     Refused(String),
@@ -75,6 +96,7 @@ fn parse_args(args: impl Iterator<Item = OsString>) -> Cli {
         match arg.to_str() {
             Some("--version") => return Cli::Version,
             Some("--register") => return Cli::Register,
+            Some("--clear-cache") => return Cli::ClearCache,
             Some("--help") | Some("-h") => return Cli::Help,
             Some("--theme") => match args.next().and_then(|name| name.into_string().ok()) {
                 Some(name) => theme = Some(name),
@@ -104,6 +126,7 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        Cli::ClearCache => clear_cache(),
         Cli::Help => {
             print!("{}", usage());
             ExitCode::SUCCESS
@@ -154,7 +177,14 @@ mod tests {
     #[test]
     fn the_usage_names_the_flags_and_both_argument_kinds() {
         let text = usage();
-        for flag in ["--theme", "--register", "--version", "--help", "-h"] {
+        for flag in [
+            "--theme",
+            "--register",
+            "--clear-cache",
+            "--version",
+            "--help",
+            "-h",
+        ] {
             assert!(text.contains(flag), "the usage names {flag}");
         }
         assert!(text.starts_with(&format!("oryx {}\n", env!("CARGO_PKG_VERSION"))));
@@ -168,6 +198,7 @@ mod tests {
         assert_eq!(parse_args(args(&["-h"])), Cli::Help);
         assert_eq!(parse_args(args(&["--version"])), Cli::Version);
         assert_eq!(parse_args(args(&["--register"])), Cli::Register);
+        assert_eq!(parse_args(args(&["--clear-cache"])), Cli::ClearCache);
         assert_eq!(
             parse_args(args(&["--theme", "dracula", "notes.md"])),
             Cli::Run {

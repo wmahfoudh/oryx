@@ -916,6 +916,7 @@ impl App {
             Command::Export => self.export_now(),
             Command::ExportSettings => self.toggle_export_settings(),
             Command::Reload => self.reload(),
+            Command::Refetch => self.refetch(),
             Command::Sidebar => self.toggle_sidebar(),
             Command::Help => self.toggle_help(),
             Command::Settings => self.toggle_settings(),
@@ -1877,6 +1878,7 @@ impl App {
                 event_loop.exit();
             }
             confirm::Pending::Reload => self.reload_now(),
+            confirm::Pending::Refetch => self.refetch_now(),
             confirm::Pending::Open(path, reroot) => self.open_file(&path, reroot),
             confirm::Pending::New => self.new_file(),
         }
@@ -3973,6 +3975,36 @@ impl App {
         // land it on the block's top instead.
         self.pending_offset = None;
         self.scroll_y = scroll;
+    }
+
+    /// Ctrl+Shift+R: a reload that also discards the remote images this
+    /// document shows from the fetch cache, so they are downloaded
+    /// again. The same unsaved guard as a reload.
+    fn refetch(&mut self) {
+        if self.guard_unsaved(confirm::Pending::Refetch) {
+            self.refetch_now();
+        }
+    }
+
+    /// Drops the cache files of the document's remote images, the
+    /// rendered page's when the source view is showing, then reloads;
+    /// the fresh cache that comes with the reload finds nothing on disk
+    /// and fetches.
+    fn refetch_now(&mut self) {
+        let page = self
+            .edit_park
+            .as_ref()
+            .map_or(&self.document, |parked| &parked.document);
+        let remote: Vec<String> = page
+            .image_sources()
+            .into_iter()
+            .filter(|src| src.starts_with("http://") || src.starts_with("https://"))
+            .map(str::to_string)
+            .collect();
+        for src in &remote {
+            self.media.forget_remote(src);
+        }
+        self.reload_now();
     }
 
     /// Starts an export with the saved settings, or the ones seeded from
