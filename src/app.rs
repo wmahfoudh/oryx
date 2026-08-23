@@ -5505,6 +5505,7 @@ impl ApplicationHandler for App {
                 event:
                     KeyEvent {
                         logical_key,
+                        physical_key,
                         state: ElementState::Pressed,
                         ..
                     },
@@ -5522,7 +5523,7 @@ impl ApplicationHandler for App {
                 let alt = self.modifiers.alt_key();
                 // The overlay toggles stay global so their chord closes the
                 // overlay it opened; everything else feeds an open overlay.
-                match keymap::command(&logical_key, ctrl, shift, alt) {
+                match keymap::command(&logical_key, physical_key, ctrl, shift, alt) {
                     Some(
                         cmd @ (Command::ThemeBrowser
                         | Command::Settings

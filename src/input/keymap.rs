@@ -2,7 +2,7 @@
 //! Each table row carries the labels the help overlay renders and the
 //! chords the app matches, so the two can never drift apart.
 
-use winit::keyboard::{Key, NamedKey};
+use winit::keyboard::{Key, KeyCode, NamedKey, PhysicalKey};
 
 /// Application command a shortcut resolves to.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -109,6 +109,11 @@ enum Binding {
     CtrlNamed(NamedKey),
     /// A named key with Alt held; tried before the plain named form.
     AltNamed(NamedKey),
+    /// Ctrl plus a key by its place on the keyboard, tried last, once
+    /// no character chord claims the press. The zoom keys live here so
+    /// that a layout printing something else on the `0`, `-` or `=`
+    /// keys still zooms with them, the way browsers do.
+    CtrlCode(KeyCode),
 }
 
 /// One help-table row: display labels plus the chords the row covers.
@@ -323,13 +328,21 @@ pub const SHORTCUTS: &[Shortcut] = &[
             (Binding::Ctrl("+"), Command::ZoomIn),
             (Binding::Ctrl("="), Command::ZoomIn),
             (Binding::Ctrl("-"), Command::ZoomOut),
+            (Binding::CtrlCode(KeyCode::Equal), Command::ZoomIn),
+            (Binding::CtrlCode(KeyCode::NumpadAdd), Command::ZoomIn),
+            (Binding::CtrlCode(KeyCode::Minus), Command::ZoomOut),
+            (Binding::CtrlCode(KeyCode::NumpadSubtract), Command::ZoomOut),
         ],
     },
     Shortcut {
         keys: "Ctrl+0",
         action: "Reset zoom (in a comic: whole page)",
         section: "View",
-        bindings: &[(Binding::Ctrl("0"), Command::ZoomReset)],
+        bindings: &[
+            (Binding::Ctrl("0"), Command::ZoomReset),
+            (Binding::CtrlCode(KeyCode::Digit0), Command::ZoomReset),
+            (Binding::CtrlCode(KeyCode::Numpad0), Command::ZoomReset),
+        ],
     },
     Shortcut {
         keys: "Ctrl+J",
@@ -371,8 +384,16 @@ pub const SHORTCUTS: &[Shortcut] = &[
 
 /// Resolves a key event against the table. Chords that require a
 /// modifier are tried first, so Ctrl+Shift+C never falls through to
-/// Ctrl+C and Ctrl+Left never falls through to plain Left.
-pub fn command(key: &Key, ctrl: bool, shift: bool, alt: bool) -> Option<Command> {
+/// Ctrl+C and Ctrl+Left never falls through to plain Left; the key's
+/// place on the keyboard is tried last, once no character chord has
+/// claimed the press.
+pub fn command(
+    key: &Key,
+    code: PhysicalKey,
+    ctrl: bool,
+    shift: bool,
+    alt: bool,
+) -> Option<Command> {
     let bindings = || SHORTCUTS.iter().flat_map(|row| row.bindings.iter());
     let shifted = bindings().find(|(binding, _)| match binding {
         Binding::CtrlShift(c) => ctrl && shift && is_char(key, c),
@@ -388,7 +409,16 @@ pub fn command(key: &Key, ctrl: bool, shift: bool, alt: bool) -> Option<Command>
             _ => false,
         })
     };
-    shifted.or_else(plain).map(|(_, cmd)| *cmd)
+    let physical = || {
+        bindings().find(|(binding, _)| match binding {
+            Binding::CtrlCode(c) => ctrl && code == PhysicalKey::Code(*c),
+            _ => false,
+        })
+    };
+    shifted
+        .or_else(plain)
+        .or_else(physical)
+        .map(|(_, cmd)| *cmd)
 }
 
 fn is_char(key: &Key, c: &str) -> bool {
@@ -415,27 +445,102 @@ fn platform_label(keys: &str, macos: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use winit::keyboard::NativeKeyCode;
 
     fn chr(s: &str) -> Key {
         Key::Character(s.into())
     }
 
-    /// The table predates the Alt modifier; the shadow keeps the
-    /// alt-free assertions readable.
+    /// The table predates the Alt modifier and the physical key; the
+    /// shadow keeps the older assertions readable.
     fn command(key: &Key, ctrl: bool, shift: bool) -> Option<Command> {
-        super::command(key, ctrl, shift, false)
+        super::command(
+            key,
+            PhysicalKey::Unidentified(NativeKeyCode::Unidentified),
+            ctrl,
+            shift,
+            false,
+        )
+    }
+
+    /// The zoom chords hold by the key's place on the keyboard once no
+    /// character chord claims the press: on AZERTY, Ctrl with the key
+    /// that prints `à` resets zoom the way browsers do.
+    #[test]
+    fn the_zoom_chords_match_by_physical_key_on_other_layouts() {
+        let on = |c: &str, code: KeyCode, ctrl: bool| {
+            super::command(&chr(c), PhysicalKey::Code(code), ctrl, false, false)
+        };
+        assert_eq!(on("à", KeyCode::Digit0, true), Some(Command::ZoomReset));
+        assert_eq!(on("0", KeyCode::Digit0, true), Some(Command::ZoomReset));
+        assert_eq!(on("à", KeyCode::Numpad0, true), Some(Command::ZoomReset));
+        assert_eq!(on(")", KeyCode::Minus, true), Some(Command::ZoomOut));
+        assert_eq!(
+            on("-", KeyCode::NumpadSubtract, true),
+            Some(Command::ZoomOut)
+        );
+        assert_eq!(on("=", KeyCode::Equal, true), Some(Command::ZoomIn));
+        assert_eq!(on("+", KeyCode::NumpadAdd, true), Some(Command::ZoomIn));
+        assert_eq!(
+            on("à", KeyCode::Digit0, false),
+            None,
+            "no chord without Ctrl"
+        );
+        assert_eq!(on(")", KeyCode::Minus, false), None);
+    }
+
+    /// No character chord stands on a physical zoom key's US character,
+    /// so the two matchers never disagree on one press; and the
+    /// physical rows name the zoom commands alone.
+    #[test]
+    fn the_physical_rows_conflict_with_no_character_chord() {
+        let physical: Vec<(&KeyCode, &Command)> = SHORTCUTS
+            .iter()
+            .flat_map(|row| row.bindings.iter())
+            .filter_map(|(binding, cmd)| match binding {
+                Binding::CtrlCode(code) => Some((code, cmd)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(physical.len(), 6, "the zoom triad, main row and pad");
+        for (code, cmd) in &physical {
+            assert!(
+                matches!(cmd, Command::ZoomIn | Command::ZoomOut | Command::ZoomReset),
+                "{code:?} is a zoom key"
+            );
+            let us = match code {
+                KeyCode::Digit0 | KeyCode::Numpad0 => "0",
+                KeyCode::Minus | KeyCode::NumpadSubtract => "-",
+                KeyCode::Equal => "=",
+                KeyCode::NumpadAdd => "+",
+                other => panic!("{other:?} has no zoom meaning"),
+            };
+            let by_char = super::command(
+                &chr(us),
+                PhysicalKey::Unidentified(NativeKeyCode::Unidentified),
+                true,
+                false,
+                false,
+            );
+            assert_eq!(
+                by_char,
+                Some(**cmd),
+                "the character chord for {code:?} agrees"
+            );
+        }
     }
 
     #[test]
     fn alt_left_goes_back_and_plain_left_still_switches_panes() {
         let left = Key::Named(NamedKey::ArrowLeft);
+        let none = PhysicalKey::Unidentified(NativeKeyCode::Unidentified);
         assert_eq!(
-            super::command(&left, false, false, true),
+            super::command(&left, none, false, false, true),
             Some(Command::Back),
             "Alt+Left returns from a jump"
         );
         assert_eq!(
-            super::command(&left, false, false, false),
+            super::command(&left, none, false, false, false),
             Some(Command::PaneLeft),
             "plain Left keeps the pane switch"
         );
