@@ -17,7 +17,7 @@ pub fn welcome() -> String {
          Press `{}` to open a file.\n\n\
          `{}` shows the folder sidebar, to browse and open files from there.\n\n\
          `{}` lists the shortcuts.\n\n\
-         A file dropped onto this window opens too.\n",
+         You can also drag and drop a file here.\n",
         keymap::display("Ctrl+O"),
         keymap::display("Ctrl+Shift+B"),
         keymap::display("F1"),
@@ -133,7 +133,7 @@ mod tests {
         let page = page();
         assert!(page.contains("dropped onto the window opens"));
         assert!(page.contains(&format!("with `{}` held it zooms", keymap::display("Ctrl"))));
-        assert!(welcome().contains("dropped onto this window opens"));
+        assert!(welcome().contains("drag and drop a file here"));
     }
 
     #[test]

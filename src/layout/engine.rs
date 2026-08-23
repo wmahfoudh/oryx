@@ -3549,19 +3549,10 @@ fn shape_segment(
     line_height: f32,
     out: &mut LayoutDoc,
 ) -> f32 {
-    // Byte offset of each piece inside the whole segment, and of the
-    // first piece of each origin span: the pieces of a split span
-    // concatenate to the span's text, so a model reference counts from
-    // where the origin starts, not where the piece does.
-    let mut offsets: Vec<u32> = Vec::with_capacity(segment.len());
-    let mut origin_starts: HashMap<usize, u32> = HashMap::new();
-    let mut acc = 0u32;
-    for &si in segment {
-        offsets.push(acc);
-        origin_starts.entry(origins[si]).or_insert(acc);
-        acc += spans[si].text(source).len() as u32;
-    }
-    let total = acc as usize;
+    // Almost every segment is small and shapes whole; it pays one
+    // length pass here and builds its own piece table inside the chunk
+    // shaper, nothing more.
+    let total: usize = segment.iter().map(|&si| spans[si].text(source).len()).sum();
     if segment.len() <= LONG_SEGMENT_PIECES && total <= LONG_SEGMENT_BYTES {
         return shape_segment_chunk(
             fonts,
@@ -3573,7 +3564,7 @@ fn shape_segment(
             origins,
             segment,
             0,
-            &origin_starts,
+            None,
             base,
             x0,
             y0,
@@ -3581,6 +3572,20 @@ fn shape_segment(
             line_height,
             out,
         );
+    }
+    // Byte offset of each piece inside the whole segment, and of the
+    // first piece of each origin span: the pieces of a split span
+    // concatenate to the span's text, so a model reference counts from
+    // where the origin starts, not where the piece does. Only a
+    // segment big enough to shape in chunks needs the tables over the
+    // whole of it.
+    let mut offsets: Vec<u32> = Vec::with_capacity(segment.len());
+    let mut origin_starts: HashMap<usize, u32> = HashMap::new();
+    let mut acc = 0u32;
+    for &si in segment {
+        offsets.push(acc);
+        origin_starts.entry(origins[si]).or_insert(acc);
+        acc += spans[si].text(source).len() as u32;
     }
     let mut height = 0.0_f32;
     let mut start = 0usize;
@@ -3603,7 +3608,7 @@ fn shape_segment(
             origins,
             &segment[start..end],
             offsets[start],
-            &origin_starts,
+            Some(&origin_starts),
             base,
             x0,
             y0 + height,
@@ -3620,7 +3625,8 @@ fn shape_segment(
 /// the chunk's byte offset inside its segment and `origin_starts` the
 /// segment offset of each origin span's first piece, both over the
 /// whole segment, so a model reference lands on the span's own bytes
-/// whichever chunk shaped it.
+/// whichever chunk shaped it. An unchunked segment passes None and the
+/// piece table is built here, over the whole segment it was handed.
 #[allow(clippy::too_many_arguments)]
 fn shape_segment_chunk(
     fonts: &mut FontStore,
@@ -3632,7 +3638,7 @@ fn shape_segment_chunk(
     origins: &[usize],
     segment: &[usize],
     chunk_base: u32,
-    origin_starts: &HashMap<usize, u32>,
+    origin_starts: Option<&HashMap<usize, u32>>,
     base: &BlockStyle,
     x0: f32,
     y0: f32,
@@ -3698,6 +3704,31 @@ fn shape_segment_chunk(
     // into separate lines whose glyph offsets are line-local. Each
     // line's base offset inside the chunk counts the stripped newline
     // back in, so a model reference lands on the span's own bytes.
+    // The unchunked path's piece table: each piece with its offset in
+    // the segment, the first of an origin span being where a model
+    // reference counts from. A handful of pieces, so a scan answers.
+    let local_starts: Vec<(usize, u32)> = if origin_starts.is_none() {
+        let mut acc = chunk_base;
+        segment
+            .iter()
+            .map(|&si| {
+                let at = (si, acc);
+                acc += spans[si].text(source).len() as u32;
+                at
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let origin_start_of = |origin: usize| -> u32 {
+        match origin_starts {
+            Some(map) => map.get(&origin).copied().unwrap_or(0),
+            None => local_starts
+                .iter()
+                .find(|(si, _)| origins[*si] == origin)
+                .map_or(0, |(_, at)| *at),
+        }
+    };
     let mut line_offsets: Vec<u32> = Vec::with_capacity(buffer.lines.len());
     let mut line_acc = chunk_base;
     for line in &buffer.lines {
@@ -3733,10 +3764,7 @@ fn shape_segment_chunk(
                 );
             }
             let text = if model[span_index] {
-                let origin_start = origin_starts
-                    .get(&origins[span_index])
-                    .copied()
-                    .unwrap_or(0);
+                let origin_start = origin_start_of(origins[span_index]);
                 TextRef::Model {
                     start: line_base + start_byte as u32 - origin_start,
                     len: (end_byte - start_byte) as u32,
