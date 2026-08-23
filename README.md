@@ -2,16 +2,13 @@
 
 ![Oryx: a fast, native viewer for markdown, code and books](screenshots/hero.png)
 
-![Version](https://img.shields.io/github/v/release/wmahfoudh/oryx?label=Version&color=purple)
-![Made with Rust](https://img.shields.io/badge/Made%20with-Rust-orange?logo=rust&logoColor=white)
+[Installation](#install) | [Themes](#themes) | [Syntax](SYNTAX.md) | [Changelog](CHANGELOG.md) | [Codeberg](https://codeberg.org/wmahfoudh/oryx) | [GitHub](https://github.com/wmahfoudh/oryx)
+
+<a href="https://github.com/wmahfoudh/oryx/releases"><img alt="Release" src="https://img.shields.io/github/v/release/wmahfoudh/oryx?style=for-the-badge&label=RELEASE&color=purple"></a>
+<a href="https://www.rust-lang.org"><img alt="Language" src="https://img.shields.io/badge/LANGUAGE-RUST-orange?style=for-the-badge&logo=rust&logoColor=white"></a>
+<a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/LICENSE-GPL--3.0-darkgreen?style=for-the-badge"></a>
 
 </div>
-
-<b>Quick Links</b>
-
-- [Installation](#install)
-- [Performance](#performance)
-- [Credits](#credits)
 
 ## Philosophy
 
