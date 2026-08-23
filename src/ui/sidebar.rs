@@ -179,7 +179,10 @@ fn recognized(path: &Path, is_dir: bool) -> bool {
 }
 
 /// The recognized entries of one directory, directories first, both
-/// groups alphabetical and case-insensitive.
+/// groups alphabetical and case-insensitive. A symbolic link counts as
+/// what it points at, so a linked folder lists and expands; its
+/// children are read on each expand, never ahead, so a link pointing
+/// up the tree cannot loop the scan.
 fn scan(dir: &Path, depth: usize) -> Vec<Entry> {
     let Ok(read) = std::fs::read_dir(dir) else {
         return Vec::new();
@@ -188,7 +191,8 @@ fn scan(dir: &Path, depth: usize) -> Vec<Entry> {
         .flatten()
         .filter_map(|e| {
             let name = e.file_name().to_str()?.to_string();
-            let is_dir = e.file_type().ok()?.is_dir();
+            let kind = e.file_type().ok()?;
+            let is_dir = kind.is_dir() || (kind.is_symlink() && e.path().is_dir());
             recognized(&e.path(), is_dir).then(|| Entry {
                 hidden: name.starts_with('.'),
                 path: e.path(),
@@ -928,6 +932,41 @@ mod tests {
         let sub = side.entries.iter().position(|e| e.name == "sub").unwrap();
         assert_eq!(side.selected, sub);
         assert!(names(&side).contains(&"zeta.md".to_string()));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A link to a folder is a folder to the reader: it lists among the
+    /// directories and expands to the target's children. Children are
+    /// read on each expand, so a link pointing up the tree expands one
+    /// level at a time and never loops the scan.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_to_a_directory_lists_as_a_folder_and_expands() {
+        let dir = temp_tree("symlink");
+        std::os::unix::fs::symlink(dir.join("sub"), dir.join("linked")).unwrap();
+        std::os::unix::fs::symlink(dir.join("zeta.md"), dir.join("linked.md")).unwrap();
+        let mut side = Sidebar::new(&dir);
+        let linked = side
+            .entries
+            .iter()
+            .position(|e| e.name == "linked")
+            .unwrap();
+        assert!(side.entries[linked].is_dir, "a linked folder is a folder");
+        assert!(
+            side.entries
+                .iter()
+                .any(|e| e.name == "linked.md" && !e.is_dir),
+            "a linked file is a file"
+        );
+        assert_eq!(
+            names(&side)[..4],
+            ["..", ".git", "linked", "sub"],
+            "it sorts with the directories"
+        );
+        assert!(side.activate(linked).is_none());
+        assert_eq!(side.entries[linked + 1].name, "subsub");
+        assert_eq!(side.entries[linked + 2].name, "inner.md");
+        assert_eq!(side.entries[linked + 1].depth, 1);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
