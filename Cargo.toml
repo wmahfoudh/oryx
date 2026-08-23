@@ -51,6 +51,12 @@ syntect = { version = "5.3.0", default-features = false, features = ["default-fa
 [target."cfg(windows)".dependencies]
 winreg = "0.56.0"
 
+# File drops on Wayland, which winit 0.30 leaves out; both crates are
+# already in the tree through winit, at the same versions.
+[target.'cfg(target_os = "linux")'.dependencies]
+wayland-backend = { version = "0.3", features = ["client_system"] }
+wayland-client = "0.31"
+
 [profile.release]
 lto = true
 codegen-units = 1

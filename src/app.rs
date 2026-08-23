@@ -30,6 +30,8 @@ use oryx::paint::painter::Painter;
 use oryx::paint::scroll::{self, BandCache};
 use oryx::platform::config::{self, Config, WindowState};
 use oryx::platform::save;
+#[cfg(target_os = "linux")]
+use oryx::platform::wayland_drop;
 use oryx::style::fonts::FontStore;
 use oryx::style::highlight::{self, Highlighter, PendingBlock};
 use oryx::style::theme::{self, Rgba, Theme};
@@ -265,6 +267,8 @@ pub fn run(launch: Launch, theme_name: Option<String>) -> anyhow::Result<()> {
         pan_target: PanTarget::Document,
         fling: None,
         wheel_zoom: 0.0,
+        #[cfg(target_os = "linux")]
+        drops: None,
         mute_mouse_until: None,
         pinch_base: 1.0,
         band: None,
@@ -338,6 +342,23 @@ pub fn run(launch: Launch, theme_name: Option<String>) -> anyhow::Result<()> {
     }
     event_loop.run_app(&mut app)?;
     Ok(())
+}
+
+/// Starts the Wayland drop thread for a window whose handles are
+/// Wayland's; None on X11, where winit delivers the drops itself.
+#[cfg(target_os = "linux")]
+fn wayland_drops(window: &Window, wake: Waker) -> Option<wayland_drop::Drops> {
+    use winit::raw_window_handle::{
+        HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle,
+    };
+    let display = window.display_handle().ok()?.as_raw();
+    let surface = window.window_handle().ok()?.as_raw();
+    match (display, surface) {
+        (RawDisplayHandle::Wayland(display), RawWindowHandle::Wayland(surface)) => {
+            wayland_drop::start(display.display.as_ptr(), surface.surface.as_ptr(), wake)
+        }
+        _ => None,
+    }
 }
 
 /// The corner notice naming each direction state.
@@ -649,6 +670,10 @@ struct App {
     /// The wheel's fraction of a zoom notch not yet spent, while the
     /// chord key is held.
     wheel_zoom: f32,
+    /// Files dropped on the window under Wayland, where winit delivers
+    /// no drop event; the drop thread fills it and wakes the loop.
+    #[cfg(target_os = "linux")]
+    drops: Option<wayland_drop::Drops>,
     /// Emulated mouse events are dropped until then after a touch pan.
     mute_mouse_until: Option<Instant>,
     /// The reader zoom captured when a pinch began.
@@ -3770,6 +3795,17 @@ impl App {
         self.sidebar = Some(side);
     }
 
+    /// A file or folder dropped on the window: the folder roots the
+    /// sidebar, the file opens as the dialog would, the unsaved guard
+    /// in front of it.
+    fn drop_path(&mut self, path: &Path) {
+        if path.is_dir() {
+            self.show_folder(path);
+        } else if self.guard_unsaved(confirm::Pending::Open(path.to_path_buf(), true)) {
+            self.open_file(path, true);
+        }
+    }
+
     /// Shows a folder in the sidebar, opening the panel when it is
     /// closed and re-rooting it when it is open; the folder is
     /// remembered as where the reader is browsing.
@@ -5410,6 +5446,13 @@ impl ApplicationHandler for App {
     /// it in. Fetches relayout; highlights only recolor. The parse lands
     /// first so a stale highlight generation dies before it recolors.
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, _event: ()) {
+        #[cfg(target_os = "linux")]
+        {
+            let dropped = self.drops.as_ref().map(|d| d.take()).unwrap_or_default();
+            for path in dropped {
+                self.drop_path(&path);
+            }
+        }
         match self.media.drain_remote() {
             images::Folded::Relayout => {
                 self.layout = None;
@@ -5478,6 +5521,10 @@ impl ApplicationHandler for App {
         let surface =
             softbuffer::Surface::new(&context, window.clone()).expect("surface creation failed");
         let scale = window.scale_factor() as f32;
+        #[cfg(target_os = "linux")]
+        {
+            self.drops = wayland_drops(&window, self.waker.clone());
+        }
         self.gfx = Some(Gfx { window, surface });
         self.rescale(scale);
         // The panel comes back the way it was left, at its saved width.
@@ -5610,13 +5657,7 @@ impl ApplicationHandler for App {
             }
             // A drop opens the way the dialog does, unsaved edits guarded;
             // a folder opens the sidebar on it.
-            WindowEvent::DroppedFile(path) => {
-                if path.is_dir() {
-                    self.show_folder(&path);
-                } else if self.guard_unsaved(confirm::Pending::Open(path.clone(), true)) {
-                    self.open_file(&path, true);
-                }
-            }
+            WindowEvent::DroppedFile(path) => self.drop_path(&path),
             WindowEvent::CursorMoved { position, .. } => {
                 if self.mouse_muted() {
                     return;

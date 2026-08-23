@@ -2350,6 +2350,8 @@ dependencies = [
  "toml",
  "ttf-parser",
  "ureq",
+ "wayland-backend",
+ "wayland-client",
  "winit",
  "winreg",
  "zip",
