@@ -44,7 +44,7 @@ Oryx displays fenced blocks in a bordered panel with syntax colors for code. A c
 
 The five GitHub alerts are styled, each with its own color and title. Oryx shows a YAML frontmatter header as a small metadata panel above the document. Footnote markers appear raised in the text and link to their definitions, gathered at the foot of the document; `Alt+Left` returns to where you were reading.
 
-**Images and badges**: Supported formats are PNG, JPEG, GIF, WebP or SVG. Remote images are fetched in the background and cached on disk, so a file with badges comes up immediately the second time it is opened, and keeps working offline. If a path is broken, the image is replaced by a placeholder with the alt text.
+**Images and badges**: Supported formats are PNG, JPEG, GIF, WebP or SVG. Remote images are fetched in the background and cached on disk, so a file with badges comes up immediately the second time it is opened, and keeps working offline. A cached image older than a day is refreshed in the background the next time the file opens. If a path is broken, the image is replaced by a placeholder showing the alt text, or the file name when there is none.
 
 **Embedded HTML** covers what GitHub renders: tables with or without a header row, collapsible `<details>` sections, HTML headings, lists and quotes, definition lists, centered blocks, images at a set width or height, rows of clickable badges, and the inline tags down to `mark`, `kbd` and `small`. Search sees into a closed section, and jumping to a match unfolds it.
 
@@ -94,10 +94,10 @@ Comic book contents are analyzed and files processed accordingly, not by name, s
 
 - **Find in document**: `Ctrl+F` searches text. The search is smart about case: `oryx` matches Oryx, ORYX and oryx, while `Oryx` performs an exact match. A match can cross styling, so `fast viewer` is found even when it was written as `**fast** *viewer*`, and it can cross a wrapped line. The whole document is searchable even while a big file is still loading. The `.*` button in the search bar (or `Alt+R`) switches to regular expressions, in the Rust `fancy-regex` flavor, so capture groups, backreferences and lookarounds are available. `^` and `$` match at line starts and ends, and on the rendered page each block counts as one line. While a pattern is incomplete, the bar's border changes color instead of showing a match count. Clicking anywhere in the document closes the search bar.
 - **Select and copy**: `Ctrl+C` copies a selection as plain text. `Ctrl+Shift+C` copies the original markdown of the selection. A double click selects the word, a triple click the paragraph, the code line or the table cell. Select all is instant at any file size, a selection survives zooming, theme switches and window resizes, and both copies work before a big file has finished loading.
-- **Sidebar**: `Ctrl+Shift+B` opens a two-tab panel: the folder tree around the open file, and an outline of the document's headings that tracks the reading position, folds its branches, and jumps on a click. For a book, the outline is its table of contents. Both tabs drive entirely from the keyboard.
+- **Sidebar**: `Ctrl+Shift+B` opens a two-tab panel: the folder tree around the open file, and an outline of the document's headings that tracks the reading position, folds its branches, and jumps on a click. For a book, the outline is its table of contents. Both tabs drive entirely from the keyboard. A folder reached through a symbolic link is listed too, and opening it moves the tree to the real folder.
 - **Open file**: `Ctrl+O` opens the native file dialog.
 - **Live reload**: Oryx notices when the open file changes on disk and reloads it, as long as there are no unsaved edits. `F5` / `Ctrl+R` reload on demand.
-- **Zoom**: `Ctrl+Plus` (in) and `Ctrl+Minus` (out).
+- **Zoom**: `Ctrl+Plus` (in) and `Ctrl+Minus` (out), or the mouse wheel with `Ctrl` held.
 - **Display scale**: Oryx follows the display's scale, so text and controls render at the intended size on a scaled screen (a laptop at 200%, for example). An `interface scale` entry in the settings (`Ctrl+,`) adjusts the size around the detected value, from -50% to +100%, and is remembered.
 - **Touch**: On a touch screen, swiping scrolls the document, the sidebar and the dialogs. A swipe released while moving keeps the document scrolling with momentum. Tapping clicks, and a two-finger pinch zooms the document.
 - **Persistence**: Window geometry, the active theme, the sidebar and the last folder are all saved and restored at every start. While Oryx is open, switching between files keeps each file's place: a file left mid-edit comes back in the editor, at the same spot.
@@ -197,7 +197,7 @@ make install
 
 ## Using Oryx
 
-After installing, open Oryx from the launcher and browse folders and files through the sidebar.
+After installing, open Oryx from the launcher and browse folders and files through the sidebar. Started without a file, Oryx shows a short page with the basic shortcuts. You can also drag and drop a file onto the window to open it, or a folder to browse it. On macOS, `Cmd` works wherever the shortcuts below say `Ctrl`.
 
 > [!NOTE]
 > There are no menus. **Press `F1`** for the complete shortcut list. `Esc` or a click outside closes a dialog, and `Esc` quits.
@@ -206,9 +206,12 @@ After installing, open Oryx from the launcher and browse folders and files throu
 oryx README.md          # open a file
 oryx book.epub          # books read in the active theme
 oryx src/main.rs        # code files render highlighted
+oryx notes/             # open the sidebar on a folder
 oryx --theme nord file  # pick a theme for this session
 oryx --register         # install the file association and icons
+oryx --clear-cache      # remove the downloaded remote images
 oryx --version          # print the version
+oryx --help             # list these options
 ```
 
 | Shortcut | Action |
@@ -219,6 +222,7 @@ oryx --version          # print the version
 | `Ctrl+S` | Save (editing) |
 | `Ctrl+Shift+S` | Save as (editing) |
 | `F5` / `Ctrl+R` | Reload from disk |
+| `Ctrl+Shift+R` | Reload and refetch remote images |
 | **Navigation** | |
 | `Up` / `Down` | Scroll by line, or move the sidebar selection |
 | `Page Up` / `Page Down`, `Space` / `Shift+Space` | Scroll by page |
@@ -251,7 +255,7 @@ oryx --version          # print the version
 | `Ctrl+Shift+P` | Choose export settings, then export |
 | **Help** | |
 | `F1` | Open the help page, and close it |
-| `Escape` | Close overlay, leave editing, quit |
+| `Escape` | Close overlay, clear the selection, leave editing, quit |
 
 `Ctrl` is `Cmd` on macOS.
 
@@ -281,6 +285,7 @@ The 8 MB markdown export writes a 9219-page file. While open, the 8 MB markdown 
 
 - On a file several megabytes long, the layout below the first screens takes a moment to catch up. Syntax colors appear right away wherever you are reading, and a few lines can change color a moment later, once the full pass reaches them. An export waits for syntax highlighting to finish before it writes, so on the 8 MB file the wall time can be double the export column above.
 - The implemented HTML is a subset: what GitHub renders in a README, nothing more.
+- Editing types in any keyboard layout, but Chinese, Japanese and Korean input methods are not supported.
 - Remote images use the operating system's TLS stack, which on Linux means it needs the OpenSSL library (normally shipped with every distro). Without it, badges show placeholders but everything else works.
 - macOS compiles but is untested, and there is no packaged build as I don't have a Mac. The Windows release is compiled on my Linux machine.
 
