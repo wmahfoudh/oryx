@@ -24,7 +24,11 @@ Most markdown editors start by showing the code and then trying to render it. I 
 - **Distraction-free**: No panes, no toolbars, no menus. `F1` lists the shortcuts, `Esc` closes whatever is open.
 - **Beautiful**: 30+ themes, with 51 color roles each, for reading and for PDF export alike.
 - **Self-contained**: One binary and a folder of themes and examples. No browser engine, no runtime, no GPU requirement and no need to download themes or syntax highlighting stuff. 
-- **Opinionated**: Nobody renders justified markdown :smile: and most ebook readers do not dare to strip the books' CSS and apply their own. 
+- **Opinionated**:
+  - Nobody renders justified markdown :smile: (you can turn it of if you don't like it)
+  - Most ebook readers do not dare to strip the books' CSS and apply their own.
+  - No buttons, no menu bar, fully keyboard driven
+  - Embedded default fonts for Latin, Arabic and Hebrew (though you can pick from system fonts) 
 
 ## Oryx Scope
 
