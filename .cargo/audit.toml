@@ -1,0 +1,15 @@
+# Settings for `cargo audit`, run by `make audit` before a release.
+# Every advisory set aside here carries its reason; a new advisory
+# still fails the audit.
+[advisories]
+ignore = [
+    # Unmaintained crates reached only through dependencies Oryx does
+    # not control; each moves when its upstream moves.
+    "RUSTSEC-2025-0141", # bincode 1, through syntect
+    "RUSTSEC-2024-0320", # yaml-rust, through syntect
+    "RUSTSEC-2026-0206", # rustybuzz, through usvg
+    "RUSTSEC-2026-0192", # ttf-parser, through cosmic-text and usvg
+    # In the lock file only: pulled by image formats (exr, avif) that
+    # the image crate offers and Oryx never enables, so never compiled.
+    "RUSTSEC-2024-0436", # paste, through exr and rav1e
+]

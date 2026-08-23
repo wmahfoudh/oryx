@@ -8,7 +8,11 @@ check:
 	cargo build --workspace
 	cargo test --workspace
 
-release:
+audit:
+	@command -v cargo-audit >/dev/null || { echo "cargo-audit is not installed: cargo install cargo-audit"; exit 1; }
+	cargo audit
+
+release: audit
 	cargo build --release
 	cargo build --release --target x86_64-pc-windows-gnu
 	rm -rf release
@@ -36,4 +40,4 @@ install:
 	cp -r examples ~/.local/share/oryx/examples
 	~/.local/bin/oryx --register
 
-.PHONY: check release install
+.PHONY: check audit release install
