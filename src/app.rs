@@ -1734,7 +1734,8 @@ impl App {
     }
 
     /// Ctrl+Shift+S: the current text written to a chosen path, which
-    /// becomes the open file; the mode survives the move.
+    /// becomes the open file; the mode, the caret and the scroll survive
+    /// the move.
     fn save_as(&mut self) {
         let Some(ledger) = self.ledger.as_ref() else {
             return;
@@ -1756,11 +1757,33 @@ impl App {
             Ok(()) => {
                 let editing = self.mode == edit::Mode::Edit;
                 let scroll = self.scroll_y;
+                let outgoing = self.path.clone();
+                // The text just written is the buffer, so the caret's
+                // offset holds in the new file; filed under its path
+                // before the switch, it is what `enter_edit` lands on.
+                let target = target.canonicalize().unwrap_or(target);
+                if let Some(offset) = self.caret.map(|c| c.offset) {
+                    self.edit_marks.insert(target.clone(), offset);
+                }
                 self.open_file(&target, false);
-                self.scroll_y = scroll;
-                if editing {
+                // `open_file` notes the outgoing file for a resumed edit,
+                // as for any switch; a Save As is done with that file,
+                // which reopens to read like any other. Saving onto the
+                // open path itself resumes through that note, so the
+                // editor is entered only when the switch left it.
+                if let Some(path) = outgoing {
+                    self.resume_edit.remove(&path);
+                }
+                if editing && self.mode != edit::Mode::Edit {
                     self.toggle_edit();
                 }
+                // Same text, same rows: the scroll puts the view back
+                // where it was, in place of the seat a fresh editor
+                // gives its caret row and of a reading position the
+                // target may have from an earlier visit.
+                self.pending_row = None;
+                self.pending_offset = None;
+                self.scroll_y = scroll;
                 self.show_notice("Saved");
             }
             Err(err) => self.show_notice(&format!("Save as failed: {err}")),
