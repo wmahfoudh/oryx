@@ -7,6 +7,7 @@ version = "0.15.8"
 description = "Fast editor for markdown and code, reader for ebooks and comics"
 edition = "2021"
 license = "GPL-3.0-only"
+repository = "https://github.com/wmahfoudh/oryx"
 rust-version = "1.80"
 
 [dependencies]

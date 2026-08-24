@@ -2,7 +2,7 @@
 
 ![Oryx: a fast, native viewer for markdown, code and books](screenshots/hero.png)
 
-[Installation](#install) | [Themes](#themes) | [Syntax](SYNTAX.md) | [Changelog](CHANGELOG.md) | [Codeberg](https://codeberg.org/wmahfoudh/oryx) | [GitHub](https://github.com/wmahfoudh/oryx)
+[Installation](#install) | [Themes](#themes) | [Syntax](SYNTAX.md) | [Changelog](CHANGELOG.md) | [GitHub](https://github.com/wmahfoudh/oryx)
 
 <a href="https://github.com/wmahfoudh/oryx/releases"><img alt="Release" src="https://img.shields.io/github/v/release/wmahfoudh/oryx?style=for-the-badge&label=RELEASE&color=purple"></a>
 <a href="https://www.rust-lang.org"><img alt="Language" src="https://img.shields.io/badge/LANGUAGE-RUST-orange?style=for-the-badge&logo=rust&logoColor=white"></a>
@@ -173,7 +173,7 @@ Ten themes are original designs: `oryx-light` and its dark twin `oryx-dark`, `or
 
 ### From a release
 
-Download the archive for your platform from the releases page on [Codeberg](https://codeberg.org/wmahfoudh/oryx/releases) or [GitHub](https://github.com/wmahfoudh/oryx/releases), extract it, and run the installer inside:
+Download the archive for your platform from the releases page on [GitHub](https://github.com/wmahfoudh/oryx/releases), extract it, and run the installer inside:
 
 ```sh
 tar -xzf oryx-*-linux-x86_64.tar.gz && cd oryx && ./install.sh
@@ -186,7 +186,7 @@ On Windows, extract the zip and run `install.ps1` in PowerShell. The installer c
 Building requires **Rust 1.80 or later**.
 
 ```sh
-git clone https://codeberg.org/wmahfoudh/oryx.git   # or https://github.com/wmahfoudh/oryx.git
+git clone https://github.com/wmahfoudh/oryx.git
 cd oryx
 make install
 ```

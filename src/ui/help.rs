@@ -33,7 +33,6 @@ pub fn page() -> String {
         out,
         "Press {} or {} to close this. \
          Please refer to the full documentation on \
-         [Codeberg](https://codeberg.org/wmahfoudh/oryx) or \
          [GitHub](https://github.com/wmahfoudh/oryx).",
         keymap::display("F1"),
         keymap::display("Escape"),
@@ -143,7 +142,7 @@ mod tests {
             page.contains(env!("CARGO_PKG_VERSION")),
             "the running version stands on the page"
         );
-        assert!(page.contains("https://codeberg.org/wmahfoudh/oryx"));
         assert!(page.contains("https://github.com/wmahfoudh/oryx"));
+        assert!(!page.contains("codeberg"), "GitHub is the only host named");
     }
 }
