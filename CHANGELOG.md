@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.0.0
+
+- The `F1` page links to the documentation on GitHub, the project's home.
+
 ## v0.15.8
 
 A review of the whole program before publishing it wider: two dozen fixes and small additions, plus two more reported while testing. The six fixes that could lose work or hide content come first.
