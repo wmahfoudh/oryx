@@ -1,0 +1,164 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The Store package manifest. msix.sh fills the @VALUES@ from
+     packaging/msix/identity and the crate version; the file type list is
+     held to load::recognized_extensions() by tests/packaging.rs. -->
+<Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+         xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+         xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+         IgnorableNamespaces="uap rescap">
+  <Identity Name="@NAME@" Publisher="@PUBLISHER@" Version="@VERSION@" ProcessorArchitecture="x64"/>
+  <Properties>
+    <DisplayName>@DISPLAY_NAME@</DisplayName>
+    <PublisherDisplayName>@PUBLISHER_DISPLAY_NAME@</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+    <Description>Fast editor for markdown and code, reader for ebooks and comics</Description>
+  </Properties>
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.17763.0" MaxVersionTested="10.0.26100.0"/>
+  </Dependencies>
+  <Resources>
+    <Resource Language="en-us"/>
+  </Resources>
+  <Applications>
+    <Application Id="Oryx" Executable="oryx.exe" EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements DisplayName="@DISPLAY_NAME@"
+                          Description="Fast editor for markdown and code, reader for ebooks and comics"
+                          BackgroundColor="transparent"
+                          Square150x150Logo="Assets\Square150x150Logo.png"
+                          Square44x44Logo="Assets\Square44x44Logo.png">
+        <uap:DefaultTile Wide310x150Logo="Assets\Wide310x150Logo.png"
+                         Square71x71Logo="Assets\Square71x71Logo.png"
+                         Square310x310Logo="Assets\Square310x310Logo.png"/>
+      </uap:VisualElements>
+      <Extensions>
+        <uap:Extension Category="windows.fileTypeAssociation">
+          <uap:FileTypeAssociation Name="oryxdocument">
+            <uap:DisplayName>Oryx Document</uap:DisplayName>
+            <uap:SupportedFileTypes>
+              <uap:FileType>.md</uap:FileType>
+              <uap:FileType>.markdown</uap:FileType>
+              <uap:FileType>.txt</uap:FileType>
+              <uap:FileType>.epub</uap:FileType>
+              <uap:FileType>.fb2</uap:FileType>
+              <uap:FileType>.fbz</uap:FileType>
+              <uap:FileType>.mobi</uap:FileType>
+              <uap:FileType>.azw3</uap:FileType>
+              <uap:FileType>.azw</uap:FileType>
+              <uap:FileType>.cbz</uap:FileType>
+              <uap:FileType>.cbr</uap:FileType>
+              <uap:FileType>.applescript</uap:FileType>
+              <uap:FileType>.as</uap:FileType>
+              <uap:FileType>.bash</uap:FileType>
+              <uap:FileType>.bat</uap:FileType>
+              <uap:FileType>.bib</uap:FileType>
+              <uap:FileType>.c</uap:FileType>
+              <uap:FileType>.cc</uap:FileType>
+              <uap:FileType>.cfg</uap:FileType>
+              <uap:FileType>.cl</uap:FileType>
+              <uap:FileType>.clj</uap:FileType>
+              <uap:FileType>.cls</uap:FileType>
+              <uap:FileType>.cmd</uap:FileType>
+              <uap:FileType>.cpp</uap:FileType>
+              <uap:FileType>.cs</uap:FileType>
+              <uap:FileType>.css</uap:FileType>
+              <uap:FileType>.csx</uap:FileType>
+              <uap:FileType>.cxx</uap:FileType>
+              <uap:FileType>.d</uap:FileType>
+              <uap:FileType>.ddl</uap:FileType>
+              <uap:FileType>.di</uap:FileType>
+              <uap:FileType>.diff</uap:FileType>
+              <uap:FileType>.dml</uap:FileType>
+              <uap:FileType>.dockerfile</uap:FileType>
+              <uap:FileType>.dot</uap:FileType>
+              <uap:FileType>.dpr</uap:FileType>
+              <uap:FileType>.el</uap:FileType>
+              <uap:FileType>.erl</uap:FileType>
+              <uap:FileType>.fish</uap:FileType>
+              <uap:FileType>.go</uap:FileType>
+              <uap:FileType>.gql</uap:FileType>
+              <uap:FileType>.gradle</uap:FileType>
+              <uap:FileType>.graphql</uap:FileType>
+              <uap:FileType>.groovy</uap:FileType>
+              <uap:FileType>.gv</uap:FileType>
+              <uap:FileType>.gvy</uap:FileType>
+              <uap:FileType>.h</uap:FileType>
+              <uap:FileType>.hcl</uap:FileType>
+              <uap:FileType>.hh</uap:FileType>
+              <uap:FileType>.hpp</uap:FileType>
+              <uap:FileType>.hrl</uap:FileType>
+              <uap:FileType>.hs</uap:FileType>
+              <uap:FileType>.htm</uap:FileType>
+              <uap:FileType>.html</uap:FileType>
+              <uap:FileType>.hxx</uap:FileType>
+              <uap:FileType>.ini</uap:FileType>
+              <uap:FileType>.java</uap:FileType>
+              <uap:FileType>.js</uap:FileType>
+              <uap:FileType>.json</uap:FileType>
+              <uap:FileType>.jsp</uap:FileType>
+              <uap:FileType>.jsx</uap:FileType>
+              <uap:FileType>.kt</uap:FileType>
+              <uap:FileType>.kts</uap:FileType>
+              <uap:FileType>.lhs</uap:FileType>
+              <uap:FileType>.lisp</uap:FileType>
+              <uap:FileType>.ltx</uap:FileType>
+              <uap:FileType>.lua</uap:FileType>
+              <uap:FileType>.m</uap:FileType>
+              <uap:FileType>.mak</uap:FileType>
+              <uap:FileType>.mjs</uap:FileType>
+              <uap:FileType>.mk</uap:FileType>
+              <uap:FileType>.ml</uap:FileType>
+              <uap:FileType>.mli</uap:FileType>
+              <uap:FileType>.mm</uap:FileType>
+              <uap:FileType>.opml</uap:FileType>
+              <uap:FileType>.pas</uap:FileType>
+              <uap:FileType>.patch</uap:FileType>
+              <uap:FileType>.php</uap:FileType>
+              <uap:FileType>.phtml</uap:FileType>
+              <uap:FileType>.pl</uap:FileType>
+              <uap:FileType>.pm</uap:FileType>
+              <uap:FileType>.pod</uap:FileType>
+              <uap:FileType>.properties</uap:FileType>
+              <uap:FileType>.proto</uap:FileType>
+              <uap:FileType>.py</uap:FileType>
+              <uap:FileType>.pyi</uap:FileType>
+              <uap:FileType>.pyw</uap:FileType>
+              <uap:FileType>.r</uap:FileType>
+              <uap:FileType>.rb</uap:FileType>
+              <uap:FileType>.rest</uap:FileType>
+              <uap:FileType>.rs</uap:FileType>
+              <uap:FileType>.rss</uap:FileType>
+              <uap:FileType>.rst</uap:FileType>
+              <uap:FileType>.sbt</uap:FileType>
+              <uap:FileType>.scala</uap:FileType>
+              <uap:FileType>.scm</uap:FileType>
+              <uap:FileType>.sh</uap:FileType>
+              <uap:FileType>.sql</uap:FileType>
+              <uap:FileType>.sty</uap:FileType>
+              <uap:FileType>.swift</uap:FileType>
+              <uap:FileType>.tcl</uap:FileType>
+              <uap:FileType>.tex</uap:FileType>
+              <uap:FileType>.textile</uap:FileType>
+              <uap:FileType>.tf</uap:FileType>
+              <uap:FileType>.toml</uap:FileType>
+              <uap:FileType>.ts</uap:FileType>
+              <uap:FileType>.tsx</uap:FileType>
+              <uap:FileType>.xhtml</uap:FileType>
+              <uap:FileType>.xml</uap:FileType>
+              <uap:FileType>.xsd</uap:FileType>
+              <uap:FileType>.xslt</uap:FileType>
+              <uap:FileType>.yaml</uap:FileType>
+              <uap:FileType>.yml</uap:FileType>
+              <uap:FileType>.zig</uap:FileType>
+              <uap:FileType>.zon</uap:FileType>
+              <uap:FileType>.zsh</uap:FileType>
+            </uap:SupportedFileTypes>
+          </uap:FileTypeAssociation>
+        </uap:Extension>
+      </Extensions>
+    </Application>
+  </Applications>
+  <Capabilities>
+    <Capability Name="internetClient"/>
+    <rescap:Capability Name="runFullTrust"/>
+  </Capabilities>
+</Package>

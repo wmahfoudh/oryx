@@ -289,3 +289,125 @@ fn the_msi_embeds_an_icon_file_not_a_second_copy_of_the_exe() {
     );
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// The `<uap:FileType>` entries of a manifest, without their dots.
+fn manifest_file_types(xml: &str) -> Vec<String> {
+    xml.split("<uap:FileType>")
+        .skip(1)
+        .filter_map(|rest| rest.split("</uap:FileType>").next())
+        .map(|ext| ext.trim_start_matches('.').to_string())
+        .collect()
+}
+
+#[test]
+fn the_msix_manifest_claims_every_extension_the_code_registers() {
+    let xml = packaging("msix/AppxManifest.xml");
+    let mut listed = manifest_file_types(&xml);
+    listed.sort_unstable();
+    let mut expected: Vec<String> = oryx::doc::load::recognized_extensions()
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    expected.sort_unstable();
+    assert_eq!(listed, expected);
+}
+
+#[test]
+fn msix_sh_builds_a_package_that_unpacks_to_the_staged_files() {
+    if Command::new("makemsix").arg("-?").output().is_err() {
+        eprintln!("makemsix is not installed, skipped");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("oryx-msix-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let stage = dir.join("oryx");
+    windows_stage(&stage, 64 << 10);
+    let msix = dir.join("Oryx.msix");
+    let out = Command::new("sh")
+        .arg(repo().join("packaging/msix.sh"))
+        .arg("1.2.3")
+        .arg(&stage)
+        .arg(&msix)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let unpacked = dir.join("unpacked");
+    // The Store signs the package; until then it is unsigned, and the
+    // SDK's reader needs `-ss` to open one.
+    let out = Command::new("makemsix")
+        .args(["unpack", "-ss", "-p"])
+        .arg(&msix)
+        .arg("-d")
+        .arg(&unpacked)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // The reader writes the payload and the manifest; the two other
+    // footprint files stay inside the archive and are listed from it.
+    let archive = zip::ZipArchive::new(std::fs::File::open(&msix).unwrap()).unwrap();
+    let names: Vec<&str> = archive.file_names().collect();
+    for footprint in [
+        "AppxManifest.xml",
+        "AppxBlockMap.xml",
+        "[Content_Types].xml",
+    ] {
+        assert!(
+            names.contains(&footprint),
+            "{footprint} missing from {names:?}"
+        );
+    }
+    for file in [
+        "oryx.exe",
+        "LICENSE",
+        "themes/dracula.toml",
+        "examples/sample.md",
+        "AppxManifest.xml",
+        "Assets/StoreLogo.png",
+        "Assets/Square44x44Logo.png",
+        "Assets/Square71x71Logo.png",
+        "Assets/Square150x150Logo.png",
+        "Assets/Square310x310Logo.png",
+        "Assets/Wide310x150Logo.png",
+    ] {
+        assert!(unpacked.join(file).is_file(), "{file} missing");
+    }
+    assert!(
+        !unpacked.join("install.ps1").exists(),
+        "the per-user script has no place in the package"
+    );
+    assert_eq!(
+        std::fs::read(unpacked.join("oryx.exe")).unwrap(),
+        std::fs::read(stage.join("oryx.exe")).unwrap(),
+        "the executable comes back byte for byte"
+    );
+    let manifest = std::fs::read_to_string(unpacked.join("AppxManifest.xml")).unwrap();
+    for needle in [
+        "Name=\"Steerania.OryxEditor\"",
+        "Publisher=\"CN=D7BBF0E0-38CE-442D-8B8D-130515345FA0\"",
+        "Version=\"1.2.3.0\"",
+        "<DisplayName>Oryx Editor</DisplayName>",
+        "<PublisherDisplayName>Steerania</PublisherDisplayName>",
+        "Executable=\"oryx.exe\"",
+        "EntryPoint=\"Windows.FullTrustApplication\"",
+        "<rescap:Capability Name=\"runFullTrust\"/>",
+        "<Capability Name=\"internetClient\"/>",
+        "<uap:FileType>.md</uap:FileType>",
+        "<uap:FileType>.epub</uap:FileType>",
+    ] {
+        assert!(
+            manifest.contains(needle),
+            "{needle} missing from the manifest"
+        );
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}

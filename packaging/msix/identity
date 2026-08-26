@@ -1,0 +1,10 @@
+# The Store identity for the MSIX manifest, read from Partner Center
+# (Product management, Product identity) after the name "Oryx Editor"
+# was reserved on 27/08/2026. None of it is secret; the Store signs the
+# package it receives against these values.
+Name=Steerania.OryxEditor
+Publisher=CN=D7BBF0E0-38CE-442D-8B8D-130515345FA0
+PublisherDisplayName=Steerania
+DisplayName=Oryx Editor
+PackageFamilyName=Steerania.OryxEditor_wek4hda1w9tce
+StoreId=9NQGHNSJF3VB
