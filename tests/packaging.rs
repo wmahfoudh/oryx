@@ -411,3 +411,38 @@ fn msix_sh_builds_a_package_that_unpacks_to_the_staged_files() {
     }
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// `build-linux.sh --check <binary> <max glibc>`: the portable-build
+/// script's floor check, run on the test executable itself, which
+/// imports some glibc version whatever the machine.
+fn glibc_check(max: &str) -> std::process::Output {
+    Command::new("sh")
+        .arg(repo().join("packaging/build-linux.sh"))
+        .arg("--check")
+        .arg(std::env::current_exe().unwrap())
+        .arg(max)
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn build_linux_refuses_a_binary_above_the_glibc_floor() {
+    let out = glibc_check("2.0");
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("GLIBC_"),
+        "the message names the version: {stderr}"
+    );
+    assert!(stderr.contains("2.0"), "and the floor: {stderr}");
+}
+
+#[test]
+fn build_linux_accepts_a_binary_within_the_glibc_floor() {
+    let out = glibc_check("99.0");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

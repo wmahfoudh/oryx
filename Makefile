@@ -15,11 +15,11 @@ audit:
 release: audit
 	@command -v wrestool >/dev/null || { echo "icoutils is not installed: wrestool extracts the MSI icon from the exe"; exit 1; }
 	@command -v makemsix >/dev/null || { echo "makemsix is not installed: see the Tools section of internal/releasing.md"; exit 1; }
-	cargo build --release
+	sh packaging/build-linux.sh
 	cargo build --release --target x86_64-pc-windows-gnu
 	rm -rf release
 	mkdir -p release/linux/oryx release/windows/oryx
-	cp target/release/oryx release/linux/oryx/
+	cp target/jammy/release/oryx release/linux/oryx/
 	cp -r themes release/linux/oryx/themes
 	cp -r examples release/linux/oryx/examples
 	cp LICENSE packaging/install.sh release/linux/oryx/
