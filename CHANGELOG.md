@@ -2,6 +2,13 @@
 
 ## v1.0.0
 
+- Oryx ships as a `.deb` and an `.rpm` on the release page, beside the tarball, the zip and the MSI.
+- The Linux binary is built on Ubuntu 22.04 and runs on Debian 12, Ubuntu 22.04, Fedora 36, openSUSE Leap 15.4 and newer (glibc 2.35, OpenSSL 3).
+- The Windows installer is 9 MB instead of 26: the old one carried the program twice, once as the file and once as the source of its icon.
+- On Linux, Oryx registers itself as `com.steerania.Oryx`, so the window icon shows on Wayland desktops; an earlier registration is cleaned up. Under a package, `oryx --register` says the package already did it.
+- Themes are also found in the system folders where a package installs them (`/usr/share/oryx/themes` and the other `XDG_DATA_DIRS` entries).
+- Clicking a heading in the outline goes to that heading, not to the first one with the same text. Repeated headings get numbered anchors as on GitHub (`#title`, `#title-1`).
+- A privacy page, `PRIVACY.md`: no account, no telemetry, what is kept on the machine and where.
 - The `F1` page links to the documentation on GitHub, the project's home.
 
 ## v0.15.8
