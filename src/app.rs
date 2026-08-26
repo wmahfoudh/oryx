@@ -569,9 +569,23 @@ fn window_title(book: Option<&str>, path: Option<&Path>, dirty: bool, editing: b
     }
 }
 
-/// Theme directories in lookup order: next to the binary, the XDG data
-/// directory an installation fills, then the working directory.
+/// The system data directories when `XDG_DATA_DIRS` is unset or empty,
+/// per the XDG base directory specification.
+#[cfg(unix)]
+const DEFAULT_DATA_DIRS: &str = "/usr/local/share:/usr/share";
+#[cfg(not(unix))]
+const DEFAULT_DATA_DIRS: &str = "";
+
+/// Theme directories in lookup order: next to the binary, the user's
+/// data directory (a per-user install and the theme editor write there),
+/// each system data directory of `XDG_DATA_DIRS` (a package's
+/// `/usr/share`, a Flatpak's `/app/share`, an AppImage's bundled share
+/// through its AppRun), then the working directory.
 fn theme_dirs() -> Vec<PathBuf> {
+    theme_dirs_from(std::env::var_os("XDG_DATA_DIRS").as_deref())
+}
+
+fn theme_dirs_from(xdg_data_dirs: Option<&std::ffi::OsStr>) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
@@ -581,6 +595,15 @@ fn theme_dirs() -> Vec<PathBuf> {
     if let Some(base) = directories::BaseDirs::new() {
         dirs.push(base.data_dir().join("oryx/themes"));
     }
+    let system = match xdg_data_dirs {
+        Some(value) if !value.is_empty() => value.to_os_string(),
+        _ => std::ffi::OsString::from(DEFAULT_DATA_DIRS),
+    };
+    dirs.extend(
+        std::env::split_paths(&system)
+            .filter(|dir| !dir.as_os_str().is_empty())
+            .map(|dir| dir.join("oryx/themes")),
+    );
     dirs.push(PathBuf::from("themes"));
     dirs
 }
@@ -5510,7 +5533,7 @@ impl ApplicationHandler for App {
         #[cfg(target_os = "linux")]
         let attributes = {
             use winit::platform::wayland::WindowAttributesExtWayland;
-            attributes.with_name("oryx", "oryx")
+            attributes.with_name(oryx::platform::register::APP_ID, "oryx")
         };
         let window = Arc::new(
             event_loop
@@ -6080,6 +6103,43 @@ mod tests {
         assert!(
             dirs.iter().any(|d| d.ends_with("oryx/themes")),
             "installed themes must resolve from the data dir, got {dirs:?}"
+        );
+    }
+
+    #[test]
+    fn theme_dirs_from_adds_the_system_data_dirs_after_the_user_dir() {
+        use std::path::PathBuf;
+        let dirs = super::theme_dirs_from(None);
+        let user = directories::BaseDirs::new()
+            .unwrap()
+            .data_dir()
+            .join("oryx/themes");
+        let at = dirs
+            .iter()
+            .position(|d| *d == user)
+            .expect("the user data dir");
+        assert_eq!(dirs[at + 1], PathBuf::from("/usr/local/share/oryx/themes"));
+        assert_eq!(dirs[at + 2], PathBuf::from("/usr/share/oryx/themes"));
+        assert_eq!(dirs.last().unwrap(), &PathBuf::from("themes"));
+    }
+
+    #[test]
+    fn theme_dirs_from_reads_each_xdg_data_dirs_entry_in_order() {
+        use std::path::PathBuf;
+        let dirs = super::theme_dirs_from(Some(std::ffi::OsStr::new("/a:/b:")));
+        let at = dirs
+            .iter()
+            .position(|d| d.as_path() == std::path::Path::new("/a/oryx/themes"))
+            .expect("the first entry");
+        assert_eq!(dirs[at + 1], PathBuf::from("/b/oryx/themes"));
+        assert_eq!(
+            dirs[at + 2],
+            PathBuf::from("themes"),
+            "an empty entry adds nothing"
+        );
+        assert!(
+            !dirs.contains(&PathBuf::from("/usr/share/oryx/themes")),
+            "the defaults apply only when the variable is unset"
         );
     }
 

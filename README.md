@@ -1,6 +1,6 @@
 <div align="center">
 
-![Oryx: a fast, native viewer for markdown, code and books](screenshots/hero.png)
+![Oryx: fast editor for markdown and code, reader for ebooks and comics](screenshots/hero.png)
 
 [Installation](#install) | [Themes](#themes) | [Syntax](SYNTAX.md) | [Changelog](CHANGELOG.md) | [GitHub](https://github.com/wmahfoudh/oryx)
 

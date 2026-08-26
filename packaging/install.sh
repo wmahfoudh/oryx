@@ -13,9 +13,9 @@ icons="$HOME/.local/share/icons/hicolor"
 if [ "$1" = "--uninstall" ]; then
     rm -f "$bin/oryx"
     rm -rf "$data"
-    rm -f "$applications/oryx.desktop"
+    rm -f "$applications/com.steerania.Oryx.desktop" "$applications/oryx.desktop"
     for size in 16 32 48 64 128 256; do
-        rm -f "$icons/${size}x${size}/apps/oryx.png"
+        rm -f "$icons/${size}x${size}/apps/com.steerania.Oryx.png" "$icons/${size}x${size}/apps/oryx.png"
     done
     if command -v update-desktop-database >/dev/null 2>&1; then
         update-desktop-database -q "$applications" || true
