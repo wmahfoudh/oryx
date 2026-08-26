@@ -1,0 +1,48 @@
+# The .deb and the .rpm, built by nfpm over the tree stage-linux.sh lays
+# out: `make release` runs it from release/linux, where usr/ sits, with
+# VERSION in the environment. Both packages install the same tree as the
+# AUR package and the Flatpak. No install scripts: the distributions'
+# own triggers refresh the desktop caches. The library floor matches the
+# Ubuntu 22.04 build root: glibc 2.35 and libssl 3.
+name: oryx-editor
+arch: amd64
+platform: linux
+version: ${VERSION}
+section: editors
+priority: optional
+maintainer: Walid Mahfoudh <walid.mahfoudh@gmail.com>
+vendor: Steerania
+homepage: https://github.com/wmahfoudh/oryx
+license: GPL-3.0-only
+description: |
+  Fast editor for markdown and code, reader for ebooks and comics
+  Oryx opens markdown, source code and plain text files, and reads ebooks
+  (EPUB, FB2, MOBI and AZW3) and comics (CBZ and CBR). A document displays
+  in under 100 ms, even an 8 MB markdown file or a 200 MB book, and memory
+  stays flat however far you scroll. There are no panes, no toolbars and
+  no menus: everything is done from the keyboard, F1 lists the shortcuts
+  and Esc closes whatever is open.
+
+  Markdown is rendered the way GitHub shows it, with syntax colors for
+  over a hundred languages and typeset TeX math. Over thirty themes with
+  editable colors apply to reading and to PDF export alike, and the
+  exported PDF reproduces the page as read. Fonts for Latin, Arabic and
+  Hebrew are embedded, and right-to-left books read correctly.
+
+  Oryx is a single binary with no browser engine, no runtime and no GPU
+  requirement. It asks for no account and sends no telemetry. The only
+  thing it downloads is the images a markdown file links to. Oryx is also
+  a light editor for markdown and text, and it writes back only the lines
+  that changed.
+contents:
+  - src: ./usr
+    dst: /usr
+    type: tree
+overrides:
+  deb:
+    depends:
+      - libc6 (>= 2.35)
+      - libssl3 (>= 3.0.0)
+  rpm:
+    depends:
+      - libssl.so.3()(64bit)

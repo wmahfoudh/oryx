@@ -15,6 +15,7 @@ audit:
 release: audit
 	@command -v wrestool >/dev/null || { echo "icoutils is not installed: wrestool extracts the MSI icon from the exe"; exit 1; }
 	@command -v makemsix >/dev/null || { echo "makemsix is not installed: see the Tools section of internal/releasing.md"; exit 1; }
+	@command -v nfpm >/dev/null || { echo "nfpm is not installed: it builds the .deb and the .rpm"; exit 1; }
 	sh packaging/build-linux.sh
 	cargo build --release --target x86_64-pc-windows-gnu
 	rm -rf release
@@ -24,6 +25,9 @@ release: audit
 	cp -r examples release/linux/oryx/examples
 	cp LICENSE packaging/install.sh release/linux/oryx/
 	tar -C release/linux -czf release/oryx-$(VERSION)-linux-x86_64.tar.gz oryx
+	sh packaging/stage-linux.sh release/linux/oryx release/linux/usr
+	cd release/linux && VERSION=$(VERSION) nfpm package -f ../../packaging/nfpm.yaml -p deb -t ..
+	cd release/linux && VERSION=$(VERSION) nfpm package -f ../../packaging/nfpm.yaml -p rpm -t ..
 	cp target/x86_64-pc-windows-gnu/release/oryx.exe release/windows/oryx/
 	cp -r themes release/windows/oryx/themes
 	cp -r examples release/windows/oryx/examples

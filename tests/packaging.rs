@@ -446,3 +446,167 @@ fn build_linux_accepts_a_binary_within_the_glibc_floor() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+/// One tar member of a `.deb` (an `ar` archive) read through bsdtar,
+/// whichever compression nfpm chose for it.
+fn deb_member(deb: &Path, member: &str) -> Vec<u8> {
+    for name in [
+        format!("{member}.tar.gz"),
+        format!("{member}.tar.zst"),
+        format!("{member}.tar.xz"),
+    ] {
+        let out = Command::new("bsdtar")
+            .args(["-xOf"])
+            .arg(deb)
+            .arg(&name)
+            .output()
+            .unwrap();
+        if out.status.success() && !out.stdout.is_empty() {
+            return out.stdout;
+        }
+    }
+    panic!("{member}.tar.* missing from {}", deb.display());
+}
+
+fn tar_listing(bytes: &[u8]) -> String {
+    use std::io::Write;
+    let mut child = Command::new("bsdtar")
+        .args(["-tf", "-"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(bytes).unwrap();
+    String::from_utf8_lossy(&child.wait_with_output().unwrap().stdout).into_owned()
+}
+
+fn tar_file(bytes: &[u8], path: &str) -> String {
+    use std::io::Write;
+    let mut child = Command::new("bsdtar")
+        .args(["-xOf", "-", path])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(bytes).unwrap();
+    String::from_utf8_lossy(&child.wait_with_output().unwrap().stdout).into_owned()
+}
+
+/// Runs nfpm over a staged stub tree, the way `make release` does from
+/// `release/linux`: the working directory holds `usr/`.
+fn nfpm_packages(name: &str) -> Option<PathBuf> {
+    for tool in ["nfpm", "rsvg-convert", "bsdtar", "rpm"] {
+        if Command::new(tool).arg("--version").output().is_err() {
+            eprintln!("{tool} is not installed, skipped");
+            return None;
+        }
+    }
+    let dir = std::env::temp_dir().join(format!("oryx-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let src = dir.join("src");
+    source_folder(&src);
+    let out = stage(&src, &dir.join("usr"));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    for packager in ["deb", "rpm"] {
+        let out = Command::new("nfpm")
+            .args(["package", "-f"])
+            .arg(repo().join("packaging/nfpm.yaml"))
+            .args(["-p", packager, "-t", "."])
+            .current_dir(&dir)
+            .env("VERSION", "1.2.3")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    Some(dir)
+}
+
+#[test]
+fn the_deb_installs_the_staged_tree_and_names_its_dependencies() {
+    let Some(dir) = nfpm_packages("deb") else {
+        return;
+    };
+    let deb = dir.join("oryx-editor_1.2.3_amd64.deb");
+    assert!(deb.is_file(), "the package name carries the version");
+    let data = tar_listing(&deb_member(&deb, "data"));
+    for file in [
+        "./usr/bin/oryx",
+        "./usr/share/applications/com.steerania.Oryx.desktop",
+        "./usr/share/metainfo/com.steerania.Oryx.metainfo.xml",
+        "./usr/share/icons/hicolor/512x512/apps/com.steerania.Oryx.png",
+        "./usr/share/icons/hicolor/scalable/apps/com.steerania.Oryx.svg",
+        "./usr/share/oryx/themes/dracula.toml",
+        "./usr/share/oryx/examples/sample.md",
+        "./usr/share/licenses/oryx-editor/LICENSE",
+    ] {
+        assert!(
+            data.contains(&format!("{file}\n")),
+            "{file} missing:\n{data}"
+        );
+    }
+    let control = tar_file(&deb_member(&deb, "control"), "./control");
+    for line in [
+        "Package: oryx-editor\n",
+        "Version: 1.2.3\n",
+        "Section: editors\n",
+        "Architecture: amd64\n",
+        "Maintainer: Walid Mahfoudh <walid.mahfoudh@gmail.com>\n",
+        "Depends: libc6 (>= 2.35), libssl3 (>= 3.0.0)\n",
+        "Homepage: https://github.com/wmahfoudh/oryx\n",
+        "Description: Fast editor for markdown and code, reader for ebooks and comics\n",
+    ] {
+        assert!(control.contains(line), "{line:?} missing:\n{control}");
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn the_rpm_requires_libssl_3_and_carries_the_metadata() {
+    let Some(dir) = nfpm_packages("rpm") else {
+        return;
+    };
+    let rpm = dir.join("oryx-editor-1.2.3-1.x86_64.rpm");
+    assert!(
+        rpm.is_file(),
+        "the package name carries the version and release"
+    );
+    let requires = Command::new("rpm")
+        .args(["-qp", "--requires"])
+        .arg(&rpm)
+        .output()
+        .unwrap();
+    let requires = String::from_utf8_lossy(&requires.stdout);
+    assert!(requires.contains("libssl.so.3()(64bit)\n"), "{requires}");
+    let info = Command::new("rpm")
+        .args([
+            "-qp",
+            "--qf",
+            "%{NAME}|%{VERSION}|%{LICENSE}|%{URL}|%{VENDOR}|%{PACKAGER}",
+        ])
+        .arg(&rpm)
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&info.stdout),
+        "oryx-editor|1.2.3|GPL-3.0-only|https://github.com/wmahfoudh/oryx|Steerania|Walid Mahfoudh <walid.mahfoudh@gmail.com>"
+    );
+    let files = Command::new("rpm")
+        .args(["-qpl"])
+        .arg(&rpm)
+        .output()
+        .unwrap();
+    let files = String::from_utf8_lossy(&files.stdout);
+    for file in ["/usr/bin/oryx\n", "/usr/share/oryx/themes/dracula.toml\n"] {
+        assert!(files.contains(file), "{file} missing:\n{files}");
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
