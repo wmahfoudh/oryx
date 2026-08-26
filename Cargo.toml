@@ -3,7 +3,7 @@ members = ["noad", "palmbook", "rarball"]
 
 [package]
 name = "oryx"
-version = "0.15.8"
+version = "1.0.0"
 description = "Fast editor for markdown and code, reader for ebooks and comics"
 edition = "2021"
 license = "GPL-3.0-only"

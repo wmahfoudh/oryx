@@ -62,6 +62,7 @@
     <keyword>editor</keyword>
   </keywords>
   <releases>
+    <release version="1.0.0" date="2026-08-26"/>
     <release version="0.15.8" date="2026-08-23"/>
   </releases>
 </component>
