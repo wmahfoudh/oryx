@@ -1,6 +1,6 @@
 #!/bin/sh
 # Builds the Windows MSI from the staged release folder with wixl
-# (msitools). Usage: msi.sh <version> <staging dir> <output.msi>.
+# (msitools). Usage: msi.sh <version> <staging dir> <output.msi> <icon.ico>.
 #
 # The package installs per machine to Program Files, adds a Start menu
 # shortcut and an Add/Remove entry, and lists Oryx under Open with for
@@ -8,12 +8,27 @@
 # `oryx --register` writes per user; the full extension list stays with
 # --register. The UpgradeCode is permanent: a newer MSI replaces the
 # installed version in place.
+#
+# The Icon table takes a small .ico file, never the executable: an Icon
+# sourced from oryx.exe makes wixl embed the whole binary a second time
+# as the icon stream, beside the compressed cabinet that already holds
+# it. `make release` extracts the .ico from the built exe with wrestool.
 set -e
 
 VERSION=$1
 STAGE=$2
 OUT=$3
+ICO=$4
 UPGRADE_CODE=8ea2ee23-91f8-46ec-9310-6dfbf39a04c9
+
+if [ -z "$VERSION" ] || [ -z "$STAGE" ] || [ -z "$OUT" ] || [ -z "$ICO" ]; then
+    echo "usage: msi.sh <version> <staging dir> <output.msi> <icon.ico>" >&2
+    exit 1
+fi
+if [ ! -f "$ICO" ]; then
+    echo "msi.sh: icon file $ICO is missing" >&2
+    exit 1
+fi
 
 WXS=$(mktemp --suffix=.wxs)
 trap 'rm -f "$WXS"' EXIT
@@ -30,7 +45,7 @@ emit_file() {
     extra=""
     if [ "$name" = "oryx.exe" ]; then
         keypath=' KeyPath="yes"'
-        extra='<Shortcut Id="StartMenuOryx" Directory="ProgramMenuFolder" Name="Oryx" Icon="oryx.exe" Advertise="yes"/>'
+        extra='<Shortcut Id="StartMenuOryx" Directory="ProgramMenuFolder" Name="Oryx" Icon="oryx.ico" Advertise="yes"/>'
     fi
     printf '          <Component Id="C%s" Guid="*">\n' "$component_id"
     printf '            <File Id="F%s" Name="%s" Source="%s"%s>%s</File>\n' \
@@ -50,14 +65,14 @@ emit_dir() {
     cat <<HEAD
 <?xml version="1.0" encoding="utf-8"?>
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
-  <Product Id="*" Name="Oryx" Version="$VERSION" Manufacturer="Walid"
+  <Product Id="*" Name="Oryx" Version="$VERSION" Manufacturer="Steerania"
            Language="1033" UpgradeCode="$UPGRADE_CODE">
     <Package InstallerVersion="200" Compressed="yes"/>
     <Media Id="1" Cabinet="oryx.cab" EmbedCab="yes"/>
     <Property Id="ALLUSERS" Value="1"/>
     <MajorUpgrade DowngradeErrorMessage="A newer version of Oryx is already installed."/>
-    <Icon Id="oryx.exe" SourceFile="$STAGE/oryx.exe"/>
-    <Property Id="ARPPRODUCTICON" Value="oryx.exe"/>
+    <Icon Id="oryx.ico" SourceFile="$ICO"/>
+    <Property Id="ARPPRODUCTICON" Value="oryx.ico"/>
     <Directory Id="TARGETDIR" Name="SourceDir">
       <Directory Id="ProgramMenuFolder"/>
       <Directory Id="ProgramFiles64Folder">
@@ -100,3 +115,6 @@ TAIL
 } > "$WXS"
 
 wixl -a x64 -o "$OUT" "$WXS"
+size=$(stat -c %s "$OUT")
+cab=$(msiinfo extract "$OUT" oryx.cab | wc -c)
+echo "$OUT: $((size / 1024)) KB, of which the cabinet $((cab / 1024)) KB"

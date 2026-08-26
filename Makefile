@@ -13,6 +13,7 @@ audit:
 	cargo audit
 
 release: audit
+	@command -v wrestool >/dev/null || { echo "icoutils is not installed: wrestool extracts the MSI icon from the exe"; exit 1; }
 	cargo build --release
 	cargo build --release --target x86_64-pc-windows-gnu
 	rm -rf release
@@ -27,7 +28,8 @@ release: audit
 	cp -r examples release/windows/oryx/examples
 	cp LICENSE packaging/install.ps1 release/windows/oryx/
 	cd release/windows && zip -qr ../oryx-$(VERSION)-windows-x86_64.zip oryx
-	sh packaging/msi.sh $(VERSION) release/windows/oryx release/oryx-$(VERSION)-windows-x86_64.msi
+	wrestool -x -t 14 -o release/windows/oryx.ico release/windows/oryx/oryx.exe
+	sh packaging/msi.sh $(VERSION) release/windows/oryx release/oryx-$(VERSION)-windows-x86_64.msi release/windows/oryx.ico
 	rm -rf release/linux release/windows
 	ls -l release
 

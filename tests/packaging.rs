@@ -198,3 +198,94 @@ fn stage_linux_refuses_a_source_folder_missing_a_file() {
     );
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// A stage shaped like `release/windows/oryx` with a stand-in `oryx.exe`
+/// of incompressible bytes, so the MSI's size tells what it embeds.
+fn windows_stage(dir: &Path, exe_len: usize) {
+    std::fs::create_dir_all(dir.join("themes")).unwrap();
+    std::fs::create_dir_all(dir.join("examples")).unwrap();
+    let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+    let exe: Vec<u8> = (0..exe_len)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state as u8
+        })
+        .collect();
+    std::fs::write(dir.join("oryx.exe"), exe).unwrap();
+    std::fs::write(dir.join("LICENSE"), "GPL\n").unwrap();
+    std::fs::write(dir.join("install.ps1"), "# per-user\n").unwrap();
+    std::fs::write(dir.join("themes/dracula.toml"), "name = \"dracula\"\n").unwrap();
+    std::fs::write(dir.join("examples/sample.md"), "# Sample\n").unwrap();
+}
+
+/// `msiinfo <command> <msi> <rest...>`, as the tool orders its arguments;
+/// table exports come in IDT form with CRLF line ends, normalized here.
+fn msiinfo(command: &str, msi: &Path, rest: &[&str]) -> String {
+    let out = Command::new("msiinfo")
+        .arg(command)
+        .arg(msi)
+        .args(rest)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n")
+}
+
+#[test]
+fn the_msi_embeds_an_icon_file_not_a_second_copy_of_the_exe() {
+    for tool in ["wixl", "msiinfo"] {
+        if Command::new(tool).arg("--version").output().is_err() {
+            eprintln!("{tool} is not installed, skipped");
+            return;
+        }
+    }
+    let dir = std::env::temp_dir().join(format!("oryx-msi-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let stage = dir.join("oryx");
+    let exe_len = 2 << 20;
+    windows_stage(&stage, exe_len);
+    let ico = Path::new(env!("OUT_DIR")).join("oryx.ico");
+    let msi = dir.join("oryx.msi");
+    let out = Command::new("sh")
+        .arg(repo().join("packaging/msi.sh"))
+        .arg("1.2.3")
+        .arg(&stage)
+        .arg(&msi)
+        .arg(&ico)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let streams = msiinfo("streams", &msi, &[]);
+    assert!(streams.contains("oryx.cab\n"), "{streams}");
+    assert!(streams.contains("Icon.oryx.ico\n"), "{streams}");
+    assert!(!streams.contains("Icon.oryx.exe"), "{streams}");
+    let properties = msiinfo("export", &msi, &["Property"]);
+    assert!(
+        properties.contains("Manufacturer\tSteerania\n"),
+        "{properties}"
+    );
+    assert!(
+        properties.contains("ProductVersion\t1.2.3\n"),
+        "{properties}"
+    );
+    assert!(
+        properties.contains("UpgradeCode\t{8ea2ee23-91f8-46ec-9310-6dfbf39a04c9}\n"),
+        "{properties}"
+    );
+    let msi_len = std::fs::metadata(&msi).unwrap().len() as usize;
+    assert!(
+        msi_len < exe_len + exe_len / 2,
+        "the MSI is {msi_len} bytes for a {exe_len} byte exe: something is embedded twice"
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
