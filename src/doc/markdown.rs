@@ -2,6 +2,7 @@
 //! its byte range in the source; spans and blocks keep those ranges so the
 //! selection can slice the original markdown back out.
 
+use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -115,6 +116,8 @@ struct Builder {
     details_start: Vec<usize>,
     /// Open HTML heading level between `<hN>` and its close.
     html_heading: Option<u8>,
+    /// How many headings produced each slug so far, for numbering repeats.
+    anchors_seen: HashMap<String, usize>,
     /// Verbatim body accumulating between `<pre>` and its close.
     html_pre: Option<HtmlPre>,
     /// Set between `<dt>` and its close; the term renders bold.
@@ -473,6 +476,7 @@ impl Builder {
             in_summary: false,
             details_start: Vec::new(),
             html_heading: None,
+            anchors_seen: HashMap::new(),
             html_pre: None,
             html_dt: false,
             html_lists: Vec::new(),
@@ -616,7 +620,7 @@ impl Builder {
             TagEnd::Heading(_) => {
                 let level = self.heading.take().unwrap_or(1);
                 let spans = std::mem::take(&mut self.spans);
-                let anchor = slug(&spans);
+                let anchor = self.unique_anchor(&spans);
                 self.emit(BlockKind::Heading {
                     level,
                     spans,
@@ -1249,6 +1253,19 @@ impl Builder {
         self.push(span);
     }
 
+    /// A heading's anchor, unique the way GitHub makes it: a repeat of an
+    /// earlier heading's slug takes `-1`, the next `-2`, so a link and
+    /// the outline reach each occurrence rather than the first.
+    fn unique_anchor(&mut self, spans: &[Span]) -> String {
+        let base = slug(spans);
+        let seen = self.anchors_seen.entry(base.clone()).or_insert(0);
+        *seen += 1;
+        match *seen {
+            1 => base,
+            n => format!("{base}-{}", n - 1),
+        }
+    }
+
     /// Emits the accumulated `<hN>` heading with its GitHub slug anchor.
     fn html_heading_close(&mut self) {
         let Some(level) = self.html_heading.take() else {
@@ -1256,7 +1273,7 @@ impl Builder {
         };
         let mut spans = std::mem::take(&mut self.spans);
         trim_cell(&mut spans);
-        let anchor = slug(&spans);
+        let anchor = self.unique_anchor(&spans);
         self.emit(BlockKind::Heading {
             level,
             spans,
@@ -1821,6 +1838,20 @@ mod tests {
 
     fn to_usize(range: &std::ops::Range<u32>) -> std::ops::Range<usize> {
         range.start as usize..range.end as usize
+    }
+
+    #[test]
+    fn repeated_headings_get_numbered_anchors_like_github() {
+        let doc = parse("# Gate\n\ntext\n\n# Gate\n\n## Gate\n\n<h2>Gate</h2>\n\n# Other\n");
+        let anchors: Vec<&str> = doc
+            .blocks
+            .iter()
+            .filter_map(|b| match &b.kind {
+                BlockKind::Heading { anchor, .. } => Some(anchor.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(anchors, ["gate", "gate-1", "gate-2", "gate-3", "other"]);
     }
 
     #[test]

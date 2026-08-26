@@ -24,7 +24,8 @@ Setext Heading 2
 ```
 
 Every heading gets an anchor from its text, in the GitHub style, and
-joins the sidebar outline.
+joins the sidebar outline. A heading repeated later in the file gets a
+numbered anchor, `-1` for the second, `-2` for the third, as on GitHub.
 
 ## Inline styles
 

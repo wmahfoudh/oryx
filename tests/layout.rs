@@ -740,6 +740,15 @@ fn anchor_target_resolves_to_heading_y() {
 }
 
 #[test]
+fn repeated_headings_resolve_to_their_own_positions() {
+    let l = lay("# Gate\n\ntext\n\n# Gate\n\ntext\n\n# Gate\n\ntext", 800.0);
+    let first = l.anchor_y("#gate").unwrap();
+    let second = l.anchor_y("#gate-1").unwrap();
+    let third = l.anchor_y("#gate-2").unwrap();
+    assert!(first < second && second < third, "{first} {second} {third}");
+}
+
+#[test]
 fn consecutive_quoted_blocks_tile_without_gap() {
     let t = Theme::default_dark();
     for source in ["> one\n>\n> two", "> [!CAUTION]\n> one\n>\n> two"] {
