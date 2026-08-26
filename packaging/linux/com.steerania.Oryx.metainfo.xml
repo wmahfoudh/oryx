@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.steerania.Oryx</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-only</project_license>
+  <name>Oryx</name>
+  <summary>Markdown editor and book reader</summary>
+  <developer id="com.steerania">
+    <name>Steerania</name>
+  </developer>
+  <description>
+    <p>Oryx opens markdown, source code and plain text files, and reads ebooks (EPUB, FB2, MOBI and AZW3) and comics (CBZ and CBR). A document displays in under 100 ms, even an 8 MB markdown file or a 200 MB book, and memory stays flat however far you scroll. There are no panes, no toolbars and no menus: everything is done from the keyboard, F1 lists the shortcuts and Esc closes whatever is open.</p>
+    <p>Markdown is rendered the way GitHub shows it, with syntax colors for over a hundred languages and typeset TeX math. Over thirty themes with editable colors apply to reading and to PDF export alike, and the exported PDF reproduces the page as read. Fonts for Latin, Arabic and Hebrew are embedded, and right-to-left books read correctly.</p>
+    <p>Oryx is a single binary with no browser engine, no runtime and no GPU requirement. It asks for no account and sends no telemetry. The only thing it downloads is the images a markdown file links to. Oryx is also a light editor for markdown and text, and it writes back only the lines that changed.</p>
+  </description>
+  <launchable type="desktop-id">com.steerania.Oryx.desktop</launchable>
+  <url type="homepage">https://github.com/wmahfoudh/oryx</url>
+  <url type="bugtracker">https://github.com/wmahfoudh/oryx/issues</url>
+  <url type="vcs-browser">https://github.com/wmahfoudh/oryx</url>
+  <screenshots>
+    <screenshot type="default">
+      <caption>A markdown document with the sidebar open</caption>
+      <image>https://raw.githubusercontent.com/wmahfoudh/oryx/main/screenshots/hero.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Typeset TeX math</caption>
+      <image>https://raw.githubusercontent.com/wmahfoudh/oryx/main/screenshots/math.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>A source file with syntax colors</caption>
+      <image>https://raw.githubusercontent.com/wmahfoudh/oryx/main/screenshots/code.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>An Arabic book, read right to left</caption>
+      <image>https://raw.githubusercontent.com/wmahfoudh/oryx/main/screenshots/rtl-ar.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>The theme editor</caption>
+      <image>https://raw.githubusercontent.com/wmahfoudh/oryx/main/screenshots/themes-editor.png</image>
+    </screenshot>
+  </screenshots>
+  <content_rating type="oars-1.1"/>
+  <provides>
+    <mediatype>text/markdown</mediatype>
+    <mediatype>text/x-markdown</mediatype>
+    <mediatype>text/plain</mediatype>
+    <mediatype>application/epub+zip</mediatype>
+    <mediatype>application/x-mobipocket-ebook</mediatype>
+    <mediatype>application/vnd.amazon.ebook</mediatype>
+    <mediatype>application/vnd.amazon.mobi8-ebook</mediatype>
+    <mediatype>application/x-fictionbook+xml</mediatype>
+    <mediatype>application/x-zip-compressed-fb2</mediatype>
+    <mediatype>application/vnd.comicbook+zip</mediatype>
+    <mediatype>application/vnd.comicbook-rar</mediatype>
+  </provides>
+  <keywords>
+    <keyword>markdown</keyword>
+    <keyword>epub</keyword>
+    <keyword>ebook</keyword>
+    <keyword>comics</keyword>
+    <keyword>viewer</keyword>
+    <keyword>editor</keyword>
+  </keywords>
+  <releases>
+    <release version="0.15.8" date="2026-08-23"/>
+  </releases>
+</component>

@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Oryx
+GenericName=Markdown editor and book reader
+Comment=Fast editor for markdown and code, reader for ebooks and comics
+Exec=oryx %f
+Icon=com.steerania.Oryx
+Terminal=false
+Categories=Office;Viewer;
+MimeType=text/markdown;text/x-markdown;text/plain;application/epub+zip;application/x-mobipocket-ebook;application/vnd.amazon.ebook;application/vnd.amazon.mobi8-ebook;application/x-fictionbook+xml;application/x-zip-compressed-fb2;application/vnd.comicbook+zip;application/vnd.comicbook-rar;
+StartupWMClass=com.steerania.Oryx

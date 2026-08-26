@@ -51,7 +51,7 @@ const ICONS: [(u32, &[u8]); 6] = [
 /// formats `load::detect` accepts: markdown and plain text, then each book
 /// and comic container. A file manager offers Open with Oryx only for a
 /// type listed here.
-const MIME_TYPES: [&str; 11] = [
+pub const MIME_TYPES: [&str; 11] = [
     "text/markdown",
     "text/x-markdown",
     "text/plain",
