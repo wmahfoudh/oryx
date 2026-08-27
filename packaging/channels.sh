@@ -122,12 +122,19 @@ if python3 -c 'import jsonschema, yaml' 2>/dev/null; then
     python3 - "$out" "$work" <<'PY'
 import json, sys, yaml, jsonschema
 out, work = sys.argv[1], sys.argv[2]
+
+# winget reads a bare date (ReleaseDate: 2026-08-23) as a string; PyYAML
+# would make a date object of it and fail the schema's string type.
+class Loader(yaml.SafeLoader):
+    pass
+
+Loader.add_constructor("tag:yaml.org,2002:timestamp", lambda loader, node: loader.construct_scalar(node))
 pairs = [("Steerania.Oryx.installer.yaml", "installer"),
          ("Steerania.Oryx.locale.en-US.yaml", "defaultLocale"),
          ("Steerania.Oryx.yaml", "version")]
 for name, kind in pairs:
     schema = json.load(open(f"{work}/{kind}.schema.json"))
-    data = yaml.safe_load(open(f"{out}/{name}"))
+    data = yaml.load(open(f"{out}/{name}"), Loader=Loader)
     jsonschema.validate(data, schema, format_checker=jsonschema.FormatChecker())
     print(f"{name}: valid against the {kind} 1.28.0 schema")
 PY
