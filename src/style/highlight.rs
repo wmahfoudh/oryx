@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
-use syntect::parsing::{ParseState, ScopeStack, SyntaxSet};
+use syntect::parsing::{ParseState, Scope, ScopeStack, SyntaxSet};
 
 use crate::doc::model::CodeBody;
 
@@ -520,7 +520,7 @@ impl Parser {
             .parse
             .parse_line(&text, syntax_set())
             .unwrap_or_default();
-        let mut ranges: LineSpans = Vec::new();
+        let mut tokens: Vec<Token> = Vec::new();
         let mut last = 0usize;
         let markdown = self.markdown;
         let mut push = |from: usize, to: usize, stack: &ScopeStack| {
@@ -531,10 +531,17 @@ impl Parser {
                 } else {
                     role_for(stack)
                 };
-                match ranges.last_mut() {
-                    Some((prev, r)) if *r == role && prev.end == from => prev.end = to,
-                    _ => ranges.push((from..to, role)),
-                }
+                tokens.push(Token {
+                    role,
+                    link: markdown
+                        && (stack_has(stack, "meta.link") || stack_has(stack, "meta.image")),
+                    closes_text: markdown
+                        && (stack_has(stack, "punctuation.definition.link.end")
+                            || stack_has(stack, "punctuation.definition.image.end")),
+                    blank: line[from..to].trim().is_empty(),
+                    illegal: markdown && stack_has(stack, "invalid.illegal.whitespace"),
+                    range: from..to,
+                });
             }
         };
         for (index, op) in &ops {
@@ -543,7 +550,73 @@ impl Parser {
             let _ = self.stack.apply(op);
         }
         push(last, line.len(), &self.stack);
+        if markdown {
+            demote_broken_links(&mut tokens);
+        }
+        let mut ranges: LineSpans = Vec::new();
+        for token in tokens {
+            match ranges.last_mut() {
+                Some((prev, r)) if *r == token.role && prev.end == token.range.start => {
+                    prev.end = token.range.end;
+                }
+                _ => ranges.push((token.range, token.role)),
+            }
+        }
         ranges
+    }
+}
+
+/// One grammar token of a line before adjacent equal roles merge.
+struct Token {
+    range: Range<usize>,
+    role: SyntaxRole,
+    /// Inside a `meta.link` or `meta.image` construct of the markdown
+    /// grammar.
+    link: bool,
+    /// The `]` closing the link or image text.
+    closes_text: bool,
+    /// Whitespace only.
+    blank: bool,
+    /// The grammar's `invalid.illegal.whitespace` tag on the token.
+    illegal: bool,
+}
+
+/// Whether a scope of `stack` starts with `prefix`.
+fn stack_has(stack: &ScopeStack, prefix: &str) -> bool {
+    Scope::new(prefix).is_ok_and(|wanted| stack.as_slice().iter().any(|s| wanted.is_prefix_of(*s)))
+}
+
+/// The markdown grammar still reads `[text] (url)`, `[text] [ref]` and
+/// `![alt] (file)`, a space after the closing bracket of the text, as
+/// links and images, the way the first Markdown allowed; CommonMark and
+/// the reader see plain text there, and a task box before a parenthesis
+/// (`- [ ] (name) ...`) is a common shape. A construct whose text
+/// bracket is followed by whitespace (the grammar tags some of them
+/// `invalid.illegal.whitespace`, the reference form not) becomes plain
+/// text as a whole. The spaces a link may hold, before a title or after
+/// a definition's colon, follow other tokens and stay.
+fn demote_broken_links(tokens: &mut [Token]) {
+    let mut start = 0;
+    while start < tokens.len() {
+        if !tokens[start].link {
+            start += 1;
+            continue;
+        }
+        let end = tokens[start..]
+            .iter()
+            .position(|t| !t.link)
+            .map_or(tokens.len(), |n| start + n);
+        let broken = (start..end).any(|i| {
+            tokens[i].illegal || (tokens[i].blank && i > start && tokens[i - 1].closes_text)
+        });
+        if broken {
+            for token in &mut tokens[start..end] {
+                if token.role == SyntaxRole::Link {
+                    token.role = SyntaxRole::Plain;
+                }
+            }
+        }
+        start = end;
     }
 }
 
@@ -1361,5 +1434,35 @@ mod tests {
         let h = spans("", &src, Some("rust"));
         assert_eq!(h.len(), 2);
         assert!(h[0].is_empty());
+    }
+
+    #[test]
+    fn a_task_box_followed_by_a_parenthesized_word_is_not_a_link() {
+        for (line, texts) in [
+            (
+                "- [ ] (Ivan) FLEX update reporting, finish within 2 weeks (Soumya)",
+                ["[ ]", "(Ivan)", "(Soumya)"],
+            ),
+            ("- [x] (Aldwin) day 1 or day 2?", ["[x]", "(Aldwin)", "day"]),
+            ("see [text] [ref] here", ["[text]", "[ref]", "here"]),
+            (
+                "![alt text] (img.png)",
+                ["![alt text]", "(img.png)", "img.png"],
+            ),
+        ] {
+            let src = lines(&[line]);
+            let h = spans("", &src, Some("md"));
+            for text in texts {
+                let at = line.find(text).unwrap();
+                for pos in at..at + text.len() {
+                    assert_eq!(
+                        role_at(&h[0], pos),
+                        SyntaxRole::Plain,
+                        "{line:?} byte {pos} ({:?}) of {text:?} is plain text, not a link",
+                        &line[pos..pos + 1]
+                    );
+                }
+            }
+        }
     }
 }
