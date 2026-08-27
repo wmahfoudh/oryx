@@ -20,7 +20,7 @@ Most markdown editors start by showing the code and then trying to render it. I 
 - **Light**: Memory stays flat however you scroll, whatever the file size. The same speed on a new laptop or an old machine with no graphics card (like mine).
 - **Distraction-free**: No panes, no toolbars, no menus. `F1` lists the shortcuts, `Esc` closes whatever is open.
 - **Beautiful**: 30+ themes, with 51 color roles each, for reading and for PDF export alike.
-- **Self-contained**: One binary and a folder of themes and examples. No browser engine, no runtime, no GPU requirement and no need to download themes or syntax highlighting stuff. 
+- **Self-contained**: One binary and a folder of themes and examples. No browser engine, no runtime, no GPU requirement and no need to download themes or syntax highlighting stuff. No account and no telemetry either; what Oryx keeps on your machine is listed in [PRIVACY.md](PRIVACY.md).
 - **Opinionated**:
   - Nobody renders justified markdown :smile: (you can turn it of if you don't like it)
   - Most ebook readers do not dare to strip the books' CSS and apply their own.
@@ -141,7 +141,7 @@ Press `Ctrl+T` to open the theme browser. Arrow keys move through the list and p
   <img src="screenshots/themes.png" alt="The theme browser">
 </p>
 
-The theme editor changes any color role through a color picker while the document restyles live. Editing a bundled theme creates a copy, so the shipped files remain unchanged. A custom theme is a TOML file saved in the themes directory.
+The theme editor changes any color role through a color picker while the document restyles live. Editing a bundled theme creates a copy, so the shipped files remain unchanged. A custom theme is a TOML file saved in the themes directory. Themes are read from `~/.local/share/oryx/themes` (your own and your edited copies) and from the system folders where a package installs them, such as `/usr/share/oryx/themes`.
 
 <p align="center">
   <img src="screenshots/themes-editor.png" alt="The theme editor">
@@ -173,13 +173,18 @@ Ten themes are original designs: `oryx-light` and its dark twin `oryx-dark`, `or
 
 ### From a release
 
-Download the archive for your platform from the releases page on [GitHub](https://github.com/wmahfoudh/oryx/releases), extract it, and run the installer inside:
+Oryx is packaged for the following platforms. Pick yours on the [releases page](https://github.com/wmahfoudh/oryx/releases):
 
-```sh
-tar -xzf oryx-*-linux-x86_64.tar.gz && cd oryx && ./install.sh
-```
+- **Debian and Ubuntu**: the `.deb`, `sudo apt install ./oryx-editor_1.0.0_amd64.deb`.
+- **Fedora and openSUSE**: the `.rpm`, `sudo dnf install ./oryx-editor-1.0.0-1.x86_64.rpm` (or `zypper`).
+- **Any Linux**: the AppImage, one file to make executable and run, nothing to install.
+- **Arch Linux**: from the AUR, `yay -S oryx-editor-bin` (the release binary) or `yay -S oryx-editor` (built from source).
+- **Windows**: the MSI installer, or the zip with `install.ps1` for an install in your user folder.
+- **Linux without a package**: the tarball, `tar -xzf oryx-*-linux-x86_64.tar.gz && cd oryx && ./install.sh`; `./install.sh --uninstall` removes it.
 
-On Windows, extract the zip and run `install.ps1` in PowerShell. The installer copies the binary, the themes and the example documents, and registers the file association, so markdown files and books open with Oryx from the file manager. `./install.sh --uninstall` removes everything.
+The packages are named `oryx-editor` because Arch already ships an unrelated program called `oryx`; the command is still `oryx` and the app appears as Oryx. A package registers Oryx with the file manager itself, so markdown files and books open with it right away; `oryx --register` is for the tarball and the source install, and says so under a package. If you move from the tarball or `make install` to a package, remove the per-user copy first (`./install.sh --uninstall`): it comes before the package on the PATH and in the launcher.
+
+The Linux packages need glibc 2.35 and OpenSSL 3, which means Debian 12, Ubuntu 22.04, Fedora 36, openSUSE Leap 15.4 and newer; the AppImage relies on the system's OpenSSL 3 as well.
 
 ### From source
 
