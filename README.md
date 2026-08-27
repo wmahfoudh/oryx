@@ -230,7 +230,7 @@ oryx --help             # list these options
 | `Home` / `End` | Jump to top / bottom |
 | `Alt+Left` | Go back after a link or outline jump |
 | `Ctrl+Shift+B` | Toggle sidebar (files and outline) |
-| `Left` / `Right` | Toggle between sidebar and document |
+| `Left` / `Right` | Move to the sidebar / to the document |
 | `Ctrl+Tab` | Toggle the sidebar tab |
 | **Find** | |
 | `Ctrl+F` | Find in document |
@@ -246,7 +246,7 @@ oryx --help             # list these options
 | `Ctrl+Shift+Z` / `Ctrl+Y` | Redo an undone edit |
 | **View** | |
 | `Ctrl+T` | Choose a theme |
-| `Ctrl+,` | Change fonts and sizes |
+| `Ctrl+,` | Settings: fonts, sizes and interface scale |
 | `Ctrl+Plus` / `Ctrl+Minus` | Zoom in / out; in a comic, switch between page views |
 | `Ctrl+0` | Reset zoom; in a comic, show the whole page |
 | `Ctrl+J` | Justify prose (markdown and books) |

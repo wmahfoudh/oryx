@@ -209,7 +209,7 @@ pub const SHORTCUTS: &[Shortcut] = &[
     },
     Shortcut {
         keys: "Left / Right",
-        action: "Toggle between sidebar and document",
+        action: "Move to the sidebar / to the document",
         section: "Navigation",
         bindings: &[
             (Binding::Named(NamedKey::ArrowLeft), Command::PaneLeft),
@@ -316,7 +316,7 @@ pub const SHORTCUTS: &[Shortcut] = &[
     },
     Shortcut {
         keys: "Ctrl+,",
-        action: "Change fonts and sizes",
+        action: "Settings: fonts, sizes and interface scale",
         section: "View",
         bindings: &[(Binding::Ctrl(","), Command::Settings)],
     },

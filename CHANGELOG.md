@@ -2,6 +2,8 @@
 
 ## v1.0.0
 
+Version 1.0.0 is the first one published as packages: a `.deb`, an `.rpm` and an AppImage on the release page, two AUR packages, and the Windows installer, beside the tarball and the zip as before. The details:
+
 - Oryx ships as a `.deb` and an `.rpm` on the release page, beside the tarball, the zip and the MSI.
 - An AppImage is on the release page too: one file that runs on any Linux with glibc 2.35 and OpenSSL 3, nothing to install.
 - On Arch Linux, Oryx is in the AUR as `oryx-editor` (built from source) and `oryx-editor-bin` (the release binary).
@@ -14,6 +16,7 @@
 - Clicking a heading in the outline goes to that heading, not to the first one with the same text. Repeated headings get numbered anchors as on GitHub (`#title`, `#title-1`).
 - A privacy page, `PRIVACY.md`: no account, no telemetry, what is kept on the machine and where.
 - The `F1` page links to the documentation on GitHub, the project's home.
+- The welcome page points at the settings (`Ctrl+,`, for the fonts, the sizes and the interface scale) and at the documentation on GitHub. The `F1` page says what `Ctrl+,` opens, what `Left` and `Right` do (move to the sidebar and back), and what `Enter` does in the sidebar.
 
 ## v0.15.8
 
