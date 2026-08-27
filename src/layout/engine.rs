@@ -3332,7 +3332,13 @@ struct SpanStyle {
     rise: f32,
 }
 
-fn span_style(theme: &Theme, cfg: &ViewConfig, base: &BlockStyle, span: &Span) -> SpanStyle {
+fn span_style(
+    fonts: &mut FontStore,
+    theme: &Theme,
+    cfg: &ViewConfig,
+    base: &BlockStyle,
+    span: &Span,
+) -> SpanStyle {
     let code = span.code;
     let footnote = span
         .link
@@ -3377,18 +3383,20 @@ fn span_style(theme: &Theme, cfg: &ViewConfig, base: &BlockStyle, span: &Span) -
         SpanScript::Small => size *= 0.85,
         SpanScript::None => {}
     }
+    let family = if code || span.math {
+        cfg.code_family.clone()
+    } else {
+        cfg.body_family.clone()
+    };
+    let weight = if base.bold || span.bold {
+        Weight::BOLD
+    } else {
+        Weight::NORMAL
+    };
     SpanStyle {
-        family: if code || span.math {
-            cfg.code_family.clone()
-        } else {
-            cfg.body_family.clone()
-        },
+        weight: fonts.weight_for(&family, weight),
+        family,
         size,
-        weight: if base.bold || span.bold {
-            Weight::BOLD
-        } else {
-            Weight::NORMAL
-        },
         italic: span.italic || span.math,
         strike: span.strike,
         underline: span.underline,
@@ -3437,7 +3445,7 @@ fn shape_block(
             for (text, script) in math_scripts(&tex_symbols(span.text(source))) {
                 let mut piece = span.clone();
                 piece.set_text(text);
-                let mut style = span_style(theme, cfg, base, &piece);
+                let mut style = span_style(fonts, theme, cfg, base, &piece);
                 if script != Script::Normal {
                     style.rise = match script {
                         Script::Sup => 0.3 * style.size,
@@ -3458,7 +3466,7 @@ fn shape_block(
                 crate::style::fonts::script_segments(text)
             };
             if let [(_, family)] = segments.as_slice() {
-                let mut style = span_style(theme, cfg, base, span);
+                let mut style = span_style(fonts, theme, cfg, base, span);
                 if let Some(face) = family {
                     style.family = face.to_string();
                     style.italic = false;
@@ -3471,7 +3479,7 @@ fn shape_block(
                 for (range, family) in segments {
                     let mut piece = span.clone();
                     piece.set_text(text[range].to_string());
-                    let mut style = span_style(theme, cfg, base, &piece);
+                    let mut style = span_style(fonts, theme, cfg, base, &piece);
                     if let Some(face) = family {
                         style.family = face.to_string();
                         style.italic = false;
@@ -6053,6 +6061,7 @@ fn shape_code_chunk(
     out: &mut LayoutDoc,
 ) -> f32 {
     let face = code_face(prose, cfg).0;
+    let bold_weight = fonts.weight_for(face, Weight::BOLD);
     let mut buffer = Buffer::new(&mut fonts.font_system, Metrics::new(size, line_height));
     buffer.set_size(&mut fonts.font_system, Some(wrap_width), None);
     let rich: Vec<(&str, Attrs)> = segments
@@ -6064,7 +6073,7 @@ fn shape_code_chunk(
             // and italic keep the regular advance, so the grid holds.
             let (bold, italic) = crate::style::highlight::role_face(*role);
             if bold {
-                attrs = attrs.weight(Weight::BOLD);
+                attrs = attrs.weight(bold_weight);
             }
             if italic {
                 attrs = attrs.style(Style::Italic);
@@ -6108,7 +6117,7 @@ fn shape_code_chunk(
                 size,
                 family,
                 weight: if bold {
-                    Weight::BOLD.0
+                    bold_weight.0
                 } else {
                     Weight::NORMAL.0
                 },
@@ -6408,5 +6417,38 @@ mod tests {
         assert_eq!(math_scripts("a^"), [seg("a^", Script::Normal)]);
         assert_eq!(math_scripts("a^{open"), [seg("a^{open", Script::Normal)]);
         assert_eq!(math_scripts(""), Vec::<(String, Script)>::new());
+    }
+
+    #[test]
+    fn a_heading_and_a_bold_word_in_a_one_face_body_font_keep_it_at_its_own_weight() {
+        use crate::style::fonts::MATH_FAMILY;
+        let doc = markdown::parse("# Title\n\nSome **bold** text.\n");
+        let mut fonts = FontStore::new();
+        let mut media = MediaCache::new(PathBuf::from("."));
+        let cfg = ViewConfig {
+            body_family: MATH_FAMILY.to_string(),
+            ..ViewConfig::default()
+        };
+        let l = layout(
+            &doc,
+            &Theme::default_dark(),
+            &mut fonts,
+            &mut media,
+            &cfg,
+            800.0,
+        );
+        for text in ["Title", "bold"] {
+            let run = l
+                .runs
+                .iter()
+                .find(|r| l.run_text(&doc, r) == text)
+                .unwrap_or_else(|| panic!("no run shows {text:?}"));
+            assert_eq!(l.run_family(run), MATH_FAMILY);
+            assert_eq!(
+                run.weight,
+                Weight::NORMAL.0,
+                "{text} asks for the weight the family has"
+            );
+        }
     }
 }

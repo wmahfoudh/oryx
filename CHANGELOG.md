@@ -5,6 +5,7 @@
 - Oryx ships as a `.deb` and an `.rpm` on the release page, beside the tarball, the zip and the MSI.
 - An AppImage is on the release page too: one file that runs on any Linux with glibc 2.35 and OpenSSL 3, nothing to install.
 - On Arch Linux, Oryx is in the AUR as `oryx-editor` (built from source) and `oryx-editor-bin` (the release binary).
+- Headings and bold words stay in the chosen body font when that font has no bold face (a cursive or display font, for example). Before, they switched to another font, on screen and in the PDF.
 - The Linux binary is built on Ubuntu 22.04 and runs on Debian 12, Ubuntu 22.04, Fedora 36, openSUSE Leap 15.4 and newer (glibc 2.35, OpenSSL 3).
 - The Windows installer is 9 MB instead of 26: the old one carried the program twice, once as the file and once as the source of its icon.
 - On Linux, Oryx registers itself as `com.steerania.Oryx`, so the window icon shows on Wayland desktops; an earlier registration is cleaned up. Under a package, `oryx --register` says the package already did it.

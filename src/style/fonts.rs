@@ -5,7 +5,9 @@
 //! fonts are loaded only as glyph fallback and as choices in the
 //! settings dialog.
 
-use cosmic_text::{FontSystem, SwashCache};
+use std::collections::HashMap;
+
+use cosmic_text::{FontSystem, SwashCache, Weight};
 
 pub const BODY_FAMILY: &str = "DejaVu Sans";
 pub const CODE_FAMILY: &str = "Courier Prime";
@@ -24,6 +26,8 @@ pub struct FontStore {
     pub swash: SwashCache,
     /// The registered math face, the raster key for math glyph runs.
     pub math_face: cosmic_text::fontdb::ID,
+    /// The weights each family has a face for, read once per family.
+    family_weights: HashMap<String, Vec<u16>>,
 }
 
 /// The regular code face bytes; math literal fallbacks measure against
@@ -45,6 +49,24 @@ pub(crate) static EMBEDDED: &[&[u8]] = &[
     include_bytes!("../../assets/fonts/DavidLibre-Regular.ttf"),
     include_bytes!("../../assets/fonts/DavidLibre-Bold.ttf"),
 ];
+
+/// The nearest of `available` (sorted) to `requested`, the requested
+/// weight itself when present. A bold request (600 and up) prefers the
+/// nearest heavier face, then the nearest lighter; any other request
+/// prefers the nearest lighter, then the nearest heavier. None for an
+/// empty list.
+fn closest_weight(available: &[u16], requested: u16) -> Option<u16> {
+    if available.binary_search(&requested).is_ok() {
+        return Some(requested);
+    }
+    let heavier = available.iter().copied().find(|&w| w > requested);
+    let lighter = available.iter().copied().rev().find(|&w| w < requested);
+    if requested >= 600 {
+        heavier.or(lighter)
+    } else {
+        lighter.or(heavier)
+    }
+}
 
 /// Strong-script class of one character for face routing. Anything
 /// non-alphabetic is neutral and follows its neighboring strong run.
@@ -152,6 +174,7 @@ impl FontStore {
             font_system,
             swash: SwashCache::new(),
             math_face,
+            family_weights: HashMap::new(),
         }
     }
 
@@ -171,7 +194,34 @@ impl FontStore {
             font_system: FontSystem::new_with_locale_and_db(seed.locale.clone(), seed.db.clone()),
             swash: SwashCache::new(),
             math_face,
+            family_weights: HashMap::new(),
         }
+    }
+
+    /// The weight to ask `family` for when `requested` is wanted: the
+    /// requested weight when the family has a face at it, else the
+    /// family's nearest (heavier first for a bold request, lighter first
+    /// otherwise, as a browser does). The shaper's fallback keeps a family
+    /// only for a face at the exact weight asked, so a bold heading in a
+    /// family with one Regular face would otherwise leave the family for
+    /// another font's Bold. A family with no face at all is answered as
+    /// asked and the fallback chooses.
+    pub fn weight_for(&mut self, family: &str, requested: Weight) -> Weight {
+        if !self.family_weights.contains_key(family) {
+            let mut weights: Vec<u16> = self
+                .font_system
+                .db()
+                .faces()
+                .filter(|face| face.families.iter().any(|(name, _)| name == family))
+                .map(|face| face.weight.0)
+                .collect();
+            weights.sort_unstable();
+            weights.dedup();
+            self.family_weights.insert(family.to_string(), weights);
+        }
+        closest_weight(&self.family_weights[family], requested.0)
+            .map(Weight)
+            .unwrap_or(requested)
     }
 
     /// Every selectable family: the bundled faces first, defaults then
@@ -309,5 +359,68 @@ mod tests {
         assert!(!store.families().contains(&MATH_FAMILY.to_string()));
         let pooled = FontStore::pooled(&store.seed());
         assert_eq!(pooled.math_face, store.math_face);
+    }
+
+    #[test]
+    fn weight_for_keeps_a_weight_the_family_has() {
+        let mut store = FontStore::new();
+        assert_eq!(store.weight_for(BODY_FAMILY, Weight::BOLD), Weight::BOLD);
+        assert_eq!(
+            store.weight_for(BODY_FAMILY, Weight::NORMAL),
+            Weight::NORMAL
+        );
+    }
+
+    #[test]
+    fn weight_for_answers_the_closest_weight_of_a_one_face_family() {
+        let mut store = FontStore::new();
+        assert_eq!(store.weight_for(MATH_FAMILY, Weight::BOLD), Weight::NORMAL);
+        assert_eq!(
+            store.weight_for(MATH_FAMILY, Weight::NORMAL),
+            Weight::NORMAL
+        );
+    }
+
+    #[test]
+    fn weight_for_leaves_an_unknown_family_to_the_fallback() {
+        let mut store = FontStore::new();
+        assert_eq!(
+            store.weight_for("No Such Family", Weight::BOLD),
+            Weight::BOLD
+        );
+    }
+
+    /// The family of the face the shaper picked for a word asked in
+    /// `family` at `weight`.
+    fn shaped_family(store: &mut FontStore, family: &str, weight: Weight) -> String {
+        use cosmic_text::{Attrs, Buffer, Family, Metrics, Shaping};
+        let mut buffer = Buffer::new(&mut store.font_system, Metrics::new(16.0, 20.0));
+        buffer.set_size(&mut store.font_system, None, None);
+        let attrs = Attrs::new().family(Family::Name(family)).weight(weight);
+        buffer.set_text(
+            &mut store.font_system,
+            "bold",
+            &attrs,
+            Shaping::Advanced,
+            None,
+        );
+        let glyph = buffer.layout_runs().next().unwrap().glyphs[0].clone();
+        let face = store.font_system.db().face(glyph.font_id).unwrap();
+        face.families[0].0.clone()
+    }
+
+    /// The shaper keeps a family only when a face has the exact weight
+    /// asked, so a bold request on a one-face family leaves it; the
+    /// weight `weight_for` answers keeps it. A shaper upgrade that
+    /// changes this makes `weight_for` unnecessary.
+    #[test]
+    fn a_bold_request_on_a_one_face_family_leaves_it_unless_the_weight_is_resolved() {
+        let mut store = FontStore::new();
+        assert_ne!(
+            shaped_family(&mut store, MATH_FAMILY, Weight::BOLD),
+            MATH_FAMILY
+        );
+        let weight = store.weight_for(MATH_FAMILY, Weight::BOLD);
+        assert_eq!(shaped_family(&mut store, MATH_FAMILY, weight), MATH_FAMILY);
     }
 }
