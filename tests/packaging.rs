@@ -996,3 +996,168 @@ fn the_bin_package_installs_the_staged_tree() {
     }
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// The three winget manifest templates under `packaging/winget/`, as
+/// `channels.sh` fills them: the identifier, the schema version and the
+/// texts are fixed, the version, the checksum, the product code and the
+/// date are placeholders.
+fn winget(name: &str) -> String {
+    packaging(&format!("winget/Steerania.Oryx.{name}.yaml"))
+}
+
+#[test]
+fn the_winget_installer_template_describes_the_msi_at_machine_scope() {
+    let text = winget("installer");
+    for line in [
+        "PackageIdentifier: Steerania.Oryx\n",
+        "PackageVersion: \"@VERSION@\"\n",
+        "InstallerType: wix\n",
+        "Scope: machine\n",
+        "ReleaseDate: @RELEASE_DATE@\n",
+        "- Architecture: x64\n",
+        "  InstallerUrl: https://github.com/wmahfoudh/oryx/releases/download/v@VERSION@/oryx-@VERSION@-windows-x86_64.msi\n",
+        "  InstallerSha256: @SHA256@\n",
+        "  ProductCode: '@PRODUCT_CODE@'\n",
+        "  - UpgradeCode: '{8EA2EE23-91F8-46EC-9310-6DFBF39A04C9}'\n",
+        "ManifestType: installer\n",
+        "ManifestVersion: 1.28.0\n",
+    ] {
+        assert!(text.contains(line), "{line:?} missing");
+    }
+    let extensions: Vec<&str> = text
+        .lines()
+        .skip_while(|line| *line != "FileExtensions:")
+        .skip(1)
+        .take_while(|line| line.starts_with("- "))
+        .map(|line| &line[2..])
+        .collect();
+    for ext in [
+        "md", "markdown", "txt", "epub", "fb2", "fbz", "mobi", "azw3", "azw", "cbz", "cbr",
+    ] {
+        assert!(
+            extensions.contains(&ext),
+            "{ext} missing from FileExtensions"
+        );
+    }
+}
+
+#[test]
+fn the_winget_locale_template_carries_the_two_texts_and_the_links() {
+    let text = winget("locale.en-US");
+    for line in [
+        "PackageIdentifier: Steerania.Oryx\n",
+        "PackageLocale: en-US\n",
+        "Publisher: Steerania\n",
+        "Author: Walid Mahfoudh\n",
+        "PackageName: Oryx\n",
+        "PackageUrl: https://github.com/wmahfoudh/oryx\n",
+        "License: GPL-3.0-only\n",
+        "LicenseUrl: https://github.com/wmahfoudh/oryx/blob/main/LICENSE\n",
+        "PrivacyUrl: https://github.com/wmahfoudh/oryx/blob/main/PRIVACY.md\n",
+        "ReleaseNotesUrl: https://github.com/wmahfoudh/oryx/releases/tag/v@VERSION@\n",
+        "Moniker: oryx\n",
+        "ManifestType: defaultLocale\n",
+        "ManifestVersion: 1.28.0\n",
+    ] {
+        assert!(text.contains(line), "{line:?} missing");
+    }
+    assert!(
+        text.contains(&format!(
+            "ShortDescription: {}\n",
+            env!("CARGO_PKG_DESCRIPTION")
+        )),
+        "the short line is the crate description"
+    );
+    let tags = text
+        .lines()
+        .skip_while(|line| *line != "Tags:")
+        .skip(1)
+        .take_while(|line| line.starts_with("- "))
+        .count();
+    assert!(
+        (1..=16).contains(&tags),
+        "{tags} tags, the schema allows 16"
+    );
+}
+
+#[test]
+fn the_winget_version_template_names_the_default_locale() {
+    let text = winget("version");
+    assert_eq!(
+        text,
+        "PackageIdentifier: Steerania.Oryx\nPackageVersion: \"@VERSION@\"\nDefaultLocale: en-US\nManifestType: version\nManifestVersion: 1.28.0\n"
+    );
+}
+
+#[test]
+fn the_flathub_manifest_builds_the_tag_offline_into_app() {
+    let text = packaging("flathub/com.steerania.Oryx.yml");
+    for line in [
+        &format!("app-id: {APP_ID}\n"),
+        "runtime: org.freedesktop.Platform\n",
+        "runtime-version: '25.08'\n",
+        "sdk: org.freedesktop.Sdk\n",
+        "  - org.freedesktop.Sdk.Extension.rust-stable\n",
+        "command: oryx\n",
+        "  - --socket=wayland\n",
+        "  - --socket=fallback-x11\n",
+        "  - --share=ipc\n",
+        "  - --share=network\n",
+        "  - --filesystem=home\n",
+        "      - cargo --offline build --release --verbose\n",
+        "      - sh packaging/stage-linux.sh stage /app\n",
+        &format!(
+            "        url: https://github.com/wmahfoudh/oryx/archive/refs/tags/v{}.tar.gz\n",
+            env!("CARGO_PKG_VERSION")
+        ),
+        "      - cargo-sources.json\n",
+    ] {
+        assert!(text.contains(line), "{line:?} missing");
+    }
+}
+
+/// `cargo-sources.json` is regenerated from `Cargo.lock` by Flathub's
+/// generator, cloned beside the repository; a stale file would make the
+/// offline build miss a crate. Skipped when the generator or its
+/// Python modules are absent.
+#[test]
+fn the_flathub_cargo_sources_match_the_lock_file() {
+    let generator = repo()
+        .parent()
+        .unwrap()
+        .join("flatpak-builder-tools/cargo/flatpak-cargo-generator.py");
+    if !generator.is_file() {
+        eprintln!("flatpak-builder-tools is not cloned beside the repository, skipped");
+        return;
+    }
+    if Command::new("python3")
+        .args(["-c", "import aiohttp, toml"])
+        .output()
+        .map(|out| !out.status.success())
+        .unwrap_or(true)
+    {
+        eprintln!("python3 with aiohttp and toml is not installed, skipped");
+        return;
+    }
+    let out_path =
+        std::env::temp_dir().join(format!("oryx-cargo-sources-{}.json", std::process::id()));
+    let out = Command::new("python3")
+        .arg(&generator)
+        .arg(repo().join("Cargo.lock"))
+        .arg("-o")
+        .arg(&out_path)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let fresh = std::fs::read_to_string(&out_path).unwrap();
+    let committed = packaging("flathub/cargo-sources.json");
+    std::fs::remove_file(&out_path).unwrap();
+    assert_eq!(
+        committed, fresh,
+        "packaging/flathub/cargo-sources.json is stale: regenerate it with make channels"
+    );
+}

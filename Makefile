@@ -41,6 +41,9 @@ release: audit
 	rm -rf release/linux release/windows
 	ls -l release
 
+channels:
+	sh packaging/channels.sh $(VERSION)
+
 install:
 	cargo build --release
 	mkdir -p ~/.local/bin ~/.local/share/oryx
@@ -50,4 +53,4 @@ install:
 	cp -r examples ~/.local/share/oryx/examples
 	~/.local/bin/oryx --register
 
-.PHONY: check audit release install
+.PHONY: check audit release channels install
