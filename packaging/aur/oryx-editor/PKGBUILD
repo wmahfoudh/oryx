@@ -1,0 +1,49 @@
+# Maintainer: Walid Mahfoudh <walid.mahfoudh@gmail.com>
+pkgname=oryx-editor
+pkgver=1.0.0
+pkgrel=1
+pkgdesc='Fast editor for markdown and code, reader for ebooks and comics'
+arch=('x86_64')
+url='https://github.com/wmahfoudh/oryx'
+license=('GPL-3.0-only')
+# gcc-libs ships the libgcc_s.so.1 the binary links; namcap calls it
+# implicitly satisfied, it is listed all the same.
+depends=('openssl' 'gcc-libs' 'glibc' 'hicolor-icon-theme')
+makedepends=('cargo' 'librsvg')
+# The command is oryx. The extra repository ships an unrelated oryx (a
+# network sniffer) that installs the same /usr/bin/oryx.
+conflicts=('oryx')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+# Written by packaging/channels.sh once the tag is published.
+sha256sums=('SKIP')
+
+prepare() {
+    cd "oryx-$pkgver"
+    export RUSTUP_TOOLCHAIN=stable
+    cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+    cd "oryx-$pkgver"
+    export RUSTUP_TOOLCHAIN=stable
+    export CARGO_TARGET_DIR=target
+    cargo build --frozen --release
+}
+
+check() {
+    cd "oryx-$pkgver"
+    export RUSTUP_TOOLCHAIN=stable
+    cargo test --frozen --workspace
+}
+
+# The same tree the .deb, the .rpm and the AppImage install, laid out by
+# the script they share from the binary, the themes, the examples and
+# the license.
+package() {
+    cd "oryx-$pkgver"
+    rm -rf stage
+    mkdir stage
+    cp target/release/oryx stage/
+    cp -r themes examples LICENSE stage/
+    sh packaging/stage-linux.sh stage "$pkgdir/usr"
+}

@@ -610,3 +610,389 @@ fn the_rpm_requires_libssl_3_and_carries_the_metadata() {
     }
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// A stand-in AppDir: `AppRun` from `packaging/linux/` over a `usr/bin/oryx`
+/// that prints the data dirs it was given and then its arguments.
+fn app_dir(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("oryx-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("usr/bin")).unwrap();
+    std::fs::write(
+        dir.join("usr/bin/oryx"),
+        "#!/bin/sh\nprintf '%s\\n' \"$XDG_DATA_DIRS\" \"$@\"\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            dir.join("usr/bin/oryx"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+    }
+    std::fs::copy(repo().join("packaging/linux/AppRun"), dir.join("AppRun")).unwrap();
+    dir
+}
+
+fn app_run(dir: &Path, data_dirs: Option<&str>, args: &[&str]) -> String {
+    let mut command = Command::new("sh");
+    command
+        .arg(dir.join("AppRun"))
+        .args(args)
+        .env_remove("APPDIR");
+    match data_dirs {
+        Some(value) => command.env("XDG_DATA_DIRS", value),
+        None => command.env_remove("XDG_DATA_DIRS"),
+    };
+    let out = command.output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+#[test]
+fn app_run_puts_the_bundle_share_before_the_data_dirs_and_passes_the_arguments() {
+    let dir = app_dir("apprun");
+    let out = app_run(
+        &dir,
+        Some("/x/share:/y/share"),
+        &["--theme", "dracula", "notes.md"],
+    );
+    assert_eq!(
+        out,
+        format!(
+            "{}/usr/share:/x/share:/y/share\n--theme\ndracula\nnotes.md\n",
+            dir.display()
+        )
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn app_run_keeps_the_default_data_dirs_when_the_variable_is_unset() {
+    let dir = app_dir("apprun-unset");
+    let out = app_run(&dir, None, &[]);
+    assert_eq!(
+        out,
+        format!("{}/usr/share:/usr/local/share:/usr/share\n", dir.display())
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn appimage_sh_packs_the_staged_tree_with_the_entry_and_the_icon_on_top() {
+    for tool in ["appimagetool", "rsvg-convert"] {
+        if Command::new(tool).arg("--version").output().is_err() {
+            eprintln!("{tool} is not installed, skipped");
+            return;
+        }
+    }
+    let dir = std::env::temp_dir().join(format!("oryx-appimage-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let src = dir.join("src");
+    let usr = dir.join("usr");
+    source_folder(&src);
+    let out = stage(&src, &usr);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    std::fs::write(
+        usr.join("bin/oryx"),
+        "#!/bin/sh\nprintf '%s\\n' \"$XDG_DATA_DIRS\" \"$@\"\n",
+    )
+    .unwrap();
+    let image = dir.join("Oryx-1.2.3-x86_64.AppImage");
+    let out = Command::new("sh")
+        .arg(repo().join("packaging/appimage.sh"))
+        .arg(&usr)
+        .arg(&image)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&image).unwrap().permissions().mode();
+        assert_eq!(mode & 0o111, 0o111, "the image is executable");
+    }
+    // The runtime unpacks the image without FUSE, into `squashfs-root`
+    // under the working directory.
+    let out = Command::new(&image)
+        .arg("--appimage-extract")
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let root = dir.join("squashfs-root");
+    for file in [
+        "AppRun",
+        "com.steerania.Oryx.desktop",
+        "com.steerania.Oryx.png",
+        "usr/bin/oryx",
+        "usr/share/applications/com.steerania.Oryx.desktop",
+        "usr/share/metainfo/com.steerania.Oryx.metainfo.xml",
+        "usr/share/oryx/themes/dracula.toml",
+        "usr/share/oryx/examples/sample.md",
+        "usr/share/icons/hicolor/256x256/apps/com.steerania.Oryx.png",
+    ] {
+        assert!(root.join(file).is_file(), "{file} missing");
+    }
+    let png = std::fs::read(root.join("com.steerania.Oryx.png")).unwrap();
+    assert_eq!(&png[1..4], b"PNG");
+    assert_eq!(
+        std::fs::read_link(root.join(".DirIcon")).unwrap(),
+        Path::new("com.steerania.Oryx.png"),
+        ".DirIcon points at the top icon"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("com.steerania.Oryx.desktop")).unwrap(),
+        packaging("linux/com.steerania.Oryx.desktop"),
+        "the top entry is the packaging one, unchanged"
+    );
+    let out = Command::new(root.join("AppRun"))
+        .arg("notes.md")
+        .env_remove("APPDIR")
+        .env("XDG_DATA_DIRS", "/x/share")
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        format!("{}/usr/share:/x/share\nnotes.md\n", root.display()),
+        "the unpacked AppRun runs the bundled binary"
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+fn pkgbuild(package: &str) -> String {
+    packaging(&format!("aur/{package}/PKGBUILD"))
+}
+
+/// The right-hand side of a `key=value` line of a PKGBUILD.
+fn pkgbuild_field<'a>(text: &'a str, key: &str) -> &'a str {
+    text.lines()
+        .find_map(|line| line.strip_prefix(&format!("{key}=")))
+        .unwrap_or_else(|| panic!("{key} missing"))
+}
+
+#[test]
+fn the_source_pkgbuild_builds_the_tag_at_the_crate_version_and_conflicts_with_oryx() {
+    let text = pkgbuild("oryx-editor");
+    assert_eq!(pkgbuild_field(&text, "pkgname"), "oryx-editor");
+    assert_eq!(pkgbuild_field(&text, "pkgver"), env!("CARGO_PKG_VERSION"));
+    assert_eq!(
+        pkgbuild_field(&text, "pkgdesc"),
+        format!("'{}'", env!("CARGO_PKG_DESCRIPTION"))
+    );
+    assert_eq!(
+        pkgbuild_field(&text, "url"),
+        "'https://github.com/wmahfoudh/oryx'"
+    );
+    assert_eq!(pkgbuild_field(&text, "license"), "('GPL-3.0-only')");
+    assert_eq!(pkgbuild_field(&text, "arch"), "('x86_64')");
+    assert_eq!(pkgbuild_field(&text, "conflicts"), "('oryx')");
+    assert_eq!(
+        pkgbuild_field(&text, "depends"),
+        "('openssl' 'gcc-libs' 'glibc' 'hicolor-icon-theme')"
+    );
+    assert_eq!(pkgbuild_field(&text, "makedepends"), "('cargo' 'librsvg')");
+    assert!(
+        text.contains("$url/archive/refs/tags/v$pkgver.tar.gz"),
+        "the source is the tag tarball"
+    );
+    assert!(text.contains("--frozen --release"), "the build is frozen");
+    assert!(
+        text.contains("packaging/stage-linux.sh"),
+        "the package is the staged tree"
+    );
+}
+
+#[test]
+fn the_bin_pkgbuild_fetches_the_release_files_and_provides_oryx_editor() {
+    let text = pkgbuild("oryx-editor-bin");
+    assert_eq!(pkgbuild_field(&text, "pkgname"), "oryx-editor-bin");
+    assert_eq!(pkgbuild_field(&text, "pkgver"), env!("CARGO_PKG_VERSION"));
+    assert_eq!(
+        pkgbuild_field(&text, "pkgdesc"),
+        format!("'{}'", env!("CARGO_PKG_DESCRIPTION"))
+    );
+    assert_eq!(pkgbuild_field(&text, "license"), "('GPL-3.0-only')");
+    assert_eq!(pkgbuild_field(&text, "provides"), "('oryx-editor')");
+    assert_eq!(pkgbuild_field(&text, "conflicts"), "('oryx' 'oryx-editor')");
+    assert_eq!(
+        pkgbuild_field(&text, "depends"),
+        "('openssl' 'gcc-libs' 'glibc' 'hicolor-icon-theme')"
+    );
+    assert_eq!(pkgbuild_field(&text, "makedepends"), "('librsvg')");
+    for source in [
+        "$url/releases/download/v$pkgver/oryx-$pkgver-linux-$CARCH.tar.gz",
+        "/v$pkgver/packaging/linux/com.steerania.Oryx.desktop",
+        "/v$pkgver/packaging/linux/com.steerania.Oryx.metainfo.xml",
+        "/v$pkgver/assets/icon/oryx.svg",
+        "/v$pkgver/packaging/stage-linux.sh",
+    ] {
+        assert!(text.contains(source), "{source} missing from the sources");
+    }
+}
+
+#[test]
+fn the_srcinfo_files_are_what_makepkg_prints() {
+    if Command::new("makepkg").arg("--version").output().is_err() {
+        eprintln!("makepkg is not installed, skipped");
+        return;
+    }
+    for package in ["oryx-editor", "oryx-editor-bin"] {
+        let dir = repo().join("packaging/aur").join(package);
+        let out = Command::new("makepkg")
+            .arg("--printsrcinfo")
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let printed = String::from_utf8_lossy(&out.stdout);
+        let file = std::fs::read_to_string(dir.join(".SRCINFO")).unwrap();
+        assert_eq!(file, printed, "{package}/.SRCINFO is stale");
+    }
+}
+
+#[test]
+fn the_bin_package_installs_the_staged_tree() {
+    for tool in ["makepkg", "fakeroot", "rsvg-convert", "bsdtar"] {
+        if Command::new(tool).arg("--version").output().is_err() {
+            eprintln!("{tool} is not installed, skipped");
+            return;
+        }
+    }
+    let version = env!("CARGO_PKG_VERSION");
+    let dir = std::env::temp_dir().join(format!("oryx-aur-bin-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    // The sources under the names the PKGBUILD downloads them as, which
+    // makepkg picks up from the build folder before fetching anything.
+    let start = dir.join("start");
+    std::fs::create_dir_all(&start).unwrap();
+    std::fs::copy(
+        repo().join("packaging/aur/oryx-editor-bin/PKGBUILD"),
+        start.join("PKGBUILD"),
+    )
+    .unwrap();
+    let release = dir.join("release");
+    source_folder(&release.join("oryx"));
+    std::fs::write(release.join("oryx/install.sh"), "# per-user\n").unwrap();
+    let tarball = start.join(format!("oryx-{version}-linux-x86_64.tar.gz"));
+    let out = Command::new("tar")
+        .arg("-czf")
+        .arg(&tarball)
+        .arg("-C")
+        .arg(&release)
+        .arg("oryx")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    for (name, file) in [
+        ("desktop", "packaging/linux/com.steerania.Oryx.desktop"),
+        (
+            "metainfo.xml",
+            "packaging/linux/com.steerania.Oryx.metainfo.xml",
+        ),
+        ("svg", "assets/icon/oryx.svg"),
+        ("stage-linux.sh", "packaging/stage-linux.sh"),
+    ] {
+        std::fs::copy(
+            repo().join(file),
+            start.join(format!("oryx-editor-bin-{version}.{name}")),
+        )
+        .unwrap();
+    }
+    let out = Command::new("makepkg")
+        .args(["-f", "--nodeps", "--skipinteg", "--noconfirm"])
+        .current_dir(&start)
+        .env("SRCDEST", &start)
+        .env("PKGDEST", &dir)
+        .env("BUILDDIR", dir.join("build"))
+        .env("LOGDEST", dir.join("build"))
+        .env("PACKAGER", "tests <tests@example.invalid>")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let package = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| {
+                    name.starts_with(&format!("oryx-editor-bin-{version}-1-x86_64.pkg.tar"))
+                        && !name.ends_with(".sig")
+                })
+        })
+        .expect("the built package");
+    let listing = Command::new("bsdtar")
+        .arg("-tf")
+        .arg(&package)
+        .output()
+        .unwrap();
+    let listing = String::from_utf8_lossy(&listing.stdout);
+    for file in [
+        "usr/bin/oryx",
+        "usr/share/applications/com.steerania.Oryx.desktop",
+        "usr/share/metainfo/com.steerania.Oryx.metainfo.xml",
+        "usr/share/icons/hicolor/512x512/apps/com.steerania.Oryx.png",
+        "usr/share/icons/hicolor/scalable/apps/com.steerania.Oryx.svg",
+        "usr/share/oryx/themes/dracula.toml",
+        "usr/share/oryx/examples/sample.md",
+        "usr/share/licenses/oryx-editor/LICENSE",
+    ] {
+        assert!(
+            listing.contains(&format!("{file}\n")),
+            "{file} missing:\n{listing}"
+        );
+    }
+    assert!(
+        !listing.contains("install.sh"),
+        "the per-user script has no place in the package"
+    );
+    let info = Command::new("bsdtar")
+        .args(["-xOf"])
+        .arg(&package)
+        .arg(".PKGINFO")
+        .output()
+        .unwrap();
+    let info = String::from_utf8_lossy(&info.stdout);
+    for line in [
+        "pkgname = oryx-editor-bin\n",
+        &format!("pkgver = {version}-1\n"),
+        "provides = oryx-editor\n",
+        "conflict = oryx\n",
+        "conflict = oryx-editor\n",
+        "depend = openssl\n",
+        "depend = hicolor-icon-theme\n",
+        "license = GPL-3.0-only\n",
+    ] {
+        assert!(info.contains(line), "{line:?} missing:\n{info}");
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}

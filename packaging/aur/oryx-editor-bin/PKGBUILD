@@ -1,0 +1,47 @@
+# Maintainer: Walid Mahfoudh <walid.mahfoudh@gmail.com>
+pkgname=oryx-editor-bin
+pkgver=1.0.0
+pkgrel=1
+pkgdesc='Fast editor for markdown and code, reader for ebooks and comics'
+arch=('x86_64')
+url='https://github.com/wmahfoudh/oryx'
+license=('GPL-3.0-only')
+# gcc-libs ships the libgcc_s.so.1 the binary links; namcap calls it
+# implicitly satisfied, it is listed all the same.
+depends=('openssl' 'gcc-libs' 'glibc' 'hicolor-icon-theme')
+makedepends=('librsvg')
+provides=('oryx-editor')
+# The command is oryx. The extra repository ships an unrelated oryx (a
+# network sniffer) that installs the same /usr/bin/oryx.
+conflicts=('oryx' 'oryx-editor')
+# The release binary is shipped as built, already stripped, with no
+# debug split to make from it.
+options=('!strip' '!debug')
+source=("$url/releases/download/v$pkgver/oryx-$pkgver-linux-$CARCH.tar.gz"
+        "$pkgname-$pkgver.desktop::https://raw.githubusercontent.com/wmahfoudh/oryx/v$pkgver/packaging/linux/com.steerania.Oryx.desktop"
+        "$pkgname-$pkgver.metainfo.xml::https://raw.githubusercontent.com/wmahfoudh/oryx/v$pkgver/packaging/linux/com.steerania.Oryx.metainfo.xml"
+        "$pkgname-$pkgver.svg::https://raw.githubusercontent.com/wmahfoudh/oryx/v$pkgver/assets/icon/oryx.svg"
+        "$pkgname-$pkgver.stage-linux.sh::https://raw.githubusercontent.com/wmahfoudh/oryx/v$pkgver/packaging/stage-linux.sh")
+# Written by packaging/channels.sh once the release is published.
+sha256sums=('SKIP'
+            'SKIP'
+            'SKIP'
+            'SKIP'
+            'SKIP')
+
+# The binary is the release build, made on Ubuntu 22.04 against glibc
+# 2.35 and OpenSSL 3. The desktop files are laid out by the script the
+# .deb, the .rpm, the AppImage and the source package share, placed here
+# where it expects them.
+prepare() {
+    rm -rf tree
+    mkdir -p tree/packaging/linux tree/assets/icon
+    cp "$pkgname-$pkgver.desktop" tree/packaging/linux/com.steerania.Oryx.desktop
+    cp "$pkgname-$pkgver.metainfo.xml" tree/packaging/linux/com.steerania.Oryx.metainfo.xml
+    cp "$pkgname-$pkgver.svg" tree/assets/icon/oryx.svg
+    cp "$pkgname-$pkgver.stage-linux.sh" tree/packaging/stage-linux.sh
+}
+
+package() {
+    sh tree/packaging/stage-linux.sh oryx "$pkgdir/usr"
+}

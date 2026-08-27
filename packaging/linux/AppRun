@@ -1,0 +1,10 @@
+#!/bin/sh
+# The AppImage's entry point. The runtime mounts the image and sets
+# APPDIR to the mount; run from an unpacked tree, the folder is taken
+# from this file's own location. The bundled share is put in front of
+# XDG_DATA_DIRS so the themes under usr/share/oryx/themes are found,
+# with the system's data folders kept behind it (their defaults when
+# the variable is unset, so nothing of the system's is hidden).
+here="${APPDIR:-$(dirname "$(readlink -f "$0")")}"
+export XDG_DATA_DIRS="$here/usr/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+exec "$here/usr/bin/oryx" "$@"

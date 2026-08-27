@@ -1,0 +1,18 @@
+pkgbase = oryx-editor
+	pkgdesc = Fast editor for markdown and code, reader for ebooks and comics
+	pkgver = 1.0.0
+	pkgrel = 1
+	url = https://github.com/wmahfoudh/oryx
+	arch = x86_64
+	license = GPL-3.0-only
+	makedepends = cargo
+	makedepends = librsvg
+	depends = openssl
+	depends = gcc-libs
+	depends = glibc
+	depends = hicolor-icon-theme
+	conflicts = oryx
+	source = oryx-editor-1.0.0.tar.gz::https://github.com/wmahfoudh/oryx/archive/refs/tags/v1.0.0.tar.gz
+	sha256sums = SKIP
+
+pkgname = oryx-editor
