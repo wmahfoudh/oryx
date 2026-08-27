@@ -23,11 +23,11 @@ source=("$url/releases/download/v$pkgver/oryx-$pkgver-linux-$CARCH.tar.gz"
         "$pkgname-$pkgver.svg::https://raw.githubusercontent.com/wmahfoudh/oryx/v$pkgver/assets/icon/oryx.svg"
         "$pkgname-$pkgver.stage-linux.sh::https://raw.githubusercontent.com/wmahfoudh/oryx/v$pkgver/packaging/stage-linux.sh")
 # Written by packaging/channels.sh once the release is published.
-sha256sums=('SKIP'
-            'SKIP'
-            'SKIP'
-            'SKIP'
-            'SKIP')
+sha256sums=('80bce3f792be6bc7a47dca39a56dba033858237fc9bc21b9cf7301f92497c7a5'
+            '0885c988e89e659d9429b8154a41b1310fb43115b7f1d209c1e4485a3d635193'
+            'f786fe47ef1e17b1dfcb744dbd4ddfe4010b40f09a9ac7ee1104c63599fcfbd6'
+            '4a18393ce9d317508b6002214d9b3cef677ddc5fa631d47ccf53daf9e7bb65e9'
+            'aafa7be3fb4850bed38f395de4235d7c88d7b191ec33134c757148128008b625')
 
 # The binary is the release build, made on Ubuntu 22.04 against glibc
 # 2.35 and OpenSSL 3. The desktop files are laid out by the script the

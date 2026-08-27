@@ -13,6 +13,6 @@ pkgbase = oryx-editor
 	depends = hicolor-icon-theme
 	conflicts = oryx
 	source = oryx-editor-1.0.0.tar.gz::https://github.com/wmahfoudh/oryx/archive/refs/tags/v1.0.0.tar.gz
-	sha256sums = SKIP
+	sha256sums = e773745c4c933a7682934c692a5242cee68c6762202413d1feebede15ef3f2b5
 
 pkgname = oryx-editor

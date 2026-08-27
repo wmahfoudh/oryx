@@ -35,7 +35,7 @@ modules:
     sources:
       - type: archive
         url: https://github.com/wmahfoudh/oryx/archive/refs/tags/v1.0.0.tar.gz
-        sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+        sha256: "e773745c4c933a7682934c692a5242cee68c6762202413d1feebede15ef3f2b5"
         x-checker-data:
           type: json
           url: https://api.github.com/repos/wmahfoudh/oryx/releases/latest
