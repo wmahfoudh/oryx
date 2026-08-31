@@ -116,7 +116,7 @@ fill "$here/winget/Steerania.Oryx.locale.en-US.yaml" "$out/Steerania.Oryx.locale
 fill "$here/winget/Steerania.Oryx.version.yaml" "$out/Steerania.Oryx.yaml"
 if python3 -c 'import jsonschema, yaml' 2>/dev/null; then
     for kind in installer defaultLocale version; do
-        curl -fsSL -o "$work/$kind.schema.json" "https://aka.ms/winget-manifest.$kind.1.28.0.schema.json" \
+        curl -fsSL -o "$work/$kind.schema.json" "https://aka.ms/winget-manifest.$kind.1.12.0.schema.json" \
             || refuse "cannot download the winget $kind schema"
     done
     python3 - "$out" "$work" <<'PY'
@@ -136,7 +136,7 @@ for name, kind in pairs:
     schema = json.load(open(f"{work}/{kind}.schema.json"))
     data = yaml.load(open(f"{out}/{name}"), Loader=Loader)
     jsonschema.validate(data, schema, format_checker=jsonschema.FormatChecker())
-    print(f"{name}: valid against the {kind} 1.28.0 schema")
+    print(f"{name}: valid against the {kind} 1.12.0 schema")
 PY
 else
     echo "channels.sh: winget schema check skipped, python3 has no jsonschema or yaml"

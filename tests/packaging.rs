@@ -1020,7 +1020,7 @@ fn the_winget_installer_template_describes_the_msi_at_machine_scope() {
         "  ProductCode: '@PRODUCT_CODE@'\n",
         "  - UpgradeCode: '{8EA2EE23-91F8-46EC-9310-6DFBF39A04C9}'\n",
         "ManifestType: installer\n",
-        "ManifestVersion: 1.28.0\n",
+        "ManifestVersion: 1.12.0\n",
     ] {
         assert!(text.contains(line), "{line:?} missing");
     }
@@ -1057,7 +1057,7 @@ fn the_winget_locale_template_carries_the_two_texts_and_the_links() {
         "ReleaseNotesUrl: https://github.com/wmahfoudh/oryx/releases/tag/v@VERSION@\n",
         "Moniker: oryx\n",
         "ManifestType: defaultLocale\n",
-        "ManifestVersion: 1.28.0\n",
+        "ManifestVersion: 1.12.0\n",
     ] {
         assert!(text.contains(line), "{line:?} missing");
     }
@@ -1085,7 +1085,7 @@ fn the_winget_version_template_names_the_default_locale() {
     let text = winget("version");
     assert_eq!(
         text,
-        "PackageIdentifier: Steerania.Oryx\nPackageVersion: \"@VERSION@\"\nDefaultLocale: en-US\nManifestType: version\nManifestVersion: 1.28.0\n"
+        "# yaml-language-server: $schema=https://aka.ms/winget-manifest.version.1.12.0.schema.json\nPackageIdentifier: Steerania.Oryx\nPackageVersion: \"@VERSION@\"\nDefaultLocale: en-US\nManifestType: version\nManifestVersion: 1.12.0\n"
     );
 }
 
