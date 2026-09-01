@@ -1,7 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- The Store package manifest. msix.sh fills the @VALUES@ from
      packaging/msix/identity and the crate version; the file type list is
-     held to load::recognized_extensions() by tests/packaging.rs. -->
+     held to load::recognized_extensions(), minus the extensions Windows
+     reserves for the operating system, by tests/packaging.rs. -->
 <Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
          xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
          xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
@@ -49,7 +50,6 @@
               <uap:FileType>.applescript</uap:FileType>
               <uap:FileType>.as</uap:FileType>
               <uap:FileType>.bash</uap:FileType>
-              <uap:FileType>.bat</uap:FileType>
               <uap:FileType>.bib</uap:FileType>
               <uap:FileType>.c</uap:FileType>
               <uap:FileType>.cc</uap:FileType>
@@ -57,7 +57,6 @@
               <uap:FileType>.cl</uap:FileType>
               <uap:FileType>.clj</uap:FileType>
               <uap:FileType>.cls</uap:FileType>
-              <uap:FileType>.cmd</uap:FileType>
               <uap:FileType>.cpp</uap:FileType>
               <uap:FileType>.cs</uap:FileType>
               <uap:FileType>.css</uap:FileType>
@@ -92,7 +91,6 @@
               <uap:FileType>.hxx</uap:FileType>
               <uap:FileType>.ini</uap:FileType>
               <uap:FileType>.java</uap:FileType>
-              <uap:FileType>.js</uap:FileType>
               <uap:FileType>.json</uap:FileType>
               <uap:FileType>.jsp</uap:FileType>
               <uap:FileType>.jsx</uap:FileType>
@@ -114,16 +112,13 @@
               <uap:FileType>.patch</uap:FileType>
               <uap:FileType>.php</uap:FileType>
               <uap:FileType>.phtml</uap:FileType>
-              <uap:FileType>.pl</uap:FileType>
               <uap:FileType>.pm</uap:FileType>
               <uap:FileType>.pod</uap:FileType>
               <uap:FileType>.properties</uap:FileType>
               <uap:FileType>.proto</uap:FileType>
-              <uap:FileType>.py</uap:FileType>
               <uap:FileType>.pyi</uap:FileType>
               <uap:FileType>.pyw</uap:FileType>
               <uap:FileType>.r</uap:FileType>
-              <uap:FileType>.rb</uap:FileType>
               <uap:FileType>.rest</uap:FileType>
               <uap:FileType>.rs</uap:FileType>
               <uap:FileType>.rss</uap:FileType>

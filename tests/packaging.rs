@@ -299,13 +299,21 @@ fn manifest_file_types(xml: &str) -> Vec<String> {
         .collect()
 }
 
+/// Extensions Windows reserves for the operating system: a package that
+/// declares one fails to register (0x80080204) and the Store rejects it
+/// in certification. The reservation binds MSIX packages only; the MSI
+/// and `oryx --register` keep the full list. The reserved set is listed
+/// at learn.microsoft.com/windows/apps/develop/launch/reserved-uri-scheme-names.
+const MSIX_RESERVED: [&str; 6] = ["bat", "cmd", "js", "pl", "py", "rb"];
+
 #[test]
-fn the_msix_manifest_claims_every_extension_the_code_registers() {
+fn the_msix_manifest_claims_every_extension_but_the_windows_reserved() {
     let xml = packaging("msix/AppxManifest.xml");
     let mut listed = manifest_file_types(&xml);
     listed.sort_unstable();
     let mut expected: Vec<String> = oryx::doc::load::recognized_extensions()
         .into_iter()
+        .filter(|ext| !MSIX_RESERVED.contains(ext))
         .map(str::to_string)
         .collect();
     expected.sort_unstable();
