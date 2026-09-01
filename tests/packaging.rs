@@ -1119,8 +1119,37 @@ fn the_flathub_manifest_builds_the_tag_offline_into_app() {
             env!("CARGO_PKG_VERSION")
         ),
         "      - cargo-sources.json\n",
+        "      - type: patch\n",
+        "        path: metainfo-screenshots.patch\n",
     ] {
         assert!(text.contains(line), "{line:?} missing");
+    }
+}
+
+/// The patch swaps the tagged metainfo's screenshots for the Flathub-sized
+/// set on main. It is removed, together with its manifest source, once a
+/// release carries the new metainfo; from then on it no longer applies.
+#[test]
+fn the_flathub_metainfo_patch_adds_the_flathub_screenshots() {
+    let patch = packaging("flathub/metainfo-screenshots.patch");
+    let metainfo = packaging("linux/com.steerania.Oryx.metainfo.xml");
+    for name in [
+        "flathub-hero.png",
+        "flathub-math.png",
+        "flathub-code.png",
+        "flathub-regex.png",
+        "flathub-rtl-ar.png",
+        "flathub-themes-editor.png",
+    ] {
+        assert!(
+            patch.contains(&format!("+      <image>https://raw.githubusercontent.com/wmahfoudh/oryx/main/screenshots/{name}</image>")),
+            "{name} missing from the patch"
+        );
+        assert!(metainfo.contains(name), "{name} missing from the metainfo");
+        assert!(
+            std::fs::metadata(repo().join("screenshots").join(name)).is_ok(),
+            "screenshots/{name} is missing"
+        );
     }
 }
 
