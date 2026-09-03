@@ -1,5 +1,7 @@
 # Changelog
 
+## v1.1.0
+
 ## v1.0.0
 
 Version 1.0.0 is the first one published as packages: a `.deb`, an `.rpm` and an AppImage on the release page, two AUR packages, and the Windows installer, beside the tarball and the zip as before. The details:

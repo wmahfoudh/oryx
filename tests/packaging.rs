@@ -72,16 +72,58 @@ fn the_desktop_entry_validates_when_the_tool_is_installed() {
     }
 }
 
+/// The metainfo's release lines in order, newest first: the version
+/// and whether the line is marked `type="development"`.
+fn metainfo_releases() -> Vec<(String, bool)> {
+    let xml = packaging("linux/com.steerania.Oryx.metainfo.xml");
+    xml.split("<release ")
+        .skip(1)
+        .map(|rest| {
+            let tag = rest.split('>').next().unwrap();
+            let version = tag
+                .split("version=\"")
+                .nth(1)
+                .and_then(|v| v.split('"').next())
+                .expect("a version attribute");
+            (version.to_string(), tag.contains("type=\"development\""))
+        })
+        .collect()
+}
+
+/// The newest release the recipes describe. A phase opens by bumping
+/// the crate and adding a release line marked development; the recipes
+/// keep the checksums of the last published tag until `make channels`
+/// rewrites them after the release, when the mark comes off.
+fn last_stable_release() -> String {
+    metainfo_releases()
+        .into_iter()
+        .find(|(_, development)| !development)
+        .map(|(version, _)| version)
+        .expect("a stable release line")
+}
+
 #[test]
 fn the_metainfo_newest_release_is_the_crate_version() {
-    let xml = packaging("linux/com.steerania.Oryx.metainfo.xml");
-    let first = xml.find("<release ").expect("a release list");
-    let version = xml[first..]
-        .split("version=\"")
-        .nth(1)
-        .and_then(|rest| rest.split('"').next())
-        .expect("a version attribute");
-    assert_eq!(version, env!("CARGO_PKG_VERSION"));
+    let releases = metainfo_releases();
+    assert_eq!(releases[0].0, env!("CARGO_PKG_VERSION"));
+}
+
+#[test]
+fn only_the_newest_release_may_be_marked_development() {
+    let releases = metainfo_releases();
+    assert!(
+        releases.iter().skip(1).all(|(_, development)| !development),
+        "a development mark below the newest line is a release that never shipped"
+    );
+    let stable = last_stable_release();
+    if releases[0].1 {
+        assert_eq!(
+            stable, releases[1].0,
+            "the recipes lag the crate by one release"
+        );
+    } else {
+        assert_eq!(stable, env!("CARGO_PKG_VERSION"));
+    }
 }
 
 #[test]
@@ -838,10 +880,10 @@ fn pkgbuild_field<'a>(text: &'a str, key: &str) -> &'a str {
 }
 
 #[test]
-fn the_source_pkgbuild_builds_the_tag_at_the_crate_version_and_conflicts_with_oryx() {
+fn the_source_pkgbuild_builds_the_tag_of_the_last_release_and_conflicts_with_oryx() {
     let text = pkgbuild("oryx-editor");
     assert_eq!(pkgbuild_field(&text, "pkgname"), "oryx-editor");
-    assert_eq!(pkgbuild_field(&text, "pkgver"), env!("CARGO_PKG_VERSION"));
+    assert_eq!(pkgbuild_field(&text, "pkgver"), last_stable_release());
     assert_eq!(
         pkgbuild_field(&text, "pkgdesc"),
         format!("'{}'", env!("CARGO_PKG_DESCRIPTION"))
@@ -873,7 +915,7 @@ fn the_source_pkgbuild_builds_the_tag_at_the_crate_version_and_conflicts_with_or
 fn the_bin_pkgbuild_fetches_the_release_files_and_provides_oryx_editor() {
     let text = pkgbuild("oryx-editor-bin");
     assert_eq!(pkgbuild_field(&text, "pkgname"), "oryx-editor-bin");
-    assert_eq!(pkgbuild_field(&text, "pkgver"), env!("CARGO_PKG_VERSION"));
+    assert_eq!(pkgbuild_field(&text, "pkgver"), last_stable_release());
     assert_eq!(
         pkgbuild_field(&text, "pkgdesc"),
         format!("'{}'", env!("CARGO_PKG_DESCRIPTION"))
@@ -929,7 +971,10 @@ fn the_bin_package_installs_the_staged_tree() {
             return;
         }
     }
-    let version = env!("CARGO_PKG_VERSION");
+    // The sources are named with the PKGBUILD's own version, the last
+    // release, which the crate may be ahead of during a phase.
+    let text = pkgbuild("oryx-editor-bin");
+    let version = pkgbuild_field(&text, "pkgver");
     let dir = std::env::temp_dir().join(format!("oryx-aur-bin-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     // The sources under the names the PKGBUILD downloads them as, which
@@ -1156,7 +1201,7 @@ fn the_flathub_manifest_builds_the_tag_offline_into_app() {
         "      - sh packaging/stage-linux.sh stage /app\n",
         &format!(
             "        url: https://github.com/wmahfoudh/oryx/archive/refs/tags/v{}.tar.gz\n",
-            env!("CARGO_PKG_VERSION")
+            last_stable_release()
         ),
         "      - cargo-sources.json\n",
     ] {
