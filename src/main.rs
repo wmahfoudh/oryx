@@ -52,6 +52,17 @@ fn usage() -> String {
     )
 }
 
+/// The `--version` line: the crate version, then the short commit the
+/// build script read from git. A build from a source archive (the AUR
+/// source package, a Flathub build) has no checkout and prints the
+/// version alone.
+fn version_line(commit: Option<&str>) -> String {
+    match commit {
+        Some(commit) => format!("oryx {} ({commit})", env!("CARGO_PKG_VERSION")),
+        None => format!("oryx {}", env!("CARGO_PKG_VERSION")),
+    }
+}
+
 /// `--clear-cache`: the downloaded remote images go, and the line
 /// printed names the folder and the count so the user sees what went.
 fn clear_cache() -> ExitCode {
@@ -116,7 +127,7 @@ fn main() -> ExitCode {
     attach_parent_console();
     match parse_args(std::env::args_os().skip(1)) {
         Cli::Version => {
-            println!("oryx {}", env!("CARGO_PKG_VERSION"));
+            println!("{}", version_line(option_env!("ORYX_COMMIT")));
             ExitCode::SUCCESS
         }
         Cli::Register => match oryx::platform::register::register() {
@@ -172,6 +183,16 @@ mod tests {
             .map(OsString::from)
             .collect::<Vec<_>>()
             .into_iter()
+    }
+
+    #[test]
+    fn the_version_line_names_the_commit_when_the_build_knows_it() {
+        let version = env!("CARGO_PKG_VERSION");
+        assert_eq!(
+            version_line(Some("abc1234")),
+            format!("oryx {version} (abc1234)")
+        );
+        assert_eq!(version_line(None), format!("oryx {version}"));
     }
 
     #[test]

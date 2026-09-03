@@ -735,7 +735,20 @@ fn app_run(dir: &Path, data_dirs: Option<&str>, args: &[&str]) -> String {
         Some(value) => command.env("XDG_DATA_DIRS", value),
         None => command.env_remove("XDG_DATA_DIRS"),
     };
-    let out = command.output().unwrap();
+    // The stub was written moments ago, and a test on another thread
+    // may fork its own child while the write handle is still open; the
+    // child keeps that handle until it execs, and running the stub in
+    // that window fails with "Text file busy". The window is
+    // microseconds long, so a short retry rides it out.
+    let mut out = command.output().unwrap();
+    for _ in 0..20 {
+        if out.status.success() || !String::from_utf8_lossy(&out.stderr).contains("Text file busy")
+        {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        out = command.output().unwrap();
+    }
     assert!(
         out.status.success(),
         "{}",

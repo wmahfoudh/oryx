@@ -7,6 +7,9 @@
 //! Grammar pipeline: compiles the `.sublime-syntax` sources under
 //! `assets/syntaxes/` together with syntect's default set into one
 //! serialized dump in OUT_DIR, which the highlighter embeds.
+//!
+//! The short commit of the checkout, when the build runs in one, goes
+//! to `--version` through the `ORYX_COMMIT` environment variable.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -22,6 +25,7 @@ const SIZES: [u32; 6] = [16, 32, 48, 64, 128, 256];
 fn main() {
     println!("cargo:rerun-if-changed=assets/icon/oryx.svg");
     println!("cargo:rerun-if-changed=src/platform/resource.rs");
+    commit_env();
     let out = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
     let svg = std::fs::read("assets/icon/oryx.svg").expect("icon svg readable");
     let options = resvg::usvg::Options::default();
@@ -62,6 +66,52 @@ fn main() {
 
 /// One dump holds the default set plus the bundled grammar sources, so
 /// the highlighter loads everything in a single deserialization.
+/// Sets `ORYX_COMMIT` to the short commit when the package directory is
+/// a git checkout. The repository must be the package's own: a source
+/// archive unpacked inside another repository (the AUR build folder is
+/// one) finds that repository's HEAD, which is not Oryx's. The build
+/// reruns when HEAD or the branch it names moves, so a new commit shows
+/// in `--version` without a clean build; a missing checkout sets nothing.
+fn commit_env() {
+    let git = |args: &[&str]| {
+        Command::new("git")
+            .args(args)
+            .output()
+            .ok()
+            .filter(|out| out.status.success())
+            .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+            .filter(|text| !text.is_empty())
+    };
+    let Some(top) = git(&["rev-parse", "--show-toplevel"]) else {
+        return;
+    };
+    let manifest = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
+    let same = std::fs::canonicalize(&top).ok() == std::fs::canonicalize(&manifest).ok();
+    if !same {
+        return;
+    }
+    let Some(dir) = git(&["rev-parse", "--git-dir"]) else {
+        return;
+    };
+    let dir = Path::new(&dir);
+    for path in [
+        Some(dir.join("HEAD")),
+        git(&["symbolic-ref", "-q", "HEAD"]).map(|r| dir.join(r)),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        // A packed ref has no file of its own; listing a missing path
+        // would rerun the script on every build.
+        if path.is_file() {
+            println!("cargo:rerun-if-changed={}", path.display());
+        }
+    }
+    if let Some(commit) = git(&["rev-parse", "--short", "HEAD"]) {
+        println!("cargo:rustc-env=ORYX_COMMIT={commit}");
+    }
+}
+
 fn build_syntax_dump(out: &Path) {
     watch_tree(Path::new("assets/syntaxes"));
     let mut builder = syntect::parsing::SyntaxSet::load_defaults_newlines().into_builder();
