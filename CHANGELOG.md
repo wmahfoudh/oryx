@@ -7,6 +7,8 @@ Version 1.0.0 is the first one published as packages: a `.deb`, an `.rpm` and an
 - Oryx ships as a `.deb` and an `.rpm` on the release page, beside the tarball, the zip and the MSI.
 - An AppImage is on the release page too: one file that runs on any Linux with glibc 2.35 and OpenSSL 3, nothing to install.
 - On Arch Linux, Oryx is in the AUR as `oryx-editor` (built from source) and `oryx-editor-bin` (the release binary).
+- Oryx is in the Microsoft Store as Oryx Editor, free, for Windows 10 and 11. The Store package cannot claim the file types Windows reserves for itself (`.bat`, `.cmd`, `.js`, `.pl`, `.py`, `.rb`), so under the Store install those files are opened from inside Oryx (Ctrl+O or the sidebar) rather than from the file manager; the MSI keeps every type.
+- On Windows, `winget install Steerania.Oryx` installs the MSI.
 - Headings and bold words stay in the chosen body font when that font has no bold face (a cursive or display font, for example). Before, they switched to another font, on screen and in the PDF.
 - In the editor, a checkbox followed by a word in parentheses (`- [ ] (Ivan) call back`) no longer shows the parentheses in the link color. The old Markdown allowed a space between `[text]` and `(url)`; the page does not, and the editor now agrees with the page for links, references and images.
 - The Linux binary is built on Ubuntu 22.04 and runs on Debian 12, Ubuntu 22.04, Fedora 36, openSUSE Leap 15.4 and newer (glibc 2.35, OpenSSL 3).

@@ -8,6 +8,8 @@
 <a href="https://www.rust-lang.org"><img alt="Language" src="https://img.shields.io/badge/LANGUAGE-RUST-orange?style=for-the-badge&logo=rust&logoColor=white"></a>
 <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/LICENSE-GPL--3.0-darkgreen?style=for-the-badge"></a>
 
+<a href="https://apps.microsoft.com/detail/9NQGHNSJF3VB"><picture><source media="(prefers-color-scheme: dark)" srcset="https://get.microsoft.com/images/en-us%20light.svg"><img alt="Get it from Microsoft" src="https://get.microsoft.com/images/en-us%20dark.svg" width="200"></picture></a>
+
 </div>
 
 ## Philosophy
@@ -178,11 +180,10 @@ Oryx is packaged for the following platforms. Pick yours on the [releases page](
 - **Debian and Ubuntu**: the `.deb`, `sudo apt install ./oryx-editor_1.0.0_amd64.deb`.
 - **Fedora and openSUSE**: the `.rpm`, `sudo dnf install ./oryx-editor-1.0.0-1.x86_64.rpm` (or `zypper`).
 - **Any Linux**: the AppImage, one file to make executable and run, nothing to install.
-- **Arch Linux**: from the AUR, `yay -S oryx-editor-bin` (the release binary) or `yay -S oryx-editor` (built from source).
-- **Windows**: the MSI installer, or the zip with `install.ps1` for an install in your user folder.
+- **Windows**: the [Microsoft Store](https://apps.microsoft.com/detail/9NQGHNSJF3VB) (as Oryx Editor), `winget install Steerania.Oryx`, the MSI installer, or the zip with `install.ps1` for an install in your user folder.
 - **Linux without a package**: the tarball, `tar -xzf oryx-*-linux-x86_64.tar.gz && cd oryx && ./install.sh`; `./install.sh --uninstall` removes it.
 
-The packages are named `oryx-editor` because Arch already ships an unrelated program called `oryx`; the command is still `oryx` and the app appears as Oryx. A package registers Oryx with the file manager itself, so markdown files and books open with it right away; `oryx --register` is for the tarball and the source install, and says so under a package. If you move from the tarball or `make install` to a package, remove the per-user copy first (`./install.sh --uninstall`): it comes before the package on the PATH and in the launcher.
+The packages are named `oryx-editor` because Arch already ships an unrelated `oryx`, and the Store app is Oryx Editor because the name was taken there; the command is still `oryx` and the app appears as Oryx. A package registers Oryx with the file manager itself, so markdown files and books open with it right away; `oryx --register` is for the tarball and the source install, and says so under a package. If you move from the tarball or `make install` to a package, remove the per-user copy first (`./install.sh --uninstall`): it comes before the package on the PATH and in the launcher.
 
 The Linux packages need glibc 2.35 and OpenSSL 3, which means Debian 12, Ubuntu 22.04, Fedora 36, openSUSE Leap 15.4 and newer; the AppImage relies on the system's OpenSSL 3 as well.
 
