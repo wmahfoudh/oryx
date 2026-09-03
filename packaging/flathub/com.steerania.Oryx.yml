@@ -42,9 +42,3 @@ modules:
           version-query: .tag_name | sub("^v"; "")
           url-query: '"https://github.com/wmahfoudh/oryx/archive/refs/tags/" + .tag_name + ".tar.gz"'
       - cargo-sources.json
-      # The tagged metainfo points at the release screenshots; the listing
-      # uses the Flathub-sized set added to main after the tag. The patch
-      # stops applying once a release carries the new metainfo, and is
-      # removed then.
-      - type: patch
-        path: metainfo-screenshots.patch

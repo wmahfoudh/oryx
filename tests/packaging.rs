@@ -1,9 +1,10 @@
 //! The shared Linux packaging files under `packaging/linux/` are held to
 //! the code: the desktop entry is the one `--register` writes, run from
 //! the PATH, and the metainfo's newest release is the crate version, so
-//! the release line is written at bump time and sits inside the tag
-//! Flathub builds from. The stage script is run on a small source folder
-//! and its tree checked file by file.
+//! the release line is written at bump time and sits inside the tag the
+//! recipes build from, and the screenshot links carry that tag. The stage
+//! script is run on a small source folder and its tree checked file by
+//! file.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -97,6 +98,45 @@ fn the_metainfo_names_the_app_id_its_entry_and_every_type() {
         );
     }
     assert!(xml.contains("<content_rating type=\"oars-1.1\""));
+}
+
+/// The screenshot links carry the tag of the release the metainfo ships
+/// in, never a branch: AppStream readers fetch them long after the branch
+/// has moved on, and Flathub refuses branch links outright. The bump step
+/// rewrites the tag; the files must exist in the tree.
+#[test]
+fn the_metainfo_screenshots_link_to_the_release_tag_and_exist() {
+    let xml = packaging("linux/com.steerania.Oryx.metainfo.xml");
+    let prefix = format!(
+        "https://raw.githubusercontent.com/wmahfoudh/oryx/v{}/screenshots/",
+        env!("CARGO_PKG_VERSION")
+    );
+    let names: Vec<&str> = xml
+        .split("<image>")
+        .skip(1)
+        .map(|rest| rest.split("</image>").next().unwrap())
+        .map(|url| {
+            url.strip_prefix(&prefix)
+                .unwrap_or_else(|| panic!("{url} is not under {prefix}"))
+        })
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "flathub-hero.png",
+            "flathub-math.png",
+            "flathub-code.png",
+            "flathub-regex.png",
+            "flathub-rtl-ar.png",
+            "flathub-themes-editor.png",
+        ]
+    );
+    for name in names {
+        assert!(
+            repo().join("screenshots").join(name).is_file(),
+            "screenshots/{name} is missing"
+        );
+    }
 }
 
 #[test]
@@ -1119,37 +1159,8 @@ fn the_flathub_manifest_builds_the_tag_offline_into_app() {
             env!("CARGO_PKG_VERSION")
         ),
         "      - cargo-sources.json\n",
-        "      - type: patch\n",
-        "        path: metainfo-screenshots.patch\n",
     ] {
         assert!(text.contains(line), "{line:?} missing");
-    }
-}
-
-/// The patch swaps the tagged metainfo's screenshots for the Flathub-sized
-/// set on main. It is removed, together with its manifest source, once a
-/// release carries the new metainfo; from then on it no longer applies.
-#[test]
-fn the_flathub_metainfo_patch_adds_the_flathub_screenshots() {
-    let patch = packaging("flathub/metainfo-screenshots.patch");
-    let metainfo = packaging("linux/com.steerania.Oryx.metainfo.xml");
-    for name in [
-        "flathub-hero.png",
-        "flathub-math.png",
-        "flathub-code.png",
-        "flathub-regex.png",
-        "flathub-rtl-ar.png",
-        "flathub-themes-editor.png",
-    ] {
-        assert!(
-            patch.contains(&format!("+      <image>https://raw.githubusercontent.com/wmahfoudh/oryx/main/screenshots/{name}</image>")),
-            "{name} missing from the patch"
-        );
-        assert!(metainfo.contains(name), "{name} missing from the metainfo");
-        assert!(
-            std::fs::metadata(repo().join("screenshots").join(name)).is_ok(),
-            "screenshots/{name} is missing"
-        );
     }
 }
 
