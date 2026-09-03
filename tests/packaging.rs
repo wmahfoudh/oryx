@@ -881,6 +881,104 @@ fn appimage_sh_packs_the_staged_tree_with_the_entry_and_the_icon_on_top() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// `packaging/bump.sh` opens a phase at a new version: the crate line
+/// and the lock, a metainfo release line marked development with the
+/// day's date above the newest, the screenshot links on the new tag,
+/// the changelog heading. Run on a small workspace shaped like the
+/// repository's files, with the real metainfo.
+#[test]
+fn bump_sh_moves_the_version_in_the_four_files_and_refuses_a_step_back() {
+    let dir = std::env::temp_dir().join(format!("oryx-bump-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::create_dir_all(dir.join("packaging/linux")).unwrap();
+    // The metainfo as a release leaves it: the newest line unmarked.
+    let metainfo =
+        packaging("linux/com.steerania.Oryx.metainfo.xml").replace(" type=\"development\"", "");
+    let (current, _) = metainfo_releases().into_iter().next().unwrap();
+    std::fs::write(
+        dir.join("Cargo.toml"),
+        format!("[package]\nname = \"oryx\"\nversion = \"{current}\"\nedition = \"2021\"\n\n[dependencies]\n"),
+    )
+    .unwrap();
+    std::fs::write(dir.join("src/lib.rs"), "").unwrap();
+    let xml_path = dir.join("packaging/linux/com.steerania.Oryx.metainfo.xml");
+    std::fs::write(&xml_path, &metainfo).unwrap();
+    std::fs::write(
+        dir.join("CHANGELOG.md"),
+        format!("# Changelog\n\n## v{current}\n\n- A bullet.\n"),
+    )
+    .unwrap();
+    let bump = |version: &str| {
+        Command::new("sh")
+            .arg(repo().join("packaging/bump.sh"))
+            .arg(version)
+            .arg(&dir)
+            .output()
+            .unwrap()
+    };
+    for refused in [current.as_str(), "0.1.0", "1.2", "1.2.3a"] {
+        let out = bump(refused);
+        assert!(!out.status.success(), "{refused} accepted");
+    }
+    let next = {
+        let mut parts: Vec<u64> = current.split('.').map(|p| p.parse().unwrap()).collect();
+        parts[1] += 1;
+        parts[2] = 0;
+        format!("{}.{}.{}", parts[0], parts[1], parts[2])
+    };
+    let out = bump(&next);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let toml = std::fs::read_to_string(dir.join("Cargo.toml")).unwrap();
+    assert!(toml.contains(&format!("version = \"{next}\"")), "{toml}");
+    let lock = std::fs::read_to_string(dir.join("Cargo.lock")).unwrap();
+    assert!(
+        lock.contains(&format!("name = \"oryx\"\nversion = \"{next}\"")),
+        "the lock follows: {lock}"
+    );
+    let today =
+        String::from_utf8(Command::new("date").arg("+%F").output().unwrap().stdout).unwrap();
+    let xml = std::fs::read_to_string(&xml_path).unwrap();
+    let lines: Vec<&str> = xml.lines().filter(|l| l.contains("<release ")).collect();
+    assert_eq!(
+        lines[0].trim(),
+        format!(
+            "<release version=\"{next}\" date=\"{}\" type=\"development\"/>",
+            today.trim()
+        )
+    );
+    assert!(
+        lines[1].contains(&format!("version=\"{current}\"")),
+        "the old newest stays below"
+    );
+    assert_eq!(
+        lines[0].len() - lines[0].trim_start().len(),
+        lines[1].len() - lines[1].trim_start().len(),
+        "same indent"
+    );
+    assert_eq!(
+        xml.matches(&format!("/wmahfoudh/oryx/v{next}/screenshots/"))
+            .count(),
+        6
+    );
+    assert!(!xml.contains(&format!("/v{current}/screenshots/")));
+    let changelog = std::fs::read_to_string(dir.join("CHANGELOG.md")).unwrap();
+    assert!(
+        changelog.starts_with(&format!("# Changelog\n\n## v{next}\n\n## v{current}\n")),
+        "{changelog}"
+    );
+    // A phase is open now: a second bump is refused until the release
+    // removes the development mark.
+    let out = bump("9.9.9");
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("development"));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 fn pkgbuild(package: &str) -> String {
     packaging(&format!("aur/{package}/PKGBUILD"))
 }
