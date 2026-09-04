@@ -46,6 +46,9 @@ pub enum Command {
     Save,
     SaveAs,
     NewFile,
+    BulletList,
+    NumberedList,
+    TaskList,
     Quit,
 }
 
@@ -109,6 +112,11 @@ enum Binding {
     CtrlNamed(NamedKey),
     /// A named key with Alt held; tried before the plain named form.
     AltNamed(NamedKey),
+    /// Alt plus a character, case-insensitive, any shift state.
+    Alt(&'static str),
+    /// Alt plus a key by its place on the keyboard, tried last: the
+    /// digit chords, on layouts where a digit needs Shift.
+    AltCode(KeyCode),
     /// Ctrl plus a key by its place on the keyboard, tried last, once
     /// no character chord claims the press. The zoom keys live here so
     /// that a layout printing something else on the `0`, `-` or `=`
@@ -309,6 +317,27 @@ pub const SHORTCUTS: &[Shortcut] = &[
         ],
     },
     Shortcut {
+        keys: "Alt+-",
+        action: "Bullet list on the selected lines, again to remove (markdown editing)",
+        section: "Edit",
+        bindings: &[(Binding::Alt("-"), Command::BulletList)],
+    },
+    Shortcut {
+        keys: "Alt+1",
+        action: "Numbered list on the selected lines, again to remove (markdown editing)",
+        section: "Edit",
+        bindings: &[
+            (Binding::Alt("1"), Command::NumberedList),
+            (Binding::AltCode(KeyCode::Digit1), Command::NumberedList),
+        ],
+    },
+    Shortcut {
+        keys: "Alt+X",
+        action: "Task list on the selected lines, again to remove (markdown editing)",
+        section: "Edit",
+        bindings: &[(Binding::Alt("x"), Command::TaskList)],
+    },
+    Shortcut {
         keys: "Ctrl+T",
         action: "Choose a theme",
         section: "View",
@@ -400,6 +429,7 @@ pub fn command(
         Binding::ShiftNamed(n) => shift && is_named(key, n),
         Binding::CtrlNamed(n) => ctrl && is_named(key, n),
         Binding::AltNamed(n) => alt && is_named(key, n),
+        Binding::Alt(c) => alt && is_char(key, c),
         _ => false,
     });
     let plain = || {
@@ -412,6 +442,7 @@ pub fn command(
     let physical = || {
         bindings().find(|(binding, _)| match binding {
             Binding::CtrlCode(c) => ctrl && code == PhysicalKey::Code(*c),
+            Binding::AltCode(c) => alt && code == PhysicalKey::Code(*c),
             _ => false,
         })
     };
@@ -528,6 +559,30 @@ mod tests {
                 "the character chord for {code:?} agrees"
             );
         }
+    }
+
+    #[test]
+    fn the_list_chords_take_alt_with_the_character_or_the_digit_key() {
+        let none = PhysicalKey::Unidentified(NativeKeyCode::Unidentified);
+        let alt = |key: &Key, code: PhysicalKey| super::command(key, code, false, false, true);
+        assert_eq!(alt(&chr("-"), none), Some(Command::BulletList));
+        assert_eq!(alt(&chr("x"), none), Some(Command::TaskList));
+        assert_eq!(
+            super::command(&chr("X"), none, false, true, true),
+            Some(Command::TaskList),
+            "shift makes no difference"
+        );
+        assert_eq!(alt(&chr("1"), none), Some(Command::NumberedList));
+        assert_eq!(
+            alt(&chr("&"), PhysicalKey::Code(KeyCode::Digit1)),
+            Some(Command::NumberedList),
+            "AZERTY: the 1 key prints & unshifted"
+        );
+        assert_eq!(
+            command(&chr("-"), false, false),
+            None,
+            "a plain dash is typing"
+        );
     }
 
     #[test]

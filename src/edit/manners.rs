@@ -236,6 +236,93 @@ pub fn reindent(region: &str, unit: &IndentUnit, outdent: bool) -> (String, Vec<
     (out, deltas)
 }
 
+/// A list kind the line keys set.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ListKind {
+    Bullet,
+    Numbered,
+    Task,
+}
+
+/// The list marker at the start of `rest`, the text after a line's
+/// indentation: its kind and its byte length, whitespace included.
+fn marker_of(rest: &str) -> Option<(ListKind, usize)> {
+    let (len, continuation) = list_marker(rest)?;
+    let kind = if continuation.contains("[ ]") {
+        ListKind::Task
+    } else if rest.as_bytes()[0].is_ascii_digit() {
+        ListKind::Numbered
+    } else {
+        ListKind::Bullet
+    };
+    Some((kind, len))
+}
+
+/// Sets or clears a list over a region of whole lines, without its
+/// trailing newline. Every non-blank line gets `kind`'s marker after
+/// its indentation, replacing the list marker it carries; a line
+/// already of that kind keeps its own (a numbered one is renumbered);
+/// when every non-blank line already carries `kind`, the markers come
+/// off. Numbered items count from 1 in order. Answers the new text
+/// and, per line, the byte column of the change and its delta, the
+/// caller's map from old positions to new.
+pub fn list_lines(region: &str, kind: ListKind) -> (String, Vec<(usize, i64)>) {
+    /// A non-blank line: its indentation and the marker after it.
+    struct Item {
+        indent: usize,
+        marker: Option<(ListKind, usize)>,
+    }
+    let lines: Vec<&str> = region.split('\n').collect();
+    let parsed: Vec<Option<Item>> = lines
+        .iter()
+        .map(|line| {
+            if line.trim_matches([' ', '\t']).is_empty() {
+                return None;
+            }
+            let indent = line.len() - line.trim_start_matches([' ', '\t']).len();
+            Some(Item {
+                indent,
+                marker: marker_of(&line[indent..]),
+            })
+        })
+        .collect();
+    let items = parsed.iter().flatten();
+    let clearing = items.clone().count() > 0
+        && items
+            .clone()
+            .all(|item| item.marker.map(|(k, _)| k) == Some(kind));
+    let mut out = String::with_capacity(region.len() + 8 * lines.len());
+    let mut edits = Vec::with_capacity(lines.len());
+    let mut count = 0;
+    for (i, line) in lines.iter().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        let Some(Item { indent, marker }) = parsed[i] else {
+            out.push_str(line);
+            edits.push((0, 0));
+            continue;
+        };
+        let (old_kind, old_len) = marker.map_or((None, 0), |(k, len)| (Some(k), len));
+        let new = if clearing {
+            String::new()
+        } else {
+            count += 1;
+            match kind {
+                ListKind::Numbered => format!("{count}. "),
+                _ if old_kind == Some(kind) => line[indent..indent + old_len].to_string(),
+                ListKind::Bullet => "- ".to_string(),
+                ListKind::Task => "- [ ] ".to_string(),
+            }
+        };
+        out.push_str(&line[..indent]);
+        out.push_str(&new);
+        out.push_str(&line[indent + old_len..]);
+        edits.push((indent, new.len() as i64 - old_len as i64));
+    }
+    (out, edits)
+}
+
 /// The leading bytes one outdent removes: a tab when the line starts
 /// with one, else up to a step of spaces, the unit's own width or the
 /// conventional four when the unit is a tab.
@@ -402,6 +489,64 @@ mod tests {
             markdown_enter("-  x", 2),
             None,
             "content after the whitespace: inside the marker"
+        );
+    }
+
+    #[test]
+    fn list_lines_sets_clears_and_converts() {
+        use ListKind::*;
+        let r = |text: &str, edits: Vec<(usize, i64)>| (text.to_string(), edits);
+        assert_eq!(
+            list_lines("one\ntwo", Bullet),
+            r("- one\n- two", vec![(0, 2), (0, 2)])
+        );
+        assert_eq!(
+            list_lines("  one\n\n  two", Bullet),
+            r("  - one\n\n  - two", vec![(2, 2), (0, 0), (2, 2)]),
+            "the indent is kept and a blank line skipped"
+        );
+        assert_eq!(
+            list_lines("- one\n- two", Bullet),
+            r("one\ntwo", vec![(0, -2), (0, -2)]),
+            "every line a bullet: the markers come off"
+        );
+        assert_eq!(
+            list_lines("- one\ntwo", Bullet),
+            r("- one\n- two", vec![(0, 0), (0, 2)]),
+            "mixed: every line becomes a bullet, the bullet untouched"
+        );
+        assert_eq!(
+            list_lines("- one\n- two", Numbered),
+            r("1. one\n2. two", vec![(0, 1), (0, 1)])
+        );
+        assert_eq!(
+            list_lines("3. one\n7. two", Numbered),
+            r("one\ntwo", vec![(0, -3), (0, -3)])
+        );
+        assert_eq!(
+            list_lines("one\n\n5. two", Numbered),
+            r("1. one\n\n2. two", vec![(0, 3), (0, 0), (0, 0)]),
+            "numbers count on over blank lines and an old number is renumbered"
+        );
+        assert_eq!(
+            list_lines("- one\n- [x] two", Task),
+            r("- [ ] one\n- [x] two", vec![(0, 4), (0, 0)]),
+            "a ticked box stays ticked"
+        );
+        assert_eq!(
+            list_lines("- [x] one\n- [ ] two", Task),
+            r("one\ntwo", vec![(0, -6), (0, -6)])
+        );
+        assert_eq!(
+            list_lines("- [x] one", Bullet),
+            r("- one", vec![(0, -4)]),
+            "the box goes with the kind"
+        );
+        assert_eq!(list_lines("1) one", Bullet), r("- one", vec![(0, -1)]));
+        assert_eq!(
+            list_lines("", Bullet),
+            r("", vec![(0, 0)]),
+            "nothing to list"
         );
     }
 

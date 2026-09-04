@@ -1050,6 +1050,9 @@ impl App {
             }
             Command::Edit => self.toggle_edit(),
             Command::Cut => self.cut_selection(),
+            Command::BulletList => self.list_lines(edit::manners::ListKind::Bullet),
+            Command::NumberedList => self.list_lines(edit::manners::ListKind::Numbered),
+            Command::TaskList => self.list_lines(edit::manners::ListKind::Task),
             Command::Paste => self.paste_clipboard(),
             Command::Undo => self.undo_edit(),
             Command::Redo => self.redo_edit(),
@@ -2092,11 +2095,34 @@ impl App {
 
     /// The line burst behind press_tab: the lines the selection
     /// touches, or the caret's line alone, re-indented as one splice
-    /// and one undo unit. Caret and selection ride the per-line deltas
-    /// rather than the splice's own seat, so an outdent never yanks
-    /// the caret to the line start.
+    /// and one undo unit.
     fn indent_lines(&mut self, outdent: bool) {
         let unit = edit::manners::indent_unit(&self.document.source);
+        self.rewrite_lines(|region| {
+            let (text, deltas) = edit::manners::reindent(region, &unit, outdent);
+            (text, deltas.into_iter().map(|d| (0, d)).collect())
+        });
+    }
+
+    /// The list keys: the selected lines, or the caret's line, made a
+    /// list of `kind`, cleared when they already are one, or converted
+    /// from another kind. Markdown files only.
+    fn list_lines(&mut self, kind: edit::manners::ListKind) {
+        if !self.markdown_source() {
+            return;
+        }
+        self.rewrite_lines(|region| edit::manners::list_lines(region, kind));
+    }
+
+    /// Rewrites the lines the selection touches, or the caret's line
+    /// alone, as one splice and one undo unit. `rewrite` answers the
+    /// new region and, per line, the byte column where the line
+    /// changed and the delta. Caret and selection ride the per-line
+    /// deltas rather than the splice's own seat: a position before the
+    /// column or hugging it stays, one inside removed bytes clamps to
+    /// the column, so an outdent never yanks the caret to the line
+    /// start and an inserted marker sits inside the selection.
+    fn rewrite_lines(&mut self, rewrite: impl FnOnce(&str) -> (String, Vec<(usize, i64)>)) {
         let sel = self.selection_source_range();
         let caret_before = self.caret.map_or(0, |c| c.offset);
         let anchor_before = self.selection_anchor_offset();
@@ -2110,8 +2136,8 @@ impl App {
             to
         };
         let end = source[last..].find('\n').map_or(source.len(), |i| last + i);
-        let (text, deltas) = edit::manners::reindent(&source[start..end], &unit, outdent);
-        if deltas.iter().all(|&d| d == 0) {
+        let (text, edits) = rewrite(&source[start..end]);
+        if edits.iter().all(|&(_, d)| d == 0) {
             return;
         }
         let mut line_starts = vec![start];
@@ -2122,16 +2148,13 @@ impl App {
         }
         let map = |p: usize| -> usize {
             let k = line_starts.partition_point(|ls| *ls <= p) - 1;
-            let prefix: i64 = deltas[..k].iter().sum();
-            let (ls, d) = (line_starts[k], deltas[k]);
-            let new = if d < 0 && p < ls + (-d) as usize {
-                // Inside the bytes the outdent removed: the position
-                // clamps to its line start.
-                ls as i64 + prefix
-            } else if d > 0 && p == ls {
-                // A selection end hugging the line start stays there,
-                // keeping the inserted unit inside the selection.
-                ls as i64 + prefix
+            let prefix: i64 = edits[..k].iter().map(|&(_, d)| d).sum();
+            let (ls, (col, d)) = (line_starts[k], edits[k]);
+            let at = ls + col;
+            let new = if p <= at {
+                p as i64 + prefix
+            } else if d < 0 && p < at + (-d) as usize {
+                at as i64 + prefix
             } else {
                 p as i64 + prefix + d
             };
