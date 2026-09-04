@@ -1458,7 +1458,9 @@ impl App {
             }
             Key::Character(s) if !s.chars().any(char::is_control) && !s.is_empty() => {
                 let text = s.clone();
-                self.type_over(&text, Kind::Insert);
+                if !self.wrap_selection(&text) {
+                    self.type_over(&text, Kind::Insert);
+                }
                 true
             }
             Key::Character(_) => true,
@@ -2225,6 +2227,30 @@ impl App {
                 .path
                 .as_deref()
                 .is_some_and(|p| load::detect(p) == load::FileKind::Markdown)
+    }
+
+    /// Typing a bracket, a quote or, in markdown, a star, an underscore
+    /// or a backtick over a selection wraps it in the pair instead of
+    /// replacing it, one undo unit, and keeps the inner text selected
+    /// so a second star makes bold. False when nothing was wrapped.
+    fn wrap_selection(&mut self, typed: &str) -> bool {
+        let Some(range) = self.selection_source_range() else {
+            return false;
+        };
+        let Some((open, close)) = edit::manners::wrap_pair(typed, self.markdown_source()) else {
+            return false;
+        };
+        let inner = self.document.source[range.clone()].to_string();
+        let text = format!("{open}{inner}{close}");
+        self.type_edit(range.clone(), &text, Kind::Structural);
+        let start = range.start + open.len();
+        let end = start + inner.len();
+        self.seat_caret_after_edit(end);
+        if let Some(s) = caret::span_selection(&self.document, start, end) {
+            self.sel_anchor = Some(s.start);
+            self.selection = Some(s);
+        }
+        true
     }
 
     /// Typing consumes the selection when one stands, else the caret

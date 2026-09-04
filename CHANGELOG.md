@@ -9,6 +9,7 @@
 - In a markdown file, Alt+. quotes the selected lines, and again removes the quote.
 - In a markdown file, Ctrl+1 to Ctrl+6 set the heading level of the line; the same level again makes it plain text.
 - In a markdown file, Ctrl+L ticks or unticks the task box of the line, or of every selected line that has one.
+- In the editor, typing `(`, `[`, `{`, `"` or `'` with text selected wraps the text in the pair instead of replacing it, and the text stays selected. In a markdown file `*`, `_` and a backtick wrap too, so two stars in a row make bold.
 - Shortcuts with a digit, a period or a dash also answer the key at that position on the keyboard, so they work on a French keyboard where those keys need Shift.
 
 ## v1.0.0

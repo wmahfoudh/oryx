@@ -460,6 +460,24 @@ pub fn toggle_tasks(region: &str) -> (String, Vec<(usize, i64)>) {
     (out, edits)
 }
 
+/// The pair a typed character wraps a selection in: brackets and the
+/// two quotes in every file, the emphasis and code marks in markdown
+/// alone, where a star in a source file is an operator to type over
+/// the selection. None for anything else.
+pub fn wrap_pair(typed: &str, markdown: bool) -> Option<(&'static str, &'static str)> {
+    match typed {
+        "(" => Some(("(", ")")),
+        "[" => Some(("[", "]")),
+        "{" => Some(("{", "}")),
+        "\"" => Some(("\"", "\"")),
+        "'" => Some(("'", "'")),
+        "*" if markdown => Some(("*", "*")),
+        "_" if markdown => Some(("_", "_")),
+        "`" if markdown => Some(("`", "`")),
+        _ => None,
+    }
+}
+
 /// The leading bytes one outdent removes: a tab when the line starts
 /// with one, else up to a step of spaces, the unit's own width or the
 /// conventional four when the unit is a tab.
@@ -771,6 +789,22 @@ mod tests {
             "no box, no change"
         );
         assert_eq!(toggle_tasks(""), r("", vec![(0, 0)]));
+    }
+
+    #[test]
+    fn wrap_pairs_are_brackets_everywhere_and_marks_in_markdown() {
+        assert_eq!(wrap_pair("(", false), Some(("(", ")")));
+        assert_eq!(wrap_pair("[", false), Some(("[", "]")));
+        assert_eq!(wrap_pair("{", true), Some(("{", "}")));
+        assert_eq!(wrap_pair("\"", false), Some(("\"", "\"")));
+        assert_eq!(wrap_pair("'", false), Some(("'", "'")));
+        assert_eq!(wrap_pair("*", true), Some(("*", "*")));
+        assert_eq!(wrap_pair("_", true), Some(("_", "_")));
+        assert_eq!(wrap_pair("`", true), Some(("`", "`")));
+        assert_eq!(wrap_pair("*", false), None, "a star in code is an operator");
+        assert_eq!(wrap_pair("`", false), None);
+        assert_eq!(wrap_pair(")", true), None, "a closing bracket types");
+        assert_eq!(wrap_pair("a", true), None);
     }
 
     #[test]
