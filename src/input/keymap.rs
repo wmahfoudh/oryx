@@ -49,6 +49,9 @@ pub enum Command {
     BulletList,
     NumberedList,
     TaskList,
+    Quote,
+    /// The heading level of the line, 1 to 6.
+    Heading(u8),
     Quit,
 }
 
@@ -320,7 +323,10 @@ pub const SHORTCUTS: &[Shortcut] = &[
         keys: "Alt+-",
         action: "Bullet list on the selected lines, again to remove (markdown editing)",
         section: "Edit",
-        bindings: &[(Binding::Alt("-"), Command::BulletList)],
+        bindings: &[
+            (Binding::Alt("-"), Command::BulletList),
+            (Binding::AltCode(KeyCode::Minus), Command::BulletList),
+        ],
     },
     Shortcut {
         keys: "Alt+1",
@@ -336,6 +342,37 @@ pub const SHORTCUTS: &[Shortcut] = &[
         action: "Task list on the selected lines, again to remove (markdown editing)",
         section: "Edit",
         bindings: &[(Binding::Alt("x"), Command::TaskList)],
+    },
+    // Alt with the period key, not Alt+>: Alt+Shift switches the
+    // keyboard layout on Linux and Windows desktops.
+    Shortcut {
+        keys: "Alt+.",
+        action: "Quote the selected lines, again to remove (markdown editing)",
+        section: "Edit",
+        bindings: &[
+            (Binding::Alt("."), Command::Quote),
+            (Binding::Alt(">"), Command::Quote),
+            (Binding::AltCode(KeyCode::Period), Command::Quote),
+        ],
+    },
+    Shortcut {
+        keys: "Ctrl+1 to Ctrl+6",
+        action: "Heading level of the line, the same level again to clear it (markdown editing)",
+        section: "Edit",
+        bindings: &[
+            (Binding::Ctrl("1"), Command::Heading(1)),
+            (Binding::Ctrl("2"), Command::Heading(2)),
+            (Binding::Ctrl("3"), Command::Heading(3)),
+            (Binding::Ctrl("4"), Command::Heading(4)),
+            (Binding::Ctrl("5"), Command::Heading(5)),
+            (Binding::Ctrl("6"), Command::Heading(6)),
+            (Binding::CtrlCode(KeyCode::Digit1), Command::Heading(1)),
+            (Binding::CtrlCode(KeyCode::Digit2), Command::Heading(2)),
+            (Binding::CtrlCode(KeyCode::Digit3), Command::Heading(3)),
+            (Binding::CtrlCode(KeyCode::Digit4), Command::Heading(4)),
+            (Binding::CtrlCode(KeyCode::Digit5), Command::Heading(5)),
+            (Binding::CtrlCode(KeyCode::Digit6), Command::Heading(6)),
+        ],
     },
     Shortcut {
         keys: "Ctrl+T",
@@ -520,45 +557,42 @@ mod tests {
         assert_eq!(on(")", KeyCode::Minus, false), None);
     }
 
-    /// No character chord stands on a physical zoom key's US character,
-    /// so the two matchers never disagree on one press; and the
-    /// physical rows name the zoom commands alone.
+    /// Every physical row names the same command as the character
+    /// chord for its key's US character, so the two matchers never
+    /// disagree on one press.
     #[test]
-    fn the_physical_rows_conflict_with_no_character_chord() {
-        let physical: Vec<(&KeyCode, &Command)> = SHORTCUTS
-            .iter()
-            .flat_map(|row| row.bindings.iter())
-            .filter_map(|(binding, cmd)| match binding {
-                Binding::CtrlCode(code) => Some((code, cmd)),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(physical.len(), 6, "the zoom triad, main row and pad");
-        for (code, cmd) in &physical {
-            assert!(
-                matches!(cmd, Command::ZoomIn | Command::ZoomOut | Command::ZoomReset),
-                "{code:?} is a zoom key"
-            );
-            let us = match code {
-                KeyCode::Digit0 | KeyCode::Numpad0 => "0",
-                KeyCode::Minus | KeyCode::NumpadSubtract => "-",
-                KeyCode::Equal => "=",
-                KeyCode::NumpadAdd => "+",
-                other => panic!("{other:?} has no zoom meaning"),
+    fn the_physical_rows_agree_with_their_character_chords() {
+        let us = |code: &KeyCode| match code {
+            KeyCode::Digit0 | KeyCode::Numpad0 => "0",
+            KeyCode::Digit1 => "1",
+            KeyCode::Digit2 => "2",
+            KeyCode::Digit3 => "3",
+            KeyCode::Digit4 => "4",
+            KeyCode::Digit5 => "5",
+            KeyCode::Digit6 => "6",
+            KeyCode::Minus | KeyCode::NumpadSubtract => "-",
+            KeyCode::Equal => "=",
+            KeyCode::NumpadAdd => "+",
+            KeyCode::Period => ".",
+            other => panic!("{other:?} has no US character in this table"),
+        };
+        let none = PhysicalKey::Unidentified(NativeKeyCode::Unidentified);
+        let mut seen = 0;
+        for (binding, cmd) in SHORTCUTS.iter().flat_map(|row| row.bindings.iter()) {
+            let (code, ctrl, alt) = match binding {
+                Binding::CtrlCode(code) => (code, true, false),
+                Binding::AltCode(code) => (code, false, true),
+                _ => continue,
             };
-            let by_char = super::command(
-                &chr(us),
-                PhysicalKey::Unidentified(NativeKeyCode::Unidentified),
-                true,
-                false,
-                false,
-            );
+            seen += 1;
+            let by_char = super::command(&chr(us(code)), none, ctrl, false, alt);
             assert_eq!(
                 by_char,
-                Some(**cmd),
+                Some(*cmd),
                 "the character chord for {code:?} agrees"
             );
         }
+        assert!(seen >= 6, "the zoom keys at least");
     }
 
     #[test]
@@ -566,6 +600,11 @@ mod tests {
         let none = PhysicalKey::Unidentified(NativeKeyCode::Unidentified);
         let alt = |key: &Key, code: PhysicalKey| super::command(key, code, false, false, true);
         assert_eq!(alt(&chr("-"), none), Some(Command::BulletList));
+        assert_eq!(
+            alt(&chr(")"), PhysicalKey::Code(KeyCode::Minus)),
+            Some(Command::BulletList),
+            "the key at the US minus position"
+        );
         assert_eq!(alt(&chr("x"), none), Some(Command::TaskList));
         assert_eq!(
             super::command(&chr("X"), none, false, true, true),
@@ -582,6 +621,40 @@ mod tests {
             command(&chr("-"), false, false),
             None,
             "a plain dash is typing"
+        );
+        assert_eq!(alt(&chr("."), none), Some(Command::Quote));
+        assert_eq!(
+            super::command(&chr(">"), none, false, true, true),
+            Some(Command::Quote),
+            "a layout with > on a plain key"
+        );
+        assert_eq!(
+            alt(&chr(";"), PhysicalKey::Code(KeyCode::Period)),
+            Some(Command::Quote),
+            "AZERTY: the period key prints ; unshifted"
+        );
+    }
+
+    #[test]
+    fn the_heading_chords_take_ctrl_with_a_digit_or_its_key() {
+        assert_eq!(command(&chr("1"), true, false), Some(Command::Heading(1)));
+        assert_eq!(command(&chr("6"), true, false), Some(Command::Heading(6)));
+        assert_eq!(command(&chr("7"), true, false), None);
+        assert_eq!(
+            super::command(
+                &chr("é"),
+                PhysicalKey::Code(KeyCode::Digit2),
+                true,
+                false,
+                false
+            ),
+            Some(Command::Heading(2)),
+            "AZERTY: the 2 key prints é unshifted"
+        );
+        assert_eq!(
+            command(&chr("1"), false, false),
+            None,
+            "a plain digit is typing"
         );
     }
 

@@ -6,6 +6,9 @@
 - A click or an arrow move past the end of a line lands after its trailing spaces, where End goes, instead of before them.
 - In the editor, a click on an empty line puts the caret there. Before, the click went to the nearest line with text, and only the arrow keys could reach an empty line.
 - In a markdown file, Alt+- turns the selected lines into a bullet list, Alt+1 into a numbered list and Alt+X into a task list. The same key again removes the markers, the other key converts, and one Ctrl+Z undoes it.
+- In a markdown file, Alt+. quotes the selected lines, and again removes the quote.
+- In a markdown file, Ctrl+1 to Ctrl+6 set the heading level of the line; the same level again makes it plain text.
+- Shortcuts with a digit, a period or a dash also answer the key at that position on the keyboard, so they work on a French keyboard where those keys need Shift.
 
 ## v1.0.0
 

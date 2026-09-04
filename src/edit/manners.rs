@@ -323,6 +323,114 @@ pub fn list_lines(region: &str, kind: ListKind) -> (String, Vec<(usize, i64)>) {
     (out, edits)
 }
 
+/// Quotes or unquotes a region of whole lines, without its trailing
+/// newline: `> ` after every line's indentation, a bare `>` on a blank
+/// line so the quote stays one block; when every non-blank line is
+/// already quoted, one mark and its space come off each line. Answers
+/// the new text and, per line, the byte column of the change and its
+/// delta.
+pub fn quote_lines(region: &str) -> (String, Vec<(usize, i64)>) {
+    let lines: Vec<&str> = region.split('\n').collect();
+    let indent_of = |line: &str| line.len() - line.trim_start_matches([' ', '\t']).len();
+    let mark_len = |rest: &str| -> usize {
+        if !rest.starts_with('>') {
+            return 0;
+        }
+        if rest[1..].starts_with(' ') {
+            2
+        } else {
+            1
+        }
+    };
+    let blank = |line: &str| line.trim_matches([' ', '\t']).is_empty();
+    let clearing = lines.iter().any(|line| !blank(line))
+        && lines
+            .iter()
+            .filter(|line| !blank(line))
+            .all(|line| mark_len(&line[indent_of(line)..]) > 0);
+    let mut out = String::with_capacity(region.len() + 2 * lines.len());
+    let mut edits = Vec::with_capacity(lines.len());
+    for (i, line) in lines.iter().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        let indent = indent_of(line);
+        let rest = &line[indent..];
+        let old = mark_len(rest);
+        let new = if clearing {
+            ""
+        } else if old > 0 {
+            &rest[..old]
+        } else if rest.is_empty() {
+            ">"
+        } else {
+            "> "
+        };
+        if region.is_empty() {
+            edits.push((0, 0));
+            continue;
+        }
+        out.push_str(&line[..indent]);
+        out.push_str(new);
+        out.push_str(&rest[old..]);
+        edits.push((indent, new.len() as i64 - old as i64));
+    }
+    (out, edits)
+}
+
+/// Sets, changes or clears the heading level of a region of whole
+/// lines, without its trailing newline: `#` times `level` and a space
+/// after every non-blank line's indentation, replacing the heading
+/// marker it carries; when every non-blank line already sits at that
+/// level, the markers come off. A hash run without a following space
+/// is text, not a marker. Answers the new text and, per line, the byte
+/// column of the change and its delta.
+pub fn heading_lines(region: &str, level: u8) -> (String, Vec<(usize, i64)>) {
+    let lines: Vec<&str> = region.split('\n').collect();
+    let indent_of = |line: &str| line.len() - line.trim_start_matches([' ', '\t']).len();
+    // The marker's byte length and its level, zero when there is none.
+    let marker = |rest: &str| -> (usize, u8) {
+        let hashes = rest.bytes().take_while(|b| *b == b'#').count();
+        match rest.as_bytes().get(hashes) {
+            _ if hashes == 0 || hashes > 6 => (0, 0),
+            Some(b' ') => (hashes + 1, hashes as u8),
+            None => (hashes, hashes as u8),
+            Some(_) => (0, 0),
+        }
+    };
+    let blank = |line: &str| line.trim_matches([' ', '\t']).is_empty();
+    let items = lines.iter().filter(|line| !blank(line));
+    let clearing = items.clone().count() > 0
+        && items
+            .clone()
+            .all(|line| marker(&line[indent_of(line)..]).1 == level);
+    let mut out = String::with_capacity(region.len() + 8 * lines.len());
+    let mut edits = Vec::with_capacity(lines.len());
+    for (i, line) in lines.iter().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        if blank(line) {
+            out.push_str(line);
+            edits.push((0, 0));
+            continue;
+        }
+        let indent = indent_of(line);
+        let rest = &line[indent..];
+        let (old, _) = marker(rest);
+        let new = if clearing {
+            String::new()
+        } else {
+            format!("{} ", "#".repeat(level as usize))
+        };
+        out.push_str(&line[..indent]);
+        out.push_str(&new);
+        out.push_str(&rest[old..]);
+        edits.push((indent, new.len() as i64 - old as i64));
+    }
+    (out, edits)
+}
+
 /// The leading bytes one outdent removes: a tab when the line starts
 /// with one, else up to a step of spaces, the unit's own width or the
 /// conventional four when the unit is a tab.
@@ -548,6 +656,74 @@ mod tests {
             r("", vec![(0, 0)]),
             "nothing to list"
         );
+    }
+
+    #[test]
+    fn quote_lines_quotes_and_unquotes() {
+        let r = |text: &str, edits: Vec<(usize, i64)>| (text.to_string(), edits);
+        assert_eq!(
+            quote_lines("one\n\ntwo"),
+            r("> one\n>\n> two", vec![(0, 2), (0, 1), (0, 2)]),
+            "a blank line inside gets a bare > so the quote stays one block"
+        );
+        assert_eq!(
+            quote_lines("  one"),
+            r("  > one", vec![(2, 2)]),
+            "the indent is kept"
+        );
+        assert_eq!(
+            quote_lines("> one\n>\n> two"),
+            r("one\n\ntwo", vec![(0, -2), (0, -1), (0, -2)]),
+            "every line quoted: the marks come off"
+        );
+        assert_eq!(
+            quote_lines(">one"),
+            r("one", vec![(0, -1)]),
+            "a mark without its space"
+        );
+        assert_eq!(
+            quote_lines("> one\ntwo"),
+            r("> one\n> two", vec![(0, 0), (0, 2)]),
+            "mixed: every line quoted, the quoted one untouched"
+        );
+        assert_eq!(quote_lines(""), r("", vec![(0, 0)]));
+    }
+
+    #[test]
+    fn heading_lines_sets_changes_and_clears_the_level() {
+        let r = |text: &str, edits: Vec<(usize, i64)>| (text.to_string(), edits);
+        assert_eq!(heading_lines("one", 2), r("## one", vec![(0, 3)]));
+        assert_eq!(
+            heading_lines("## one", 3),
+            r("### one", vec![(0, 1)]),
+            "another level replaces"
+        );
+        assert_eq!(
+            heading_lines("## one", 2),
+            r("one", vec![(0, -3)]),
+            "the same level clears"
+        );
+        assert_eq!(
+            heading_lines("  one", 1),
+            r("  # one", vec![(2, 2)]),
+            "the indent is kept"
+        );
+        assert_eq!(
+            heading_lines("one\n\n# two", 1),
+            r("# one\n\n# two", vec![(0, 2), (0, 0), (0, 0)]),
+            "mixed: every line set, the blank skipped, the heading untouched"
+        );
+        assert_eq!(
+            heading_lines("#tag", 2),
+            r("## #tag", vec![(0, 3)]),
+            "a hash without a space is text"
+        );
+        assert_eq!(
+            heading_lines("##", 2),
+            r("", vec![(0, -2)]),
+            "a bare marker clears too"
+        );
+        assert_eq!(heading_lines("", 1), r("", vec![(0, 0)]));
     }
 
     #[test]

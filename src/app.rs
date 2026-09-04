@@ -1053,6 +1053,8 @@ impl App {
             Command::BulletList => self.list_lines(edit::manners::ListKind::Bullet),
             Command::NumberedList => self.list_lines(edit::manners::ListKind::Numbered),
             Command::TaskList => self.list_lines(edit::manners::ListKind::Task),
+            Command::Quote => self.quote_lines(),
+            Command::Heading(level) => self.heading_lines(level),
             Command::Paste => self.paste_clipboard(),
             Command::Undo => self.undo_edit(),
             Command::Redo => self.redo_edit(),
@@ -2112,6 +2114,25 @@ impl App {
             return;
         }
         self.rewrite_lines(|region| edit::manners::list_lines(region, kind));
+    }
+
+    /// The quote key: the selected lines, or the caret's line, quoted,
+    /// or unquoted when they already are. Markdown files only.
+    fn quote_lines(&mut self) {
+        if !self.markdown_source() {
+            return;
+        }
+        self.rewrite_lines(edit::manners::quote_lines);
+    }
+
+    /// The heading keys: the selected lines, or the caret's line, set
+    /// to a level, or cleared when they already sit at it. Markdown
+    /// files only.
+    fn heading_lines(&mut self, level: u8) {
+        if !self.markdown_source() {
+            return;
+        }
+        self.rewrite_lines(|region| edit::manners::heading_lines(region, level));
     }
 
     /// Rewrites the lines the selection touches, or the caret's line
