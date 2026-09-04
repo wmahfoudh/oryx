@@ -53,6 +53,9 @@ pub enum Command {
     /// The heading level of the line, 1 to 6.
     Heading(u8),
     TaskToggle,
+    Bold,
+    Italic,
+    Code,
     Quit,
 }
 
@@ -382,6 +385,25 @@ pub const SHORTCUTS: &[Shortcut] = &[
         bindings: &[(Binding::Ctrl("l"), Command::TaskToggle)],
     },
     Shortcut {
+        keys: "Ctrl+B / Ctrl+I",
+        action:
+            "Bold / italic around the selection or the word, again to remove (markdown editing)",
+        section: "Edit",
+        bindings: &[
+            (Binding::Ctrl("b"), Command::Bold),
+            (Binding::Ctrl("i"), Command::Italic),
+        ],
+    },
+    Shortcut {
+        keys: "Ctrl+`",
+        action: "Inline code around the selection or the word, again to remove (markdown editing)",
+        section: "Edit",
+        bindings: &[
+            (Binding::Ctrl("`"), Command::Code),
+            (Binding::CtrlCode(KeyCode::Backquote), Command::Code),
+        ],
+    },
+    Shortcut {
         keys: "Ctrl+T",
         action: "Choose a theme",
         section: "View",
@@ -581,6 +603,7 @@ mod tests {
             KeyCode::Equal => "=",
             KeyCode::NumpadAdd => "+",
             KeyCode::Period => ".",
+            KeyCode::Backquote => "`",
             other => panic!("{other:?} has no US character in this table"),
         };
         let none = PhysicalKey::Unidentified(NativeKeyCode::Unidentified);
@@ -799,12 +822,21 @@ mod tests {
     }
 
     #[test]
-    fn the_sidebar_re_homes_and_ctrl_b_falls_silent() {
+    fn the_sidebar_re_homes_and_ctrl_b_is_bold() {
         assert_eq!(command(&chr("B"), true, true), Some(Command::Sidebar));
+        assert_eq!(command(&chr("b"), true, false), Some(Command::Bold));
+        assert_eq!(command(&chr("i"), true, false), Some(Command::Italic));
+        assert_eq!(command(&chr("`"), true, false), Some(Command::Code));
         assert_eq!(
-            command(&chr("b"), true, false),
-            None,
-            "freed for bold in the input-method milestone"
+            super::command(
+                &chr("²"),
+                PhysicalKey::Code(KeyCode::Backquote),
+                true,
+                false,
+                false
+            ),
+            Some(Command::Code),
+            "AZERTY: the backtick key prints ² and the backtick needs AltGr"
         );
     }
 

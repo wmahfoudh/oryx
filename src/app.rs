@@ -1056,6 +1056,9 @@ impl App {
             Command::Quote => self.quote_lines(),
             Command::Heading(level) => self.heading_lines(level),
             Command::TaskToggle => self.toggle_tasks(),
+            Command::Bold => self.toggle_mark("**"),
+            Command::Italic => self.toggle_mark("*"),
+            Command::Code => self.toggle_mark("`"),
             Command::Paste => self.paste_clipboard(),
             Command::Undo => self.undo_edit(),
             Command::Redo => self.redo_edit(),
@@ -2145,6 +2148,29 @@ impl App {
             return;
         }
         self.rewrite_lines(edit::manners::toggle_tasks);
+    }
+
+    /// Ctrl+B, Ctrl+I and Ctrl+`: the mark toggled around the selection
+    /// or the word under the caret, one undo unit; the inner text stays
+    /// selected when a selection stood, the caret keeps its letter when
+    /// none did. Markdown files only.
+    fn toggle_mark(&mut self, mark: &str) {
+        if !self.markdown_source() {
+            return;
+        }
+        let selection = self.selection_source_range();
+        let had_selection = selection.is_some();
+        let caret = self.caret.map_or(0, |c| c.offset);
+        let edit = edit::manners::toggle_mark(&self.document.source, selection, caret, mark);
+        self.type_edit(edit.replace, &edit.text, Kind::Structural);
+        self.seat_caret_after_edit(edit.caret);
+        if had_selection && !edit.inner.is_empty() {
+            if let Some(s) = caret::span_selection(&self.document, edit.inner.start, edit.inner.end)
+            {
+                self.sel_anchor = Some(s.start);
+                self.selection = Some(s);
+            }
+        }
     }
 
     /// Rewrites the lines the selection touches, or the caret's line

@@ -478,6 +478,114 @@ pub fn wrap_pair(typed: &str, markdown: bool) -> Option<(&'static str, &'static 
     }
 }
 
+/// One splice that wraps or unwraps a mark: the bytes to replace, the
+/// text that goes there, the inner text's range afterwards, and where
+/// the caret stands.
+#[derive(Debug, PartialEq, Eq)]
+pub struct MarkEdit {
+    pub replace: std::ops::Range<usize>,
+    pub text: String,
+    pub inner: std::ops::Range<usize>,
+    pub caret: usize,
+}
+
+/// Toggles an emphasis or code mark around the selection, or around
+/// the word under the caret when nothing is selected. A selection that
+/// carries the mark at both ends, or sits just inside a pair of them,
+/// loses the pair; anything else gains one. A single star just outside
+/// is not a pair when it belongs to a double, so italic inside bold
+/// adds its own star. With no selection and no word, an empty pair
+/// opens with the caret inside; with a word, the caret keeps its
+/// letter. The inner range is what stays selected.
+pub fn toggle_mark(
+    source: &str,
+    selection: Option<std::ops::Range<usize>>,
+    caret: usize,
+    mark: &str,
+) -> MarkEdit {
+    let m = mark.len();
+    let word = |at: usize| -> Option<std::ops::Range<usize>> {
+        let is_word = |c: char| c.is_alphanumeric() || c == '_';
+        let start = source[..at]
+            .char_indices()
+            .rev()
+            .take_while(|(_, c)| is_word(*c))
+            .last()
+            .map_or(at, |(i, _)| i);
+        let end = source[at..]
+            .char_indices()
+            .find(|(_, c)| !is_word(*c))
+            .map_or(source.len(), |(i, _)| at + i);
+        (end > start).then_some(start..end)
+    };
+    let (range, pinned) = match selection.filter(|r| !r.is_empty()) {
+        Some(r) => (r, None),
+        None => match word(caret) {
+            Some(r) => (r, Some(caret)),
+            None => {
+                return MarkEdit {
+                    replace: caret..caret,
+                    text: format!("{mark}{mark}"),
+                    inner: caret + m..caret + m,
+                    caret: caret + m,
+                };
+            }
+        },
+    };
+    let text = &source[range.clone()];
+    // The pair around the range, when both sides carry the mark and,
+    // for a single star, the star is not half of a double.
+    let outside = range.start >= m
+        && source[..range.start].ends_with(mark)
+        && source[range.end..].starts_with(mark)
+        && !(mark == "*"
+            && (source[..range.start - m].ends_with('*')
+                || source[range.end + m..].starts_with('*')));
+    let inside = text.len() >= 2 * m
+        && text.starts_with(mark)
+        && text.ends_with(mark)
+        && !(mark == "*" && (text.starts_with("**") || text.ends_with("**")));
+    let ride = |p: usize, from: usize, delta: i64| -> usize {
+        if p < from {
+            p
+        } else {
+            (p as i64 + delta) as usize
+        }
+    };
+    if outside {
+        let replace = range.start - m..range.end + m;
+        let inner = replace.start..replace.start + text.len();
+        let caret = pinned.map_or(inner.end, |p| ride(p, range.start, -(m as i64)));
+        return MarkEdit {
+            replace,
+            text: text.to_string(),
+            inner,
+            caret,
+        };
+    }
+    if inside {
+        let stripped = &text[m..text.len() - m];
+        let inner = range.start..range.start + stripped.len();
+        let caret = pinned.map_or(inner.end, |p| {
+            ride(p, range.start, -(m as i64)).min(inner.end)
+        });
+        return MarkEdit {
+            replace: range,
+            text: stripped.to_string(),
+            inner,
+            caret,
+        };
+    }
+    let inner = range.start + m..range.end + m;
+    let caret = pinned.map_or(inner.end, |p| ride(p, range.start, m as i64));
+    MarkEdit {
+        replace: range,
+        text: format!("{mark}{text}{mark}"),
+        inner,
+        caret,
+    }
+}
+
 /// The leading bytes one outdent removes: a tab when the line starts
 /// with one, else up to a step of spaces, the unit's own width or the
 /// conventional four when the unit is a tab.
@@ -805,6 +913,91 @@ mod tests {
         assert_eq!(wrap_pair("`", false), None);
         assert_eq!(wrap_pair(")", true), None, "a closing bracket types");
         assert_eq!(wrap_pair("a", true), None);
+    }
+
+    #[test]
+    fn toggle_mark_wraps_and_unwraps_a_selection() {
+        let e = |replace: std::ops::Range<usize>,
+                 text: &str,
+                 inner: std::ops::Range<usize>,
+                 caret: usize| MarkEdit {
+            replace,
+            text: text.to_string(),
+            inner,
+            caret,
+        };
+        assert_eq!(
+            toggle_mark("a word b", Some(2..6), 6, "**"),
+            e(2..6, "**word**", 4..8, 8)
+        );
+        assert_eq!(
+            toggle_mark("a **word** b", Some(2..10), 10, "**"),
+            e(2..10, "word", 2..6, 6),
+            "the marks inside the selection come off"
+        );
+        assert_eq!(
+            toggle_mark("a **word** b", Some(4..8), 8, "**"),
+            e(2..10, "word", 2..6, 6),
+            "the marks just outside the selection come off"
+        );
+        assert_eq!(
+            toggle_mark("a **word** b", Some(4..8), 8, "*"),
+            e(4..8, "*word*", 5..9, 9),
+            "italic inside bold adds a third star, the double is not a single"
+        );
+        assert_eq!(
+            toggle_mark("a `x` b", Some(3..4), 4, "`"),
+            e(2..5, "x", 2..3, 3)
+        );
+        assert_eq!(
+            toggle_mark("one\ntwo", Some(0..7), 7, "**"),
+            e(0..7, "**one\ntwo**", 2..9, 9),
+            "a selection over lines wraps whole"
+        );
+    }
+
+    #[test]
+    fn toggle_mark_takes_the_word_under_the_caret() {
+        let e = |replace: std::ops::Range<usize>,
+                 text: &str,
+                 inner: std::ops::Range<usize>,
+                 caret: usize| MarkEdit {
+            replace,
+            text: text.to_string(),
+            inner,
+            caret,
+        };
+        assert_eq!(
+            toggle_mark("a word b", None, 4, "**"),
+            e(2..6, "**word**", 4..8, 6),
+            "the caret rides its letter"
+        );
+        assert_eq!(
+            toggle_mark("a word b", None, 6, "**"),
+            e(2..6, "**word**", 4..8, 8),
+            "at the word's end"
+        );
+        assert_eq!(
+            toggle_mark("a word b", None, 2, "*"),
+            e(2..6, "*word*", 3..7, 3),
+            "at the word's start"
+        );
+        assert_eq!(
+            toggle_mark("a **word** b", None, 5, "**"),
+            e(2..10, "word", 2..6, 3),
+            "unwrapped, the caret rides back"
+        );
+        assert_eq!(
+            toggle_mark("a  b", None, 2, "**"),
+            e(2..2, "****", 4..4, 4),
+            "no word: an empty pair, the caret inside"
+        );
+        assert_eq!(toggle_mark("", None, 0, "`"), e(0..0, "``", 1..1, 1));
+        assert_eq!(
+            toggle_mark("état", None, 2, "_"),
+            e(0..5, "_état_", 1..6, 3),
+            "a word is any run of letters"
+        );
     }
 
     #[test]
