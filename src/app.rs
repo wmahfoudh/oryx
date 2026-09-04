@@ -1060,6 +1060,8 @@ impl App {
             Command::Italic => self.toggle_mark("*"),
             Command::Code => self.toggle_mark("`"),
             Command::Link => self.insert_link(),
+            Command::MoveLineUp => self.move_lines(true),
+            Command::MoveLineDown => self.move_lines(false),
             Command::Paste => self.paste_clipboard(),
             Command::Undo => self.undo_edit(),
             Command::Redo => self.redo_edit(),
@@ -2172,6 +2174,7 @@ impl App {
                 self.selection = Some(s);
             }
         }
+        self.rehighlight_now();
     }
 
     /// Ctrl+K: a link around the selection, or an empty one, the caret
@@ -2185,6 +2188,63 @@ impl App {
         let edit = edit::manners::link_edit(&self.document.source, selection, caret);
         self.type_edit(edit.replace, &edit.text, Kind::Structural);
         self.seat_caret_after_edit(edit.caret);
+        self.rehighlight_now();
+    }
+
+    /// The whole lines the selection touches, or the caret's line: the
+    /// start and the end without the trailing newline. A selection
+    /// ending at a line start leaves that line alone.
+    fn line_span(&self) -> (usize, usize) {
+        let caret = self.caret.map_or(0, |c| c.offset);
+        let (from, to) = self
+            .selection_source_range()
+            .map_or((caret, caret), |r| (r.start, r.end));
+        let source = &self.document.source;
+        let start = source[..from].rfind('\n').map_or(0, |i| i + 1);
+        let last = if to > from && source[..to].ends_with('\n') {
+            to - 1
+        } else {
+            to
+        };
+        let end = source[last..].find('\n').map_or(source.len(), |i| last + i);
+        (start, end)
+    }
+
+    /// Alt+Up and Alt+Down: the selected lines, or the caret's line,
+    /// swapped with the line above or below, one undo unit; the caret
+    /// and the selection ride along. Every file kind.
+    fn move_lines(&mut self, up: bool) {
+        if self.mode != edit::Mode::Edit {
+            return;
+        }
+        let (start, end) = self.line_span();
+        let Some((replace, text, delta)) =
+            edit::manners::move_lines(&self.document.source, start..end, up)
+        else {
+            return;
+        };
+        let caret_before = self.caret.map_or(0, |c| c.offset);
+        let anchor_before = self.selection_anchor_offset();
+        let shift = |p: usize| (p as i64 + delta) as usize;
+        self.type_edit(replace, &text, Kind::Structural);
+        let caret_after = shift(caret_before);
+        self.seat_caret_after_edit(caret_after);
+        if let Some(anchor) = anchor_before.map(shift).filter(|a| *a != caret_after) {
+            if let Some(s) = caret::span_selection(&self.document, anchor, caret_after) {
+                self.sel_anchor = Some(s.start);
+                self.selection = Some(s);
+            }
+        }
+        self.rehighlight_now();
+    }
+
+    /// A shortcut's edit is not typing: the re-coloring the rest timer
+    /// owes after a keystroke starts at once, so moved or rewritten
+    /// lines never sit plain while the keys keep coming.
+    fn rehighlight_now(&mut self) {
+        if self.rehighlight_at.take().is_some() {
+            self.rehighlight_edited();
+        }
     }
 
     /// Rewrites the lines the selection touches, or the caret's line
@@ -2196,19 +2256,10 @@ impl App {
     /// the column, so an outdent never yanks the caret to the line
     /// start and an inserted marker sits inside the selection.
     fn rewrite_lines(&mut self, rewrite: impl FnOnce(&str) -> (String, Vec<(usize, i64)>)) {
-        let sel = self.selection_source_range();
         let caret_before = self.caret.map_or(0, |c| c.offset);
         let anchor_before = self.selection_anchor_offset();
-        let (from, to) = sel.map_or((caret_before, caret_before), |r| (r.start, r.end));
+        let (start, end) = self.line_span();
         let source = &self.document.source;
-        let start = source[..from].rfind('\n').map_or(0, |i| i + 1);
-        // A selection ending at a line start leaves that line alone.
-        let last = if to > from && source[..to].ends_with('\n') {
-            to - 1
-        } else {
-            to
-        };
-        let end = source[last..].find('\n').map_or(source.len(), |i| last + i);
         let (text, edits) = rewrite(&source[start..end]);
         if text == source[start..end] {
             return;
@@ -2257,6 +2308,7 @@ impl App {
                 self.selection = Some(s);
             }
         }
+        self.rehighlight_now();
     }
 
     /// True while the editor shows a markdown file's own bytes, the
@@ -2290,6 +2342,7 @@ impl App {
             self.sel_anchor = Some(s.start);
             self.selection = Some(s);
         }
+        self.rehighlight_now();
         true
     }
 
@@ -3491,12 +3544,28 @@ impl App {
 
     /// Folds queued highlight chunks into the document and recolors the
     /// affected laid-out lines in one batch: a backlog costs one pass
-    /// over the run vector however many arrivals it holds. Deferred while
-    /// a selection drag is active; releasing the mouse folds the queue.
+    /// over the run vector however many arrivals it holds. A standing
+    /// selection rides the fold as source offsets, since the fold
+    /// re-cuts the spans its positions name; a selection that has no
+    /// source offsets (rendered prose) defers the fold until it clears.
     fn fold_highlights(&mut self) {
-        if self.sel_anchor.is_some() {
-            return;
-        }
+        let carried = match self.sel_anchor {
+            None => None,
+            Some(anchor) => {
+                let anchor = caret::model_offset(&self.document, &anchor);
+                let ends = self.selection.map(|s| {
+                    (
+                        caret::model_offset(&self.document, &s.start),
+                        caret::model_offset(&self.document, &s.end),
+                    )
+                });
+                match (anchor, ends) {
+                    (Some(a), None) => Some((a, None)),
+                    (Some(a), Some((Some(x), Some(y)))) => Some((a, Some((x, y)))),
+                    _ => return,
+                }
+            }
+        };
         let arrivals = self.highlighter.drain();
         if arrivals.is_empty() {
             // The worker's last chunk can land between wakes; the wave
@@ -3514,6 +3583,12 @@ impl App {
                 let line = arrival.start_line + arrival.spans.len();
                 let table = self.seams.entry(arrival.block).or_default();
                 highlight::record_seam(table, line, seam);
+            }
+        }
+        if let Some((anchor, ends)) = carried {
+            self.sel_anchor = caret::model_pos(&self.document, anchor);
+            if let Some((x, y)) = ends {
+                self.selection = caret::span_selection(&self.document, x, y);
             }
         }
         self.pending_recolor.extend(

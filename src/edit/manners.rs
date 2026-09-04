@@ -647,6 +647,44 @@ pub fn is_url(text: &str) -> bool {
     rest.is_some_and(|rest| !rest.is_empty() && !rest.chars().any(char::is_whitespace))
 }
 
+/// Moves a block of whole lines, `block` being its bytes without the
+/// trailing newline, one line up or down: the bytes to replace, the
+/// text that goes there, and the delta every position inside the block
+/// moves by. None at the file's edges; the empty line after a final
+/// newline is not a line to swap with.
+pub fn move_lines(
+    source: &str,
+    block: std::ops::Range<usize>,
+    up: bool,
+) -> Option<(std::ops::Range<usize>, String, i64)> {
+    let text = &source[block.clone()];
+    if up {
+        if block.start == 0 {
+            return None;
+        }
+        let above_start = source[..block.start - 1].rfind('\n').map_or(0, |i| i + 1);
+        let above = &source[above_start..block.start - 1];
+        Some((
+            above_start..block.end,
+            format!("{text}\n{above}"),
+            -(above.len() as i64 + 1),
+        ))
+    } else {
+        if block.end + 1 >= source.len() {
+            return None;
+        }
+        let below_end = source[block.end + 1..]
+            .find('\n')
+            .map_or(source.len(), |i| block.end + 1 + i);
+        let below = &source[block.end + 1..below_end];
+        Some((
+            block.start..below_end,
+            format!("{below}\n{text}"),
+            below.len() as i64 + 1,
+        ))
+    }
+}
+
 /// The leading bytes one outdent removes: a tab when the line starts
 /// with one, else up to a step of spaces, the unit's own width or the
 /// conventional four when the unit is a tab.
@@ -1109,6 +1147,46 @@ mod tests {
             link_paste("a word b", None, "https://x.y"),
             None,
             "no selection: a plain paste"
+        );
+    }
+
+    #[test]
+    fn move_lines_swaps_the_block_with_its_neighbor() {
+        let m = |replace: std::ops::Range<usize>, text: &str, delta: i64| {
+            Some((replace, text.to_string(), delta))
+        };
+        assert_eq!(move_lines("a\nb\nc", 2..3, true), m(0..3, "b\na", -2));
+        assert_eq!(move_lines("a\nb\nc", 2..3, false), m(2..5, "c\nb", 2));
+        assert_eq!(
+            move_lines("a\nb\nc", 0..1, true),
+            None,
+            "nothing above the first line"
+        );
+        assert_eq!(
+            move_lines("a\nb\nc", 4..5, false),
+            None,
+            "nothing below the last"
+        );
+        assert_eq!(
+            move_lines("a\nb\n", 2..3, false),
+            None,
+            "the file's final newline is not a line to swap with"
+        );
+        assert_eq!(
+            move_lines("a\nb\nc\nd", 2..5, true),
+            m(0..5, "b\nc\na", -2),
+            "a block of lines"
+        );
+        assert_eq!(move_lines("a\nb\nc\nd", 2..5, false), m(2..7, "d\nb\nc", 2));
+        assert_eq!(
+            move_lines("a\n\nc", 2..2, true),
+            m(0..2, "\na", -2),
+            "an empty line moves too"
+        );
+        assert_eq!(
+            move_lines("a\nbb\nc", 0..1, false),
+            m(0..4, "bb\na", 3),
+            "the delta is the neighbor's length plus its newline"
         );
     }
 

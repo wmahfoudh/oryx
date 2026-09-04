@@ -12,6 +12,8 @@
 - In the editor, typing `(`, `[`, `{`, `"` or `'` with text selected wraps the text in the pair instead of replacing it, and the text stays selected. In a markdown file `*`, `_` and a backtick wrap too, so two stars in a row make bold.
 - In a markdown file, Ctrl+B, Ctrl+I and Ctrl+` make the selection or the word under the caret bold, italic or code, and the same key again removes it.
 - In a markdown file, Ctrl+K turns the selection into a link with the caret ready for the address, or opens an empty link. Pasting an address over selected text makes a link too.
+- In the editor, Alt+Up and Alt+Down move the line, or the selected lines, up and down. The caret and the selection move with them.
+- Syntax colors now arrive while text is selected, and the lines a shortcut moves or rewrites are colored at once instead of after a pause. Before, lines changed under a selection stayed uncolored until the selection was cleared.
 - Shortcuts with a digit, a period or a dash also answer the key at that position on the keyboard, so they work on a French keyboard where those keys need Shift.
 
 ## v1.0.0

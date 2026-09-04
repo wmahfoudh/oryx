@@ -57,6 +57,8 @@ pub enum Command {
     Italic,
     Code,
     Link,
+    MoveLineUp,
+    MoveLineDown,
     Quit,
 }
 
@@ -411,6 +413,15 @@ pub const SHORTCUTS: &[Shortcut] = &[
         bindings: &[(Binding::Ctrl("k"), Command::Link)],
     },
     Shortcut {
+        keys: "Alt+Up / Alt+Down",
+        action: "Move the line or the selected lines up / down (editing)",
+        section: "Edit",
+        bindings: &[
+            (Binding::AltNamed(NamedKey::ArrowUp), Command::MoveLineUp),
+            (Binding::AltNamed(NamedKey::ArrowDown), Command::MoveLineDown),
+        ],
+    },
+    Shortcut {
         keys: "Ctrl+T",
         action: "Choose a theme",
         section: "View",
@@ -692,6 +703,25 @@ mod tests {
             command(&chr("1"), false, false),
             None,
             "a plain digit is typing"
+        );
+    }
+
+    #[test]
+    fn alt_up_and_down_move_lines_and_plain_arrows_still_scroll() {
+        let none = PhysicalKey::Unidentified(NativeKeyCode::Unidentified);
+        let up = Key::Named(NamedKey::ArrowUp);
+        let down = Key::Named(NamedKey::ArrowDown);
+        assert_eq!(
+            super::command(&up, none, false, false, true),
+            Some(Command::MoveLineUp)
+        );
+        assert_eq!(
+            super::command(&down, none, false, false, true),
+            Some(Command::MoveLineDown)
+        );
+        assert_eq!(
+            super::command(&up, none, false, false, false),
+            Some(Command::LineUp)
         );
     }
 
