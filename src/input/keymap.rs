@@ -52,6 +52,7 @@ pub enum Command {
     Quote,
     /// The heading level of the line, 1 to 6.
     Heading(u8),
+    TaskToggle,
     Quit,
 }
 
@@ -375,6 +376,12 @@ pub const SHORTCUTS: &[Shortcut] = &[
         ],
     },
     Shortcut {
+        keys: "Ctrl+L",
+        action: "Tick or untick the task box of the line (markdown editing)",
+        section: "Edit",
+        bindings: &[(Binding::Ctrl("l"), Command::TaskToggle)],
+    },
+    Shortcut {
         keys: "Ctrl+T",
         action: "Choose a theme",
         section: "View",
@@ -656,6 +663,12 @@ mod tests {
             None,
             "a plain digit is typing"
         );
+    }
+
+    #[test]
+    fn ctrl_l_toggles_the_task_box() {
+        assert_eq!(command(&chr("l"), true, false), Some(Command::TaskToggle));
+        assert_eq!(command(&chr("l"), false, false), None);
     }
 
     #[test]

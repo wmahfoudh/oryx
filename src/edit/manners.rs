@@ -431,6 +431,35 @@ pub fn heading_lines(region: &str, level: u8) -> (String, Vec<(usize, i64)>) {
     (out, edits)
 }
 
+/// Flips the task box of every line in a region of whole lines that
+/// carries one, `[ ]` to `[x]` and `[x]` or `[X]` to `[ ]`; lines
+/// without a box are untouched. Nothing moves: every delta is zero.
+pub fn toggle_tasks(region: &str) -> (String, Vec<(usize, i64)>) {
+    let mut out = String::with_capacity(region.len());
+    let mut edits = Vec::new();
+    for (i, line) in region.split('\n').enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        let indent = line.len() - line.trim_start_matches([' ', '\t']).len();
+        let rest = &line[indent..];
+        let boxed = marker_of(rest)
+            .filter(|(kind, _)| *kind == ListKind::Task)
+            .and_then(|(_, len)| rest[..len].find('[').map(|at| indent + at + 1));
+        match boxed {
+            Some(at) => {
+                let flipped = if &line[at..at + 1] == " " { "x" } else { " " };
+                out.push_str(&line[..at]);
+                out.push_str(flipped);
+                out.push_str(&line[at + 1..]);
+            }
+            None => out.push_str(line),
+        }
+        edits.push((indent, 0));
+    }
+    (out, edits)
+}
+
 /// The leading bytes one outdent removes: a tab when the line starts
 /// with one, else up to a step of spaces, the unit's own width or the
 /// conventional four when the unit is a tab.
@@ -724,6 +753,24 @@ mod tests {
             "a bare marker clears too"
         );
         assert_eq!(heading_lines("", 1), r("", vec![(0, 0)]));
+    }
+
+    #[test]
+    fn toggle_tasks_flips_each_box_and_leaves_the_rest() {
+        let r = |text: &str, edits: Vec<(usize, i64)>| (text.to_string(), edits);
+        assert_eq!(
+            toggle_tasks("- [ ] a\n- [x] b\nplain\n  1. [X] c\n"),
+            r(
+                "- [x] a\n- [ ] b\nplain\n  1. [ ] c\n",
+                vec![(0, 0), (0, 0), (0, 0), (2, 0), (0, 0)]
+            )
+        );
+        assert_eq!(
+            toggle_tasks("- a"),
+            r("- a", vec![(0, 0)]),
+            "no box, no change"
+        );
+        assert_eq!(toggle_tasks(""), r("", vec![(0, 0)]));
     }
 
     #[test]

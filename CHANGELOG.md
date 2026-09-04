@@ -8,6 +8,7 @@
 - In a markdown file, Alt+- turns the selected lines into a bullet list, Alt+1 into a numbered list and Alt+X into a task list. The same key again removes the markers, the other key converts, and one Ctrl+Z undoes it.
 - In a markdown file, Alt+. quotes the selected lines, and again removes the quote.
 - In a markdown file, Ctrl+1 to Ctrl+6 set the heading level of the line; the same level again makes it plain text.
+- In a markdown file, Ctrl+L ticks or unticks the task box of the line, or of every selected line that has one.
 - Shortcuts with a digit, a period or a dash also answer the key at that position on the keyboard, so they work on a French keyboard where those keys need Shift.
 
 ## v1.0.0

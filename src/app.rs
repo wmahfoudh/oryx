@@ -1055,6 +1055,7 @@ impl App {
             Command::TaskList => self.list_lines(edit::manners::ListKind::Task),
             Command::Quote => self.quote_lines(),
             Command::Heading(level) => self.heading_lines(level),
+            Command::TaskToggle => self.toggle_tasks(),
             Command::Paste => self.paste_clipboard(),
             Command::Undo => self.undo_edit(),
             Command::Redo => self.redo_edit(),
@@ -2135,6 +2136,15 @@ impl App {
         self.rewrite_lines(|region| edit::manners::heading_lines(region, level));
     }
 
+    /// Ctrl+L: the task box of the caret's line, or of every selected
+    /// line that has one, flipped. Markdown files only.
+    fn toggle_tasks(&mut self) {
+        if !self.markdown_source() {
+            return;
+        }
+        self.rewrite_lines(edit::manners::toggle_tasks);
+    }
+
     /// Rewrites the lines the selection touches, or the caret's line
     /// alone, as one splice and one undo unit. `rewrite` answers the
     /// new region and, per line, the byte column where the line
@@ -2158,7 +2168,7 @@ impl App {
         };
         let end = source[last..].find('\n').map_or(source.len(), |i| last + i);
         let (text, edits) = rewrite(&source[start..end]);
-        if edits.iter().all(|&(_, d)| d == 0) {
+        if text == source[start..end] {
             return;
         }
         let mut line_starts = vec![start];
