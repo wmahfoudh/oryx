@@ -4,6 +4,7 @@
 
 - In the editor, Enter on an empty list item now ends the list even when the caret was placed by a click or an arrow key. Before, the caret could land between the dash and its space, and Enter left the dash behind.
 - A click or an arrow move past the end of a line lands after its trailing spaces, where End goes, instead of before them.
+- In the editor, a click on an empty line puts the caret there. Before, the click went to the nearest line with text, and only the arrow keys could reach an empty line.
 
 ## v1.0.0
 

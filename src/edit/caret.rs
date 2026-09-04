@@ -666,7 +666,11 @@ fn line_prefix_advance(
         .map_or(0.0, |g| g.x + g.w)
 }
 
-/// Places the caret from a click, in document coordinates.
+/// Places the caret from a click, in document coordinates. A click on
+/// a text row lands on its nearest character; a click between rows,
+/// above the first or below the last lands on the blank line standing
+/// there, one row each as `geometry` seats them; with no blank line to
+/// take it, the nearest row answers.
 pub fn place(
     lay: &LayoutDoc,
     doc: &Document,
@@ -675,21 +679,92 @@ pub fn place(
     y: f32,
 ) -> Option<Caret> {
     let lines = lines_of(lay, doc);
+    if let Some(li) = lines.iter().position(|l| y >= l.y && y < l.y + l.h) {
+        return Some(Caret::at(offset_at_x(fonts, lay, doc, &lines[li], x)));
+    }
+    if let Some(offset) = blank_line_at(fonts, lay, doc, &lines, x, y) {
+        return Some(Caret::at(offset));
+    }
     let li = lines
         .iter()
-        .position(|l| y >= l.y && y < l.y + l.h)
-        .or_else(|| {
-            lines
-                .iter()
-                .enumerate()
-                .min_by(|a, b| {
-                    (a.1.y + a.1.h / 2.0 - y)
-                        .abs()
-                        .total_cmp(&(b.1.y + b.1.h / 2.0 - y).abs())
-                })
-                .map(|(i, _)| i)
-        })?;
+        .enumerate()
+        .min_by(|a, b| {
+            (a.1.y + a.1.h / 2.0 - y)
+                .abs()
+                .total_cmp(&(b.1.y + b.1.h / 2.0 - y).abs())
+        })
+        .map(|(i, _)| i)?;
     Some(Caret::at(offset_at_x(fonts, lay, doc, &lines[li], x)))
+}
+
+/// The blank source line a y between rows falls on, as an offset: the
+/// line's start, or its end past any whitespace when x is beyond it.
+/// The blank lines after a row stand one row height each below it;
+/// those before the first row stand above it the same way. A y past
+/// the last blank line of a gap takes that line, so a click anywhere
+/// in a gap lands inside it.
+fn blank_line_at(
+    fonts: &mut FontStore,
+    lay: &LayoutDoc,
+    doc: &Document,
+    lines: &[Line],
+    x: f32,
+    y: f32,
+) -> Option<usize> {
+    let source = &doc.source;
+    // The starts of the source lines in `range` that own no row.
+    let starts = |range: std::ops::Range<usize>| -> Vec<usize> {
+        let mut out = Vec::new();
+        let mut i = range.start;
+        while i < range.end {
+            let start = if i == 0 || source.as_bytes()[i - 1] == b'\n' {
+                Some(i)
+            } else {
+                None
+            };
+            if let Some(start) = start {
+                out.push(start);
+            }
+            i = match source[i..].find('\n') {
+                Some(n) => i + n + 1,
+                None => range.end,
+            };
+        }
+        out
+    };
+    let seat = |anchor: &Line, start: usize, fonts: &mut FontStore| -> usize {
+        let end = start
+            + source[start..]
+                .find('\n')
+                .map_or(source.len() - start, |n| n);
+        let x0 = anchor.runs.first().map_or(0.0, |r| r.x);
+        if end > start && x > x0 + line_prefix_advance(fonts, lay, doc, anchor, end) {
+            end
+        } else {
+            start
+        }
+    };
+    if let Some(li) = lines.iter().rposition(|l| l.y + l.h <= y) {
+        let line = &lines[li];
+        let until = lines.get(li + 1).map_or(source.len(), |next| next.start);
+        // The row's own newline first, then one start per blank line.
+        let after = line.end + source[line.end..until].find('\n').map_or(0, |n| n + 1);
+        let blanks = starts(after..until);
+        if blanks.is_empty() {
+            return None;
+        }
+        let row = ((y - line.y) / line.h).floor() as usize;
+        let j = row.saturating_sub(1).min(blanks.len() - 1);
+        return Some(seat(line, blanks[j], fonts));
+    }
+    let below = lines.first()?;
+    let blanks = starts(0..below.start);
+    if blanks.is_empty() {
+        return None;
+    }
+    let gap = ((below.y - y) / below.h).floor() as usize + 1;
+    let j = blanks.len().saturating_sub(gap);
+    Some(seat(below, blanks[j], fonts))
 }
 
 /// The landing offset on entering edit mode, in precedence order: the
@@ -1222,6 +1297,88 @@ mod tests {
         };
         let c = step(c, Motion::Up, &l, &doc, &mut fonts);
         assert_eq!(c.offset, end, "up with a goal past the end");
+    }
+
+    /// A click between two text rows lands on the blank line that
+    /// stands there, one row each as `geometry` seats them; the same
+    /// above the first row, below the last, and on a line of spaces.
+    #[test]
+    fn a_click_lands_on_a_blank_line() {
+        let doc = code_doc("alpha\n\n\nbeta\n");
+        let (l, mut fonts) = lay_of(&doc);
+        let a = run(&l, &doc, "alpha");
+        let h = metrics::LINE_HEIGHT * a.size;
+        let mid = |rows: f32| a.y + h * rows + h / 2.0;
+        let click =
+            |x: f32, y: f32, fonts: &mut FontStore| place(&l, &doc, fonts, x, y).unwrap().offset;
+        assert_eq!(
+            click(a.x + 3.0, mid(1.0), &mut fonts),
+            6,
+            "the first blank line"
+        );
+        assert_eq!(
+            click(a.x + 3.0, mid(2.0), &mut fonts),
+            7,
+            "the second blank line"
+        );
+        assert_eq!(click(0.0, mid(1.0), &mut fonts), 6, "the left margin");
+        assert_eq!(
+            click(a.x + 900.0, mid(2.0), &mut fonts),
+            7,
+            "far to the right"
+        );
+        assert_eq!(
+            click(a.x + 3.0, mid(3.0), &mut fonts),
+            at(&doc, "beta"),
+            "the text row below still answers itself"
+        );
+
+        let doc = code_doc("alpha\n   \nbeta\n");
+        let (l, mut fonts) = lay_of(&doc);
+        let a = run(&l, &doc, "alpha");
+        let h = metrics::LINE_HEIGHT * a.size;
+        let c = place(&l, &doc, &mut fonts, 0.0, a.y + h * 1.5).unwrap();
+        assert_eq!(
+            c.offset, 6,
+            "a line of spaces, clicked at the margin: its start"
+        );
+        let c = place(&l, &doc, &mut fonts, a.x + 900.0, a.y + h * 1.5).unwrap();
+        assert_eq!(c.offset, 9, "clicked past its spaces: its end");
+
+        let doc = code_doc("\n\nalpha\n");
+        let (l, mut fonts) = lay_of(&doc);
+        let a = run(&l, &doc, "alpha");
+        let h = metrics::LINE_HEIGHT * a.size;
+        let c = place(&l, &doc, &mut fonts, a.x, a.y - h * 0.5).unwrap();
+        assert_eq!(c.offset, 1, "the blank line just above the first row");
+        let c = place(&l, &doc, &mut fonts, a.x, a.y - h * 1.5).unwrap();
+        assert_eq!(c.offset, 0, "the blank first line");
+        let c = place(&l, &doc, &mut fonts, a.x, a.y - h * 9.0).unwrap();
+        assert_eq!(c.offset, 0, "above everything: the first line");
+
+        let doc = code_doc("alpha\n\n\n");
+        let (l, mut fonts) = lay_of(&doc);
+        let a = run(&l, &doc, "alpha");
+        let h = metrics::LINE_HEIGHT * a.size;
+        let c = place(&l, &doc, &mut fonts, a.x, a.y + h * 1.5).unwrap();
+        assert_eq!(c.offset, 6, "the blank line after the last row");
+        let c = place(&l, &doc, &mut fonts, a.x, a.y + h * 2.5).unwrap();
+        assert_eq!(c.offset, 7, "the last blank line");
+        let c = place(&l, &doc, &mut fonts, a.x, a.y + h * 9.0).unwrap();
+        assert_eq!(
+            c.offset, 7,
+            "below everything: the last line, not the row after the final newline"
+        );
+
+        let doc = code_doc("alpha\n");
+        let (l, mut fonts) = lay_of(&doc);
+        let a = run(&l, &doc, "alpha");
+        let h = metrics::LINE_HEIGHT * a.size;
+        let c = place(&l, &doc, &mut fonts, a.x + 900.0, a.y + h * 9.0).unwrap();
+        assert_eq!(
+            c.offset, 5,
+            "no blank line below: the last row's end as before"
+        );
     }
 
     #[test]
