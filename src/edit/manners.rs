@@ -586,6 +586,67 @@ pub fn toggle_mark(
     }
 }
 
+/// Ctrl+K: the selection becomes a link's text with the caret in the
+/// empty parentheses; a selection that is itself an address becomes
+/// the target with the caret in the empty brackets; with no selection
+/// an empty link opens with the caret in the brackets.
+pub fn link_edit(
+    source: &str,
+    selection: Option<std::ops::Range<usize>>,
+    caret: usize,
+) -> MarkEdit {
+    let (replace, text, caret) = match selection.filter(|r| !r.is_empty()) {
+        Some(r) => {
+            let inner = &source[r.clone()];
+            if is_url(inner) {
+                (r.clone(), format!("[]({})", inner.trim()), r.start + 1)
+            } else {
+                let caret = r.start + inner.len() + 3;
+                (r, format!("[{inner}]()"), caret)
+            }
+        }
+        None => (caret..caret, "[]()".to_string(), caret + 1),
+    };
+    MarkEdit {
+        replace,
+        text,
+        inner: caret..caret,
+        caret,
+    }
+}
+
+/// A pasted address over a selection: the selection becomes the link's
+/// text and the address its target, the caret after the link. None
+/// when there is no selection or the clipboard is not an address.
+pub fn link_paste(
+    source: &str,
+    selection: Option<std::ops::Range<usize>>,
+    clipboard: &str,
+) -> Option<MarkEdit> {
+    let r = selection.filter(|r| !r.is_empty())?;
+    if !is_url(clipboard) {
+        return None;
+    }
+    let text = format!("[{}]({})", &source[r.clone()], clipboard.trim());
+    let caret = r.start + text.len();
+    Some(MarkEdit {
+        replace: r,
+        text,
+        inner: caret..caret,
+        caret,
+    })
+}
+
+/// A web or mail address on its own: a scheme, then at least one byte
+/// and no whitespace, once the clipboard's padding is trimmed.
+pub fn is_url(text: &str) -> bool {
+    let text = text.trim();
+    let rest = ["https://", "http://", "ftp://", "mailto:"]
+        .iter()
+        .find_map(|scheme| text.strip_prefix(scheme));
+    rest.is_some_and(|rest| !rest.is_empty() && !rest.chars().any(char::is_whitespace))
+}
+
 /// The leading bytes one outdent removes: a tab when the line starts
 /// with one, else up to a step of spaces, the unit's own width or the
 /// conventional four when the unit is a tab.
@@ -997,6 +1058,57 @@ mod tests {
             toggle_mark("état", None, 2, "_"),
             e(0..5, "_état_", 1..6, 3),
             "a word is any run of letters"
+        );
+    }
+
+    #[test]
+    fn a_link_wraps_the_selection_or_opens_empty() {
+        let e = |replace: std::ops::Range<usize>, text: &str, caret: usize| MarkEdit {
+            replace,
+            text: text.to_string(),
+            inner: caret..caret,
+            caret,
+        };
+        assert_eq!(
+            link_edit("a word b", Some(2..6), 6),
+            e(2..6, "[word]()", 9),
+            "the caret in the parentheses"
+        );
+        assert_eq!(
+            link_edit("ab", None, 1),
+            e(1..1, "[]()", 2),
+            "the caret in the brackets"
+        );
+        assert_eq!(
+            link_edit("see https://x.y now", Some(4..15), 15),
+            e(4..15, "[](https://x.y)", 5),
+            "a selected address becomes the target, the caret in the brackets"
+        );
+    }
+
+    #[test]
+    fn a_pasted_address_over_a_selection_makes_a_link() {
+        assert!(is_url("https://x.y/z?q=1"));
+        assert!(is_url("http://a"));
+        assert!(is_url("mailto:a@b.c"));
+        assert!(is_url("  https://x.y\n"), "clipboard padding is trimmed");
+        assert!(!is_url("hello"));
+        assert!(!is_url("https://a b"));
+        assert!(!is_url("https://"));
+        assert_eq!(
+            link_paste("a word b", Some(2..6), "https://x.y\n"),
+            Some(MarkEdit {
+                replace: 2..6,
+                text: "[word](https://x.y)".to_string(),
+                inner: 21..21,
+                caret: 21,
+            })
+        );
+        assert_eq!(link_paste("a word b", Some(2..6), "plain"), None);
+        assert_eq!(
+            link_paste("a word b", None, "https://x.y"),
+            None,
+            "no selection: a plain paste"
         );
     }
 

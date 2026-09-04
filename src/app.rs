@@ -1059,6 +1059,7 @@ impl App {
             Command::Bold => self.toggle_mark("**"),
             Command::Italic => self.toggle_mark("*"),
             Command::Code => self.toggle_mark("`"),
+            Command::Link => self.insert_link(),
             Command::Paste => self.paste_clipboard(),
             Command::Undo => self.undo_edit(),
             Command::Redo => self.redo_edit(),
@@ -2173,6 +2174,19 @@ impl App {
         }
     }
 
+    /// Ctrl+K: a link around the selection, or an empty one, the caret
+    /// where the next thing gets typed. Markdown files only.
+    fn insert_link(&mut self) {
+        if !self.markdown_source() {
+            return;
+        }
+        let selection = self.selection_source_range();
+        let caret = self.caret.map_or(0, |c| c.offset);
+        let edit = edit::manners::link_edit(&self.document.source, selection, caret);
+        self.type_edit(edit.replace, &edit.text, Kind::Structural);
+        self.seat_caret_after_edit(edit.caret);
+    }
+
     /// Rewrites the lines the selection touches, or the caret's line
     /// alone, as one splice and one undo unit. `rewrite` answers the
     /// new region and, per line, the byte column where the line
@@ -2388,9 +2402,19 @@ impl App {
         // Clipboard line endings normalize like the load; the ledger
         // writes the file's own ending back on save.
         let text = text.replace("\r\n", "\n");
-        if !text.is_empty() {
-            self.type_over(&text, Kind::Structural);
+        if text.is_empty() {
+            return;
         }
+        // An address pasted over selected markdown text links the text.
+        if self.markdown_source() {
+            let selection = self.selection_source_range();
+            if let Some(edit) = edit::manners::link_paste(&self.document.source, selection, &text) {
+                self.type_edit(edit.replace, &edit.text, Kind::Structural);
+                self.seat_caret_after_edit(edit.caret);
+                return;
+            }
+        }
+        self.type_over(&text, Kind::Structural);
     }
 
     /// A click while editing places the caret at the character.

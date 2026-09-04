@@ -56,6 +56,7 @@ pub enum Command {
     Bold,
     Italic,
     Code,
+    Link,
     Quit,
 }
 
@@ -404,6 +405,12 @@ pub const SHORTCUTS: &[Shortcut] = &[
         ],
     },
     Shortcut {
+        keys: "Ctrl+K",
+        action: "Link around the selection, or an empty link; pasting an address over a selection links it too (markdown editing)",
+        section: "Edit",
+        bindings: &[(Binding::Ctrl("k"), Command::Link)],
+    },
+    Shortcut {
         keys: "Ctrl+T",
         action: "Choose a theme",
         section: "View",
@@ -686,6 +693,11 @@ mod tests {
             None,
             "a plain digit is typing"
         );
+    }
+
+    #[test]
+    fn ctrl_k_makes_a_link() {
+        assert_eq!(command(&chr("k"), true, false), Some(Command::Link));
     }
 
     #[test]
