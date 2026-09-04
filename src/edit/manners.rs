@@ -685,6 +685,34 @@ pub fn move_lines(
     }
 }
 
+/// Duplicates a block of whole lines below itself: the insertion point
+/// (the block's end), the text to insert (a newline and the block), and
+/// the delta that carries the caret and the selection onto the copy.
+pub fn duplicate_lines(
+    source: &str,
+    block: std::ops::Range<usize>,
+) -> (std::ops::Range<usize>, String, i64) {
+    let text = format!("\n{}", &source[block.clone()]);
+    let delta = text.len() as i64;
+    (block.end..block.end, text, delta)
+}
+
+/// Deletes a block of whole lines with the newline that follows it, or
+/// the one before it when it is the file's last line. Answers the bytes
+/// to remove and the landing: the start of the line that follows, in
+/// the new coordinates, or the new end of the file when none follows.
+pub fn delete_lines(
+    source: &str,
+    block: std::ops::Range<usize>,
+) -> (std::ops::Range<usize>, usize) {
+    if block.end < source.len() {
+        (block.start..block.end + 1, block.start)
+    } else {
+        let start = block.start.saturating_sub(1);
+        (start..block.end, start)
+    }
+}
+
 /// The leading bytes one outdent removes: a tab when the line starts
 /// with one, else up to a step of spaces, the unit's own width or the
 /// conventional four when the unit is a tab.
@@ -1187,6 +1215,50 @@ mod tests {
             move_lines("a\nbb\nc", 0..1, false),
             m(0..4, "bb\na", 3),
             "the delta is the neighbor's length plus its newline"
+        );
+    }
+
+    #[test]
+    fn duplicate_lines_copies_the_block_below_it() {
+        assert_eq!(
+            duplicate_lines("a\nb\nc", 2..3),
+            (3..3, "\nb".to_string(), 2)
+        );
+        assert_eq!(
+            duplicate_lines("a\nb", 2..3),
+            (3..3, "\nb".to_string(), 2),
+            "the last line too"
+        );
+        assert_eq!(
+            duplicate_lines("a\nb\nc\nd", 2..5),
+            (5..5, "\nb\nc".to_string(), 4),
+            "a block"
+        );
+        assert_eq!(
+            duplicate_lines("a\n\nb", 2..2),
+            (2..2, "\n".to_string(), 1),
+            "an empty line"
+        );
+    }
+
+    #[test]
+    fn delete_lines_removes_the_block_and_names_the_landing() {
+        assert_eq!(
+            delete_lines("a\nb\nc", 2..3),
+            (2..4, 2),
+            "the line and its newline; the next line lands at the same start"
+        );
+        assert_eq!(
+            delete_lines("a\nb\nc", 4..5),
+            (3..5, 3),
+            "the last line takes the newline before it; the landing is the new end"
+        );
+        assert_eq!(delete_lines("a\nb\nc\nd", 2..5), (2..6, 2), "a block");
+        assert_eq!(delete_lines("a", 0..1), (0..1, 0), "the only line");
+        assert_eq!(
+            delete_lines("a\nb\n", 2..3),
+            (2..4, 2),
+            "a last line followed by the final newline keeps that newline"
         );
     }
 

@@ -59,6 +59,8 @@ pub enum Command {
     Link,
     MoveLineUp,
     MoveLineDown,
+    DuplicateLines,
+    DeleteLines,
     Quit,
 }
 
@@ -422,6 +424,18 @@ pub const SHORTCUTS: &[Shortcut] = &[
         ],
     },
     Shortcut {
+        keys: "Ctrl+Shift+D",
+        action: "Duplicate the line or the selected lines (editing)",
+        section: "Edit",
+        bindings: &[(Binding::CtrlShift("d"), Command::DuplicateLines)],
+    },
+    Shortcut {
+        keys: "Ctrl+Shift+K",
+        action: "Delete the line or the selected lines (editing)",
+        section: "Edit",
+        bindings: &[(Binding::CtrlShift("k"), Command::DeleteLines)],
+    },
+    Shortcut {
         keys: "Ctrl+T",
         action: "Choose a theme",
         section: "View",
@@ -723,6 +737,21 @@ mod tests {
             super::command(&up, none, false, false, false),
             Some(Command::LineUp)
         );
+    }
+
+    #[test]
+    fn ctrl_shift_d_and_k_duplicate_and_delete_lines() {
+        assert_eq!(
+            command(&chr("D"), true, true),
+            Some(Command::DuplicateLines)
+        );
+        assert_eq!(command(&chr("K"), true, true), Some(Command::DeleteLines));
+        assert_eq!(
+            command(&chr("d"), true, false),
+            Some(Command::Direction),
+            "plain Ctrl+D stays"
+        );
+        assert_eq!(command(&chr("k"), true, false), Some(Command::Link));
     }
 
     #[test]

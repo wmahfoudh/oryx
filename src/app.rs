@@ -1062,6 +1062,8 @@ impl App {
             Command::Link => self.insert_link(),
             Command::MoveLineUp => self.move_lines(true),
             Command::MoveLineDown => self.move_lines(false),
+            Command::DuplicateLines => self.duplicate_lines(),
+            Command::DeleteLines => self.delete_lines(),
             Command::Paste => self.paste_clipboard(),
             Command::Undo => self.undo_edit(),
             Command::Redo => self.redo_edit(),
@@ -2235,6 +2237,55 @@ impl App {
                 self.selection = Some(s);
             }
         }
+        self.rehighlight_now();
+    }
+
+    /// Ctrl+Shift+D: the selected lines, or the caret's line, copied
+    /// below themselves, the caret and the selection on the copy. Every
+    /// file kind.
+    fn duplicate_lines(&mut self) {
+        if self.mode != edit::Mode::Edit {
+            return;
+        }
+        let (start, end) = self.line_span();
+        let (replace, text, delta) =
+            edit::manners::duplicate_lines(&self.document.source, start..end);
+        let caret_before = self.caret.map_or(0, |c| c.offset);
+        let anchor_before = self.selection_anchor_offset();
+        let shift = |p: usize| (p as i64 + delta) as usize;
+        self.type_edit(replace, &text, Kind::Structural);
+        let caret_after = shift(caret_before);
+        self.seat_caret_after_edit(caret_after);
+        if let Some(anchor) = anchor_before.map(shift).filter(|a| *a != caret_after) {
+            if let Some(s) = caret::span_selection(&self.document, anchor, caret_after) {
+                self.sel_anchor = Some(s.start);
+                self.selection = Some(s);
+            }
+        }
+        self.rehighlight_now();
+    }
+
+    /// Ctrl+Shift+K: the selected lines, or the caret's line, removed
+    /// whole, the caret on the line that follows at its old column, or
+    /// at the file's new end. Every file kind.
+    fn delete_lines(&mut self) {
+        if self.mode != edit::Mode::Edit {
+            return;
+        }
+        let (start, end) = self.line_span();
+        let caret_before = self.caret.map_or(0, |c| c.offset);
+        let column = caret_before
+            - self.document.source[..caret_before]
+                .rfind('\n')
+                .map_or(0, |i| i + 1);
+        let (replace, landing) = edit::manners::delete_lines(&self.document.source, start..end);
+        self.type_edit(replace, "", Kind::Structural);
+        let source = &self.document.source;
+        let line_len = source[landing.min(source.len())..]
+            .find('\n')
+            .unwrap_or(source.len() - landing.min(source.len()));
+        let caret_after = (landing + column.min(line_len)).min(source.len());
+        self.seat_caret_after_edit(caret_after);
         self.rehighlight_now();
     }
 

@@ -13,6 +13,7 @@
 - In a markdown file, Ctrl+B, Ctrl+I and Ctrl+` make the selection or the word under the caret bold, italic or code, and the same key again removes it.
 - In a markdown file, Ctrl+K turns the selection into a link with the caret ready for the address, or opens an empty link. Pasting an address over selected text makes a link too.
 - In the editor, Alt+Up and Alt+Down move the line, or the selected lines, up and down. The caret and the selection move with them.
+- In the editor, Ctrl+Shift+D duplicates the line or the selected lines, and Ctrl+Shift+K deletes them.
 - Syntax colors now arrive while text is selected, and the lines a shortcut moves or rewrites are colored at once instead of after a pause. Before, lines changed under a selection stayed uncolored until the selection was cleared.
 - Shortcuts with a digit, a period or a dash also answer the key at that position on the keyboard, so they work on a French keyboard where those keys need Shift.
 
