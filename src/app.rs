@@ -1064,6 +1064,7 @@ impl App {
             Command::MoveLineDown => self.move_lines(false),
             Command::DuplicateLines => self.duplicate_lines(),
             Command::DeleteLines => self.delete_lines(),
+            Command::Comment => self.comment_lines(),
             Command::Paste => self.paste_clipboard(),
             Command::Undo => self.undo_edit(),
             Command::Redo => self.redo_edit(),
@@ -2289,6 +2290,27 @@ impl App {
         self.rehighlight_now();
     }
 
+    /// Ctrl+/: the selected lines, or the caret's line, commented in
+    /// the file's language, or uncommented when they already are; a
+    /// markdown source takes the HTML comment. Nothing in a language
+    /// without comments or in plain text.
+    fn comment_lines(&mut self) {
+        if self.mode != edit::Mode::Edit {
+            return;
+        }
+        let language = match self.document.blocks.first().map(|b| &b.kind) {
+            Some(BlockKind::CodeBlock { language, .. }) if !self.document.plain_file => {
+                language.clone()
+            }
+            _ => None,
+        };
+        let Some(style) = edit::manners::comment_style(language.as_deref(), self.markdown_source())
+        else {
+            return;
+        };
+        self.rewrite_lines(|region| edit::manners::comment_lines(region, style));
+    }
+
     /// A shortcut's edit is not typing: the re-coloring the rest timer
     /// owes after a keystroke starts at once, so moved or rewritten
     /// lines never sit plain while the keys keep coming.
@@ -2315,6 +2337,14 @@ impl App {
         if text == source[start..end] {
             return;
         }
+        // Each line's whole growth carries the lines below it; the
+        // reported delta moves the positions on the line itself, which
+        // a closing mark appended past them does not touch.
+        let growth: Vec<i64> = text
+            .split('\n')
+            .zip(source[start..end].split('\n'))
+            .map(|(new, old)| new.len() as i64 - old.len() as i64)
+            .collect();
         let mut line_starts = vec![start];
         for (i, b) in source[start..end].bytes().enumerate() {
             if b == b'\n' {
@@ -2323,7 +2353,7 @@ impl App {
         }
         let map = |p: usize| -> usize {
             let k = line_starts.partition_point(|ls| *ls <= p) - 1;
-            let prefix: i64 = edits[..k].iter().map(|&(_, d)| d).sum();
+            let prefix: i64 = growth[..k].iter().sum();
             let (ls, (col, d)) = (line_starts[k], edits[k]);
             let at = ls + col;
             let new = if p <= at {

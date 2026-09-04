@@ -61,6 +61,7 @@ pub enum Command {
     MoveLineDown,
     DuplicateLines,
     DeleteLines,
+    Comment,
     Quit,
 }
 
@@ -436,6 +437,15 @@ pub const SHORTCUTS: &[Shortcut] = &[
         bindings: &[(Binding::CtrlShift("k"), Command::DeleteLines)],
     },
     Shortcut {
+        keys: "Ctrl+/",
+        action: "Comment or uncomment the line or the selected lines (code and markdown editing)",
+        section: "Edit",
+        bindings: &[
+            (Binding::Ctrl("/"), Command::Comment),
+            (Binding::CtrlCode(KeyCode::Slash), Command::Comment),
+        ],
+    },
+    Shortcut {
         keys: "Ctrl+T",
         action: "Choose a theme",
         section: "View",
@@ -636,6 +646,7 @@ mod tests {
             KeyCode::NumpadAdd => "+",
             KeyCode::Period => ".",
             KeyCode::Backquote => "`",
+            KeyCode::Slash => "/",
             other => panic!("{other:?} has no US character in this table"),
         };
         let none = PhysicalKey::Unidentified(NativeKeyCode::Unidentified);
@@ -752,6 +763,22 @@ mod tests {
             "plain Ctrl+D stays"
         );
         assert_eq!(command(&chr("k"), true, false), Some(Command::Link));
+    }
+
+    #[test]
+    fn ctrl_slash_toggles_a_comment_by_character_or_key() {
+        assert_eq!(command(&chr("/"), true, false), Some(Command::Comment));
+        assert_eq!(
+            super::command(
+                &chr(":"),
+                PhysicalKey::Code(KeyCode::Slash),
+                true,
+                false,
+                false
+            ),
+            Some(Command::Comment),
+            "AZERTY: the slash key prints : unshifted"
+        );
     }
 
     #[test]

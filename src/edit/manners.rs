@@ -713,6 +713,121 @@ pub fn delete_lines(
     }
 }
 
+/// How a language writes a comment: a token that comments the rest of
+/// the line, or a pair that wraps it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CommentStyle {
+    Line(&'static str),
+    Block(&'static str, &'static str),
+}
+
+/// The comment style of a detected language, by the token the loader
+/// names it with; markdown takes the HTML comment; None where the
+/// language has no comment (JSON, diffs) or the file is plain text.
+pub fn comment_style(language: Option<&str>, markdown: bool) -> Option<CommentStyle> {
+    use CommentStyle::*;
+    if markdown {
+        return Some(Block("<!--", "-->"));
+    }
+    Some(match language? {
+        "actionscript" | "c" | "cpp" | "csharp" | "d" | "go" | "graphql" | "graphviz"
+        | "groovy" | "java" | "javascript" | "kotlin" | "objective-c" | "objective-c++"
+        | "pascal" | "php" | "protobuf" | "rust" | "scala" | "swift" | "tsx" | "typescript"
+        | "zig" => Line("//"),
+        "bash" | "dockerfile" | "makefile" | "perl" | "properties" | "python" | "r" | "ruby"
+        | "tcl" | "terraform" | "toml" | "yaml" => Line("#"),
+        "applescript" | "haskell" | "lua" | "sql" => Line("--"),
+        "clojure" | "ini" | "lisp" => Line(";"),
+        "bibtex" | "erlang" | "latex" => Line("%"),
+        "batch" => Line("REM"),
+        "html" | "jsp" | "xml" => Block("<!--", "-->"),
+        "css" => Block("/*", "*/"),
+        "ocaml" => Block("(*", "*)"),
+        _ => return None,
+    })
+}
+
+/// Comments or uncomments a region of whole lines, without its
+/// trailing newline. A line token goes at the block's shallowest indent
+/// on every non-blank line, a space after it; a block pair wraps each
+/// non-blank line. When every non-blank line is already commented, the
+/// marks come off (the token's one following space with it). Answers
+/// the new text and, per line, the byte column of the change and the
+/// delta positions on that line move by; a closing mark appended past
+/// them is the caller's to count.
+pub fn comment_lines(region: &str, style: CommentStyle) -> (String, Vec<(usize, i64)>) {
+    let lines: Vec<&str> = region.split('\n').collect();
+    let indent_of = |line: &str| line.len() - line.trim_start_matches([' ', '\t']).len();
+    let blank = |line: &str| line.trim_matches([' ', '\t']).is_empty();
+    // The mark a line carries: the bytes it takes at the start and,
+    // for a pair, at the end.
+    let marked = |line: &str| -> Option<(usize, usize)> {
+        let rest = &line[indent_of(line)..];
+        match style {
+            CommentStyle::Line(token) => {
+                let rest = rest.strip_prefix(token)?;
+                Some((token.len() + usize::from(rest.starts_with(' ')), 0))
+            }
+            CommentStyle::Block(open, close) => {
+                let rest = rest.strip_prefix(open)?;
+                let trimmed = rest.trim_end_matches([' ', '\t']);
+                let body = trimmed.strip_suffix(close)?;
+                let head = open.len() + usize::from(rest.starts_with(' '));
+                let tail =
+                    close.len() + usize::from(body.ends_with(' ')) + (rest.len() - trimmed.len());
+                Some((head, tail))
+            }
+        }
+    };
+    let items = lines.iter().filter(|line| !blank(line));
+    let clearing = items.clone().count() > 0 && items.clone().all(|line| marked(line).is_some());
+    let column = items.clone().map(|line| indent_of(line)).min().unwrap_or(0);
+    let mut out = String::with_capacity(region.len() + 8 * lines.len());
+    let mut edits = Vec::with_capacity(lines.len());
+    for (i, line) in lines.iter().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        if blank(line) {
+            out.push_str(line);
+            edits.push((0, 0));
+            continue;
+        }
+        let indent = indent_of(line);
+        if clearing {
+            let (head, tail) = marked(line).expect("every line is marked");
+            out.push_str(&line[..indent]);
+            out.push_str(&line[indent + head..line.len() - tail]);
+            edits.push((indent, -(head as i64)));
+            continue;
+        }
+        if marked(line).is_some() {
+            out.push_str(line);
+            edits.push((indent, 0));
+            continue;
+        }
+        match style {
+            CommentStyle::Line(token) => {
+                out.push_str(&line[..column]);
+                out.push_str(token);
+                out.push(' ');
+                out.push_str(&line[column..]);
+                edits.push((column, token.len() as i64 + 1));
+            }
+            CommentStyle::Block(open, close) => {
+                out.push_str(&line[..indent]);
+                out.push_str(open);
+                out.push(' ');
+                out.push_str(&line[indent..]);
+                out.push(' ');
+                out.push_str(close);
+                edits.push((indent, open.len() as i64 + 1));
+            }
+        }
+    }
+    (out, edits)
+}
+
 /// The leading bytes one outdent removes: a tab when the line starts
 /// with one, else up to a step of spaces, the unit's own width or the
 /// conventional four when the unit is a tab.
@@ -1260,6 +1375,65 @@ mod tests {
             (2..4, 2),
             "a last line followed by the final newline keeps that newline"
         );
+    }
+
+    #[test]
+    fn comment_styles_follow_the_language() {
+        use CommentStyle::*;
+        assert_eq!(comment_style(Some("rust"), false), Some(Line("//")));
+        assert_eq!(comment_style(Some("python"), false), Some(Line("#")));
+        assert_eq!(comment_style(Some("sql"), false), Some(Line("--")));
+        assert_eq!(comment_style(Some("css"), false), Some(Block("/*", "*/")));
+        assert_eq!(
+            comment_style(Some("html"), false),
+            Some(Block("<!--", "-->"))
+        );
+        assert_eq!(
+            comment_style(Some("json"), false),
+            None,
+            "no comments in JSON"
+        );
+        assert_eq!(
+            comment_style(None, true),
+            Some(Block("<!--", "-->")),
+            "markdown"
+        );
+        assert_eq!(comment_style(None, false), None, "plain text");
+    }
+
+    #[test]
+    fn comment_lines_toggles_line_and_block_comments() {
+        use CommentStyle::*;
+        let r = |text: &str, edits: Vec<(usize, i64)>| (text.to_string(), edits);
+        assert_eq!(
+            comment_lines("a\n  b", Line("//")),
+            r("// a\n//   b", vec![(0, 3), (0, 3)]),
+            "the token sits at the block's shallowest indent"
+        );
+        assert_eq!(
+            comment_lines("  a\n  b", Line("#")),
+            r("  # a\n  # b", vec![(2, 2), (2, 2)])
+        );
+        assert_eq!(
+            comment_lines("// a\n//b\n\n  // c", Line("//")),
+            r("a\nb\n\n  c", vec![(0, -3), (0, -2), (0, 0), (2, -3)]),
+            "every line commented: the token and one space come off, a blank skipped"
+        );
+        assert_eq!(
+            comment_lines("// a\nb", Line("//")),
+            r("// a\n// b", vec![(0, 0), (0, 3)]),
+            "mixed: every line commented, the commented one untouched"
+        );
+        assert_eq!(
+            comment_lines("a\n\nb", Block("<!--", "-->")),
+            r("<!-- a -->\n\n<!-- b -->", vec![(0, 5), (0, 0), (0, 5)]),
+            "a block style wraps each line; the delta is the opening's"
+        );
+        assert_eq!(
+            comment_lines("<!-- a -->\n  <!-- b -->", Block("<!--", "-->")),
+            r("a\n  b", vec![(0, -5), (2, -5)])
+        );
+        assert_eq!(comment_lines("", Line("#")), r("", vec![(0, 0)]));
     }
 
     #[test]
