@@ -31,14 +31,22 @@ pub enum MarkdownEnter {
 /// The markdown continuation decision for Enter with the caret `col`
 /// bytes into `line`. None when the line opens with no quote or list
 /// marker, or the caret sits inside the marker; the plain indent carry
-/// of `enter_text` is the fallback either way.
+/// of `enter_text` is the fallback either way. A marker followed by
+/// nothing but whitespace is an empty item wherever the caret stands
+/// past the marker's last non-blank byte: layout trims trailing spaces,
+/// so a click or an arrow move can seat the caret between the dash and
+/// its space, and Enter there must still end the list.
 pub fn markdown_enter(line: &str, col: usize) -> Option<MarkdownEnter> {
     let (prefix, continuation) = markdown_prefix(line)?;
-    if col < prefix {
+    let core = line[..prefix].trim_end_matches([' ', '\t']).len();
+    if col < core {
         return None;
     }
-    if line.len() == prefix {
-        return Some(MarkdownEnter::Unwind(prefix));
+    if line[core..].trim_matches([' ', '\t']).is_empty() {
+        return Some(MarkdownEnter::Unwind(line.len()));
+    }
+    if col < prefix {
+        return None;
     }
     Some(MarkdownEnter::Insert(format!("\n{continuation}")))
 }
@@ -330,7 +338,6 @@ mod tests {
     fn a_caret_inside_the_marker_declines() {
         assert_eq!(markdown_enter("- item", 1), None);
         assert_eq!(markdown_enter("- item", 0), None);
-        assert_eq!(markdown_enter("- ", 1), None);
     }
 
     #[test]
@@ -357,6 +364,44 @@ mod tests {
             markdown_enter("> ", 2),
             unwind(2),
             "an empty quote ends too"
+        );
+    }
+
+    /// A click or an arrow move past a line's visible end lands before
+    /// its trailing spaces, so the caret can sit between the dash and
+    /// its space; Enter must still see an empty item there.
+    #[test]
+    fn a_bare_marker_ends_its_list_from_anywhere_after_the_marker() {
+        assert_eq!(
+            markdown_enter("- ", 1),
+            unwind(2),
+            "between the dash and its space"
+        );
+        assert_eq!(
+            markdown_enter("-  ", 2),
+            unwind(3),
+            "two spaces, the caret between them"
+        );
+        assert_eq!(
+            markdown_enter("-  ", 3),
+            unwind(3),
+            "two spaces, the caret at the end"
+        );
+        assert_eq!(markdown_enter("1. ", 2), unwind(3));
+        assert_eq!(markdown_enter("- [ ] ", 5), unwind(6), "after the box");
+        assert_eq!(markdown_enter("- [ ]  ", 6), unwind(7));
+        assert_eq!(markdown_enter("> ", 1), unwind(2));
+        assert_eq!(markdown_enter("  - ", 3), unwind(4), "nested");
+        assert_eq!(
+            markdown_enter("- ", 0),
+            None,
+            "before the dash is a plain split"
+        );
+        assert_eq!(markdown_enter("- [ ] ", 3), None, "inside the box");
+        assert_eq!(
+            markdown_enter("-  x", 2),
+            None,
+            "content after the whitespace: inside the marker"
         );
     }
 

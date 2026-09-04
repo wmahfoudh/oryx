@@ -368,7 +368,9 @@ fn x_of(
     text_run.width
 }
 
-/// The character boundary nearest an absolute x on a line.
+/// The character boundary nearest an absolute x on a line. Past the
+/// last run's visible end the answer is the line's end, which extends
+/// over the trailing whitespace layout trimmed, the place End reaches.
 fn offset_at_x(
     fonts: &mut FontStore,
     lay: &LayoutDoc,
@@ -376,13 +378,12 @@ fn offset_at_x(
     line: &Line,
     x: f32,
 ) -> usize {
-    let Some(run) = line
-        .runs
-        .iter()
-        .find(|r| x < r.x + r.width)
-        .or_else(|| line.runs.last())
-    else {
-        return line.start;
+    let Some(run) = line.runs.iter().find(|r| x < r.x + r.width) else {
+        return if line.runs.is_empty() {
+            line.start
+        } else {
+            line.end
+        };
     };
     if x <= run.x {
         return run.start;
@@ -1192,6 +1193,35 @@ mod tests {
             at(&doc, "line 05") + "line 05".len(),
             "past the line's end is the line end"
         );
+    }
+
+    /// Layout trims trailing spaces, but a click or a goal column past
+    /// the visible end means the end of the line, spaces included, the
+    /// same place End reaches.
+    #[test]
+    fn past_the_visible_end_lands_after_the_trailing_spaces() {
+        let doc = text_doc("a much longer line above\nshort   \nafter\n");
+        let (l, mut fonts) = lay_of(&doc);
+        let r = run(&l, &doc, "short");
+        let end = at(&doc, "short") + "short   ".len();
+        let c = place(&l, &doc, &mut fonts, r.x + r.width + 60.0, r.y + 1.0).unwrap();
+        assert_eq!(c.offset, end, "a click past the end");
+        let c = place(&l, &doc, &mut fonts, r.x + r.width - 0.5, r.y + 1.0).unwrap();
+        assert_eq!(
+            c.offset,
+            at(&doc, "short") + "short".len(),
+            "a click on the last glyph still lands before the spaces"
+        );
+        let above = at(&doc, "a much longer line above") + "a much longer line above".len();
+        let c = step(Caret::at(above), Motion::Down, &l, &doc, &mut fonts);
+        assert_eq!(c.offset, end, "down from a longer line");
+        let below = at(&doc, "after") + "after".len();
+        let c = Caret {
+            offset: below,
+            goal: Some(r.x + r.width + 200.0),
+        };
+        let c = step(c, Motion::Up, &l, &doc, &mut fonts);
+        assert_eq!(c.offset, end, "up with a goal past the end");
     }
 
     #[test]

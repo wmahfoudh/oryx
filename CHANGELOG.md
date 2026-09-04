@@ -2,6 +2,9 @@
 
 ## v1.1.0
 
+- In the editor, Enter on an empty list item now ends the list even when the caret was placed by a click or an arrow key. Before, the caret could land between the dash and its space, and Enter left the dash behind.
+- A click or an arrow move past the end of a line lands after its trailing spaces, where End goes, instead of before them.
+
 ## v1.0.0
 
 Version 1.0.0 is the first one published as packages: a `.deb`, an `.rpm` and an AppImage on the release page, two AUR packages, and the Windows installer, beside the tarball and the zip as before. The details:
