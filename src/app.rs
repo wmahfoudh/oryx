@@ -1852,9 +1852,9 @@ impl App {
     }
 
     /// Ctrl+Shift+S: the current text written to a chosen path, which
-    /// becomes the open file; the mode, the caret and the scroll survive
-    /// the move. True once the file is written; false when the dialog
-    /// is dismissed or the write fails.
+    /// becomes the open file, the sidebar on its folder; the mode, the
+    /// caret and the scroll survive the move. True once the file is
+    /// written; false when the dialog is dismissed or the write fails.
     fn save_as(&mut self) -> bool {
         let Some(ledger) = self.ledger.as_ref() else {
             return false;
@@ -1893,7 +1893,9 @@ impl App {
                 if let Some(offset) = self.caret.map(|c| c.offset) {
                     self.edit_marks.insert(target.clone(), offset);
                 }
-                self.open_file(&target, false);
+                // The file lives in the chosen folder now, and the
+                // sidebar moves there, as it does for a new file.
+                self.open_file(&target, true);
                 // `open_file` notes the outgoing file for a resumed edit,
                 // as for any switch; a Save As is done with that file,
                 // which reopens to read like any other. Saving onto the

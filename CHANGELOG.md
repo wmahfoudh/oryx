@@ -20,6 +20,7 @@
 - Syntax colors now arrive while text is selected, and the lines a shortcut moves or rewrites are colored at once instead of after a pause. Before, lines changed under a selection stayed uncolored until the selection was cleared.
 - Shortcuts with a digit, a period or a dash also answer the key at that position on the keyboard, so they work on a French keyboard where those keys need Shift.
 - In the editor, the caret now shows on an empty file, and a click on an empty page places it. Before, an empty file showed no caret until a letter was typed.
+- After Save As, the sidebar shows the folder the file was saved in, as it does for a new file.
 - Ctrl+M opens an empty markdown note in the editor at once, with no dialog. The name, the place and the type are chosen at the first Ctrl+S; until then the note is unsaved work, and closing the window or opening another file asks the usual question.
 
 ## v1.0.0
