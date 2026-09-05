@@ -22,6 +22,7 @@
 - In the editor, the caret now shows on an empty file, and a click on an empty page places it. Before, an empty file showed no caret until a letter was typed.
 - After Save As, the sidebar shows the folder the file was saved in, as it does for a new file.
 - The search and replace fields now behave like text boxes. Ctrl+Left and Ctrl+Right jump words, with Shift they select them, Ctrl+Backspace and Ctrl+Delete remove a word, Ctrl+Y redoes, a click places the caret, a double click selects the word, a triple click the whole text, and a drag selects. While a field has the keyboard, the document's editing keys stay quiet: before, Ctrl+B or Tab typed into the search field changed the document. The theme editor's and the theme browser's fields gain the same keys.
+- The search bar's text, counter and hint sit level with the caret and the regex button. Before, they rode slightly high.
 - Ctrl+M opens an empty markdown note in the editor at once, with no dialog. The name, the place and the type are chosen at the first Ctrl+S; until then the note is unsaved work, and closing the window or opening another file asks the usual question.
 
 ## v1.0.0

@@ -25,6 +25,9 @@ const COUNTER_SIZE: f32 = 13.0;
 const TOGGLE_W: f32 = 26.0;
 const TOGGLE_H: f32 = 22.0;
 const ROW_H: f32 = 36.0;
+/// The glyphs sit this much below the row's top, so the text's caps
+/// stand centered on the caret and the pill, level with the toggle.
+const TEXT_DROP: f32 = 2.0;
 
 /// Live find session: the query as typed, its matches, and the cursor
 /// among them. `stale` marks the matches for recomputation against the
@@ -196,7 +199,7 @@ pub fn draw_bar(painter: &mut Painter, theme: &Theme, state: &mut SearchState, w
     // Tops differ by the ascent difference so both texts share a baseline.
     painter.text(
         toggle_x - 10.0 - counter_w,
-        y + 10.0 + (QUERY_SIZE - COUNTER_SIZE) * 1.1,
+        y + 10.0 + TEXT_DROP + (QUERY_SIZE - COUNTER_SIZE) * 1.1,
         &counter,
         CODE_FAMILY,
         COUNTER_SIZE,
@@ -231,7 +234,7 @@ pub fn draw_bar(painter: &mut Painter, theme: &Theme, state: &mut SearchState, w
         let hint_w = painter.measure(hint, CODE_FAMILY, COUNTER_SIZE, 400);
         painter.text(
             x + BAR_WIDTH - PAD - hint_w,
-            y + BAR_HEIGHT + 7.0 + (QUERY_SIZE - COUNTER_SIZE) * 1.1,
+            y + BAR_HEIGHT + 7.0 + TEXT_DROP + (QUERY_SIZE - COUNTER_SIZE) * 1.1,
             hint,
             CODE_FAMILY,
             COUNTER_SIZE,
@@ -329,7 +332,7 @@ fn draw_field(
     if text.is_empty() {
         painter.text(
             left + 6.0,
-            top,
+            top + TEXT_DROP,
             placeholder,
             CODE_FAMILY,
             QUERY_SIZE,
@@ -339,7 +342,7 @@ fn draw_field(
     } else {
         painter.text(
             left,
-            top,
+            top + TEXT_DROP,
             &shown,
             CODE_FAMILY,
             QUERY_SIZE,
