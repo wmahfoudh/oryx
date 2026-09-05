@@ -1,12 +1,17 @@
-//! A single-line text field: buffer, caret and selection. It owns no
-//! drawing, no clipboard and no font system, so every site keeps its own
-//! appearance and the whole thing stays testable without a display.
+//! A single-line text field: buffer, caret and selection, with the
+//! manners of every text box: word jumps and word deletion on the
+//! editor's own word rules, a click that places the caret, a double
+//! click for the word, a triple for everything, a drag for a range. It
+//! owns no drawing, no clipboard and no font system, so every site
+//! keeps its own appearance and the whole thing stays testable without
+//! a display.
 
 use std::ops::Range;
 use std::time::Instant;
 
 use winit::keyboard::{Key, NamedKey};
 
+use crate::edit::caret::{word_char, word_left, word_right};
 use crate::input::DOUBLE_CLICK;
 
 /// What a key did to the field.
@@ -37,6 +42,8 @@ pub struct TextField {
     caret: usize,
     anchor: Option<usize>,
     last_click: Option<Instant>,
+    /// Clicks in the current burst, one to three.
+    clicks: u8,
     undo: Vec<(String, usize)>,
     redo: Vec<(String, usize)>,
 }
@@ -50,6 +57,7 @@ impl TextField {
             text,
             anchor: None,
             last_click: None,
+            clicks: 0,
             undo: Vec::new(),
             redo: Vec::new(),
         }
@@ -119,8 +127,10 @@ impl TextField {
         self.anchor = None;
     }
 
-    /// Handles one key. Keys the field does not claim, Enter and Escape
-    /// above all, report `Ignored` so the owner can act on them.
+    /// Handles one key. The clipboard chords, Enter, Escape and Tab
+    /// report `Ignored` so the owner can act on them; every key a text
+    /// box answers is claimed here, at the ends of the text included,
+    /// so it never reaches the owner's document.
     pub fn key(&mut self, key: &Key, ctrl: bool, shift: bool) -> Edit {
         match key {
             Key::Character(c) if ctrl => {
@@ -133,20 +143,26 @@ impl TextField {
                     } else {
                         self.undo()
                     }
+                } else if c.eq_ignore_ascii_case("y") {
+                    self.redo()
                 } else {
                     Edit::Ignored
                 }
             }
             Key::Character(c) => self.insert_text(c.as_str()),
             Key::Named(NamedKey::Space) => self.insert_text(" "),
+            Key::Named(NamedKey::Backspace) if ctrl => self.delete(Step::WordBack),
+            Key::Named(NamedKey::Delete) if ctrl => self.delete(Step::WordForward),
             Key::Named(NamedKey::Backspace) => self.delete(Step::Back),
             Key::Named(NamedKey::Delete) => self.delete(Step::Forward),
-            // Ctrl-modified navigation means nothing on one line; the
-            // owner keeps its document jumps while a field is open.
-            Key::Named(NamedKey::ArrowLeft) if !ctrl => self.move_caret(Motion::Left, shift),
-            Key::Named(NamedKey::ArrowRight) if !ctrl => self.move_caret(Motion::Right, shift),
-            Key::Named(NamedKey::Home) if !ctrl => self.move_caret(Motion::Start, shift),
-            Key::Named(NamedKey::End) if !ctrl => self.move_caret(Motion::End, shift),
+            // Ctrl with an arrow jumps a word; with Home or End it
+            // means the plain key, one line having no farther to go.
+            Key::Named(NamedKey::ArrowLeft) if ctrl => self.move_caret(Motion::WordLeft, shift),
+            Key::Named(NamedKey::ArrowRight) if ctrl => self.move_caret(Motion::WordRight, shift),
+            Key::Named(NamedKey::ArrowLeft) => self.move_caret(Motion::Left, shift),
+            Key::Named(NamedKey::ArrowRight) => self.move_caret(Motion::Right, shift),
+            Key::Named(NamedKey::Home) => self.move_caret(Motion::Start, shift),
+            Key::Named(NamedKey::End) => self.move_caret(Motion::End, shift),
             _ => Edit::Ignored,
         }
     }
@@ -187,23 +203,73 @@ impl TextField {
         best
     }
 
-    /// A click at `x`. A second click inside `DOUBLE_CLICK` selects
-    /// everything; a single click places the caret.
+    /// A click at `x`: the caret goes under it; a second click inside
+    /// `DOUBLE_CLICK` selects the word there, a third the whole text,
+    /// and a fourth starts over.
     pub fn click(&mut self, x: f32, offsets: &[f32], now: Instant) {
-        let double = self
+        let quick = self
             .last_click
             .is_some_and(|at| now.duration_since(at) < DOUBLE_CLICK);
-        if double {
-            self.select_all();
-            self.last_click = None;
-        } else {
-            let index = self.caret_at(x, offsets);
-            self.set_caret(index);
-            self.last_click = Some(now);
+        self.clicks = if quick { self.clicks % 3 + 1 } else { 1 };
+        self.last_click = Some(now);
+        let index = self.caret_at(x, offsets);
+        match self.clicks {
+            2 => self.select_word_at(index),
+            3 => self.select_all(),
+            _ => self.set_caret(index),
         }
     }
 
-    fn boundaries(&self) -> impl Iterator<Item = usize> + '_ {
+    /// The pointer moved with the button held after a click: the
+    /// selection runs from the press to the pointer.
+    pub fn drag_to(&mut self, x: f32, offsets: &[f32]) {
+        let index = self.caret_at(x, offsets);
+        self.anchor.get_or_insert(self.caret);
+        self.caret = index;
+    }
+
+    /// Selects the run of like characters around a boundary: the word,
+    /// the symbols or the gap. A boundary with space on one side takes
+    /// the other side's run, so the last letter of a word still means
+    /// the word.
+    fn select_word_at(&mut self, index: usize) {
+        let class = |c: char| {
+            if c.is_whitespace() {
+                0
+            } else if word_char(c) {
+                1
+            } else {
+                2
+            }
+        };
+        let after = self.text[index..].chars().next();
+        let before = self.text[..index].chars().next_back();
+        let Some(kind) = after
+            .filter(|c| !c.is_whitespace())
+            .or(before.filter(|c| !c.is_whitespace()))
+            .or(after)
+            .or(before)
+            .map(class)
+        else {
+            return;
+        };
+        let back: usize = self.text[..index]
+            .chars()
+            .rev()
+            .take_while(|c| class(*c) == kind)
+            .map(char::len_utf8)
+            .sum();
+        let ahead: usize = self.text[index..]
+            .chars()
+            .take_while(|c| class(*c) == kind)
+            .map(char::len_utf8)
+            .sum();
+        self.anchor = Some(index - back);
+        self.caret = index + ahead;
+    }
+
+    /// Every character boundary in order, the text's end last.
+    pub fn boundaries(&self) -> impl Iterator<Item = usize> + '_ {
         self.text
             .char_indices()
             .map(|(i, _)| i)
@@ -235,9 +301,14 @@ impl TextField {
             self.replace(range, "");
             return Edit::Changed;
         }
+        let caret = self.caret;
         let range = match step {
-            Step::Back => self.prev(self.caret).map(|from| from..self.caret),
-            Step::Forward => self.next(self.caret).map(|to| self.caret..to),
+            Step::Back => self.prev(caret).map(|from| from..caret),
+            Step::Forward => self.next(caret).map(|to| caret..to),
+            Step::WordBack => (caret > 0).then(|| word_left(&self.text, caret)..caret),
+            Step::WordForward => {
+                (caret < self.text.len()).then(|| caret..word_right(&self.text, caret))
+            }
         };
         match range {
             Some(range) => {
@@ -311,19 +382,24 @@ impl TextField {
         // and goes no further, which is what every text field does.
         if !shift {
             if let Some(range) = self.selection() {
-                self.caret = match motion {
-                    Motion::Left => range.start,
-                    Motion::Right => range.end,
-                    Motion::Start => 0,
-                    Motion::End => self.text.len(),
+                let edge = match motion {
+                    Motion::Left => Some(range.start),
+                    Motion::Right => Some(range.end),
+                    _ => None,
                 };
-                self.anchor = None;
-                return Edit::Handled;
+                if let Some(edge) = edge {
+                    self.caret = edge;
+                    self.anchor = None;
+                    return Edit::Handled;
+                }
             }
         }
+        let caret = self.caret;
         let target = match motion {
-            Motion::Left => self.prev(self.caret),
-            Motion::Right => self.next(self.caret),
+            Motion::Left => self.prev(caret),
+            Motion::Right => self.next(caret),
+            Motion::WordLeft => (caret > 0).then(|| word_left(&self.text, caret)),
+            Motion::WordRight => (caret < self.text.len()).then(|| word_right(&self.text, caret)),
             Motion::Start => Some(0),
             Motion::End => Some(self.text.len()),
         };
@@ -357,11 +433,15 @@ impl TextField {
 enum Step {
     Back,
     Forward,
+    WordBack,
+    WordForward,
 }
 
 enum Motion {
     Left,
     Right,
+    WordLeft,
+    WordRight,
     Start,
     End,
 }
@@ -392,17 +472,119 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_navigation_is_left_to_the_owner() {
-        let mut f = field_at("hello", 2);
-        for key in [
-            NamedKey::Home,
-            NamedKey::End,
-            NamedKey::ArrowLeft,
-            NamedKey::ArrowRight,
-        ] {
-            assert_eq!(f.key(&named(key), true, false), Edit::Ignored);
-        }
-        assert_eq!(f.caret(), 2, "the field caret never moved");
+    fn ctrl_arrows_jump_words_and_ctrl_home_and_end_reach_the_ends() {
+        let mut f = field_at("hello big world", 7);
+        assert_eq!(
+            f.key(&named(NamedKey::ArrowLeft), true, false),
+            Edit::Handled
+        );
+        assert_eq!(f.caret(), 6, "back to the start of big");
+        assert_eq!(
+            f.key(&named(NamedKey::ArrowLeft), true, false),
+            Edit::Handled
+        );
+        assert_eq!(f.caret(), 0);
+        assert_eq!(
+            f.key(&named(NamedKey::ArrowLeft), true, false),
+            Edit::Handled
+        );
+        assert_eq!(f.caret(), 0, "claimed at the start, so nothing leaks");
+        assert_eq!(
+            f.key(&named(NamedKey::ArrowRight), true, false),
+            Edit::Handled
+        );
+        assert_eq!(f.caret(), 5, "to the end of hello");
+        assert_eq!(f.key(&named(NamedKey::End), true, false), Edit::Handled);
+        assert_eq!(f.caret(), 15);
+        assert_eq!(f.key(&named(NamedKey::Home), true, false), Edit::Handled);
+        assert_eq!(f.caret(), 0);
+        assert_eq!(f.selection(), None);
+    }
+
+    #[test]
+    fn ctrl_shift_arrows_and_ends_select_words() {
+        let mut f = field_at("hello big world", 6);
+        assert_eq!(
+            f.key(&named(NamedKey::ArrowRight), true, true),
+            Edit::Handled
+        );
+        assert_eq!(f.selected_text(), "big");
+        assert_eq!(
+            f.key(&named(NamedKey::ArrowRight), true, true),
+            Edit::Handled
+        );
+        assert_eq!(f.selected_text(), "big world");
+        assert_eq!(
+            f.key(&named(NamedKey::ArrowLeft), true, true),
+            Edit::Handled
+        );
+        assert_eq!(f.selected_text(), "big ");
+        let mut g = field_at("hello big world", 9);
+        g.key(&named(NamedKey::Home), true, true);
+        assert_eq!(g.selected_text(), "hello big");
+        g.key(&named(NamedKey::End), true, true);
+        assert_eq!(g.selected_text(), " world", "the anchor stays");
+    }
+
+    #[test]
+    fn ctrl_backspace_and_ctrl_delete_remove_a_word() {
+        let mut f = field_at("hello big world", 9);
+        assert_eq!(
+            f.key(&named(NamedKey::Backspace), true, false),
+            Edit::Changed
+        );
+        assert_eq!(f.text(), "hello  world");
+        assert_eq!(f.caret(), 6);
+        assert_eq!(f.key(&named(NamedKey::Delete), true, false), Edit::Changed);
+        assert_eq!(f.text(), "hello ");
+        assert_eq!(f.caret(), 6);
+        assert_eq!(
+            f.key(&named(NamedKey::Delete), true, false),
+            Edit::Handled,
+            "nothing after"
+        );
+        let mut g = field_at("ab", 0);
+        assert_eq!(
+            g.key(&named(NamedKey::Backspace), true, false),
+            Edit::Handled,
+            "nothing before"
+        );
+        let mut h = TextField::new("hello world");
+        h.select_all();
+        assert_eq!(
+            h.key(&named(NamedKey::Backspace), true, false),
+            Edit::Changed
+        );
+        assert_eq!(h.text(), "", "a selection goes whole, word or not");
+    }
+
+    #[test]
+    fn ctrl_y_redoes_like_ctrl_shift_z() {
+        let mut f = field_at("ab", 2);
+        f.key(&ch("c"), false, false);
+        assert_eq!(f.key(&ch("z"), true, false), Edit::Changed);
+        assert_eq!(f.key(&ch("y"), true, false), Edit::Changed);
+        assert_eq!(f.text(), "abc");
+        assert_eq!(
+            f.key(&ch("y"), true, false),
+            Edit::Ignored,
+            "nothing left to redo"
+        );
+    }
+
+    #[test]
+    fn a_drag_selects_from_the_press() {
+        let mut f = TextField::new("hello world");
+        let at = f.offsets(measure);
+        f.click(21.0, &at, Instant::now());
+        f.drag_to(71.0, &at);
+        assert_eq!(f.selected_text(), "llo w");
+        assert_eq!(f.caret(), 7);
+        f.drag_to(1.0, &at);
+        assert_eq!(f.selected_text(), "he", "back past the press");
+        assert_eq!(f.caret(), 0);
+        f.drag_to(21.0, &at);
+        assert_eq!(f.selection(), None, "back on the press: nothing");
     }
 
     #[test]
@@ -734,15 +916,20 @@ mod tests {
     }
 
     #[test]
-    fn a_single_click_places_the_caret_and_a_double_click_selects_all() {
-        let mut f = TextField::new("hello");
+    fn a_click_places_the_caret_a_second_selects_the_word_a_third_everything() {
+        let mut f = TextField::new("hello big world");
         let at = f.offsets(measure);
         let start = Instant::now();
-        f.click(21.0, &at, start);
-        assert_eq!(f.caret(), 2);
+        f.click(71.0, &at, start);
+        assert_eq!(f.caret(), 7);
         assert_eq!(f.selection(), None);
-        f.click(21.0, &at, start + Duration::from_millis(100));
-        assert_eq!(f.selected_text(), "hello", "inside the window");
+        f.click(71.0, &at, start + Duration::from_millis(100));
+        assert_eq!(f.selected_text(), "big", "the word under the pointer");
+        f.click(71.0, &at, start + Duration::from_millis(200));
+        assert_eq!(f.selected_text(), "hello big world", "the whole text");
+        f.click(71.0, &at, start + Duration::from_millis(300));
+        assert_eq!(f.selection(), None, "a fourth click starts over");
+        assert_eq!(f.caret(), 7);
 
         let mut g = TextField::new("hello");
         let at = g.offsets(measure);
@@ -750,5 +937,21 @@ mod tests {
         g.click(41.0, &at, start + Duration::from_millis(900));
         assert_eq!(g.selection(), None, "too slow to be a double click");
         assert_eq!(g.caret(), 4);
+
+        let mut h = TextField::new("hello world");
+        let at = h.offsets(measure);
+        h.click(51.0, &at, start);
+        h.click(51.0, &at, start + Duration::from_millis(100));
+        assert_eq!(
+            h.selected_text(),
+            "hello",
+            "on a word's last letter, its boundary still means the word"
+        );
+
+        let mut s = TextField::new("a  b");
+        let at = s.offsets(measure);
+        s.click(20.0, &at, start);
+        s.click(20.0, &at, start + Duration::from_millis(100));
+        assert_eq!(s.selected_text(), "  ", "between words, the gap");
     }
 }

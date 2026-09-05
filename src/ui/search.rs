@@ -35,6 +35,10 @@ const ROW_H: f32 = 36.0;
 /// character replaces it.
 pub struct SearchState {
     pub query: TextField,
+    /// Where the query's text was last drawn, for the mouse.
+    pub query_view: FieldView,
+    /// The same for the replace field.
+    pub replace_view: FieldView,
     /// Regex matching instead of plain text, flipped by the bar's
     /// toggle and kept across close and reopen like the query.
     pub regex: bool,
@@ -67,6 +71,17 @@ pub struct SearchState {
     /// The current match landed on its recorded block top because its
     /// region was cold; the exact anchor still owes a centering.
     pub settle: bool,
+}
+
+/// Where a field's text was last drawn: the left edge of its text and
+/// the x of every character boundary from there, the windowed text's
+/// characters at their drawn places and the cut ones beyond the box. A
+/// click and a drag read it; the bar refreshes it every frame it
+/// draws, so it describes the text the pointer sees.
+#[derive(Debug, Default, Clone)]
+pub struct FieldView {
+    pub left: f32,
+    pub offsets: Vec<f32>,
 }
 
 /// The second row of the bar: the replacement text and whether its
@@ -106,8 +121,9 @@ impl SearchState {
 }
 
 /// The floating pill over the document's top-right corner: query on the
-/// left, match counter on the right, in the theme's overlay colors.
-pub fn draw_bar(painter: &mut Painter, theme: &Theme, state: &SearchState, width: f32) {
+/// left, match counter on the right, in the theme's overlay colors. The
+/// fields' views are refreshed for the mouse.
+pub fn draw_bar(painter: &mut Painter, theme: &Theme, state: &mut SearchState, width: f32) {
     let ui = &theme.ui;
     let x = (width - BAR_WIDTH - MARGIN).max(MARGIN);
     let y = MARGIN;
@@ -189,7 +205,7 @@ pub fn draw_bar(painter: &mut Painter, theme: &Theme, state: &SearchState, width
     );
 
     let avail = toggle_x - 10.0 - counter_w - 12.0 - (x + PAD);
-    draw_field(
+    state.query_view = draw_field(
         painter,
         theme,
         &state.query,
@@ -222,7 +238,7 @@ pub fn draw_bar(painter: &mut Painter, theme: &Theme, state: &SearchState, width
             400,
             theme.blocks.frontmatter_fg,
         );
-        draw_field(
+        state.replace_view = draw_field(
             painter,
             theme,
             &row.field,
@@ -265,7 +281,7 @@ pub fn bar_hit(width: f32, replace_row: bool, px: f32, py: f32) -> Option<BarHit
 
 /// One field row: windowed text with the caret kept visible, the
 /// placeholder when empty, selection and caret drawn only on the field
-/// the keyboard feeds.
+/// the keyboard feeds. Answers where the text stands, for the mouse.
 #[allow(clippy::too_many_arguments)]
 fn draw_field(
     painter: &mut Painter,
@@ -276,7 +292,7 @@ fn draw_field(
     avail: f32,
     placeholder: &str,
     focused: bool,
-) {
+) -> FieldView {
     let ui = &theme.ui;
     let text = field.text();
     let (window, cut) = window_fit(painter, text, field.caret(), avail);
@@ -335,6 +351,20 @@ fn draw_field(
         let caret_x = left + x_of(painter, field.caret()) + 1.0;
         painter.line(caret_x, top + 1.0, caret_x, top + 19.0, 1.0, ui.overlay_fg);
     }
+    // Every boundary from the drawn window's start, the cut ones
+    // before it at negative x: a click at the box's left edge reaches
+    // them one at a time, and the window follows the caret.
+    let offsets = field
+        .boundaries()
+        .map(|at| {
+            if at >= window.start {
+                lead + painter.measure(&text[window.start..at], CODE_FAMILY, QUERY_SIZE, 400)
+            } else {
+                lead - painter.measure(&text[at..window.start], CODE_FAMILY, QUERY_SIZE, 400)
+            }
+        })
+        .collect();
+    FieldView { left, offsets }
 }
 
 /// Whether a point in logical window coordinates lands on the regex

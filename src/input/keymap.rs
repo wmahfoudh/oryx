@@ -133,6 +133,29 @@ impl Command {
     ];
 }
 
+impl Command {
+    /// Whether the command still acts while a text field has the
+    /// keyboard. The document's editing and selection keys fall silent
+    /// there, so nothing typed at a field ever edits the page; the
+    /// app-wide chords stay live (files, find, navigation, view,
+    /// export, help), and so does the editor toggle, a mode switch.
+    pub fn live_under_a_field(self) -> bool {
+        match section_of(self) {
+            Some("Edit") => self == Command::Edit,
+            Some("Selection") => false,
+            _ => true,
+        }
+    }
+}
+
+/// The section of the table row that binds `cmd`.
+fn section_of(cmd: Command) -> Option<&'static str> {
+    SHORTCUTS
+        .iter()
+        .find(|row| row.bindings.iter().any(|(_, c)| *c == cmd))
+        .map(|row| row.section)
+}
+
 /// One matchable key chord.
 #[derive(PartialEq, Debug)]
 enum Binding {
@@ -862,6 +885,67 @@ mod tests {
                     .any(|row| row.bindings.iter().any(|(_, c)| *c == cmd)),
                 "{cmd:?} has no row in SHORTCUTS"
             );
+        }
+    }
+
+    /// While a text field has the keyboard, the document's editing and
+    /// selection keys fall silent; the app-wide chords stay live. The
+    /// editor toggle is a mode switch, not an edit.
+    #[test]
+    fn under_a_field_the_document_keys_fall_silent() {
+        for cmd in [
+            Command::Cut,
+            Command::Paste,
+            Command::Undo,
+            Command::Redo,
+            Command::SelectAll,
+            Command::CopyText,
+            Command::CopyMarkdown,
+            Command::Bold,
+            Command::Heading(3),
+            Command::MoveLineUp,
+            Command::Comment,
+            Command::DeleteLines,
+        ] {
+            assert!(
+                !cmd.live_under_a_field(),
+                "{cmd:?} edits or selects in the document"
+            );
+        }
+        for cmd in [
+            Command::OpenFile,
+            Command::Save,
+            Command::NewNote,
+            Command::Edit,
+            Command::Sidebar,
+            Command::ZoomIn,
+            Command::Find,
+            Command::Replace,
+            Command::FindNext,
+            Command::LineUp,
+            Command::PageDown,
+            Command::Back,
+            Command::Settings,
+            Command::Help,
+            Command::Quit,
+            Command::Export,
+        ] {
+            assert!(cmd.live_under_a_field(), "{cmd:?} is app-wide");
+        }
+        for row in SHORTCUTS {
+            for (_, cmd) in row.bindings {
+                let expected = match row.section {
+                    "Edit" => *cmd == Command::Edit,
+                    "Selection" => false,
+                    _ => true,
+                };
+                assert_eq!(
+                    cmd.live_under_a_field(),
+                    expected,
+                    "{cmd:?} in the {} section",
+                    row.section
+                );
+            }
         }
     }
 

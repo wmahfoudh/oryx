@@ -301,6 +301,7 @@ pub fn run(launch: Launch, theme_name: Option<String>) -> anyhow::Result<()> {
         last_regex: false,
         last_replace: String::new(),
         search_mouse: false,
+        search_drag: false,
         pending_band_for: None,
         mode: edit::Mode::Read,
         caret: None,
@@ -791,6 +792,9 @@ struct App {
     /// The press that opened or hit the search bar's toggle; its release
     /// must not click the document underneath.
     search_mouse: bool,
+    /// A press on a search field that may grow into a drag: the pointer
+    /// moving with the button held selects in that field.
+    search_drag: bool,
     /// Deferred band rebuild, tagged with the window size it was scheduled
     /// at. Interactive frames (drag, live resize) paint the viewport
     /// directly; the expensive band builds one frame later, once stable.
@@ -2711,6 +2715,8 @@ impl App {
         query.select_all();
         self.search = Some(SearchState {
             query,
+            query_view: search::FieldView::default(),
+            replace_view: search::FieldView::default(),
             regex: self.last_regex,
             error: false,
             replace: None,
@@ -2755,6 +2761,7 @@ impl App {
 
     fn close_search(&mut self) {
         self.search_mouse = false;
+        self.search_drag = false;
         if let Some(state) = self.search.take() {
             self.last_query = state.query.text().to_string();
             self.last_regex = state.regex;
@@ -2881,15 +2888,46 @@ impl App {
         match hit {
             BarHit::Toggle => self.toggle_search_regex(),
             BarHit::Query | BarHit::Replace => {
+                let on_replace = matches!(hit, BarHit::Replace);
                 let state = self.search.as_mut().expect("search open");
                 if let Some(row) = state.replace.as_mut() {
-                    row.focused = matches!(hit, BarHit::Replace);
+                    row.focused = on_replace;
                 }
                 state.doc_intent = false;
+                // The caret goes under the pointer, a second click
+                // takes the word and a third the text; the press may
+                // grow into a drag.
+                let view = if on_replace {
+                    &state.replace_view
+                } else {
+                    &state.query_view
+                };
+                let (left, offsets) = (view.left, view.offsets.clone());
+                state
+                    .focused_mut()
+                    .click(x - left, &offsets, Instant::now());
+                self.search_drag = true;
                 self.request_redraw();
             }
         }
         true
+    }
+
+    /// The pointer moving with the button held after a press on a
+    /// search field: that field's selection follows it.
+    fn search_drag_to(&mut self) {
+        let (x, _) = self.ui_cursor();
+        let Some(state) = self.search.as_mut() else {
+            return;
+        };
+        let view = if state.replace_focused() {
+            &state.replace_view
+        } else {
+            &state.query_view
+        };
+        let (left, offsets) = (view.left, view.offsets.clone());
+        state.focused_mut().drag_to(x - left, &offsets);
+        self.request_redraw();
     }
 
     /// Window width in logical units, the space bar geometry lives in.
@@ -2965,17 +3003,16 @@ impl App {
                 true
             }
             // Tab moves between the two fields while the replace row is
-            // shown; without it the key keeps its editor meaning.
+            // shown; without it the key is the bar's to keep, since a
+            // Tab must never indent the document under an open field.
             Key::Named(NamedKey::Tab) => {
                 let state = self.search.as_mut().expect("search open");
                 if let Some(row) = state.replace.as_mut() {
                     row.focused = !row.focused;
                     state.doc_intent = false;
                     self.request_redraw();
-                    true
-                } else {
-                    false
                 }
+                true
             }
             Key::Character(s) if ctrl && s.eq_ignore_ascii_case("v") => {
                 if self.clipboard.is_none() {
@@ -2990,19 +3027,17 @@ impl App {
                 true
             }
             // Copy and cut act on the focused field's own selection;
-            // without one the key keeps its document meaning.
+            // without one they do nothing, as in any text box, and the
+            // document's selection stays out of it.
             Key::Character(s) if ctrl && s.eq_ignore_ascii_case("c") && !shift => {
-                match self
+                if let Some(text) = self
                     .search
                     .as_ref()
                     .and_then(SearchState::focused_selection)
                 {
-                    Some(text) => {
-                        self.set_clipboard(text);
-                        true
-                    }
-                    None => false,
+                    self.set_clipboard(text);
                 }
+                true
             }
             Key::Character(s) if ctrl && s.eq_ignore_ascii_case("x") && !shift => {
                 match self
@@ -3023,19 +3058,31 @@ impl App {
                         self.request_redraw();
                         true
                     }
-                    None => false,
+                    None => true,
                 }
             }
             key => {
-                let state = self.search.as_mut().expect("search open");
-                // With intent on the document, undo and redo pass
-                // through to it instead of the field.
-                if state.doc_intent
-                    && ctrl
-                    && matches!(key, Key::Character(s) if s.eq_ignore_ascii_case("z"))
-                {
-                    return false;
+                // With intent on the document, undo and redo go to it
+                // and take the replacement back, by the bar's own hand:
+                // the document's chords are otherwise quiet under it.
+                let doc_intent = self.search.as_ref().is_some_and(|s| s.doc_intent);
+                if doc_intent && ctrl {
+                    if let Key::Character(s) = key {
+                        if s.eq_ignore_ascii_case("z") {
+                            if shift {
+                                self.redo_edit();
+                            } else {
+                                self.undo_edit();
+                            }
+                            return true;
+                        }
+                        if s.eq_ignore_ascii_case("y") {
+                            self.redo_edit();
+                            return true;
+                        }
+                    }
                 }
+                let state = self.search.as_mut().expect("search open");
                 let on_query = !state.replace_focused();
                 match state.focused_mut().key(key, ctrl, shift) {
                     Edit::Ignored => false,
@@ -3367,6 +3414,7 @@ impl App {
         // A stale latch from a lost release must not eat this press's
         // own release.
         self.search_mouse = false;
+        self.search_drag = false;
         if let Some(overlay) = self.overlay.as_mut() {
             self.overlay_mouse = true;
             let (x, y) = (
@@ -3420,6 +3468,7 @@ impl App {
     /// The matching release.
     fn left_release(&mut self) {
         self.overlay_mouse = false;
+        self.search_drag = false;
         if let Some(overlay) = self.overlay.as_mut() {
             overlay.release();
         } else if self.search_mouse {
@@ -5723,7 +5772,7 @@ impl App {
                 *stale = painter.dirty();
             }
         }
-        if let Some(state) = self.search.as_ref() {
+        if let Some(state) = self.search.as_mut() {
             let fits = self
                 .search_canvas
                 .as_ref()
@@ -6029,7 +6078,8 @@ impl ApplicationHandler for App {
                 }
                 // The overlay toggles stay global so their chord closes the
                 // overlay it opened; everything else feeds an open overlay.
-                match keymap::command(&logical_key, physical_key, ctrl, shift, alt) {
+                let resolved = keymap::command(&logical_key, physical_key, ctrl, shift, alt);
+                match resolved {
                     Some(
                         cmd @ (Command::ThemeBrowser
                         | Command::Settings
@@ -6044,6 +6094,15 @@ impl ApplicationHandler for App {
                         self.overlay_result(result);
                     }
                     _ if self.search_key(&logical_key, ctrl, shift) => {}
+                    // A search field has the keyboard: what the bar did
+                    // not claim acts only when it is app-wide. Nothing
+                    // reaches the editor's own keys or the document's
+                    // editing chords while a field is open.
+                    _ if self.search.is_some() => {
+                        if let Some(cmd) = resolved.filter(|cmd| cmd.live_under_a_field()) {
+                            self.run_command(cmd, event_loop);
+                        }
+                    }
                     _ if self.mode == edit::Mode::Edit
                         && self.edit_key(&logical_key, ctrl, shift) => {}
                     Some(Command::LineUp) if self.sidebar_owns_keys() => {
@@ -6131,6 +6190,8 @@ impl ApplicationHandler for App {
                         let result = self.overlay.as_mut().expect("overlay open").drag(x, y);
                         self.overlay_result(result);
                     }
+                } else if self.search_drag {
+                    self.search_drag_to();
                 } else if let Some(Drag::SidebarEdge(grab)) = self.drag {
                     self.resize_sidebar(position.x as f32 / self.scale - grab);
                 } else if self.drag.is_some() {

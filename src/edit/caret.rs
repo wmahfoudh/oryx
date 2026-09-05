@@ -36,7 +36,7 @@ pub enum Motion {
     WordRight,
 }
 
-fn word_char(c: char) -> bool {
+pub(crate) fn word_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
 
