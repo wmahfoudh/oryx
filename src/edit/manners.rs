@@ -828,6 +828,65 @@ pub fn comment_lines(region: &str, style: CommentStyle) -> (String, Vec<(usize, 
     (out, edits)
 }
 
+/// After Enter continues a numbered item at `at` with `continuation`
+/// (a newline, the indent and the next number), the items below that
+/// belong to the same list, same indent and same delimiter with blank
+/// lines allowed between, count on from it. Answers the end of the
+/// last renumbered item and the text for `at..end` minus the
+/// continuation: the rest of the split line, then the renumbered
+/// items. None when no item below needs a new number.
+pub fn renumber_tail(source: &str, at: usize, continuation: &str) -> Option<(usize, String)> {
+    let cont = continuation.strip_prefix('\n')?;
+    let indent = cont.len() - cont.trim_start_matches([' ', '\t']).len();
+    let digits = cont[indent..]
+        .bytes()
+        .take_while(u8::is_ascii_digit)
+        .count();
+    if digits == 0 {
+        return None;
+    }
+    let delim = *cont.as_bytes().get(indent + digits)?;
+    let mut next: u64 = cont[indent..indent + digits].parse().ok()?;
+    let line_end = source[at..].find('\n').map_or(source.len(), |i| at + i);
+    let mut out = source[at..line_end].to_string();
+    let mut end = line_end;
+    let mut pos = line_end;
+    let mut pending = String::new();
+    while pos < source.len() {
+        let start = pos + 1;
+        let stop = source[start..]
+            .find('\n')
+            .map_or(source.len(), |i| start + i);
+        let line = &source[start..stop];
+        if line.trim_matches([' ', '\t']).is_empty() {
+            pending.push('\n');
+            pending.push_str(line);
+            pos = stop;
+            continue;
+        }
+        let line_indent = line.len() - line.trim_start_matches([' ', '\t']).len();
+        let rest = &line[line_indent..];
+        let n = rest.bytes().take_while(u8::is_ascii_digit).count();
+        let item = line_indent == indent
+            && n > 0
+            && rest.as_bytes().get(n) == Some(&delim)
+            && matches!(rest.as_bytes().get(n + 1), Some(b' ' | b'\t'));
+        if !item {
+            break;
+        }
+        next += 1;
+        out.push_str(&pending);
+        pending.clear();
+        out.push('\n');
+        out.push_str(&line[..line_indent]);
+        out.push_str(&next.to_string());
+        out.push_str(&rest[n..]);
+        end = stop;
+        pos = stop;
+    }
+    (end > line_end && out != source[at..end]).then_some((end, out))
+}
+
 /// The leading bytes one outdent removes: a tab when the line starts
 /// with one, else up to a step of spaces, the unit's own width or the
 /// conventional four when the unit is a tab.
@@ -1434,6 +1493,56 @@ mod tests {
             r("a\n  b", vec![(0, -5), (2, -5)])
         );
         assert_eq!(comment_lines("", Line("#")), r("", vec![(0, 0)]));
+    }
+
+    #[test]
+    fn the_items_below_a_new_numbered_item_count_on() {
+        let s = |end: usize, tail: &str| Some((end, tail.to_string()));
+        assert_eq!(
+            renumber_tail("1. a\n2. b\n3. c", 4, "\n2. "),
+            s(14, "\n3. b\n4. c")
+        );
+        assert_eq!(
+            renumber_tail("1. a b\n2. c", 4, "\n2. "),
+            s(11, " b\n3. c"),
+            "a split mid-item carries the rest of the line"
+        );
+        assert_eq!(
+            renumber_tail("1. a\ntext", 4, "\n2. "),
+            None,
+            "nothing numbered below"
+        );
+        assert_eq!(
+            renumber_tail("1. a\n\n2. b", 4, "\n2. "),
+            s(10, "\n\n3. b"),
+            "a loose list"
+        );
+        assert_eq!(
+            renumber_tail("1. a\n   2. b", 4, "\n2. "),
+            None,
+            "a nested list is another list"
+        );
+        assert_eq!(
+            renumber_tail("  1. a\n  2. b", 6, "\n  2. "),
+            s(13, "\n  3. b"),
+            "the indent must match"
+        );
+        assert_eq!(renumber_tail("1) a\n2) b", 4, "\n2) "), s(9, "\n3) b"));
+        assert_eq!(
+            renumber_tail("1. a\n2) b", 4, "\n2. "),
+            None,
+            "another delimiter is another list"
+        );
+        assert_eq!(
+            renumber_tail("- a\n- b", 3, "\n- "),
+            None,
+            "bullets have no numbers"
+        );
+        assert_eq!(
+            renumber_tail("1. a\n2. b\n\ntext\n3. c", 4, "\n2. "),
+            s(9, "\n3. b"),
+            "the list ends at the first line that is not an item"
+        );
     }
 
     #[test]

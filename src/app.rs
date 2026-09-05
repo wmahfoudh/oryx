@@ -1480,6 +1480,20 @@ impl App {
     /// One typing edit: the history records it, the ledger applies it,
     /// and the caret lands after the inserted text.
     fn type_edit(&mut self, range: std::ops::Range<usize>, text: &str, kind: Kind) {
+        let caret_after = range.start + text.len();
+        self.type_edit_at(range, text, kind, caret_after);
+    }
+
+    /// `type_edit` with the caret seated at a chosen offset instead of
+    /// the end of the inserted text: a splice that reaches past where
+    /// typing continues, such as the renumbered items below a new one.
+    fn type_edit_at(
+        &mut self,
+        range: std::ops::Range<usize>,
+        text: &str,
+        kind: Kind,
+        caret_after: usize,
+    ) {
         let replaced = self
             .document
             .source
@@ -1487,7 +1501,6 @@ impl App {
             .unwrap_or_default()
             .to_string();
         let caret_before = self.caret.map_or(range.start, |c| c.offset);
-        let caret_after = range.start + text.len();
         if !self.apply_edit(range.clone(), text) {
             return;
         }
@@ -2069,7 +2082,15 @@ impl App {
         };
         match decision {
             Some(edit::manners::MarkdownEnter::Insert(text)) => {
-                self.type_over(&text, Kind::Structural);
+                // The items below a numbered item count on from the new
+                // one, in the same splice and the same undo unit.
+                match edit::manners::renumber_tail(&self.document.source, at, &text) {
+                    Some((end, tail)) => {
+                        let full = format!("{text}{tail}");
+                        self.type_edit_at(at..end, &full, Kind::Structural, at + text.len());
+                    }
+                    None => self.type_over(&text, Kind::Structural),
+                }
             }
             Some(edit::manners::MarkdownEnter::Unwind(len)) => {
                 self.type_edit(start..start + len, "", Kind::Structural);
