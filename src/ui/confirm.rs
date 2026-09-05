@@ -16,6 +16,8 @@ pub enum Pending {
     Refetch,
     Open(std::path::PathBuf, bool),
     New,
+    /// A fresh untitled note over the open file's unsaved edits.
+    Note,
 }
 
 /// The user's decision on the modal.

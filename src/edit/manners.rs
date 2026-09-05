@@ -772,9 +772,13 @@ pub fn comment_lines(region: &str, style: CommentStyle) -> (String, Vec<(usize, 
                 let rest = rest.strip_prefix(open)?;
                 let trimmed = rest.trim_end_matches([' ', '\t']);
                 let body = trimmed.strip_suffix(close)?;
-                let head = open.len() + usize::from(rest.starts_with(' '));
+                // The space after the opening and the one before the
+                // closing are the same byte when the body is one space.
+                let lead = usize::from(rest.starts_with(' '));
+                let inner = &body[lead.min(body.len())..];
+                let head = open.len() + lead;
                 let tail =
-                    close.len() + usize::from(body.ends_with(' ')) + (rest.len() - trimmed.len());
+                    close.len() + usize::from(inner.ends_with(' ')) + (rest.len() - trimmed.len());
                 Some((head, tail))
             }
         }
@@ -826,6 +830,50 @@ pub fn comment_lines(region: &str, style: CommentStyle) -> (String, Vec<(usize, 
         }
     }
     (out, edits)
+}
+
+/// Carries a position through a line rewrite. `old` and `new` are the
+/// region before and after, the same line count; `edits` names per line
+/// the byte column where the line changed and the delta positions past
+/// it move by; `p` is relative to the region's start. A position before
+/// the column or on it stays, so an inserted marker sits inside the
+/// selection; one inside removed bytes clamps to the column, so an
+/// outdent never yanks the caret to the line start; one past the
+/// column moves by the delta, which leaves it before a closing mark
+/// appended after the text; one past the line's end, the start of the
+/// line after the region where a selection ends, moves by the line's
+/// whole growth. Every line above carries its whole growth down.
+pub fn ride_rewrite(old: &str, new: &str, edits: &[(usize, i64)], p: usize) -> usize {
+    let mut at = 0;
+    let mut shift: i64 = 0;
+    for ((old_line, new_line), &(col, delta)) in old.split('\n').zip(new.split('\n')).zip(edits) {
+        let end = at + old_line.len();
+        if p <= end {
+            let col = at + col;
+            let moved = if p <= col {
+                p as i64
+            } else if delta < 0 && p < col + (-delta) as usize {
+                col as i64
+            } else {
+                p as i64 + delta
+            };
+            return (moved + shift) as usize;
+        }
+        at = end + 1;
+        shift += new_line.len() as i64 - old_line.len() as i64;
+    }
+    (p as i64 + shift) as usize
+}
+
+/// The byte offset `column` bytes into `line`, brought back to the
+/// character boundary before it when it falls inside a character, or
+/// to the line's end when the line is shorter.
+pub fn seat_at_column(line: &str, column: usize) -> usize {
+    let mut at = column.min(line.len());
+    while !line.is_char_boundary(at) {
+        at -= 1;
+    }
+    at
 }
 
 /// After Enter continues a numbered item at `at` with `continuation`
@@ -1493,6 +1541,64 @@ mod tests {
             r("a\n  b", vec![(0, -5), (2, -5)])
         );
         assert_eq!(comment_lines("", Line("#")), r("", vec![(0, 0)]));
+    }
+
+    /// A pair around one space, or around nothing, is the shortest
+    /// block comment: uncommenting it leaves the line empty. The one
+    /// space is the opening's and the closing's at once.
+    #[test]
+    fn the_shortest_block_comments_uncomment_to_nothing() {
+        use CommentStyle::*;
+        let r = |text: &str, edits: Vec<(usize, i64)>| (text.to_string(), edits);
+        let html = Block("<!--", "-->");
+        assert_eq!(comment_lines("<!-- -->", html), r("", vec![(0, -5)]));
+        assert_eq!(comment_lines("<!---->", html), r("", vec![(0, -4)]));
+        assert_eq!(
+            comment_lines("<!--  -->", html),
+            r("", vec![(0, -5)]),
+            "two spaces: one each side"
+        );
+        assert_eq!(
+            comment_lines("  /*  */", Block("/*", "*/")),
+            r("  ", vec![(2, -3)])
+        );
+    }
+
+    #[test]
+    fn a_position_rides_a_rewrite_by_its_line() {
+        // A bullet on two lines: the marker sits inside the selection.
+        let (old, new, edits) = ("a\nb", "- a\n- b", vec![(0, 2), (0, 2)]);
+        let ride = |p| ride_rewrite(old, new, &edits, p);
+        assert_eq!(ride(0), 0, "hugging the column stays");
+        assert_eq!(ride(1), 3);
+        assert_eq!(ride(2), 4, "the second line's start");
+        assert_eq!(ride(3), 7);
+        assert_eq!(ride(4), 8, "the line after the region");
+        // An outdent: a position inside the removed bytes clamps.
+        let (old, new, edits) = ("    a\n  b", "  a\nb", vec![(0, -2), (0, -2)]);
+        let ride = |p| ride_rewrite(old, new, &edits, p);
+        assert_eq!(ride(1), 0);
+        assert_eq!(ride(5), 3);
+        assert_eq!(ride(7), 4, "inside the second line's removed bytes");
+        assert_eq!(ride(9), 5);
+        // A block comment: the closing mark counts for the line after.
+        let (old, new, edits) = ("abc", "<!-- abc -->", vec![(0, 5)]);
+        let ride = |p| ride_rewrite(old, new, &edits, p);
+        assert_eq!(ride(3), 8, "the text's end stays before the closing mark");
+        assert_eq!(ride(4), 13, "the next line's start rides the whole growth");
+    }
+
+    #[test]
+    fn a_column_seats_on_a_character_boundary() {
+        assert_eq!(seat_at_column("héllo", 1), 1);
+        assert_eq!(
+            seat_at_column("héllo", 2),
+            1,
+            "inside the accent: before it"
+        );
+        assert_eq!(seat_at_column("héllo", 3), 3);
+        assert_eq!(seat_at_column("ab", 5), 2, "a shorter line: its end");
+        assert_eq!(seat_at_column("", 3), 0);
     }
 
     #[test]

@@ -15,7 +15,7 @@ use crate::input::keymap;
 pub fn welcome() -> String {
     format!(
         "# Oryx\n\n\
-         Press `{}` to open a file.\n\n\
+         Press `{}` to open a file, or `{}` to start a markdown note.\n\n\
          `{}` shows the folder sidebar, to browse and open files from there.\n\n\
          `{}` opens the settings: fonts, sizes and the interface scale, \
          if the page looks too small or too large on this screen.\n\n\
@@ -24,6 +24,7 @@ pub fn welcome() -> String {
          Please refer to the full documentation on \
          [GitHub](https://github.com/wmahfoudh/oryx).\n",
         keymap::display("Ctrl+O"),
+        keymap::display("Ctrl+M"),
         keymap::display("Ctrl+Shift+B"),
         keymap::display("Ctrl+,"),
         keymap::display("F1"),

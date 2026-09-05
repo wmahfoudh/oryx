@@ -10,6 +10,9 @@ Nothing here is visible until the row is clicked. Search still finds
 this text, and stepping to a match reveals it: try finding the word
 crocodile.
 
+- step one
+- step two
+
 </details>
 
 <details open>

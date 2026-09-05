@@ -212,8 +212,11 @@ pub fn model_pos(doc: &Document, offset: usize) -> Option<ModelPos> {
                 // The load drops the file's trailing empty lines, so an
                 // offset past the last line has no line of its own; it
                 // stands at that line's end, and a selection reaching
-                // the end of the file still covers every line.
-                if let Some(last) = lines.len().checked_sub(1) {
+                // the end of the file still covers every line. The last
+                // block alone stands in: a later block's offsets are
+                // its own.
+                let last_block = bi + 1 == doc.blocks.len();
+                if let Some(last) = lines.len().checked_sub(1).filter(|_| last_block) {
                     let range = lines.line_range(last)?;
                     if offset > range.end && offset <= doc.source.len() {
                         return Some(ModelPos {
@@ -1418,6 +1421,20 @@ mod tests {
             Some(0..3),
             "and covers every line"
         );
+    }
+
+    /// The stand-in for an offset past the last line belongs to the
+    /// last block alone: an offset inside a later code block of a
+    /// rendered page finds its own line, and the round trip through
+    /// `model_offset` holds.
+    #[test]
+    fn an_offset_in_a_later_code_block_finds_its_own_line() {
+        let source = "```\na\n```\n\ntext\n\n```\nb\n```\n";
+        let doc = md_doc(source);
+        let at_b = source.find("\nb\n").unwrap() + 1;
+        let pos = model_pos(&doc, at_b).expect("a position");
+        assert_eq!(model_offset(&doc, &pos), Some(at_b), "the round trip");
+        assert_ne!(pos.block, 0, "not the first block's end");
     }
 
     #[test]

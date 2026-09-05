@@ -46,6 +46,8 @@ pub enum Command {
     Save,
     SaveAs,
     NewFile,
+    /// An untitled markdown note in the editor, named at the first save.
+    NewNote,
     BulletList,
     NumberedList,
     TaskList,
@@ -67,7 +69,7 @@ pub enum Command {
 
 impl Command {
     /// Every variant; the coverage test checks each one against the table.
-    pub const ALL: [Command; 39] = [
+    pub const ALL: [Command; 60] = [
         Command::OpenFile,
         Command::Reload,
         Command::Refetch,
@@ -106,6 +108,27 @@ impl Command {
         Command::Save,
         Command::SaveAs,
         Command::NewFile,
+        Command::NewNote,
+        Command::BulletList,
+        Command::NumberedList,
+        Command::TaskList,
+        Command::Quote,
+        Command::Heading(1),
+        Command::Heading(2),
+        Command::Heading(3),
+        Command::Heading(4),
+        Command::Heading(5),
+        Command::Heading(6),
+        Command::TaskToggle,
+        Command::Bold,
+        Command::Italic,
+        Command::Code,
+        Command::Link,
+        Command::MoveLineUp,
+        Command::MoveLineDown,
+        Command::DuplicateLines,
+        Command::DeleteLines,
+        Command::Comment,
         Command::Quit,
     ];
 }
@@ -159,6 +182,12 @@ pub const SHORTCUTS: &[Shortcut] = &[
         action: "New file",
         section: "Files",
         bindings: &[(Binding::Ctrl("n"), Command::NewFile)],
+    },
+    Shortcut {
+        keys: "Ctrl+M",
+        action: "New markdown note; the name and the type are chosen when saving",
+        section: "Files",
+        bindings: &[(Binding::Ctrl("m"), Command::NewNote)],
     },
     Shortcut {
         keys: "Ctrl+S",
@@ -906,6 +935,12 @@ mod tests {
         assert_eq!(command(&chr("s"), true, false), Some(Command::Save));
         assert_eq!(command(&chr("S"), true, true), Some(Command::SaveAs));
         assert_eq!(command(&chr("n"), true, false), Some(Command::NewFile));
+        assert_eq!(command(&chr("m"), true, false), Some(Command::NewNote));
+        assert_eq!(
+            command(&chr("m"), false, false),
+            None,
+            "a plain m is typing"
+        );
     }
 
     #[test]

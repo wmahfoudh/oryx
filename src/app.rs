@@ -318,6 +318,8 @@ pub fn run(launch: Launch, theme_name: Option<String>) -> anyhow::Result<()> {
         help_stash: None,
         edit_park: None,
         resume_edit: HashSet::new(),
+        note_file: None,
+        note_from: None,
         pending_row: None,
         disk_seen: None,
         disk_check_at: Instant::now(),
@@ -566,6 +568,28 @@ fn window_title(book: Option<&str>, path: Option<&Path>, dirty: bool, editing: b
     match path.and_then(|p| p.file_name()).and_then(|n| n.to_str()) {
         Some(name) => format!("{dot}{name} \u{00B7} {mode}oryx"),
         None => "oryx".to_string(),
+    }
+}
+
+/// The untitled note's file: `untitled.md` in the state folder where
+/// the platform has one, else in the cache folder beside the images.
+fn note_path(state: Option<&Path>, cache: &Path) -> PathBuf {
+    state.unwrap_or(cache).join("untitled.md")
+}
+
+/// Where the Save As dialog opens: the open file's folder; on the
+/// untitled note, the folder of the file that was open before it,
+/// else the home folder, never the note's own.
+fn save_dialog_dir(
+    on_note: bool,
+    note_from: Option<&Path>,
+    path: Option<&Path>,
+    home: Option<&Path>,
+) -> Option<PathBuf> {
+    if on_note {
+        note_from.or(home).map(Path::to_path_buf)
+    } else {
+        path.and_then(Path::parent).map(Path::to_path_buf)
     }
 }
 
@@ -819,6 +843,13 @@ struct App {
     /// editor. Switching away is not a decision to stop editing;
     /// Escape is, and it clears the entry.
     resume_edit: HashSet<PathBuf>,
+    /// The untitled note's file while one is open: `untitled.md` in
+    /// Oryx's own folder, removed when the note is saved elsewhere,
+    /// discarded or the app quits.
+    note_file: Option<PathBuf>,
+    /// The folder of the file that was open when the note started,
+    /// where its save dialog opens; home when there was none.
+    note_from: Option<PathBuf>,
     /// A row to seat at the top of the editor once the layout places
     /// it, the source view's counterpart to `pending_offset`.
     pending_row: Option<usize>,
@@ -1071,12 +1102,15 @@ impl App {
             Command::Save => {
                 self.save();
             }
-            Command::SaveAs => self.save_as(),
+            Command::SaveAs => {
+                self.save_as();
+            }
             Command::NewFile => {
                 if self.guard_unsaved(confirm::Pending::New) {
                     self.new_file();
                 }
             }
+            Command::NewNote => self.new_note(),
             // The Escape ladder, innermost out. The overlay branch
             // catches it upstream; the find bar rung is normally spent
             // there too and stands here for totality.
@@ -1102,8 +1136,7 @@ impl App {
                         if self.help_stash.is_some() {
                             self.help_return();
                         } else if self.guard_unsaved(confirm::Pending::Quit) {
-                            self.remember_position();
-                            event_loop.exit();
+                            self.quit(event_loop);
                         }
                     }
                 }
@@ -1486,7 +1519,9 @@ impl App {
 
     /// `type_edit` with the caret seated at a chosen offset instead of
     /// the end of the inserted text: a splice that reaches past where
-    /// typing continues, such as the renumbered items below a new one.
+    /// typing continues, such as the renumbered items below a new one,
+    /// or a shortcut with a seat of its own. The history records the
+    /// seat, so a redo lands the caret where the shortcut did.
     fn type_edit_at(
         &mut self,
         range: std::ops::Range<usize>,
@@ -1774,6 +1809,10 @@ impl App {
     /// receipt shown with its lines-changed figure. True when nothing
     /// was left unsaved.
     fn save(&mut self) -> bool {
+        // The note has no place of its own: the save names it.
+        if self.on_note() {
+            return self.save_as();
+        }
         let Some(path) = self.path.clone() else {
             return false;
         };
@@ -1814,23 +1853,33 @@ impl App {
 
     /// Ctrl+Shift+S: the current text written to a chosen path, which
     /// becomes the open file; the mode, the caret and the scroll survive
-    /// the move.
-    fn save_as(&mut self) {
+    /// the move. True once the file is written; false when the dialog
+    /// is dismissed or the write fails.
+    fn save_as(&mut self) -> bool {
         let Some(ledger) = self.ledger.as_ref() else {
-            return;
+            return false;
         };
         let bytes = ledger.emit();
         let mut dialog = rfd::FileDialog::new();
-        if let Some(path) = self.path.as_deref() {
-            if let Some(dir) = path.parent() {
-                dialog = dialog.set_directory(dir);
-            }
-            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                dialog = dialog.set_file_name(name);
-            }
+        let home = directories::BaseDirs::new().map(|base| base.home_dir().to_path_buf());
+        if let Some(dir) = save_dialog_dir(
+            self.on_note(),
+            self.note_from.as_deref(),
+            self.path.as_deref(),
+            home.as_deref(),
+        ) {
+            dialog = dialog.set_directory(dir);
+        }
+        if let Some(name) = self
+            .path
+            .as_deref()
+            .and_then(Path::file_name)
+            .and_then(|n| n.to_str())
+        {
+            dialog = dialog.set_file_name(name);
         }
         let Some(target) = dialog.save_file() else {
-            return;
+            return false;
         };
         match save::write_atomic(&target, &bytes) {
             Ok(()) => {
@@ -1864,8 +1913,12 @@ impl App {
                 self.pending_offset = None;
                 self.scroll_y = scroll;
                 self.show_notice("Saved");
+                true
             }
-            Err(err) => self.show_notice(&format!("Save as failed: {err}")),
+            Err(err) => {
+                self.show_notice(&format!("Save as failed: {err}"));
+                false
+            }
         }
     }
 
@@ -1886,6 +1939,82 @@ impl App {
         }
         self.open_file(&target, true);
         self.toggle_edit();
+    }
+
+    /// True while the open file is the untitled note.
+    fn on_note(&self) -> bool {
+        self.note_file.is_some() && self.note_file == self.path
+    }
+
+    /// Ctrl+M: an empty markdown page in the editor at once, named at
+    /// the first save. Unsaved edits, the note's own included, ask the
+    /// unsaved-changes question first; a clean note already open is
+    /// the note asked for.
+    fn new_note(&mut self) {
+        if self.on_note() && !self.edits_unsaved() {
+            return;
+        }
+        if self.guard_unsaved(confirm::Pending::Note) {
+            self.open_note();
+        }
+    }
+
+    /// The note is a real empty file in Oryx's own folder, so every
+    /// rule that hangs off the open file holds; the sidebar stays where
+    /// it is, the browse folder is not moved, and the file goes when
+    /// the note is saved elsewhere, discarded or the app quits. The
+    /// save dialog remembers the folder of the file open before.
+    fn open_note(&mut self) {
+        let Some(dirs) = directories::ProjectDirs::from("", "", "oryx") else {
+            self.show_notice("No folder for a note");
+            return;
+        };
+        let path = note_path(dirs.state_dir(), dirs.cache_dir());
+        let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
+        let created = std::fs::create_dir_all(&dir).and_then(|_| save::write_atomic(&path, b""));
+        if let Err(err) = created {
+            self.show_notice(&format!("Could not create the note: {err}"));
+            return;
+        }
+        let path = dir.canonicalize().unwrap_or(dir).join("untitled.md");
+        if !self.on_note() {
+            self.note_from = self
+                .path
+                .as_deref()
+                .and_then(Path::parent)
+                .map(Path::to_path_buf);
+        }
+        // A fresh note starts on its first line, whatever an earlier
+        // one left under the same path.
+        self.edit_marks.remove(&path);
+        self.read_marks.remove(&path);
+        self.direction_marks.remove(&path);
+        self.note_file = Some(path.clone());
+        self.open_file(&path, false);
+        if self.mode != edit::Mode::Edit {
+            self.toggle_edit();
+        }
+    }
+
+    /// The note's file goes with the note, and so does every mark
+    /// filed under its path.
+    fn remove_note(&mut self) {
+        let Some(path) = self.note_file.take() else {
+            return;
+        };
+        let _ = std::fs::remove_file(&path);
+        self.note_from = None;
+        self.edit_marks.remove(&path);
+        self.read_marks.remove(&path);
+        self.direction_marks.remove(&path);
+        self.resume_edit.remove(&path);
+    }
+
+    /// The way out: the reading position kept, the note's file gone.
+    fn quit(&mut self, event_loop: &ActiveEventLoop) {
+        self.remember_position();
+        self.remove_note();
+        event_loop.exit();
     }
 
     /// Records the open file's on-disk identity after a read or a
@@ -1951,14 +2080,12 @@ impl App {
             return;
         };
         match pending {
-            confirm::Pending::Quit => {
-                self.remember_position();
-                event_loop.exit();
-            }
+            confirm::Pending::Quit => self.quit(event_loop),
             confirm::Pending::Reload => self.reload_now(),
             confirm::Pending::Refetch => self.refetch_now(),
             confirm::Pending::Open(path, reroot) => self.open_file(&path, reroot),
             confirm::Pending::New => self.new_file(),
+            confirm::Pending::Note => self.open_note(),
         }
         self.request_redraw();
     }
@@ -2189,8 +2316,7 @@ impl App {
         let had_selection = selection.is_some();
         let caret = self.caret.map_or(0, |c| c.offset);
         let edit = edit::manners::toggle_mark(&self.document.source, selection, caret, mark);
-        self.type_edit(edit.replace, &edit.text, Kind::Structural);
-        self.seat_caret_after_edit(edit.caret);
+        self.type_edit_at(edit.replace, &edit.text, Kind::Structural, edit.caret);
         if had_selection && !edit.inner.is_empty() {
             if let Some(s) = caret::span_selection(&self.document, edit.inner.start, edit.inner.end)
             {
@@ -2210,8 +2336,7 @@ impl App {
         let selection = self.selection_source_range();
         let caret = self.caret.map_or(0, |c| c.offset);
         let edit = edit::manners::link_edit(&self.document.source, selection, caret);
-        self.type_edit(edit.replace, &edit.text, Kind::Structural);
-        self.seat_caret_after_edit(edit.caret);
+        self.type_edit_at(edit.replace, &edit.text, Kind::Structural, edit.caret);
         self.rehighlight_now();
     }
 
@@ -2249,10 +2374,14 @@ impl App {
         };
         let caret_before = self.caret.map_or(0, |c| c.offset);
         let anchor_before = self.selection_anchor_offset();
-        let shift = |p: usize| (p as i64 + delta) as usize;
-        self.type_edit(replace, &text, Kind::Structural);
+        // A move keeps the file's length. A selection ending at the
+        // next line's start rides past the block when the block becomes
+        // the file's last line, which has no line after it: it stops at
+        // the end.
+        let len = self.document.source.len();
+        let shift = |p: usize| ((p as i64 + delta) as usize).min(len);
         let caret_after = shift(caret_before);
-        self.seat_caret_after_edit(caret_after);
+        self.type_edit_at(replace, &text, Kind::Structural, caret_after);
         if let Some(anchor) = anchor_before.map(shift).filter(|a| *a != caret_after) {
             if let Some(s) = caret::span_selection(&self.document, anchor, caret_after) {
                 self.sel_anchor = Some(s.start);
@@ -2275,9 +2404,8 @@ impl App {
         let caret_before = self.caret.map_or(0, |c| c.offset);
         let anchor_before = self.selection_anchor_offset();
         let shift = |p: usize| (p as i64 + delta) as usize;
-        self.type_edit(replace, &text, Kind::Structural);
         let caret_after = shift(caret_before);
-        self.seat_caret_after_edit(caret_after);
+        self.type_edit_at(replace, &text, Kind::Structural, caret_after);
         if let Some(anchor) = anchor_before.map(shift).filter(|a| *a != caret_after) {
             if let Some(s) = caret::span_selection(&self.document, anchor, caret_after) {
                 self.sel_anchor = Some(s.start);
@@ -2303,10 +2431,12 @@ impl App {
         let (replace, landing) = edit::manners::delete_lines(&self.document.source, start..end);
         self.type_edit(replace, "", Kind::Structural);
         let source = &self.document.source;
-        let line_len = source[landing.min(source.len())..]
+        let landing = landing.min(source.len());
+        let line_end = source[landing..]
             .find('\n')
-            .unwrap_or(source.len() - landing.min(source.len()));
-        let caret_after = (landing + column.min(line_len)).min(source.len());
+            .map_or(source.len(), |i| landing + i);
+        let caret_after =
+            landing + edit::manners::seat_at_column(&source[landing..line_end], column);
         self.seat_caret_after_edit(caret_after);
         self.rehighlight_now();
     }
@@ -2345,10 +2475,9 @@ impl App {
     /// alone, as one splice and one undo unit. `rewrite` answers the
     /// new region and, per line, the byte column where the line
     /// changed and the delta. Caret and selection ride the per-line
-    /// deltas rather than the splice's own seat: a position before the
-    /// column or hugging it stays, one inside removed bytes clamps to
-    /// the column, so an outdent never yanks the caret to the line
-    /// start and an inserted marker sits inside the selection.
+    /// deltas rather than the splice's own seat, by `ride_rewrite`'s
+    /// rule; both stand at or after the region's start, and a selection
+    /// may end at the start of the line after it.
     fn rewrite_lines(&mut self, rewrite: impl FnOnce(&str) -> (String, Vec<(usize, i64)>)) {
         let caret_before = self.caret.map_or(0, |c| c.offset);
         let anchor_before = self.selection_anchor_offset();
@@ -2358,33 +2487,9 @@ impl App {
         if text == source[start..end] {
             return;
         }
-        // Each line's whole growth carries the lines below it; the
-        // reported delta moves the positions on the line itself, which
-        // a closing mark appended past them does not touch.
-        let growth: Vec<i64> = text
-            .split('\n')
-            .zip(source[start..end].split('\n'))
-            .map(|(new, old)| new.len() as i64 - old.len() as i64)
-            .collect();
-        let mut line_starts = vec![start];
-        for (i, b) in source[start..end].bytes().enumerate() {
-            if b == b'\n' {
-                line_starts.push(start + i + 1);
-            }
-        }
         let map = |p: usize| -> usize {
-            let k = line_starts.partition_point(|ls| *ls <= p) - 1;
-            let prefix: i64 = growth[..k].iter().sum();
-            let (ls, (col, d)) = (line_starts[k], edits[k]);
-            let at = ls + col;
-            let new = if p <= at {
-                p as i64 + prefix
-            } else if d < 0 && p < at + (-d) as usize {
-                at as i64 + prefix
-            } else {
-                p as i64 + prefix + d
-            };
-            new as usize
+            let rel = p.max(start) - start;
+            start + edit::manners::ride_rewrite(&source[start..end], &text, &edits, rel)
         };
         let caret_after = map(caret_before);
         let anchor_after = anchor_before.map(map);
@@ -2436,10 +2541,9 @@ impl App {
         };
         let inner = self.document.source[range.clone()].to_string();
         let text = format!("{open}{inner}{close}");
-        self.type_edit(range.clone(), &text, Kind::Structural);
         let start = range.start + open.len();
         let end = start + inner.len();
-        self.seat_caret_after_edit(end);
+        self.type_edit_at(range, &text, Kind::Structural, end);
         if let Some(s) = caret::span_selection(&self.document, start, end) {
             self.sel_anchor = Some(s.start);
             self.selection = Some(s);
@@ -2564,8 +2668,7 @@ impl App {
         if self.markdown_source() {
             let selection = self.selection_source_range();
             if let Some(edit) = edit::manners::link_paste(&self.document.source, selection, &text) {
-                self.type_edit(edit.replace, &edit.text, Kind::Structural);
-                self.seat_caret_after_edit(edit.caret);
+                self.type_edit_at(edit.replace, &edit.text, Kind::Structural, edit.caret);
                 return;
             }
         }
@@ -4197,6 +4300,11 @@ impl App {
         // Return positions belong to the file being left.
         self.jump_stack.clear();
         let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        // The note left for another file is done with; reopened, it is
+        // the fresh note `open_note` just wrote.
+        if self.on_note() && self.note_file.as_deref() != Some(path.as_path()) {
+            self.remove_note();
+        }
         let loaded = load::open(&path, Some(Instant::now() + load::OPEN_BUDGET));
         let opened = loaded.is_ok();
         let mut book_job = None;
@@ -4243,7 +4351,7 @@ impl App {
             .map(Path::to_path_buf)
             .filter(|d| !d.as_os_str().is_empty())
             .unwrap_or_else(|| PathBuf::from("."));
-        if opened {
+        if opened && !self.on_note() {
             self.remember_dir(&dir);
         }
         self.media = MediaCache::new(dir.clone());
@@ -5867,8 +5975,7 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => {
                 if self.guard_unsaved(confirm::Pending::Quit) {
-                    self.remember_position();
-                    event_loop.exit();
+                    self.quit(event_loop);
                 }
             }
             WindowEvent::Focused(true) => {
@@ -6366,6 +6473,56 @@ mod tests {
             "README.md · oryx"
         );
         assert_eq!(super::window_title(None, None, false, false), "oryx");
+    }
+
+    /// The untitled note is a real file in Oryx's own folder: the
+    /// state folder where the platform has one, else the cache folder.
+    #[test]
+    fn the_note_lives_in_the_state_folder_or_the_cache() {
+        use std::path::Path;
+        assert_eq!(
+            super::note_path(Some(Path::new("/s")), Path::new("/c")),
+            Path::new("/s/untitled.md")
+        );
+        assert_eq!(
+            super::note_path(None, Path::new("/c")),
+            Path::new("/c/untitled.md")
+        );
+    }
+
+    /// The save dialog opens in the open file's folder; on the note,
+    /// in the folder of the file that was open before, else at home.
+    #[test]
+    fn the_save_dialog_starts_where_the_file_is_or_where_the_note_came_from() {
+        use std::path::{Path, PathBuf};
+        let dir = |on_note: bool, from: Option<&str>, path: Option<&str>, home: Option<&str>| {
+            super::save_dialog_dir(
+                on_note,
+                from.map(Path::new),
+                path.map(Path::new),
+                home.map(Path::new),
+            )
+        };
+        assert_eq!(
+            dir(false, None, Some("/docs/a.md"), Some("/home/x")),
+            Some(PathBuf::from("/docs"))
+        );
+        assert_eq!(
+            dir(
+                true,
+                Some("/docs"),
+                Some("/state/untitled.md"),
+                Some("/home/x")
+            ),
+            Some(PathBuf::from("/docs")),
+            "the note: where it came from, not its own folder"
+        );
+        assert_eq!(
+            dir(true, None, Some("/state/untitled.md"), Some("/home/x")),
+            Some(PathBuf::from("/home/x")),
+            "no file before the note: home"
+        );
+        assert_eq!(dir(true, None, Some("/state/untitled.md"), None), None);
     }
 
     #[test]
