@@ -209,6 +209,20 @@ pub fn model_pos(doc: &Document, offset: usize) -> Option<ModelPos> {
                         });
                     }
                 }
+                // The load drops the file's trailing empty lines, so an
+                // offset past the last line has no line of its own; it
+                // stands at that line's end, and a selection reaching
+                // the end of the file still covers every line.
+                if let Some(last) = lines.len().checked_sub(1) {
+                    let range = lines.line_range(last)?;
+                    if offset > range.end && offset <= doc.source.len() {
+                        return Some(ModelPos {
+                            block: bi,
+                            span: last,
+                            byte: range.end - range.start,
+                        });
+                    }
+                }
             }
             kind => {
                 for (si, span) in block_spans(kind)?.iter().enumerate() {
@@ -1378,6 +1392,31 @@ mod tests {
         assert_eq!(
             c.offset, 5,
             "no blank line below: the last row's end as before"
+        );
+    }
+
+    /// The load drops a file's trailing empty lines from the model, so
+    /// the caret can stand past the last modeled line; a selection
+    /// reaching there speaks the last line's end.
+    #[test]
+    fn an_offset_past_the_last_modeled_line_stands_at_its_end() {
+        let doc = code_doc("a\nb\n\n");
+        let end = ModelPos {
+            block: 0,
+            span: 1,
+            byte: 1,
+        };
+        assert_eq!(model_pos(&doc, 3), Some(end), "the end of b itself");
+        assert_eq!(model_pos(&doc, 4), Some(end), "the empty line");
+        assert_eq!(model_pos(&doc, 5), Some(end), "after the final newline");
+        assert!(
+            span_selection(&doc, 0, 4).is_some(),
+            "a selection to the empty line holds"
+        );
+        assert_eq!(
+            selection_range(&doc, &span_selection(&doc, 0, 4).unwrap()),
+            Some(0..3),
+            "and covers every line"
         );
     }
 
