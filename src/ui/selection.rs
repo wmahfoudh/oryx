@@ -863,13 +863,26 @@ pub(crate) fn byte_of_char(text: &str, ch: usize) -> usize {
 
 /// Shapes a run exactly as paint does, single line at its own metrics.
 pub(crate) fn shape_run(fonts: &mut FontStore, run: &TextRun, text: &str, family: &str) -> Buffer {
-    let line_height = metrics::LINE_HEIGHT * run.size;
-    let mut buffer = Buffer::new(&mut fonts.font_system, Metrics::new(run.size, line_height));
+    shape_text(fonts, run.size, run.weight, run.italic, text, family)
+}
+
+/// Shapes `text` in a face named outright, where no run stands to
+/// take the attributes from.
+pub(crate) fn shape_text(
+    fonts: &mut FontStore,
+    size: f32,
+    weight: u16,
+    italic: bool,
+    text: &str,
+    family: &str,
+) -> Buffer {
+    let line_height = metrics::LINE_HEIGHT * size;
+    let mut buffer = Buffer::new(&mut fonts.font_system, Metrics::new(size, line_height));
     buffer.set_size(&mut fonts.font_system, None, None);
     let mut attrs = Attrs::new()
         .family(Family::Name(family))
-        .weight(Weight(run.weight));
-    if run.italic {
+        .weight(Weight(weight));
+    if italic {
         attrs = attrs.style(Style::Italic);
     }
     buffer.set_text(

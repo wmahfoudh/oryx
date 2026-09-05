@@ -605,6 +605,9 @@ impl Caret {
         fonts: &mut FontStore,
     ) -> Option<CaretBox> {
         let lines = lines_of(lay, doc);
+        if lines.is_empty() {
+            return seat_without_rows(fonts, lay, doc, self.offset);
+        }
         if let Some(li) = locate(&lines, self.offset) {
             let line = &lines[li];
             let run = run_at(line, self.offset)?;
@@ -654,6 +657,79 @@ impl Caret {
     }
 }
 
+/// The caret's seat on a page the layout holds no glyphs for, an empty
+/// file or one of blank lines: where the first glyph of its line would
+/// stand, from the block table, advanced over the whitespace before it.
+/// The line counts newlines from the block's start, so the trailing
+/// empty lines the load drops from the model still stand a row each.
+fn seat_without_rows(
+    fonts: &mut FontStore,
+    lay: &LayoutDoc,
+    doc: &Document,
+    offset: usize,
+) -> Option<CaretBox> {
+    let offset = offset.min(doc.source.len());
+    let block = model_pos(doc, offset).map_or(0, |pos| pos.block);
+    let base = match doc.blocks.get(block).map(|b| &b.kind) {
+        Some(BlockKind::CodeBlock { lines, .. }) if !lines.is_empty() => {
+            lines.line_range(0).map_or(0, |r| r.start)
+        }
+        _ => 0,
+    };
+    let line = doc.source[base.min(offset)..offset].matches('\n').count();
+    let seat = lay.code_line_seat(block, line)?;
+    let head = &doc.source[..offset];
+    let prefix = &head[head.rfind('\n').map_or(0, |i| i + 1)..];
+    Some(CaretBox {
+        x: seat.x + whitespace_advance(fonts, lay, prefix),
+        y: seat.y,
+        h: seat.height,
+    })
+}
+
+/// A click on a page the layout holds no glyphs for: the line whose
+/// row is under y, the first above them all and the last below, at
+/// its start, or at its end when x is past the whitespace it holds.
+fn blank_page_at(
+    fonts: &mut FontStore,
+    lay: &LayoutDoc,
+    doc: &Document,
+    x: f32,
+    y: f32,
+) -> Option<usize> {
+    let source = &doc.source;
+    let first = lay.code_line_seat(0, 0)?;
+    let row = ((y - first.y) / first.height).floor().max(0.0) as usize;
+    let line = row.min(source.matches('\n').count());
+    let mut start = 0;
+    for _ in 0..line {
+        start = source[start..].find('\n').map(|i| start + i + 1)?;
+    }
+    let end = source[start..]
+        .find('\n')
+        .map_or(source.len(), |i| start + i);
+    let seat = lay.code_line_seat(0, line)?;
+    let text = &source[start..end];
+    if !text.is_empty() && x > seat.x + whitespace_advance(fonts, lay, text) {
+        Some(end)
+    } else {
+        Some(start)
+    }
+}
+
+/// The advance of `text`, whitespace as a rule, set in the code face.
+fn whitespace_advance(fonts: &mut FontStore, lay: &LayoutDoc, text: &str) -> f32 {
+    if text.is_empty() {
+        return 0.0;
+    }
+    let buffer = selection::shape_text(fonts, lay.code_size, 400, false, text, &lay.code_family);
+    buffer
+        .layout_runs()
+        .next()
+        .and_then(|line| line.glyphs.last())
+        .map_or(0.0, |g| g.x + g.w)
+}
+
 /// The advance of the caret line's own prefix on a line the layout
 /// holds no glyphs for: the whitespace Enter carried onto it, shaped
 /// in the face of the anchor line's first run so a tab advances as a
@@ -696,6 +772,9 @@ pub fn place(
     y: f32,
 ) -> Option<Caret> {
     let lines = lines_of(lay, doc);
+    if lines.is_empty() {
+        return blank_page_at(fonts, lay, doc, x, y).map(Caret::at);
+    }
     if let Some(li) = lines.iter().position(|l| y >= l.y && y < l.y + l.h) {
         return Some(Caret::at(offset_at_x(fonts, lay, doc, &lines[li], x)));
     }
@@ -1046,6 +1125,94 @@ mod tests {
             .expect("the line opened past the text seats the caret");
         assert_eq!(tail.x, alpha.x);
         assert!(tail.y > alpha.y, "the new line stands below the last text");
+    }
+
+    /// A page with no text at all, the untitled note as it opens or a
+    /// file of blank lines: the caret stands where the first glyph
+    /// would, one row down per line, advanced over the spaces typed.
+    #[test]
+    fn the_caret_stands_on_an_empty_page() {
+        let doc = code_doc("a\n");
+        let (l, _) = lay_of(&doc);
+        let a = run(&l, &doc, "a");
+        let h = metrics::LINE_HEIGHT * a.size;
+
+        let empty = code_doc("");
+        let (le, mut fe) = lay_of(&empty);
+        let seat = Caret::at(0)
+            .geometry(&le, &empty, &mut fe)
+            .expect("an empty page seats the caret");
+        assert!(
+            (seat.x - a.x).abs() < 0.5 && (seat.y - a.y).abs() < 0.5,
+            "where the first glyph would stand: {} {} vs {} {}",
+            seat.x,
+            seat.y,
+            a.x,
+            a.y
+        );
+        assert!((seat.h - h).abs() < 0.5, "a row high: {} vs {h}", seat.h);
+
+        let blank = code_doc("\n\n");
+        let (lb, mut fb) = lay_of(&blank);
+        let third = Caret::at(2)
+            .geometry(&lb, &blank, &mut fb)
+            .expect("the third blank line");
+        assert!(
+            (third.y - (a.y + 2.0 * h)).abs() < 0.5,
+            "one row per line: {} vs {}",
+            third.y,
+            a.y + 2.0 * h
+        );
+
+        let spaced = code_doc("   ");
+        let (ls, mut fs) = lay_of(&spaced);
+        let after = Caret::at(3)
+            .geometry(&ls, &spaced, &mut fs)
+            .expect("after the spaces");
+        let text = code_doc("   b");
+        let (lt, mut ft) = lay_of(&text);
+        let b = Caret::at(3)
+            .geometry(&lt, &text, &mut ft)
+            .expect("before b");
+        assert!(
+            (after.x - b.x).abs() < 0.5,
+            "the spaces advance the caret as before a glyph: {} vs {}",
+            after.x,
+            b.x
+        );
+    }
+
+    /// A click anywhere on an empty page lands on the line under it,
+    /// the first above them all and the last below.
+    #[test]
+    fn a_click_on_an_empty_page_seats_the_caret() {
+        let doc = code_doc("a\n");
+        let (l, _) = lay_of(&doc);
+        let a = run(&l, &doc, "a");
+        let h = metrics::LINE_HEIGHT * a.size;
+        let blank = code_doc("\n\n");
+        let (lb, mut fb) = lay_of(&blank);
+        let mut click = |y: f32| place(&lb, &blank, &mut fb, a.x + 3.0, y).map(|c| c.offset);
+        assert_eq!(click(a.y + h * 0.5), Some(0));
+        assert_eq!(click(a.y + h * 1.5), Some(1));
+        assert_eq!(click(a.y + h * 2.5), Some(2));
+        assert_eq!(
+            click(a.y + h * 9.0),
+            Some(2),
+            "below everything: the last line"
+        );
+        assert_eq!(
+            click(a.y - h * 9.0),
+            Some(0),
+            "above everything: the first line"
+        );
+        let empty = code_doc("");
+        let (le, mut fe) = lay_of(&empty);
+        assert_eq!(
+            place(&le, &empty, &mut fe, a.x + 3.0, a.y + h * 0.5).map(|c| c.offset),
+            Some(0),
+            "the empty page itself"
+        );
     }
 
     // The line Enter just opened holds nothing but the carried

@@ -230,6 +230,11 @@ pub struct LayoutDoc {
     pub code_lines: Vec<CodeLine>,
     /// The resolved families runs shaped with; runs carry ids.
     pub families: Vec<String>,
+    /// The code face every code line is set in, family name and size
+    /// with the zoom applied: the caret's seat on a line the layout
+    /// holds no glyphs for shapes the line's whitespace in it.
+    pub code_family: String,
+    pub code_size: f32,
     /// Synthesized display text with no model home: markers, alert
     /// titles, frontmatter lines, expanded math, placeholder alts.
     /// Append-only; side references slice it.
@@ -277,6 +282,9 @@ struct BlockEntry {
     /// and the panel padding above the first line.
     line_height: f32,
     pad: f32,
+    /// Code blocks: where a line's first glyph stands, the block's
+    /// left edge past the panel padding.
+    x0: f32,
     flags: u8,
 }
 
@@ -823,6 +831,34 @@ impl LayoutDoc {
         }
         Some(entry.y)
     }
+
+    /// Where the first glyph of line `line` of code block `block`
+    /// stands, from the block table alone: the caret's seat on a line
+    /// the layout holds no glyphs for. None before the pass places the
+    /// block, and for a block that is not code.
+    pub fn code_line_seat(&self, block: usize, line: usize) -> Option<LineSeat> {
+        let position = *self.table.position_of_block.get(block)?;
+        if position == u32::MAX {
+            return None;
+        }
+        let entry = &self.table.entries[position as usize];
+        if entry.flags & ENTRY_CODE == 0 {
+            return None;
+        }
+        Some(LineSeat {
+            x: entry.x0,
+            y: self.table.code_line_top(position as usize, line),
+            height: entry.line_height,
+        })
+    }
+}
+
+/// A code line's first-glyph position and its row height.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LineSeat {
+    pub x: f32,
+    pub y: f32,
+    pub height: f32,
 }
 
 /// One image scaled and positioned in the document.
@@ -1487,6 +1523,9 @@ pub fn layout_begin(
     let mut out = LayoutDoc::default();
     out.table.margin = margin;
     out.table.content_width = content_width;
+    let (family, size) = code_face(doc.plain_file, cfg);
+    out.code_family = family.to_string();
+    out.code_size = size * cfg.zoom;
     (out, pass)
 }
 
@@ -1588,6 +1627,7 @@ fn layout_comic(
                     deco_top: f32::NAN,
                     line_height: 0.0,
                     pad: 0.0,
+                    x0: 0.0,
                     flags: ENTRY_SILENT,
                 },
             );
@@ -1657,6 +1697,7 @@ fn layout_comic(
                 deco_top: f32::NAN,
                 line_height: 0.0,
                 pad: 0.0,
+                x0: 0.0,
                 flags: 0,
             },
         );
@@ -1966,6 +2007,7 @@ fn place_block(
                 deco_top: f32::NAN,
                 line_height: 0.0,
                 pad: 0.0,
+                x0: 0.0,
                 flags: ENTRY_SILENT,
             },
         );
@@ -2032,6 +2074,11 @@ fn place_block(
 
     let is_code = matches!(block.kind, BlockKind::CodeBlock { .. });
     let size = code_face(doc.plain_file, cfg).1 * cfg.zoom;
+    let pad = if is_code && code_framed(doc) {
+        metrics::CODE_PAD * cfg.zoom
+    } else {
+        0.0
+    };
     out.table.push(
         block_index,
         BlockEntry {
@@ -2045,11 +2092,8 @@ fn place_block(
             } else {
                 0.0
             },
-            pad: if is_code && code_framed(doc) {
-                metrics::CODE_PAD * cfg.zoom
-            } else {
-                0.0
-            },
+            pad,
+            x0: x_base + pad,
             flags: if is_code { ENTRY_CODE } else { 0 }
                 | if alert_start { ENTRY_ALERT_TITLE } else { 0 },
         },
