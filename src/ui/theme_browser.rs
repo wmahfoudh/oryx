@@ -12,6 +12,7 @@ use crate::paint::painter::Painter;
 use crate::style::fonts::BODY_FAMILY;
 use crate::style::theme::{self, Rgba, Theme};
 use crate::ui::overlay::{self, inside, Action, Overlay, OverlayResult, PanelDrag};
+use crate::ui::scrollbar;
 use crate::ui::textfield::TextField;
 
 /// A drawn rename field: the caret offsets of its text and its box.
@@ -24,6 +25,10 @@ const PANEL_W: f32 = 400.0;
 const SWATCH: f32 = 16.0;
 const ICON_BOX: f32 = 22.0;
 const RADIUS: f32 = 8.0;
+/// The scrollbar thumb: its width and its distance from the panel's
+/// right edge, centered in the pad beside the rows.
+const THUMB_W: f32 = 6.0;
+const THUMB_INSET: f32 = 3.0;
 
 struct Row {
     name: String,
@@ -67,6 +72,11 @@ pub struct ThemeBrowser {
     last_name_click: Option<(usize, Instant)>,
     drag: PanelDrag,
     geometry: Geometry,
+    /// The cursor's offset from the thumb's top while the thumb is held.
+    thumb_grab: Option<f32>,
+    /// Whether the first draw has seated the list on the current theme;
+    /// the panel learns its height only there.
+    seated: bool,
 }
 
 impl ThemeBrowser {
@@ -84,6 +94,8 @@ impl ThemeBrowser {
             last_name_click: None,
             drag: PanelDrag::default(),
             geometry: Geometry::default(),
+            thumb_grab: None,
+            seated: false,
         };
         browser.rescan();
         if let Some(index) = browser.rows.iter().position(|r| r.name == active) {
@@ -122,6 +134,34 @@ impl ThemeBrowser {
 
     fn max_scroll(&self) -> f32 {
         (self.rows.len() as f32 * ROW_H - self.geometry.list_h).max(0.0)
+    }
+
+    /// The thumb as `(y, height)` from the list's top, or None when the
+    /// list fits its viewport.
+    fn thumb(&self) -> Option<(f32, f32)> {
+        let list_h = self.geometry.list_h;
+        scrollbar::thumb(
+            self.rows.len() as f32 * ROW_H,
+            list_h,
+            self.scroll,
+            list_h,
+            1.0,
+        )
+    }
+
+    /// Moves the list so the held thumb follows the cursor at `y`.
+    fn drag_thumb(&mut self, y: f32) {
+        let (Some(grab), Some((_, th))) = (self.thumb_grab, self.thumb()) else {
+            return;
+        };
+        let list_h = self.geometry.list_h;
+        self.scroll = scrollbar::scroll_for_thumb(
+            y - self.geometry.list_top - grab,
+            th,
+            list_h,
+            self.rows.len() as f32 * ROW_H,
+            list_h,
+        );
     }
 
     fn select(&mut self, index: usize) {
@@ -322,6 +362,12 @@ impl Overlay for ThemeBrowser {
             duplicate_x: px + panel_w - PAD - 2.0 * ICON_BOX - 6.0,
             edit_x: px + panel_w - PAD - 3.0 * ICON_BOX - 12.0,
         };
+        // The first draw seats the list on the current theme, centered
+        // so its neighbors show; the arrows keep their manner after.
+        if !self.seated {
+            self.scroll = self.selected as f32 * ROW_H - (list_h - ROW_H) / 2.0;
+            self.seated = true;
+        }
         self.scroll = self.scroll.clamp(0.0, self.max_scroll());
 
         // Soft shadow lifts the panel off the untouched document.
@@ -496,6 +542,21 @@ impl Overlay for ThemeBrowser {
         }
 
         painter.clip(None);
+        if let Some((ty, th)) = self.thumb() {
+            let color = if self.thumb_grab.is_some() {
+                theme.ui.scrollbar_hover
+            } else {
+                theme.ui.scrollbar
+            };
+            painter.fill(
+                px + panel_w - THUMB_INSET - THUMB_W,
+                list_top + ty,
+                THUMB_W,
+                th,
+                THUMB_W / 2.0,
+                color,
+            );
+        }
         overlay::panel_header(painter, px, py, panel_w, HEADER_H, RADIUS, theme);
 
         let title = "Themes";
@@ -583,6 +644,22 @@ impl Overlay for ThemeBrowser {
         if y < self.geometry.list_top || y > self.geometry.list_top + self.geometry.list_h {
             return OverlayResult::Open;
         }
+        // The pad beside the rows is the bar: a press on the thumb keeps
+        // the cursor's offset, a press on the track jumps the thumb to
+        // center on the cursor; neither reaches the delete icon.
+        if x >= px + pw - PAD {
+            if let Some((ty, th)) = self.thumb() {
+                let at = y - self.geometry.list_top;
+                let grab = if at >= ty && at < ty + th {
+                    at - ty
+                } else {
+                    th / 2.0
+                };
+                self.thumb_grab = Some(grab);
+                self.drag_thumb(y);
+            }
+            return OverlayResult::Open;
+        }
         let index = ((y - self.geometry.list_top + self.scroll) / ROW_H).floor() as usize;
         if index >= self.rows.len() {
             return OverlayResult::Open;
@@ -621,11 +698,16 @@ impl Overlay for ThemeBrowser {
     }
 
     fn drag(&mut self, x: f32, y: f32) -> OverlayResult {
-        self.drag.to(x, y, self.geometry.center);
+        if self.thumb_grab.is_some() {
+            self.drag_thumb(y);
+        } else {
+            self.drag.to(x, y, self.geometry.center);
+        }
         OverlayResult::Open
     }
 
     fn release(&mut self) {
+        self.thumb_grab = None;
         self.drag.release();
     }
 
@@ -664,6 +746,9 @@ pub fn duplicate_path(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::paint::painter::Painter;
+    use crate::style::fonts::FontStore;
+    use tiny_skia::Pixmap;
 
     fn temp_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("oryx-dup-{}-{name}", std::process::id()));
@@ -676,9 +761,6 @@ mod tests {
     /// shows over the document below it.
     #[test]
     fn a_partly_visible_row_never_shows_below_the_panel() {
-        use crate::paint::painter::Painter;
-        use crate::style::fonts::FontStore;
-        use tiny_skia::Pixmap;
         let dir = temp_dir("spill");
         for n in 0..40 {
             std::fs::write(
@@ -722,6 +804,95 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Forty themes in a folder, the browser open on one of them.
+    fn long_browser(name: &str, active: &str) -> ThemeBrowser {
+        let dir = temp_dir(name);
+        for n in 0..40 {
+            std::fs::write(
+                dir.join(format!("theme-{n:02}.toml")),
+                "[surface]\nbackground = \"#282a36\"\n",
+            )
+            .unwrap();
+        }
+        let browser = ThemeBrowser::new(vec![dir.clone()], active);
+        std::fs::remove_dir_all(&dir).unwrap();
+        browser
+    }
+
+    fn drawn(browser: &mut ThemeBrowser, fonts: &mut FontStore, w: u32, h: u32) -> Pixmap {
+        let mut pixmap = Pixmap::new(w, h).unwrap();
+        let mut painter = Painter::new(&mut pixmap, fonts, None, 1.0);
+        browser.draw(&mut painter, &Theme::default_dark());
+        pixmap
+    }
+
+    #[test]
+    fn the_browser_opens_with_the_current_theme_centered() {
+        let mut fonts = FontStore::new();
+        let mut browser = long_browser("seat", "theme-30");
+        assert_eq!(browser.selected, 30);
+        drawn(&mut browser, &mut fonts, 460, 320);
+        let list_h = browser.geometry.list_h;
+        let centered = 30.0 * ROW_H - (list_h - ROW_H) / 2.0;
+        assert!(
+            (browser.scroll - centered).abs() < 0.5,
+            "the current row sits in the middle: {} against {centered}",
+            browser.scroll
+        );
+        // The arrows keep their manner: a step down moves the list only
+        // when the row leaves the view.
+        browser.key(&Key::Named(NamedKey::ArrowDown), false, false);
+        assert!(
+            (browser.scroll - centered).abs() < 0.5,
+            "a step inside the view moves nothing"
+        );
+        // A theme on the first page opens at the top, one at the end
+        // at the end: the seat is clamped like any scroll.
+        let mut first = long_browser("seat-first", "theme-01");
+        drawn(&mut first, &mut fonts, 460, 320);
+        assert_eq!(first.scroll, 0.0);
+        let mut last = long_browser("seat-last", "theme-39");
+        drawn(&mut last, &mut fonts, 460, 320);
+        assert_eq!(last.scroll, last.max_scroll());
+    }
+
+    #[test]
+    fn the_bar_scrolls_the_list_and_never_arms_a_delete() {
+        let mut fonts = FontStore::new();
+        let mut browser = long_browser("bar", "theme-00");
+        let pixmap = drawn(&mut browser, &mut fonts, 460, 320);
+        let (px, _, pw, _) = browser.geometry.panel;
+        let list_top = browser.geometry.list_top;
+        let list_h = browser.geometry.list_h;
+        let (ty, th) = browser.thumb().expect("a long list shows a thumb");
+        assert_eq!(ty, 0.0, "at the top the thumb sits at the top");
+        let sb = Theme::default_dark().ui.scrollbar;
+        let p = pixmap
+            .pixel(
+                (px + pw - THUMB_INSET - THUMB_W / 2.0) as u32,
+                (list_top + th / 2.0) as u32,
+            )
+            .unwrap();
+        assert_eq!(
+            (p.red(), p.green(), p.blue()),
+            (sb.r, sb.g, sb.b),
+            "the thumb in the scrollbar color"
+        );
+        // A press on the track's bottom jumps there, takes the thumb and arms nothing.
+        browser.click(px + pw - 6.0, list_top + list_h - 2.0);
+        assert!(browser.scroll > 0.0, "the list jumped");
+        assert!(browser.thumb_grab.is_some(), "the thumb is held");
+        assert_eq!(
+            browser.pending_delete, None,
+            "the strip is no delete button"
+        );
+        let jumped = browser.scroll;
+        browser.drag(px + pw - 6.0, list_top + 10.0);
+        assert!(browser.scroll < jumped, "dragging up scrolls back");
+        browser.release();
+        assert!(browser.thumb_grab.is_none());
     }
 
     #[test]

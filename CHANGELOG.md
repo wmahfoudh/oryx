@@ -2,7 +2,7 @@
 
 ## v1.1.0
 
-This release is about the editor. I added the small tricks a real editor has, a quick note on Ctrl+M, search fields that behave like text boxes, and a new look for the sidebar and for the unsaved changes dialog. The details, by area:
+This release is about the editor. Added the small tricks a real editor has, a quick note on Ctrl+M, search fields that behave like text boxes, and a new look for the sidebar and for the unsaved changes dialog. The details, by area:
 
 ### Lists and headings
 
@@ -44,11 +44,12 @@ This release is about the editor. I added the small tricks a real editor has, a 
 
 ### The look
 
-- I redesigned the sidebar. Folders have a small triangle and an outlined folder icon. Files have an outlined icon by type. Children hang from thin guide lines. The open file takes the theme's accent color, with a bar at its left. The row under the mouse lights up, and the list has a scrollbar, for the files and for the outline. Every theme works as it is.
-- I redesigned the unsaved changes dialog in the same spirit. The page dims behind it and the file's name is shown. The three answers are rows with their key beside them: S saves, D discards, Escape keeps editing. The arrows move between the rows and Enter or Space picks the highlighted one. A click on a row picks it, and a click outside keeps editing.
+- Redesigned the sidebar. Folders have a small triangle and an outlined folder icon. Files have an outlined icon by type. Children hang from thin guide lines. The open file takes the theme's accent color, with a bar at its left. The row under the mouse lights up, and the list has a scrollbar, for the files and for the outline. Every theme works as it is.
+- Redesigned the unsaved changes dialog in the same spirit. The page dims behind it and the file's name is shown. The three answers are rows with their key beside them: S saves, D discards, Escape keeps editing. The arrows move between the rows and Enter or Space picks the highlighted one. A click on a row picks it, and a click outside keeps editing.
 
 ### Fixes
 
+- The theme browser opens with the current theme in the middle of the list, so you see where you are. The list has a scrollbar now.
 - In the theme browser, the last row no longer shows below the panel when you scroll with the wheel.
 - On the help page, the Ctrl+` shortcut shows its key. Before, the backtick broke the table cell.
 
