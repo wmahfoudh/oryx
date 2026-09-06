@@ -933,6 +933,8 @@ enum Drag {
     Scrollbar(f32),
     /// The sidebar's right edge, holding the cursor offset from it.
     SidebarEdge(f32),
+    /// The sidebar's scrollbar thumb; the panel holds the grab.
+    SidebarThumb,
 }
 
 fn drag_is_edge(drag: Drag) -> bool {
@@ -3477,6 +3479,9 @@ impl App {
             if drag_is_edge(drag) {
                 self.save_sidebar_state();
             }
+            if let Some(side) = self.sidebar.as_mut() {
+                side.release();
+            }
             if let Some(gfx) = self.gfx.as_ref() {
                 gfx.window.request_redraw();
             }
@@ -4034,6 +4039,7 @@ impl App {
                 self.config.sidebar_tab = tab;
                 config::save(&self.config);
             }
+            sidebar::SideClick::Thumb => self.drag = Some(Drag::SidebarThumb),
             sidebar::SideClick::None => {}
         }
         self.request_redraw();
@@ -5264,13 +5270,23 @@ impl App {
     /// Track whether a link sits under the cursor and swap the pointer icon
     /// on transitions.
     fn update_hover(&mut self) {
+        let (ux, uy) = self.ui_cursor();
         let on_edge = self
             .sidebar
             .as_ref()
-            .is_some_and(|side| sidebar::on_edge(side.width(), self.cursor.x as f32 / self.scale));
+            .is_some_and(|side| sidebar::on_edge(side.width(), ux));
+        // The panel's hover mark: a redraw only when the row or the
+        // thumb under the mouse changed.
+        let side_changed = match self.sidebar.as_mut() {
+            Some(side) if !on_edge && ux < side.width() => side.hover_at(ux, uy, &self.outline),
+            Some(side) => side.clear_hover(),
+            None => false,
+        };
+        if side_changed {
+            self.request_redraw();
+        }
         let x = self.cursor.x as f32 - self.inset();
         let y = self.cursor.y as f32 + self.scroll_y;
-        let (ux, uy) = self.ui_cursor();
         let on_toggle = self.search.is_some()
             && self
                 .logical_width()
@@ -6167,6 +6183,7 @@ impl ApplicationHandler for App {
                 } else if let Some(side) = self.sidebar.as_mut().filter(|_| over_sidebar) {
                     side.wheel(lines * 3.0, &mut self.outline);
                     self.move_ownership(PaneAct::WheelSidebar);
+                    self.update_hover();
                     self.request_redraw();
                 } else {
                     self.scroll_by(lines * 3.0 * self.line_step());
@@ -6176,6 +6193,13 @@ impl ApplicationHandler for App {
             // A drop opens the way the dialog does, unsaved edits guarded;
             // a folder opens the sidebar on it.
             WindowEvent::DroppedFile(path) => self.drop_path(&path),
+            WindowEvent::CursorLeft { .. } => {
+                if let Some(side) = self.sidebar.as_mut() {
+                    if side.clear_hover() {
+                        self.request_redraw();
+                    }
+                }
+            }
             WindowEvent::CursorMoved { position, .. } => {
                 if self.mouse_muted() {
                     return;
@@ -6194,6 +6218,12 @@ impl ApplicationHandler for App {
                     self.search_drag_to();
                 } else if let Some(Drag::SidebarEdge(grab)) = self.drag {
                     self.resize_sidebar(position.x as f32 / self.scale - grab);
+                } else if let Some(Drag::SidebarThumb) = self.drag {
+                    let y = position.y as f32 / self.scale;
+                    if let Some(side) = self.sidebar.as_mut() {
+                        side.drag_thumb(y, &mut self.outline);
+                    }
+                    self.request_redraw();
                 } else if self.drag.is_some() {
                     self.drag_to(position.y as f32);
                 } else if self.sel_anchor.is_some() {

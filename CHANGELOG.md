@@ -26,6 +26,7 @@
 - Ctrl+M opens an empty markdown note in the editor at once, with no dialog. The name, the place and the type are chosen at the first Ctrl+S; until then the note is unsaved work, and closing the window or opening another file asks the usual question.
 - In the theme browser, a row cut by the bottom of the list ends there. Before, scrolling with the wheel could leave the last row showing below the panel, over the page.
 - On the help page, the Ctrl+` shortcut now shows its key. Before, the backtick in the key name broke the table cell.
+- The sidebar has a new look. Folders show a small triangle and an outlined folder, files show an outlined mark by type, children hang from thin indent guides, and the open file is drawn in the theme's accent color with a bar at its left. The row under the mouse lights up, and the list has a scrollbar, for the files and for the outline. Every existing theme works as it is.
 
 ## v1.0.0
 

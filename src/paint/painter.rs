@@ -252,6 +252,35 @@ impl<'a> Painter<'a> {
         self.stroke_shape(&path, &paint, &stroke, reach);
     }
 
+    /// Fills the triangle through three points, anti-aliased.
+    pub fn triangle(&mut self, points: [(f32, f32); 3], color: Rgba) {
+        let s = self.scale;
+        let p = points.map(|(x, y)| (x * s, y * s));
+        let mut pb = PathBuilder::new();
+        pb.move_to(p[0].0, p[0].1);
+        pb.line_to(p[1].0, p[1].1);
+        pb.line_to(p[2].0, p[2].1);
+        pb.close();
+        let Some(path) = pb.finish() else {
+            return;
+        };
+        let x0 = p.iter().map(|q| q.0).fold(f32::MAX, f32::min);
+        let y0 = p.iter().map(|q| q.1).fold(f32::MAX, f32::min);
+        let x1 = p.iter().map(|q| q.0).fold(f32::MIN, f32::max);
+        let y1 = p.iter().map(|q| q.1).fold(f32::MIN, f32::max);
+        let reach = self.reach(x0, y0, x1 - x0, y1 - y0);
+        if matches!(reach, Reach::None) {
+            return;
+        }
+        self.mark(x0, y0, x1 - x0, y1 - y0);
+        let mut paint = tiny_skia::Paint {
+            anti_alias: true,
+            ..tiny_skia::Paint::default()
+        };
+        paint.set_color_rgba8(color.r, color.g, color.b, color.a);
+        self.fill_shape(&path, &paint, reach);
+    }
+
     /// Fills a rectangle from a per-pixel callback over coordinates
     /// normalized to [0, 1]; the result is opaque.
     pub fn shade(&mut self, x: f32, y: f32, w: f32, h: f32, f: impl Fn(f32, f32) -> Rgba) {
@@ -635,5 +664,26 @@ mod tests {
         painter.clip(None);
         painter.fill(70.0, 70.0, 20.0, 20.0, 4.0, RED);
         assert!(painted(&pixmap, 75, 75), "the second fill lands");
+    }
+
+    #[test]
+    fn a_triangle_fills_its_shape_and_respects_the_clip() {
+        let mut fonts = FontStore::new();
+        let mut plain = Pixmap::new(100, 100).unwrap();
+        let mut painter = Painter::new(&mut plain, &mut fonts, None, 1.0);
+        painter.triangle([(10.0, 10.0), (90.0, 50.0), (10.0, 90.0)], RED);
+        assert!(painted(&plain, 30, 50), "inside the triangle");
+        assert!(painted(&plain, 12, 12), "the first corner");
+        assert!(!painted(&plain, 80, 15), "outside, past the slanted edge");
+        assert!(!painted(&plain, 80, 85), "outside, past the other edge");
+        let mut clipped = Pixmap::new(100, 100).unwrap();
+        let mut painter = Painter::new(&mut clipped, &mut fonts, None, 1.0);
+        painter.clip(Some((0.0, 0.0, 50.0, 100.0)));
+        painter.triangle([(10.0, 10.0), (90.0, 50.0), (10.0, 90.0)], RED);
+        assert!(painted(&clipped, 30, 50), "inside the clip");
+        assert!(
+            !any_painted(&clipped, 50, 0, 100, 100),
+            "cut at the clip's edge"
+        );
     }
 }

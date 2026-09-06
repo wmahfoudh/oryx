@@ -13,8 +13,9 @@ use serde::{Deserialize, Serialize};
 use crate::doc::load::{self, FileKind};
 use crate::paint::painter::Painter;
 use crate::style::fonts::BODY_FAMILY;
-use crate::style::theme::{Rgba, Theme};
+use crate::style::theme::{Rgba, Theme, Ui};
 use crate::ui::outline::OutlineTree;
+use crate::ui::scrollbar;
 
 /// Panel width in pixels for a reader who has never dragged the edge.
 pub const DEFAULT_WIDTH: f32 = 260.0;
@@ -38,6 +39,55 @@ const ICON_W: f32 = 18.0;
 pub const CAPTION_H: f32 = 34.0;
 /// Dead zone either side of the caption row's middle.
 const CAPTION_GAP: f32 = 3.0;
+/// Inset of the row fills and the accent bar from the panel's left edge.
+const FILL_X: f32 = 5.0;
+/// Width of the accent bar marking the open file or the current heading.
+const BAR_W: f32 = 3.0;
+/// Height of a type mark; the folder and the pages share it.
+const MARK_H: f32 = 12.0;
+/// The triangle's center within its column, a pixel left of the middle
+/// so the triangle and the mark after it breathe.
+const TRIANGLE_CX: f32 = INDENT / 2.0 - 1.0;
+/// The scrollbar thumb: its width and its distance from the panel's
+/// right edge, which keeps it clear of the resize grab zone.
+const THUMB_W: f32 = 6.0;
+const THUMB_INSET: f32 = 5.0;
+/// The rightmost band of the panel, where a press goes to the bar rather
+/// than to a row while the list scrolls; names stop short of it.
+const STRIP_W: f32 = 14.0;
+
+/// Where a row's parts sit for its depth: the triangle column, the mark
+/// column and the name. The outline has no marks, so its names start
+/// where the mark column would.
+#[derive(Debug, PartialEq)]
+pub struct RowLayout {
+    pub triangle_x: f32,
+    pub mark_x: f32,
+    pub text_x: f32,
+}
+
+pub fn row_layout(depth: usize, marks: bool) -> RowLayout {
+    let triangle_x = PAD + depth as f32 * INDENT;
+    let mark_x = triangle_x + INDENT;
+    RowLayout {
+        triangle_x,
+        mark_x,
+        text_x: if marks { mark_x + ICON_W } else { mark_x },
+    }
+}
+
+/// The x of the guide a row draws for `level`, one of the levels above
+/// its own: the center of that level's triangle column.
+pub fn guide_x(level: usize) -> f32 {
+    PAD + level as f32 * INDENT + INDENT / 2.0
+}
+
+/// What the mouse rests on inside the panel.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum Hover {
+    Row(usize),
+    Thumb,
+}
 
 /// Which panel tab is active; persisted in config.
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Default, Serialize, Deserialize)]
@@ -58,6 +108,8 @@ pub enum SideClick {
     Open(PathBuf),
     /// Scroll the document to this heading block.
     Jump(usize),
+    /// The press took the scrollbar thumb; the app drags it until release.
+    Thumb,
 }
 
 /// The tab a click at panel coordinates lands on; None outside the
@@ -167,6 +219,10 @@ pub struct Sidebar {
     current: Option<PathBuf>,
     scroll: f32,
     list_h: f32,
+    /// The row or the thumb under the mouse, from the last cursor move.
+    hover: Option<Hover>,
+    /// The cursor's offset from the thumb's top while the thumb is held.
+    thumb_grab: Option<f32>,
 }
 
 /// Whether a directory entry belongs in the tree. Directories always do,
@@ -245,6 +301,8 @@ impl Sidebar {
             current: None,
             scroll: 0.0,
             list_h: 0.0,
+            hover: None,
+            thumb_grab: None,
         }
     }
 
@@ -385,8 +443,74 @@ impl Sidebar {
         }
     }
 
-    /// A click inside the panel: the caption row switches tabs, a file
-    /// row opens or expands, an outline row folds or jumps.
+    /// The active list's scroll and its full height.
+    fn list_extent(&self, outline: &OutlineTree) -> (f32, f32) {
+        match self.tab {
+            Tab::Files => (self.scroll, self.entries.len() as f32 * ROW_H),
+            Tab::Outline => (outline.scroll, outline.rows().len() as f32 * ROW_H),
+        }
+    }
+
+    /// The thumb of the active list as `(y, height)` from the list's
+    /// top, or None when the list fits its viewport.
+    pub fn thumb(&self, outline: &OutlineTree) -> Option<(f32, f32)> {
+        let (scroll, content_h) = self.list_extent(outline);
+        scrollbar::thumb(content_h, self.list_h, scroll, self.list_h, 1.0)
+    }
+
+    /// Records what the mouse rests on at panel coordinates: a row of
+    /// the active tab, or the thumb. Reports whether it changed, so the
+    /// caller redraws only then.
+    pub fn hover_at(&mut self, x: f32, y: f32, outline: &OutlineTree) -> bool {
+        let top = PAD + CAPTION_H;
+        let in_list = x >= 0.0 && x < self.width && y >= top && y < top + self.list_h;
+        let hover = if !in_list {
+            None
+        } else if let Some((ty, th)) = self.thumb(outline).filter(|_| x >= self.width - STRIP_W) {
+            (y >= top + ty && y < top + ty + th).then_some(Hover::Thumb)
+        } else {
+            let (scroll, content_h) = self.list_extent(outline);
+            let index = ((y - top + scroll) / ROW_H).floor();
+            (index >= 0.0 && index * ROW_H < content_h).then_some(Hover::Row(index as usize))
+        };
+        let changed = hover != self.hover;
+        self.hover = hover;
+        changed
+    }
+
+    /// Forgets the hover, for a cursor that left the panel or the
+    /// window. Reports whether there was one.
+    pub fn clear_hover(&mut self) -> bool {
+        self.hover.take().is_some()
+    }
+
+    /// Moves the active list so the held thumb follows the cursor at `y`.
+    pub fn drag_thumb(&mut self, y: f32, outline: &mut OutlineTree) {
+        let (Some(grab), Some((_, th))) = (self.thumb_grab, self.thumb(outline)) else {
+            return;
+        };
+        let (_, content_h) = self.list_extent(outline);
+        let scroll = scrollbar::scroll_for_thumb(
+            y - (PAD + CAPTION_H) - grab,
+            th,
+            self.list_h,
+            content_h,
+            self.list_h,
+        );
+        match self.tab {
+            Tab::Files => self.scroll = scroll,
+            Tab::Outline => outline.scroll = scroll,
+        }
+    }
+
+    /// The mouse button went up: the thumb, if held, is let go.
+    pub fn release(&mut self) {
+        self.thumb_grab = None;
+    }
+
+    /// A click inside the panel: the caption row switches tabs, a press
+    /// on the bar takes the thumb, a file row opens or expands, an
+    /// outline row folds or jumps.
     pub fn click(&mut self, x: f32, y: f32, outline: &mut OutlineTree) -> SideClick {
         if let Some(tab) = caption_hit(self.width, x, y) {
             if tab != self.tab {
@@ -394,6 +518,22 @@ impl Sidebar {
                 return SideClick::Tab;
             }
             return SideClick::None;
+        }
+        let top = PAD + CAPTION_H;
+        if x >= self.width - STRIP_W && y >= top && y < top + self.list_h {
+            if let Some((ty, th)) = self.thumb(outline) {
+                // On the thumb the grab keeps the cursor's offset; on the
+                // track the thumb jumps to center on the cursor.
+                let at = y - top;
+                let grab = if at >= ty && at < ty + th {
+                    at - ty
+                } else {
+                    th / 2.0
+                };
+                self.thumb_grab = Some(grab);
+                self.drag_thumb(y, outline);
+                return SideClick::Thumb;
+            }
         }
         match self.tab {
             Tab::Files => {
@@ -415,7 +555,7 @@ impl Sidebar {
                 let index = index as usize;
                 let row = rows[index];
                 outline.selected = index;
-                let chevron_end = PAD + row.depth as f32 * INDENT + 12.0;
+                let chevron_end = row_layout(row.depth as usize, false).text_x;
                 if row.has_children && x < chevron_end {
                     outline.toggle_row(index);
                     return SideClick::None;
@@ -438,9 +578,10 @@ impl Sidebar {
     }
 
     /// Draws the panel: captions, then the active tab's list. `current`
-    /// is the outline entry carrying the reading-position highlight.
+    /// is the outline entry carrying the reading-position mark.
     /// `owns_keys` is key ownership: while the panel does not own Up,
-    /// Down, and Enter, its live marks render dimmed.
+    /// Down, and Enter, the active caption dims and the keyboard's row
+    /// shows no fill.
     pub fn draw(
         &mut self,
         painter: &mut Painter,
@@ -454,14 +595,15 @@ impl Sidebar {
         let width = self.width;
         painter.fill(0.0, 0.0, width, h, 0.0, ui.sidebar_bg);
         self.list_h = h - 2.0 * PAD - CAPTION_H;
+        // The rows draw under a clip to the list viewport, between the
+        // caption row and the bottom pad, so a cut row ends there.
+        painter.clip(Some((0.0, PAD + CAPTION_H, width, self.list_h)));
         match self.tab {
             Tab::Files => self.draw_files(painter, theme, owns_keys),
             Tab::Outline => self.draw_outline(painter, theme, outline, current, owns_keys),
         }
-        // Masks cover row overflow above and below the list viewport; the
-        // captions and the border paint over them.
-        painter.fill(0.0, 0.0, width, PAD + CAPTION_H, 0.0, ui.sidebar_bg);
-        painter.fill(0.0, h - PAD, width, PAD, 0.0, ui.sidebar_bg);
+        painter.clip(None);
+        self.draw_thumb(painter, theme, outline);
         self.draw_captions(painter, theme, owns_keys);
         painter.line(
             width - 0.5,
@@ -473,13 +615,22 @@ impl Sidebar {
         );
     }
 
-    /// The two tab captions: a small icon beside a text label, the
-    /// active one in full color over an underline, the other dimmed the
-    /// way dot entries are. The active caption dims too while the panel
-    /// does not own the keys. Captions truncate; icons never do.
+    /// The two tab captions: a small icon beside a text label over a
+    /// hairline across the panel, the active one in full color with an
+    /// accent underline on the hairline, the other dimmed the way dot
+    /// entries are. The active caption dims too while the panel does
+    /// not own the keys. Captions truncate; icons never do.
     fn draw_captions(&self, painter: &mut Painter, theme: &Theme, owns_keys: bool) {
         let ui = &theme.ui;
         let mid = self.width / 2.0;
+        painter.fill(
+            0.0,
+            CAPTION_H - 1.0,
+            self.width,
+            1.0,
+            0.0,
+            guide(ui.sidebar_fg),
+        );
         let zones = [
             (Tab::Files, PAD, mid - CAPTION_GAP),
             (Tab::Outline, mid + CAPTION_GAP, self.width - PAD),
@@ -493,11 +644,7 @@ impl Sidebar {
             };
             let iy = (CAPTION_H - 12.0) / 2.0;
             match tab {
-                Tab::Files => {
-                    // The folder shape the tree rows use.
-                    painter.fill(x0, iy + 1.0, 5.5, 3.0, 1.0, color);
-                    painter.fill(x0, iy + 3.5, 11.0, 8.0, 1.5, color);
-                }
+                Tab::Files => draw_folder(painter, x0, iy, color, false),
                 Tab::Outline => {
                     // Indented lines, an outline in miniature.
                     painter.fill(x0, iy + 1.5, 10.0, 1.6, 0.8, color);
@@ -514,13 +661,35 @@ impl Sidebar {
             let text = truncated(painter, label, x1 - tx, weight);
             painter.text(tx, 7.0, &text, BODY_FAMILY, TEXT_SIZE, weight, color);
             if active {
-                painter.fill(x0, CAPTION_H - 3.0, x1 - x0, 2.0, 1.0, color);
+                painter.fill(x0, CAPTION_H - 2.0, x1 - x0, 2.0, 1.0, ui.sidebar_dir);
             }
         }
     }
 
-    /// The outline tab: one row per visible heading, chevrons on rows
-    /// with children, the current section bold.
+    /// The scrollbar thumb of the active list, in the hover color while
+    /// the mouse rests on it or holds it.
+    fn draw_thumb(&self, painter: &mut Painter, theme: &Theme, outline: &OutlineTree) {
+        let Some((ty, th)) = self.thumb(outline) else {
+            return;
+        };
+        let held = self.thumb_grab.is_some() || self.hover == Some(Hover::Thumb);
+        let color = if held {
+            theme.ui.scrollbar_hover
+        } else {
+            theme.ui.scrollbar
+        };
+        painter.fill(
+            self.width - THUMB_INSET - THUMB_W,
+            PAD + CAPTION_H + ty,
+            THUMB_W,
+            th,
+            THUMB_W / 2.0,
+            color,
+        );
+    }
+
+    /// The outline tab: one row per visible heading, triangles on rows
+    /// with children, the current section in the accent look.
     fn draw_outline(
         &mut self,
         painter: &mut Painter,
@@ -560,41 +729,43 @@ impl Sidebar {
             }
             slot += 1;
             let row = rows[index];
-            if index == outline.selected {
-                let hi = if owns_keys {
-                    ui.overlay_highlight
-                } else {
-                    dim(ui.overlay_highlight)
-                };
-                painter.fill(3.0, ry, self.width - 8.0, ROW_H - 2.0, 5.0, hi);
-            }
-            let x = PAD + row.depth as f32 * INDENT;
-            // An unresolved book entry dims like a dot file and jumps
-            // nowhere.
-            let color = if row.dead {
-                dim(ui.sidebar_fg)
-            } else {
-                ui.sidebar_fg
-            };
-            if row.has_children {
-                let cx = x + 3.0;
-                let cy = ry + ROW_H / 2.0;
-                if row.collapsed {
-                    // Right-pointing: fold closed.
-                    painter.line(cx - 1.5, cy - 3.5, cx + 2.5, cy, 1.6, color);
-                    painter.line(cx + 2.5, cy, cx - 1.5, cy + 3.5, 1.6, color);
-                } else {
-                    // Down-pointing: open.
-                    painter.line(cx - 3.5, cy - 1.5, cx, cy + 2.5, 1.6, color);
-                    painter.line(cx, cy + 2.5, cx + 3.5, cy - 1.5, 1.6, color);
-                }
-            }
             let is_current = current == Some(row.entry);
-            let weight = if is_current { 700 } else { 400 };
-            let tx = x + 12.0;
-            let avail = self.width - tx - PAD;
-            let name = truncated(painter, &outline.entries()[row.entry].text, avail, weight);
-            painter.text(tx, ry + 5.0, &name, BODY_FAMILY, TEXT_SIZE, weight, color);
+            let attended =
+                self.hover == Some(Hover::Row(index)) || (owns_keys && index == outline.selected);
+            draw_row_ground(
+                painter,
+                self.width,
+                ry,
+                is_current,
+                attended,
+                ui.sidebar_fg,
+                ui.sidebar_dir,
+            );
+            for level in 0..row.depth as usize {
+                draw_guide(painter, level, ry, ui.sidebar_fg);
+            }
+            let layout = row_layout(row.depth as usize, false);
+            let color = outline_color(ui, row.depth as usize, row.dead, is_current);
+            if row.has_children {
+                draw_triangle(
+                    painter,
+                    layout.triangle_x + TRIANGLE_CX,
+                    ry + ROW_H / 2.0,
+                    !row.collapsed,
+                    soft(color),
+                );
+            }
+            let avail = self.width - layout.text_x - STRIP_W;
+            let name = truncated(painter, &outline.entries()[row.entry].text, avail, 400);
+            painter.text(
+                layout.text_x,
+                ry + 5.0,
+                &name,
+                BODY_FAMILY,
+                TEXT_SIZE,
+                400,
+                color,
+            );
         }
     }
 
@@ -602,6 +773,7 @@ impl Sidebar {
         let h = painter.height();
         let ui = &theme.ui;
         let width = self.width;
+        let (fg, accent) = (ui.sidebar_fg, ui.sidebar_dir);
         self.scroll = self.scroll.clamp(0.0, self.max_scroll());
         let first = (self.scroll / ROW_H).floor() as usize;
         let offset = -(self.scroll - first as f32 * ROW_H);
@@ -614,81 +786,141 @@ impl Sidebar {
             }
             slot += 1;
             let entry = &self.entries[index];
-            if index == self.selected {
-                let hi = if owns_keys {
-                    ui.overlay_highlight
-                } else {
-                    dim(ui.overlay_highlight)
-                };
-                painter.fill(3.0, ry, width - 8.0, ROW_H - 2.0, 5.0, hi);
+            let current = self.current.as_deref() == Some(entry.path.as_path());
+            let attended =
+                self.hover == Some(Hover::Row(index)) || (owns_keys && index == self.selected);
+            draw_row_ground(painter, width, ry, current, attended, fg, accent);
+            for level in 0..entry.depth {
+                draw_guide(painter, level, ry, fg);
             }
-            let x = PAD + entry.depth as f32 * INDENT;
-            let mut color = if entry.is_dir {
-                ui.sidebar_dir
-            } else {
-                ui.sidebar_fg
-            };
+            let layout = row_layout(entry.depth, true);
+            let mut color = if current { accent } else { fg };
             if entry.hidden {
                 color = dim(color);
             }
+            let iy = ry + (ROW_H - MARK_H) / 2.0;
             if index == 0 && entry.name == ".." {
-                // Up chevron for the parent row.
-                let iy = ry + ROW_H / 2.0;
-                painter.line(x + 1.0, iy + 2.0, x + 5.5, iy - 2.5, 1.6, color);
-                painter.line(x + 5.5, iy - 2.5, x + 10.0, iy + 2.0, 1.6, color);
+                // Up chevron in the mark column for the parent row.
+                let (cx, cy) = (layout.mark_x + 5.0, ry + ROW_H / 2.0);
+                painter.line(cx - 4.5, cy + 2.0, cx, cy - 2.5, 1.6, color);
+                painter.line(cx, cy - 2.5, cx + 4.5, cy + 2.0, 1.6, color);
             } else if entry.is_dir {
-                // Folder icon: a tab over a solid body. A linked folder
-                // carries an arrow knocked out of the body, since a click
-                // moves the tree there instead of opening it in place.
-                let iy = ry + (ROW_H - 12.0) / 2.0;
-                painter.fill(x, iy, 5.5, 3.0, 1.0, color);
-                painter.fill(x, iy + 2.5, 11.0, 8.0, 1.5, color);
-                if entry.linked {
-                    let ay = iy + 6.5;
-                    painter.line(x + 4.0, ay - 2.0, x + 6.5, ay, 1.4, ui.sidebar_bg);
-                    painter.line(x + 6.5, ay, x + 4.0, ay + 2.0, 1.4, ui.sidebar_bg);
-                }
+                draw_triangle(
+                    painter,
+                    layout.triangle_x + TRIANGLE_CX,
+                    ry + ROW_H / 2.0,
+                    entry.expanded,
+                    soft(color),
+                );
+                draw_folder(painter, layout.mark_x, iy, color, entry.linked);
             } else {
-                let iy = ry + (ROW_H - 12.0) / 2.0;
-                draw_icon(painter, icon_for(&entry.path), x, iy, color, ui.sidebar_bg);
+                draw_icon(painter, icon_for(&entry.path), layout.mark_x, iy, color);
             }
-            let current = self.current.as_deref() == Some(entry.path.as_path());
-            let weight = if current { 700 } else { 400 };
-            let avail = width - x - ICON_W - PAD;
-            let name = truncated(painter, &entry.name, avail, weight);
+            let avail = width - layout.text_x - STRIP_W;
+            let name = truncated(painter, &entry.name, avail, 400);
             painter.text(
-                x + ICON_W,
+                layout.text_x,
                 ry + 5.0,
                 &name,
                 BODY_FAMILY,
                 TEXT_SIZE,
-                weight,
+                400,
                 color,
             );
         }
     }
 }
 
-/// The type mark for one file, drawn in an 11 by 12 box at `x`, `y`.
-/// Every shape is built from the painter's rectangles and lines, since the
-/// UI has no icon font: the three page-shaped marks share a silhouette and
-/// differ inside it, and the two others take their own outline.
-fn draw_icon(painter: &mut Painter, icon: Icon, x: f32, y: f32, color: Rgba, bg: Rgba) {
+/// The row's ground: the accent fill and bar for the open file or the
+/// current heading, the hover fill for a row under attention, nothing
+/// otherwise. The accent look wins when both apply.
+fn draw_row_ground(
+    painter: &mut Painter,
+    width: f32,
+    ry: f32,
+    current: bool,
+    attended: bool,
+    fg: Rgba,
+    accent: Rgba,
+) {
+    let fill_w = width - 2.0 * FILL_X;
+    if current {
+        painter.fill(
+            FILL_X,
+            ry + 1.0,
+            fill_w,
+            ROW_H - 2.0,
+            5.0,
+            accent_fill(accent),
+        );
+        // The bar spans the fill's straight edge, between its rounded corners.
+        painter.fill(FILL_X, ry + 6.0, BAR_W, ROW_H - 12.0, 1.5, accent);
+    } else if attended {
+        painter.fill(FILL_X, ry + 1.0, fill_w, ROW_H - 2.0, 5.0, hover_fill(fg));
+    }
+}
+
+/// One row's segment of the guide for `level`, a one pixel line on a
+/// whole column so consecutive rows join into one crisp line.
+fn draw_guide(painter: &mut Painter, level: usize, ry: f32, fg: Rgba) {
+    painter.fill(guide_x(level).floor(), ry, 1.0, ROW_H, 0.0, guide(fg));
+}
+
+/// A small filled triangle centered at `cx`, `cy`: pointing down on an
+/// open folder or an expanded heading, right on a closed one.
+fn draw_triangle(painter: &mut Painter, cx: f32, cy: f32, open: bool, color: Rgba) {
+    if open {
+        painter.triangle(
+            [(cx - 4.0, cy - 2.0), (cx + 4.0, cy - 2.0), (cx, cy + 3.0)],
+            color,
+        );
+    } else {
+        painter.triangle(
+            [(cx - 2.5, cy - 4.0), (cx + 3.0, cy), (cx - 2.5, cy + 4.0)],
+            color,
+        );
+    }
+}
+
+/// The folder mark, 11 by 12 at `x`, `y`: an outlined body under a small
+/// tab. A linked folder carries an arrow inside, since a click moves
+/// the tree there instead of opening it in place.
+fn draw_folder(painter: &mut Painter, x: f32, y: f32, color: Rgba, linked: bool) {
+    painter.fill(x, y, 5.0, 2.5, 1.0, color);
+    painter.stroke(x + 0.5, y + 2.5, 10.0, 8.5, 1.5, 1.2, color);
+    if linked {
+        let ay = y + 7.0;
+        painter.line(x + 3.0, ay, x + 8.0, ay, 1.2, color);
+        painter.line(x + 5.5, ay - 2.5, x + 8.0, ay, 1.2, color);
+        painter.line(x + 5.5, ay + 2.5, x + 8.0, ay, 1.2, color);
+    }
+}
+
+/// The type mark for one file, drawn in a 10 by 12 box at `x`, `y`.
+/// Every shape is built from the painter's rectangles and lines, since
+/// the UI has no icon font: the three page-shaped marks share an outline
+/// and differ by the lines inside it, and the two others take their own
+/// shape.
+fn draw_icon(painter: &mut Painter, icon: Icon, x: f32, y: f32, color: Rgba) {
     const W: f32 = 10.0;
-    const H: f32 = 12.0;
+    const H: f32 = MARK_H;
+    fn page(painter: &mut Painter, x: f32, y: f32, color: Rgba) {
+        painter.stroke(x + 0.5, y + 0.5, W - 1.0, H - 1.0, 1.5, 1.2, color);
+    }
     match icon {
         Icon::Document => {
-            painter.fill(x, y, W, H, 1.5, color);
-            // Two lines of text knocked out of the page.
-            painter.fill(x + 2.0, y + 3.5, W - 4.0, 1.5, 0.0, bg);
-            painter.fill(x + 2.0, y + 7.0, W - 4.0, 1.5, 0.0, bg);
+            page(painter, x, y, color);
+            for ly in [4.0, 7.0] {
+                painter.fill(x + 2.5, y + ly, W - 5.0, 1.2, 0.6, color);
+            }
         }
         Icon::Text => {
-            painter.fill(x, y, W, H, 1.5, color);
+            page(painter, x, y, color);
+            for ly in [3.5, 5.75, 8.0] {
+                painter.fill(x + 2.5, y + ly, W - 5.0, 1.0, 0.5, color);
+            }
         }
-        Icon::Unknown => {
-            painter.stroke(x, y, W, H, 1.5, 1.2, color);
-        }
+        Icon::Unknown => page(painter, x, y, color),
         Icon::Code => {
             // Angle brackets, the shape source carries everywhere.
             let mid = y + H / 2.0;
@@ -707,11 +939,50 @@ fn draw_icon(painter: &mut Painter, icon: Icon, x: f32, y: f32, color: Rgba, bg:
     }
 }
 
-/// Dot entries render at reduced opacity.
-fn dim(color: Rgba) -> Rgba {
+fn with_alpha(color: Rgba, factor: f32) -> Rgba {
     Rgba {
-        a: (color.a as f32 * 0.55) as u8,
+        a: (color.a as f32 * factor) as u8,
         ..color
+    }
+}
+
+/// The fill behind the open file or the current heading.
+fn accent_fill(accent: Rgba) -> Rgba {
+    with_alpha(accent, 0.18)
+}
+
+/// The fill under the mouse, and under the keyboard's row while the
+/// panel owns the keys: a lift on a dark theme, a tint on a light one.
+fn hover_fill(fg: Rgba) -> Rgba {
+    with_alpha(fg, 0.08)
+}
+
+/// Indent guides and the hairline under the captions.
+fn guide(fg: Rgba) -> Rgba {
+    with_alpha(fg, 0.18)
+}
+
+/// Outline headings below the top level, and every triangle.
+fn soft(color: Rgba) -> Rgba {
+    with_alpha(color, 0.7)
+}
+
+/// Dot entries, unresolved book entries and inactive captions.
+fn dim(color: Rgba) -> Rgba {
+    with_alpha(color, 0.55)
+}
+
+/// The color of an outline row: the accent when current, dimmed when
+/// unresolved, softened below the top level, the text color otherwise.
+fn outline_color(ui: &Ui, depth: usize, dead: bool, current: bool) -> Rgba {
+    if current {
+        ui.sidebar_dir
+    } else if dead {
+        dim(ui.sidebar_fg)
+    } else if depth > 0 {
+        soft(ui.sidebar_fg)
+    } else {
+        ui.sidebar_fg
     }
 }
 
@@ -1073,6 +1344,219 @@ mod tests {
         }
         assert_eq!(side.selected, side.entries.len() - 1);
         assert_eq!(side.enter(), Some(dir.join("zeta.md")));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Draws the panel into a fresh canvas of `w` by `h`, the panel
+    /// owning the keys, and returns the pixels.
+    fn painted(
+        side: &mut Sidebar,
+        outline: &mut OutlineTree,
+        fonts: &mut FontStore,
+        theme: &Theme,
+        w: u32,
+        h: u32,
+    ) -> Pixmap {
+        let mut pixmap = Pixmap::new(w, h).unwrap();
+        let mut painter = Painter::new(&mut pixmap, fonts, None, 1.0);
+        side.draw(&mut painter, theme, outline, None, true);
+        pixmap
+    }
+
+    fn rgba(pixmap: &Pixmap, x: f32, y: f32) -> (u8, u8, u8, u8) {
+        let p = pixmap.pixel(x as u32, y as u32).unwrap();
+        (p.red(), p.green(), p.blue(), p.alpha())
+    }
+
+    fn opaque(c: Rgba) -> (u8, u8, u8, u8) {
+        (c.r, c.g, c.b, 255)
+    }
+
+    #[test]
+    fn row_layout_indents_by_the_triangle_column() {
+        let top = row_layout(0, true);
+        assert_eq!(
+            (top.triangle_x, top.mark_x, top.text_x),
+            (PAD, PAD + INDENT, PAD + INDENT + ICON_W)
+        );
+        let child = row_layout(1, true);
+        assert_eq!(
+            child.triangle_x, top.mark_x,
+            "a child's triangle sits under its parent's mark"
+        );
+        assert_eq!(child.text_x - top.text_x, INDENT);
+        let heading = row_layout(0, false);
+        assert_eq!(
+            heading.text_x,
+            PAD + INDENT,
+            "the outline has no mark column"
+        );
+        assert_eq!(
+            guide_x(0),
+            PAD + INDENT / 2.0,
+            "a guide hangs from the triangle's center"
+        );
+        assert_eq!(guide_x(1), PAD + INDENT + INDENT / 2.0);
+    }
+
+    #[test]
+    fn derived_colors_keep_the_hue_and_scale_the_opacity() {
+        let c = Rgba {
+            r: 10,
+            g: 20,
+            b: 30,
+            a: 255,
+        };
+        assert_eq!(accent_fill(c), Rgba { a: 45, ..c });
+        assert_eq!(hover_fill(c), Rgba { a: 20, ..c });
+        assert_eq!(guide(c), Rgba { a: 45, ..c });
+        assert_eq!(soft(c), Rgba { a: 178, ..c });
+        assert_eq!(dim(c), Rgba { a: 140, ..c });
+    }
+
+    #[test]
+    fn outline_rows_color_by_depth_state_and_currency() {
+        let ui = &Theme::default_dark().ui;
+        assert_eq!(outline_color(ui, 0, false, false), ui.sidebar_fg);
+        assert_eq!(outline_color(ui, 1, false, false), soft(ui.sidebar_fg));
+        assert_eq!(outline_color(ui, 2, true, false), dim(ui.sidebar_fg));
+        assert_eq!(outline_color(ui, 2, false, true), ui.sidebar_dir);
+    }
+
+    #[test]
+    fn the_open_file_wears_the_accent_bar_and_a_nested_row_its_guide() {
+        let dir = temp_tree("look");
+        let mut side = Sidebar::new(&dir);
+        let sub = side.entries.iter().position(|e| e.name == "sub").unwrap();
+        assert!(side.activate(sub).is_none());
+        let at =
+            |side: &Sidebar, name: &str| side.entries.iter().position(|e| e.name == name).unwrap();
+        let (subsub, inner, zeta) = (
+            at(&side, "subsub"),
+            at(&side, "inner.md"),
+            at(&side, "zeta.md"),
+        );
+        side.set_current(&dir.join("sub/inner.md"));
+        let theme = Theme::default_dark();
+        let doc = markdown::parse("");
+        let mut outline = OutlineTree::build(&doc);
+        let mut fonts = FontStore::new();
+        let pixmap = painted(&mut side, &mut outline, &mut fonts, &theme, 260, 400);
+        std::fs::remove_dir_all(&dir).unwrap();
+        let row_y = |index: usize| PAD + CAPTION_H + index as f32 * ROW_H;
+        assert_eq!(
+            rgba(&pixmap, FILL_X + 1.0, row_y(inner) + ROW_H / 2.0),
+            opaque(theme.ui.sidebar_dir),
+            "the accent bar at the open file's left edge"
+        );
+        let bg = opaque(theme.ui.sidebar_bg);
+        assert_ne!(
+            rgba(&pixmap, guide_x(0), row_y(subsub) + 3.0),
+            bg,
+            "a nested row draws the guide of the level above it"
+        );
+        assert_eq!(
+            rgba(&pixmap, guide_x(0), row_y(zeta) + 3.0),
+            bg,
+            "a top-level file has no guide and no triangle"
+        );
+    }
+
+    #[test]
+    fn hover_follows_the_row_under_the_mouse_and_reports_changes() {
+        let dir = temp_tree("hover");
+        let mut side = Sidebar::new(&dir);
+        std::fs::remove_dir_all(&dir).unwrap();
+        let doc = markdown::parse("");
+        let outline = OutlineTree::build(&doc);
+        side.list_h = 300.0;
+        let top = PAD + CAPTION_H;
+        assert!(side.hover_at(50.0, top + 5.0, &outline), "the first row");
+        assert_eq!(side.hover, Some(Hover::Row(0)));
+        assert!(
+            !side.hover_at(60.0, top + 20.0, &outline),
+            "the same row again changes nothing"
+        );
+        assert!(side.hover_at(50.0, top + ROW_H + 5.0, &outline));
+        assert_eq!(side.hover, Some(Hover::Row(1)));
+        assert!(
+            side.hover_at(50.0, 5.0, &outline),
+            "the caption row is no row"
+        );
+        assert_eq!(side.hover, None);
+        assert!(!side.clear_hover(), "nothing to clear");
+        side.hover_at(50.0, top + 5.0, &outline);
+        assert!(side.clear_hover(), "leaving clears it");
+        assert_eq!(side.hover, None);
+        assert!(
+            !side.hover_at(50.0, top + 20.0 * ROW_H, &outline),
+            "past the last row there is nothing to hover"
+        );
+        assert_eq!(side.hover, None);
+    }
+
+    #[test]
+    fn the_bar_scrolls_a_long_list_and_never_opens_a_row() {
+        let dir = temp_tree("bar");
+        for n in 0..40 {
+            std::fs::write(dir.join(format!("f{n:02}.md")), "x").unwrap();
+        }
+        let mut side = Sidebar::new(&dir);
+        let doc = markdown::parse("");
+        let mut outline = OutlineTree::build(&doc);
+        let mut fonts = FontStore::new();
+        let theme = Theme::default_dark();
+        let pixmap = painted(&mut side, &mut outline, &mut fonts, &theme, 260, 300);
+        std::fs::remove_dir_all(&dir).unwrap();
+        let top = PAD + CAPTION_H;
+        let list_h = side.list_h();
+        let (ty, th) = side.thumb(&outline).expect("a long list shows a thumb");
+        assert_eq!(ty, 0.0, "at rest the thumb sits at the top");
+        assert_eq!(
+            rgba(
+                &pixmap,
+                side.width() - THUMB_INSET - THUMB_W / 2.0,
+                top + th / 2.0
+            ),
+            opaque(theme.ui.scrollbar),
+            "the thumb in the scrollbar color"
+        );
+        let click = side.click(side.width() - 8.0, top + list_h - 2.0, &mut outline);
+        assert_eq!(
+            click,
+            SideClick::Thumb,
+            "a press on the track takes the thumb"
+        );
+        assert!(side.scroll > 0.0, "the list jumped to the press");
+        let jumped = side.scroll;
+        side.drag_thumb(top + 10.0, &mut outline);
+        assert!(side.scroll < jumped, "dragging the thumb up scrolls back");
+        side.release();
+        assert!(side.thumb_grab.is_none());
+        assert!(side.hover_at(side.width() - 8.0, top + 3.0, &outline));
+        assert_eq!(side.hover, Some(Hover::Thumb), "the mouse over the thumb");
+    }
+
+    #[test]
+    fn a_short_list_shows_no_thumb_and_the_strip_is_a_plain_row() {
+        let dir = temp_tree("short");
+        let mut side = Sidebar::new(&dir);
+        let doc = markdown::parse("");
+        let mut outline = OutlineTree::build(&doc);
+        side.list_h = 600.0;
+        assert!(side.thumb(&outline).is_none());
+        let top = PAD + CAPTION_H;
+        let zeta = side
+            .entries
+            .iter()
+            .position(|e| e.name == "zeta.md")
+            .unwrap();
+        let click = side.click(
+            side.width() - 8.0,
+            top + zeta as f32 * ROW_H + 5.0,
+            &mut outline,
+        );
+        assert_eq!(click, SideClick::Open(dir.join("zeta.md")));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
