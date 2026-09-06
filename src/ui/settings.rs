@@ -14,6 +14,11 @@ const LIST_ROW_H: f32 = 28.0;
 const PAD: f32 = 14.0;
 const HEADER_H: f32 = 44.0;
 const FOOTER_H: f32 = 30.0;
+
+// The list's rows are drawn whole and the panel's own color is painted
+// back over what reaches past the list; the bands above and below the
+// list must be at least a row tall for the cover to be complete.
+const _: () = assert!(HEADER_H + PAD / 2.0 >= LIST_ROW_H && FOOTER_H + PAD / 2.0 >= LIST_ROW_H);
 const PANEL_W: f32 = 420.0;
 const RADIUS: f32 = 8.0;
 

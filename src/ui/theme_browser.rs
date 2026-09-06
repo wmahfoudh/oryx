@@ -328,13 +328,17 @@ impl Overlay for ThemeBrowser {
         overlay::panel_shadow(painter, px, py, panel_w, panel_h, RADIUS);
         painter.fill(px, py, panel_w, panel_h, RADIUS, theme.ui.overlay_bg);
 
+        // The rows are drawn under a clip to the list's viewport: a row
+        // cut by either edge ends there, never over the header or past
+        // the panel's bottom pad.
+        painter.clip(Some((px, list_top, panel_w, list_h)));
         let first = (self.scroll / ROW_H).floor() as usize;
         let offset = -(self.scroll - first as f32 * ROW_H);
         let mut slot = 0usize;
         loop {
             let index = first + slot;
             let ry = list_top + offset + slot as f32 * ROW_H;
-            if index >= self.rows.len() || ry > list_bottom {
+            if index >= self.rows.len() || ry >= list_bottom {
                 break;
             }
             slot += 1;
@@ -491,16 +495,7 @@ impl Overlay for ThemeBrowser {
             );
         }
 
-        // Masks cover row overflow above and below the list viewport.
-        painter.fill(px, py, panel_w, list_top - py, RADIUS, theme.ui.overlay_bg);
-        painter.fill(
-            px,
-            list_bottom,
-            panel_w,
-            panel_h - (list_bottom - py),
-            RADIUS,
-            theme.ui.overlay_bg,
-        );
+        painter.clip(None);
         overlay::panel_header(painter, px, py, panel_w, HEADER_H, RADIUS, theme);
 
         let title = "Themes";
@@ -674,6 +669,59 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("oryx-dup-{}-{name}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// The rows are drawn under a clip to the list's viewport, so a
+    /// row cut by the list's bottom ends inside the panel and never
+    /// shows over the document below it.
+    #[test]
+    fn a_partly_visible_row_never_shows_below_the_panel() {
+        use crate::paint::painter::Painter;
+        use crate::style::fonts::FontStore;
+        use tiny_skia::Pixmap;
+        let dir = temp_dir("spill");
+        for n in 0..40 {
+            std::fs::write(
+                dir.join(format!("theme-{n:02}.toml")),
+                "[surface]\nbackground = \"#282a36\"\n",
+            )
+            .unwrap();
+        }
+        let mut browser = ThemeBrowser::new(vec![dir.clone()], "theme-00");
+        std::fs::remove_dir_all(&dir).unwrap();
+        let theme = Theme::default_dark();
+        let mut fonts = FontStore::new();
+        let (w, h) = (460, 320);
+        // Scrolled to the end, the last row sits flush with the list's
+        // bottom: nothing reaches below the panel but its shadow.
+        let mut aligned = Pixmap::new(w, h).unwrap();
+        browser.scroll = f32::MAX;
+        browser.draw(
+            &mut Painter::new(&mut aligned, &mut fonts, None, 1.0),
+            &theme,
+        );
+        let mut spilling = Pixmap::new(w, h).unwrap();
+        browser.scroll = 0.0;
+        browser.draw(
+            &mut Painter::new(&mut spilling, &mut fonts, None, 1.0),
+            &theme,
+        );
+        let (_, py, _, ph) = browser.geometry.panel;
+        let overflow = ROW_H - browser.geometry.list_h % ROW_H;
+        assert!(
+            overflow > PAD,
+            "at scroll 0 the last drawn row reaches {overflow} below the list, past the panel's pad"
+        );
+        let bottom = (py + ph) as u32;
+        for y in bottom + 1..(bottom + ROW_H as u32).min(h) {
+            for x in 0..w {
+                assert_eq!(
+                    aligned.pixel(x, y),
+                    spilling.pixel(x, y),
+                    "pixel ({x}, {y}) below the panel changed with the scroll"
+                );
+            }
+        }
     }
 
     #[test]
