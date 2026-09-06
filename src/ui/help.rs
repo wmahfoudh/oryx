@@ -50,7 +50,12 @@ pub fn page() -> String {
             section = row.section;
             let _ = write!(out, "\n## {section}\n\n| Shortcut | Action |\n|---|---|\n");
         }
-        let _ = writeln!(out, "| `{}` | {} |", keymap::display(row.keys), row.action);
+        let _ = writeln!(
+            out,
+            "| {} | {} |",
+            code(&keymap::display(row.keys)),
+            row.action
+        );
     }
     out.push_str("\n## While editing\n\n");
     let _ = writeln!(
@@ -96,6 +101,16 @@ pub fn page() -> String {
         keymap::display("Ctrl"),
     );
     out
+}
+
+/// A chord as a code span. A chord holding a backtick takes the
+/// double-backtick form, the only one markdown reads whole.
+fn code(chord: &str) -> String {
+    if chord.contains('`') {
+        format!("`` {chord} ``")
+    } else {
+        format!("`{chord}`")
+    }
 }
 
 #[cfg(test)]
@@ -208,5 +223,29 @@ mod tests {
         );
         assert!(page.contains("https://github.com/wmahfoudh/oryx"));
         assert!(!page.contains("codeberg"), "GitHub is the only host named");
+    }
+
+    /// The inline-code chord holds a backtick, which a single-backtick
+    /// code span cannot carry: the page writes it in the double-backtick
+    /// form and markdown reads it back whole.
+    #[test]
+    fn the_backtick_chord_survives_as_a_code_span() {
+        let page = page();
+        let chord = keymap::display("Ctrl+`");
+        assert!(page.contains(&format!("`` {chord} ``")), "{page}");
+        assert!(
+            !page.contains(&format!("`{chord}`")),
+            "a single-backtick span breaks on the chord: {page}"
+        );
+        let spans: Vec<String> = pulldown_cmark::Parser::new(&page)
+            .filter_map(|event| match event {
+                pulldown_cmark::Event::Code(text) => Some(text.to_string()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            spans.iter().any(|span| span == &chord),
+            "markdown reads the chord back whole: {spans:?}"
+        );
     }
 }
