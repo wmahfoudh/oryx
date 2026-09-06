@@ -2,32 +2,55 @@
 
 ## v1.1.0
 
-- In the editor, Enter on an empty list item now ends the list even when the caret was placed by a click or an arrow key. Before, the caret could land between the dash and its space, and Enter left the dash behind.
-- A click or an arrow move past the end of a line lands after its trailing spaces, where End goes, instead of before them.
-- In the editor, a click on an empty line puts the caret there. Before, the click went to the nearest line with text, and only the arrow keys could reach an empty line.
-- In a markdown file, Alt+- turns the selected lines into a bullet list, Alt+1 into a numbered list and Alt+X into a task list. The same key again removes the markers, the other key converts, and one Ctrl+Z undoes it.
-- In a markdown file, Alt+. quotes the selected lines, and again removes the quote.
-- In a markdown file, Ctrl+1 to Ctrl+6 set the heading level of the line; the same level again makes it plain text.
-- In a markdown file, Ctrl+L ticks or unticks the task box of the line, or of every selected line that has one.
-- In the editor, typing `(`, `[`, `{`, `"` or `'` with text selected wraps the text in the pair instead of replacing it, and the text stays selected. In a markdown file `*`, `_` and a backtick wrap too, so two stars in a row make bold.
-- In a markdown file, Ctrl+B, Ctrl+I and Ctrl+` make the selection or the word under the caret bold, italic or code, and the same key again removes it.
-- In a markdown file, Ctrl+K turns the selection into a link with the caret ready for the address, or opens an empty link. Pasting an address over selected text makes a link too.
-- In the editor, Alt+Up and Alt+Down move the line, or the selected lines, up and down. The caret and the selection move with them.
-- In the editor, Ctrl+Shift+D duplicates the line or the selected lines, and Ctrl+Shift+K deletes them.
-- In the editor, a keyboard selection can now reach the empty line at the end of the file. Before, extending it there with Shift+Down or Shift+Ctrl+End cleared the selection.
-- In a markdown file, Enter in the middle of a numbered list renumbers the items below, so the numbers stay in order. One Ctrl+Z takes back the new line and the numbers together.
-- In a code file, Ctrl+/ comments or uncomments the line or the selected lines in the language's own way; in a markdown file it uses an HTML comment.
-- Syntax colors now arrive while text is selected, and the lines a shortcut moves or rewrites are colored at once instead of after a pause. Before, lines changed under a selection stayed uncolored until the selection was cleared.
-- Shortcuts with a digit, a period or a dash also answer the key at that position on the keyboard, so they work on a French keyboard where those keys need Shift.
-- In the editor, the caret now shows on an empty file, and a click on an empty page places it. Before, an empty file showed no caret until a letter was typed.
-- After Save As, the sidebar shows the folder the file was saved in, as it does for a new file.
-- The search and replace fields now behave like text boxes. Ctrl+Left and Ctrl+Right jump words, with Shift they select them, Ctrl+Backspace and Ctrl+Delete remove a word, Ctrl+Y redoes, a click places the caret, a double click selects the word, a triple click the whole text, and a drag selects. While a field has the keyboard, the document's editing keys stay quiet: before, Ctrl+B or Tab typed into the search field changed the document. The theme editor's and the theme browser's fields gain the same keys.
-- The search bar's text, counter and hint sit level with the caret and the regex button. Before, they rode slightly high.
-- Ctrl+M opens an empty markdown note in the editor at once, with no dialog. The name, the place and the type are chosen at the first Ctrl+S; until then the note is unsaved work, and closing the window or opening another file asks the usual question.
-- In the theme browser, a row cut by the bottom of the list ends there. Before, scrolling with the wheel could leave the last row showing below the panel, over the page.
-- On the help page, the Ctrl+` shortcut now shows its key. Before, the backtick in the key name broke the table cell.
-- The sidebar has a new look. Folders show a small triangle and an outlined folder, files show an outlined mark by type, children hang from thin indent guides, and the open file is drawn in the theme's accent color with a bar at its left. The row under the mouse lights up, and the list has a scrollbar, for the files and for the outline. Every existing theme works as it is.
-- The unsaved changes question has a new look in the same spirit: the page dims behind it, the file's name is shown, and the three answers are rows with their key beside them. The arrows move between the rows and Enter or Space picks the highlighted one, a click on a row picks it, a click outside keeps editing. S saves, D discards and Escape keeps editing from anywhere, and a plain Enter still saves.
+This release is about the editor. I added the small tricks a real editor has, a quick note on Ctrl+M, search fields that behave like text boxes, and a new look for the sidebar and for the unsaved changes dialog. The details, by area:
+
+### Lists and headings
+
+- Enter on an empty list item ends the list. Before, if you had clicked into the item, Oryx left the dash behind.
+- Alt+- turns the selected lines into a bullet list, Alt+1 into a numbered list and Alt+X into a task list. Press the same key again to remove the markers. One Ctrl+Z undoes it.
+- Alt+. quotes the selected lines. Press it again to remove the quote.
+- Ctrl+1 to Ctrl+6 set the heading level of the line. The same level again makes it plain text.
+- Ctrl+L ticks or unticks the task box of the line, or of every selected line that has one.
+- Enter in the middle of a numbered list renumbers the items below. One Ctrl+Z takes back the new line and the numbers together.
+
+### Text and lines
+
+- Type `(`, `[`, `{`, `"` or `'` with text selected and Oryx wraps the text instead of replacing it. In a markdown file `*`, `_` and a backtick wrap too, so two stars make bold.
+- Ctrl+B, Ctrl+I and Ctrl+` make the selection or the word under the caret bold, italic or code. The same key again removes it.
+- Ctrl+K turns the selection into a link and puts the caret where the address goes. Pasting an address over selected text makes a link too.
+- Alt+Up and Alt+Down move the line, or the selected lines, up and down.
+- Ctrl+Shift+D duplicates the line or the selected lines. Ctrl+Shift+K deletes them.
+- Ctrl+/ comments or uncomments the line or the selected lines, in the language's own way. In a markdown file it uses an HTML comment.
+- A keyboard selection can now reach the empty line at the end of the file.
+- Syntax colors arrive while text is selected, and right after a shortcut moves or rewrites lines. Before, those lines stayed uncolored until you cleared the selection.
+- Shortcuts with a digit, a period or a dash also answer the key at that position on the keyboard. They now work on a French keyboard, where those keys need Shift.
+
+### The caret
+
+- A click on an empty line puts the caret there. Before, only the arrow keys could reach an empty line.
+- A click or an arrow key past the end of a line lands after the trailing spaces, where End goes.
+- The caret shows on an empty file, and a click on an empty page places it.
+
+### Search
+
+- The search and replace fields behave like text boxes. Ctrl+Left and Ctrl+Right jump words, Shift selects them, Ctrl+Backspace and Ctrl+Delete remove a word, Ctrl+Y redoes. A click places the caret, a double click selects the word, a triple click selects everything, and a drag selects.
+- While a search field has the keyboard, the document's editing keys stay quiet. Before, Ctrl+B or Tab typed into the search field changed the document. The fields of the theme editor and the theme browser gain the same keys.
+- The search bar's text sits level with the caret and the regex button.
+
+### Notes and saving
+
+- Ctrl+M opens an empty markdown note in the editor, with no dialog. You choose the name, the place and the type at the first Ctrl+S. Until then the note is unsaved work, and Oryx asks the usual question before closing or opening another file.
+- After Save As, the sidebar shows the folder you saved in.
+
+### The look
+
+- I redesigned the sidebar. Folders have a small triangle and an outlined folder icon. Files have an outlined icon by type. Children hang from thin guide lines. The open file takes the theme's accent color, with a bar at its left. The row under the mouse lights up, and the list has a scrollbar, for the files and for the outline. Every theme works as it is.
+- I redesigned the unsaved changes dialog in the same spirit. The page dims behind it and the file's name is shown. The three answers are rows with their key beside them: S saves, D discards, Escape keeps editing. The arrows move between the rows and Enter or Space picks the highlighted one. A click on a row picks it, and a click outside keeps editing.
+
+### Fixes
+
+- In the theme browser, the last row no longer shows below the panel when you scroll with the wheel.
+- On the help page, the Ctrl+` shortcut shows its key. Before, the backtick broke the table cell.
 
 ## v1.0.0
 

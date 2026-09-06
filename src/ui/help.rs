@@ -77,7 +77,8 @@ pub fn page() -> String {
     );
     out.push_str(
         "\nClosing, quitting or reloading with unsaved changes asks first: \
-         `Enter` saves, `D` discards, `Escape` keeps editing.\n",
+         `S` saves, `D` discards, `Escape` keeps editing, or the arrows and `Enter` \
+         pick one of the three.\n",
     );
     out.push_str("\n## Sidebar\n\n");
     let _ = writeln!(

@@ -131,7 +131,7 @@ A task checkbox can be ticked by clicking it on the page, without entering edit 
 
 `Ctrl+N` creates a new file: the save dialog opens first, then the empty page is ready to type into. That is how Oryx knows the type of file you created to be able to apply syntax colors.
 
-Closing the window, quitting or reloading with unsaved changes asks first: `Enter` saves, `D` discards, `Escape` keeps editing. If the file changes on disk while there are unsaved edits, Oryx shows a notice and leaves the edits alone.
+Closing the window, quitting or reloading with unsaved changes asks first: `S` saves, `D` discards, `Escape` keeps editing, or the arrows and `Enter` pick one of the three. If the file changes on disk while there are unsaved edits, Oryx shows a notice and leaves the edits alone.
 
 ## Themes
 
