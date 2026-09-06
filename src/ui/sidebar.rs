@@ -15,6 +15,7 @@ use crate::paint::painter::Painter;
 use crate::style::fonts::BODY_FAMILY;
 use crate::style::theme::{Rgba, Theme, Ui};
 use crate::ui::outline::OutlineTree;
+use crate::ui::overlay::{accent_fill, dim, guide, hover_fill, soft};
 use crate::ui::scrollbar;
 
 /// Panel width in pixels for a reader who has never dragged the edge.
@@ -939,39 +940,6 @@ fn draw_icon(painter: &mut Painter, icon: Icon, x: f32, y: f32, color: Rgba) {
     }
 }
 
-fn with_alpha(color: Rgba, factor: f32) -> Rgba {
-    Rgba {
-        a: (color.a as f32 * factor) as u8,
-        ..color
-    }
-}
-
-/// The fill behind the open file or the current heading.
-fn accent_fill(accent: Rgba) -> Rgba {
-    with_alpha(accent, 0.18)
-}
-
-/// The fill under the mouse, and under the keyboard's row while the
-/// panel owns the keys: a lift on a dark theme, a tint on a light one.
-fn hover_fill(fg: Rgba) -> Rgba {
-    with_alpha(fg, 0.08)
-}
-
-/// Indent guides and the hairline under the captions.
-fn guide(fg: Rgba) -> Rgba {
-    with_alpha(fg, 0.18)
-}
-
-/// Outline headings below the top level, and every triangle.
-fn soft(color: Rgba) -> Rgba {
-    with_alpha(color, 0.7)
-}
-
-/// Dot entries, unresolved book entries and inactive captions.
-fn dim(color: Rgba) -> Rgba {
-    with_alpha(color, 0.55)
-}
-
 /// The color of an outline row: the accent when current, dimmed when
 /// unresolved, softened below the top level, the text color otherwise.
 fn outline_color(ui: &Ui, depth: usize, dead: bool, current: bool) -> Rgba {
@@ -1397,21 +1365,6 @@ mod tests {
             "a guide hangs from the triangle's center"
         );
         assert_eq!(guide_x(1), PAD + INDENT + INDENT / 2.0);
-    }
-
-    #[test]
-    fn derived_colors_keep_the_hue_and_scale_the_opacity() {
-        let c = Rgba {
-            r: 10,
-            g: 20,
-            b: 30,
-            a: 255,
-        };
-        assert_eq!(accent_fill(c), Rgba { a: 45, ..c });
-        assert_eq!(hover_fill(c), Rgba { a: 20, ..c });
-        assert_eq!(guide(c), Rgba { a: 45, ..c });
-        assert_eq!(soft(c), Rgba { a: 178, ..c });
-        assert_eq!(dim(c), Rgba { a: 140, ..c });
     }
 
     #[test]

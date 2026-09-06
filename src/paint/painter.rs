@@ -322,6 +322,30 @@ impl<'a> Painter<'a> {
             / self.scale
     }
 
+    /// Where a capital's ink lands below the top of a drawn line, as
+    /// `(top, bottom)` in logical units, measured from the rasterized
+    /// glyph: chrome that centers a short label centers its capitals
+    /// with it rather than the line box.
+    pub fn cap_bounds(&mut self, family: &str, size: f32, weight: u16) -> (f32, f32) {
+        let buffer = self.shape("H", family, size * self.scale, weight);
+        let (mut top, mut bottom) = (f32::MAX, f32::MIN);
+        buffer.draw(
+            &mut self.fonts.font_system,
+            &mut self.fonts.swash,
+            cosmic_text::Color::rgb(0, 0, 0),
+            |_, gy, _, h, c| {
+                if c.a() > 0 {
+                    top = top.min(gy as f32);
+                    bottom = bottom.max((gy + h as i32) as f32);
+                }
+            },
+        );
+        if top > bottom {
+            return (0.0, size);
+        }
+        (top / self.scale, bottom / self.scale)
+    }
+
     /// Draws one line with its top at `y`; returns the advance width.
     #[allow(clippy::too_many_arguments)]
     pub fn text(
@@ -664,6 +688,37 @@ mod tests {
         painter.clip(None);
         painter.fill(70.0, 70.0, 20.0, 20.0, 4.0, RED);
         assert!(painted(&pixmap, 75, 75), "the second fill lands");
+    }
+
+    #[test]
+    fn a_capitals_ink_is_measured_where_it_lands() {
+        let mut pixmap = Pixmap::new(100, 100).unwrap();
+        let mut fonts = FontStore::new();
+        let mut painter = Painter::new(&mut pixmap, &mut fonts, None, 1.0);
+        let (top, bottom) = painter.cap_bounds(BODY_FAMILY, 20.0, 400);
+        assert!(
+            top > 0.0 && bottom > top,
+            "ink inside the line: {top}..{bottom}"
+        );
+        let cap = bottom - top;
+        assert!(
+            (12.0..=16.0).contains(&cap),
+            "a capital is 60 to 80 percent of the size: {cap}"
+        );
+        // The measure matches the paint: a drawn H has no ink outside it.
+        painter.text(10.0, 10.0, "H", BODY_FAMILY, 20.0, 400, RED);
+        assert!(
+            !any_painted(&pixmap, 0, 0, 100, (10.0 + top) as u32),
+            "nothing above"
+        );
+        assert!(
+            !any_painted(&pixmap, 0, (10.0 + bottom) as u32 + 1, 100, 100),
+            "nothing below"
+        );
+        assert!(
+            any_painted(&pixmap, 0, (10.0 + top) as u32, 100, (10.0 + bottom) as u32),
+            "ink between"
+        );
     }
 
     #[test]

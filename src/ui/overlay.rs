@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use winit::keyboard::Key;
 
 use crate::paint::painter::Painter;
-use crate::style::theme::Theme;
+use crate::style::theme::{Rgba, Theme};
 
 /// App-level effect requested by an overlay.
 pub enum Action {
@@ -177,6 +177,49 @@ pub fn row_highlight(theme: &Theme) -> crate::style::theme::Rgba {
     }
 }
 
+fn with_alpha(color: Rgba, factor: f32) -> Rgba {
+    Rgba {
+        a: (color.a as f32 * factor) as u8,
+        ..color
+    }
+}
+
+/// The fill behind the row that carries the accent: the open file in
+/// the sidebar, the focused answer in the confirm.
+pub fn accent_fill(accent: Rgba) -> Rgba {
+    with_alpha(accent, 0.18)
+}
+
+/// The fill under the mouse, and under the keyboard's row while a
+/// panel owns the keys: a lift on a dark theme, a tint on a light one.
+pub fn hover_fill(fg: Rgba) -> Rgba {
+    with_alpha(fg, 0.08)
+}
+
+/// Indent guides and the hairline under the sidebar's captions.
+pub fn guide(fg: Rgba) -> Rgba {
+    with_alpha(fg, 0.18)
+}
+
+/// Outline headings below the top level, and every triangle.
+pub fn soft(color: Rgba) -> Rgba {
+    with_alpha(color, 0.7)
+}
+
+/// Dot entries, unresolved book entries, inactive captions and the
+/// file's name under the confirm's title.
+pub fn dim(color: Rgba) -> Rgba {
+    with_alpha(color, 0.55)
+}
+
+/// The dark layer over the page while the confirm holds it.
+pub const SCRIM: Rgba = Rgba {
+    r: 0,
+    g: 0,
+    b: 0,
+    a: 90,
+};
+
 pub trait Overlay {
     /// Paints the overlay; geometry may be cached for hit testing.
     fn draw(&mut self, painter: &mut Painter, theme: &Theme);
@@ -198,6 +241,21 @@ pub trait Overlay {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn derived_colors_keep_the_hue_and_scale_the_opacity() {
+        let c = Rgba {
+            r: 10,
+            g: 20,
+            b: 30,
+            a: 255,
+        };
+        assert_eq!(accent_fill(c), Rgba { a: 45, ..c });
+        assert_eq!(hover_fill(c), Rgba { a: 20, ..c });
+        assert_eq!(guide(c), Rgba { a: 45, ..c });
+        assert_eq!(soft(c), Rgba { a: 178, ..c });
+        assert_eq!(dim(c), Rgba { a: 140, ..c });
+    }
 
     // Distinct roles pass through; colliding roles soften toward the
     // panel surface so the row never merges with the header band.

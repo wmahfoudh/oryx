@@ -836,7 +836,7 @@ struct App {
     /// placing, waiting for the whole document to seat it.
     bottom_hold: scroll::BottomHold,
     /// The unsaved-changes modal and the action it guards.
-    confirm: Option<confirm::Pending>,
+    confirm: Option<confirm::Confirm>,
     /// The document stashed whole while the help page shows, edits and
     /// layout included, so F1 out and back never touches the disk.
     help_stash: Option<Box<Stash>>,
@@ -2077,17 +2077,27 @@ impl App {
         if !self.edits_unsaved() {
             return true;
         }
-        self.confirm = Some(pending);
+        self.confirm = Some(confirm::Confirm::new(pending, self.file_name()));
         self.request_redraw();
         false
     }
 
+    /// The open file's name, for the confirm's header; empty with no
+    /// file open.
+    fn file_name(&self) -> String {
+        self.path
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    }
+
     /// Runs the action the confirm was holding.
     fn resolve_confirm(&mut self, event_loop: &ActiveEventLoop) {
-        let Some(pending) = self.confirm.take() else {
+        let Some(confirm) = self.confirm.take() else {
             return;
         };
-        match pending {
+        match confirm.into_pending() {
             confirm::Pending::Quit => self.quit(event_loop),
             confirm::Pending::Reload => self.reload_now(),
             confirm::Pending::Refetch => self.refetch_now(),
@@ -2100,7 +2110,21 @@ impl App {
 
     /// One key against the open confirm modal.
     fn confirm_key(&mut self, key: &Key, event_loop: &ActiveEventLoop) {
-        match confirm::decide(key) {
+        let Some(confirm) = self.confirm.as_mut() else {
+            return;
+        };
+        let before = confirm.focus();
+        let decision = confirm.key(key);
+        // A moved focus shows at once, not at the next mouse move.
+        if confirm.focus() != before {
+            self.request_redraw();
+        }
+        self.confirm_decide(decision, event_loop);
+    }
+
+    /// Acts on a decision taken on the modal, by key or by click.
+    fn confirm_decide(&mut self, decision: confirm::Decision, event_loop: &ActiveEventLoop) {
+        match decision {
             confirm::Decision::Save => {
                 if self.save() {
                     self.resolve_confirm(event_loop);
@@ -5849,12 +5873,14 @@ impl App {
             }
             if let Some((canvas, stale)) = self.notice_canvas.as_mut() {
                 let mut painter = Painter::new(canvas, &mut self.fonts, stale.take(), self.scale);
-                confirm::draw(
-                    &mut painter,
-                    &self.theme,
-                    size.width as f32 / self.scale,
-                    size.height as f32 / self.scale,
-                );
+                if let Some(confirm) = self.confirm.as_mut() {
+                    confirm.draw(
+                        &mut painter,
+                        &self.theme,
+                        size.width as f32 / self.scale,
+                        size.height as f32 / self.scale,
+                    );
+                }
                 painter.composite(&mut buffer, size.width);
                 *stale = painter.dirty();
             }
@@ -6076,7 +6102,12 @@ impl ApplicationHandler for App {
                 // The confirm modal owns the keyboard outright until a
                 // decision lands.
                 if self.confirm.is_some() {
-                    self.confirm_key(&logical_key, event_loop);
+                    // A held key repeating into the modal answers nothing:
+                    // the Enter that opened it from the sidebar must not
+                    // answer it too.
+                    if !repeat {
+                        self.confirm_key(&logical_key, event_loop);
+                    }
                     return;
                 }
                 let ctrl = chord_key(self.modifiers);
@@ -6151,6 +6182,9 @@ impl ApplicationHandler for App {
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 self.fling = None;
+                if self.confirm.is_some() {
+                    return;
+                }
                 // With the chord key held the wheel zooms, one step per
                 // notch, wheel up zooming in; a touchpad's pixel deltas
                 // count a notch per three lines, the distance a notch
@@ -6205,6 +6239,18 @@ impl ApplicationHandler for App {
                     return;
                 }
                 self.cursor = position;
+                // The confirm holds the mouse: only its hover moves.
+                if self.confirm.is_some() {
+                    let (x, y) = self.ui_cursor();
+                    let changed = self
+                        .confirm
+                        .as_mut()
+                        .is_some_and(|confirm| confirm.hover_at(x, y));
+                    if changed {
+                        self.request_redraw();
+                    }
+                    return;
+                }
                 if self.overlay.is_some() {
                     if self.overlay_mouse {
                         let (x, y) = (
@@ -6243,6 +6289,15 @@ impl ApplicationHandler for App {
                 match state {
                     ElementState::Pressed => {
                         self.fling = None;
+                        if self.confirm.is_some() {
+                            let (x, y) = self.ui_cursor();
+                            let decision = self
+                                .confirm
+                                .as_mut()
+                                .map_or(confirm::Decision::Hold, |confirm| confirm.click(x, y));
+                            self.confirm_decide(decision, event_loop);
+                            return;
+                        }
                         self.left_press();
                     }
                     ElementState::Released => self.left_release(),
