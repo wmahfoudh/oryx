@@ -222,6 +222,10 @@ pub struct LayoutDoc {
     index: YIndex,
     /// Heading anchor slugs and their y positions.
     pub anchors: Vec<(String, f32)>,
+    /// The link each footnote definition's number carries, back to the
+    /// first reference: the block index and the `fnref:` target. The
+    /// number is a marker run, so it answers here and not in the model.
+    pub footnote_backs: Vec<(usize, String)>,
     /// Row bands of every table, in document order. Pagination needs
     /// them because a row is several lines that must not be split.
     pub table_rows: Vec<TableRow>,
@@ -437,6 +441,13 @@ impl LayoutDoc {
     /// A run's link target, resolved through the model span the run
     /// indexes; synthesized runs carry none.
     pub fn run_link<'a>(&'a self, doc: &'a Document, run: &'a TextRun) -> Option<&'a str> {
+        if run.span == usize::MAX {
+            return self
+                .footnote_backs
+                .iter()
+                .find(|(block, _)| *block == run.block)
+                .map(|(_, target)| target.as_str());
+        }
         model_span(doc, run.block, run.span)?.link.as_deref()
     }
 
@@ -541,6 +552,11 @@ impl LayoutDoc {
                 anchor.1 += top;
                 anchor
             }));
+        for back in scratch.footnote_backs.drain(..) {
+            if !self.footnote_backs.iter().any(|(b, _)| *b == back.0) {
+                self.footnote_backs.push(back);
+            }
+        }
         self.table_rows
             .extend(scratch.table_rows.drain(..).map(|mut row| {
                 row.top += top;
@@ -2326,15 +2342,16 @@ pub(crate) fn shape_kind(
             scratch,
         ),
         BlockKind::FootnoteDef {
+            label,
             number,
             continued,
             spans,
-            ..
         } => layout_footnote_def(
             fonts,
             theme,
             cfg,
             source,
+            label,
             *number,
             *continued,
             spans,
@@ -3829,6 +3846,10 @@ fn shape_segment_chunk(
         let line_text = buffer.lines[run.line_i].text();
         let line_base = line_offsets[run.line_i];
         let glyphs = trim_trailing_spaces(run.glyphs, line_text);
+        // The pill open under the previous group of this line, so the
+        // words of one phrase share a pill instead of overlapping at
+        // their spaces, which doubles a translucent color.
+        let mut open_pill: Option<(usize, Rgba)> = None;
         for group in glyph_groups(glyphs, line_text, base.justify) {
             let span_index = group.meta;
             let (start_byte, end_byte) = (group.bytes.start, group.bytes.end);
@@ -3837,18 +3858,35 @@ fn shape_segment_chunk(
             let width = group.width;
             let y = y0 + run.line_top - st.rise;
             let baseline = y0 + run.line_y - st.rise;
-            if let Some(pill) = st.pill {
-                let radius = metrics::PILL_RADIUS * cfg.zoom;
-                out.rects.push(
-                    DecoRect::fill(
-                        x - 3.0,
-                        y + 0.1 * line_height,
-                        width + 6.0,
-                        0.8 * line_height,
-                        pill,
-                    )
-                    .rounded(radius, radius),
-                );
+            match (st.pill, open_pill) {
+                (Some(pill), Some((at, color))) if color == pill => {
+                    let rect = &mut out.rects[at];
+                    rect.width = (x + width + 3.0 - rect.x).max(rect.width);
+                }
+                (Some(pill), _) => {
+                    let radius = metrics::PILL_RADIUS * cfg.zoom;
+                    out.rects.push(
+                        DecoRect::fill(
+                            x - 3.0,
+                            y + 0.1 * line_height,
+                            width + 6.0,
+                            0.8 * line_height,
+                            pill,
+                        )
+                        .rounded(radius, radius),
+                    );
+                    open_pill = Some((out.rects.len() - 1, pill));
+                }
+                (None, _) => open_pill = None,
+            }
+            if let Some(label) = spans[span_index]
+                .link
+                .as_deref()
+                .and_then(|l| l.strip_prefix("footnote:"))
+            {
+                // The way back from the foot: the first reference wins
+                // the lookup, later ones only add entries.
+                out.anchors.push((format!("fnref:{label}"), y));
             }
             let text = if model[span_index] {
                 let origin_start = origin_start_of(origins[span_index]);
@@ -4805,14 +4843,16 @@ fn footnote_number(block: &Block) -> u32 {
 }
 
 /// Lays out one block of a footnote definition: the number in the link
-/// color, the text indented past it. A continued block measures the
-/// number to take the same indent and draws none.
+/// color, linking back to the first reference, the text indented past
+/// it. A continued block measures the number to take the same indent
+/// and draws none.
 #[allow(clippy::too_many_arguments)]
 fn layout_footnote_def(
     fonts: &mut FontStore,
     theme: &Theme,
     cfg: &ViewConfig,
     source: &str,
+    label: &str,
     number: u32,
     continued: bool,
     spans: &[Span],
@@ -4823,6 +4863,10 @@ fn layout_footnote_def(
     avail: f32,
     out: &mut LayoutDoc,
 ) -> f32 {
+    if !continued && !out.footnote_backs.iter().any(|(b, _)| *b == block_index) {
+        out.footnote_backs
+            .push((block_index, format!("fnref:{label}")));
+    }
     let marker = [Span::plain(format!("{number}."))];
     let marker_base = BlockStyle {
         size: 0.7 * base_size,
@@ -4852,6 +4896,11 @@ fn layout_footnote_def(
         - x0;
     if continued {
         out.runs.truncate(runs_mark);
+    }
+    // The number is a marker run: outside the selection, its link
+    // answered by `footnote_backs`.
+    for run in &mut out.runs[runs_mark..] {
+        run.span = usize::MAX;
     }
     let indent = (marker_w + 8.0 * cfg.zoom).max(metrics::INDENT * cfg.zoom);
     let base = BlockStyle {
@@ -6489,6 +6538,51 @@ mod tests {
             1,
             "one anchor per note"
         );
+    }
+
+    #[test]
+    fn a_highlight_over_several_words_is_one_pill() {
+        let doc =
+            markdown::parse("Some ==highlighted with equal signs== here and more words to fill.\n");
+        let mut fonts = FontStore::new();
+        let mut media = MediaCache::new(PathBuf::from("."));
+        let theme = Theme::default_dark();
+        for justify in [false, true] {
+            let cfg = ViewConfig {
+                justify,
+                ..ViewConfig::default()
+            };
+            let l = layout(&doc, &theme, &mut fonts, &mut media, &cfg, 800.0);
+            let pills = l
+                .rects
+                .iter()
+                .filter(|r| r.color == theme.ui.search_match_bg)
+                .count();
+            assert_eq!(pills, 1, "one pill under the phrase, justify {justify}");
+        }
+    }
+
+    #[test]
+    fn a_footnote_number_at_the_foot_links_back_to_its_reference() {
+        let doc = markdown::parse("Alpha[^n] beta.\n\nGamma.\n\n[^n]: The note.\n");
+        let l = lay_of(&doc);
+        let reference = l
+            .runs
+            .iter()
+            .find(|r| l.run_link(&doc, r) == Some("footnote:n"))
+            .expect("the reference run");
+        let back = l.anchor_y("fnref:n").expect("an anchor at the reference");
+        assert!(
+            (back - reference.y).abs() < reference.size,
+            "the anchor sits on the reference's line: {back} against {}",
+            reference.y
+        );
+        let marker = l
+            .runs
+            .iter()
+            .find(|r| l.run_text(&doc, r) == "1.")
+            .expect("the marker run");
+        assert_eq!(l.run_link(&doc, marker), Some("fnref:n"));
     }
 
     #[test]

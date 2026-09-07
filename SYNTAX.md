@@ -281,7 +281,7 @@ A link to another file opens it in Oryx. Remote images fetch in the background a
 
 ## Footnotes
 
-Footnotes are numbered in order of first use, whatever their labels say, and the definitions gather at the foot of the document in that order. A definition of several paragraphs indents its later paragraphs by four spaces.
+Footnotes are numbered in order of first use, whatever their labels say, and the definitions gather at the foot of the document in that order. The number at the foot links back to where the footnote is cited. A definition of several paragraphs indents its later paragraphs by four spaces.
 
 ```markdown
 A claim with a footnote,[^note] and another.[^1]

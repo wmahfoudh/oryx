@@ -50,12 +50,14 @@ This release is about the editor and the markdown it reads. Added the small tric
 - `==text==` and `::text::` highlight the text.
 - Abbreviations: a `*[HTML]: Hyper Text Markup Language` line marks every HTML in the document with a dotted underline, and resting the mouse on the word shows the expansion.
 - Footnotes are numbered in order of use, as on GitHub, whatever their labels. A footnote of several paragraphs shows its number once, with the other paragraphs indented under it. Before, the label repeated on every paragraph.
+- The number at the foot of a footnote links back to where it is cited, in the window and in the PDF.
 - The PDF export carries all of the above.
 - SYNTAX.md was rewritten. Every construct is shown twice, as written and as rendered.
 
 ### The look
 
 - Redesigned the sidebar. Folders have a small triangle and an outlined folder icon. Files have an outlined icon by type. Children hang from thin guide lines. The open file takes the theme's accent color, with a bar at its left. The row under the mouse lights up, and the list has a scrollbar, for the files and for the outline. Every theme works as it is.
+- The sample image in the examples folder shows the current logo.
 - Redesigned the unsaved changes dialog in the same spirit. The page dims behind it and the file's name is shown. The three answers are rows with their key beside them: S saves, D discards, Escape keeps editing. The arrows move between the rows and Enter or Space picks the highlighted one. A click on a row picks it, and a click outside keeps editing.
 
 ### Fixes

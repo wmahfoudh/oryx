@@ -45,7 +45,7 @@ Oryx displays fenced blocks in a bordered panel with syntax colors for code. A c
 
 ### GitHub flavor and more
 
-The five GitHub alerts are styled, each with its own color and title. Oryx shows a YAML frontmatter header as a small metadata panel above the document. Footnote markers appear raised in the text, numbered in order of use, and link to their definitions, gathered at the foot of the document; `Alt+Left` returns to where you were reading.
+The five GitHub alerts are styled, each with its own color and title. Oryx shows a YAML frontmatter header as a small metadata panel above the document. Footnote markers appear raised in the text, numbered in order of use, and link to their definitions, gathered at the foot of the document. The number at the foot links back to the text, and `Alt+Left` returns to where you were reading.
 
 **Images and badges**: Supported formats are PNG, JPEG, GIF, WebP or SVG. Remote images are fetched in the background and cached on disk, so a file with badges comes up immediately the second time it is opened, and keeps working offline. A cached image older than a day is refreshed in the background the next time the file opens. If a path is broken, the image is replaced by a placeholder showing the alt text, or the file name when there is none.
 
