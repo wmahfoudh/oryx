@@ -34,8 +34,8 @@ modules:
       - sh packaging/stage-linux.sh stage /app
     sources:
       - type: archive
-        url: https://github.com/wmahfoudh/oryx/archive/refs/tags/v1.0.0.tar.gz
-        sha256: "e773745c4c933a7682934c692a5242cee68c6762202413d1feebede15ef3f2b5"
+        url: https://github.com/wmahfoudh/oryx/archive/refs/tags/v1.1.0.tar.gz
+        sha256: "cca9d318c33ed20c7e9f8500654646a6b191ae2ead18db9fa41bf14ba8f5de90"
         x-checker-data:
           type: json
           url: https://api.github.com/repos/wmahfoudh/oryx/releases/latest

@@ -1,6 +1,6 @@
 # Maintainer: Walid Mahfoudh <walid.mahfoudh@gmail.com>
 pkgname=oryx-editor
-pkgver=1.0.0
+pkgver=1.1.0
 pkgrel=1
 pkgdesc='Fast editor for markdown and code, reader for ebooks and comics'
 arch=('x86_64')
@@ -15,7 +15,7 @@ makedepends=('cargo' 'librsvg')
 conflicts=('oryx')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
 # Written by packaging/channels.sh once the tag is published.
-sha256sums=('e773745c4c933a7682934c692a5242cee68c6762202413d1feebede15ef3f2b5')
+sha256sums=('cca9d318c33ed20c7e9f8500654646a6b191ae2ead18db9fa41bf14ba8f5de90')
 
 prepare() {
     cd "oryx-$pkgver"
