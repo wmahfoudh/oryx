@@ -71,8 +71,15 @@ pub(crate) fn block_pieces(doc: &Document, index: usize) -> Vec<Piece<'_>> {
         | BlockKind::Paragraph { spans }
         | BlockKind::ListItem { spans, .. }
         | BlockKind::Summary { spans, .. } => span_pieces(&mut out, spans, 0, source),
-        BlockKind::FootnoteDef { label, spans } => {
-            out.push(Piece::Label(format!("{label}.\t")));
+        BlockKind::FootnoteDef {
+            number,
+            continued,
+            spans,
+            ..
+        } => {
+            if !continued {
+                out.push(Piece::Label(format!("{number}.\t")));
+            }
             span_pieces(&mut out, spans, 0, source);
         }
         BlockKind::CodeBlock { lines, .. } => {

@@ -31,11 +31,11 @@ Most markdown editors start by showing the code and then trying to render it. I 
 
 ## Oryx Scope
 
-The complete recognized syntax, markdown and embedded HTML, is listed in [SYNTAX.md](SYNTAX.md). The [examples](examples/) folder is installed with Oryx and shows the syntax on real documents.
+Oryx reads CommonMark, the GitHub Flavored Markdown extensions (tables, task lists, strikethrough, footnotes, alerts and math) and the extended syntax listed by the Markdown Guide: heading IDs, definition lists, subscript and superscript, highlight and abbreviations. It also renders the HTML subset GitHub allows in READMEs. [SYNTAX.md](SYNTAX.md) shows every construct twice, as written and as rendered. The [examples](examples/) folder is installed with Oryx and shows the syntax on real documents.
 
 ### Markdown
 
-Headings, bold, italic, strikethrough, inline code, links and bare URLs (a link to another file opens it in Oryx), nested blockquotes, horizontal rules, smart quotes and dashes, and emoji shortcodes like `:tada:` :tada:. Ordered, unordered and task lists nest as deep as needed. A lot of care was given to details: for example, a wrapped line aligns with the text above it, not with the bullet, and tables keep per-column alignment, shade alternating rows and wrap long cells, so a wide table does not run off the page.
+Headings, bold, italic, strikethrough, inline code, links and bare URLs (a link to another file opens it in Oryx), nested blockquotes, horizontal rules, smart quotes and dashes, and emoji shortcodes like `:tada:` :tada:. Ordered, unordered and task lists nest as deep as needed. The extended forms render too: `H~2~O` and `x^2^` as subscript and superscript, `==text==` highlighted, a definition list with each term above its indented definitions, a heading with an id of its own in braces, and abbreviations with a dotted underline. Resting the mouse on an abbreviation shows its expansion. A lot of care was given to details: for example, a wrapped line aligns with the text above it, not with the bullet, and tables keep per-column alignment, shade alternating rows and wrap long cells, so a wide table does not run off the page.
 
 ### Source code
 
@@ -45,7 +45,7 @@ Oryx displays fenced blocks in a bordered panel with syntax colors for code. A c
 
 ### GitHub flavor and more
 
-The five GitHub alerts are styled, each with its own color and title. Oryx shows a YAML frontmatter header as a small metadata panel above the document. Footnote markers appear raised in the text and link to their definitions, gathered at the foot of the document; `Alt+Left` returns to where you were reading.
+The five GitHub alerts are styled, each with its own color and title. Oryx shows a YAML frontmatter header as a small metadata panel above the document. Footnote markers appear raised in the text, numbered in order of use, and link to their definitions, gathered at the foot of the document; `Alt+Left` returns to where you were reading.
 
 **Images and badges**: Supported formats are PNG, JPEG, GIF, WebP or SVG. Remote images are fetched in the background and cached on disk, so a file with badges comes up immediately the second time it is opened, and keeps working offline. A cached image older than a day is refreshed in the background the next time the file opens. If a path is broken, the image is replaced by a placeholder showing the alt text, or the file name when there is none.
 

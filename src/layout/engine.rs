@@ -440,6 +440,25 @@ impl LayoutDoc {
         model_span(doc, run.block, run.span)?.link.as_deref()
     }
 
+    /// The expansion of the abbreviation under (`x`, `y`), if a run
+    /// standing for one sits there.
+    pub fn abbr_at<'a>(&'a self, doc: &'a Document, x: f32, y: f32) -> Option<&'a str> {
+        let (head, tail) = self.runs_in(y, y);
+        self.runs[head]
+            .iter()
+            .chain(&self.runs[tail])
+            .find_map(|r| {
+                let inside = x >= r.x
+                    && x <= r.x + r.width
+                    && y >= r.y
+                    && y <= r.y + metrics::LINE_HEIGHT * r.size;
+                if !inside {
+                    return None;
+                }
+                model_span(doc, r.block, r.span)?.abbr.as_deref()
+            })
+    }
+
     /// The id of a family in this layout's table, interned on first use.
     /// The resolved families of a document number a handful, so a scan
     /// beats a map.
@@ -1487,9 +1506,10 @@ pub fn layout_begin(
     // selection and copy keep their mapping. Blocks folded inside a
     // closed details group never enter the order; a toggle restarts the
     // pass, so visibility is fixed for its lifetime.
-    let (body_order, note_order): (Vec<usize>, Vec<usize>) = (0..doc.blocks.len())
+    let (body_order, mut note_order): (Vec<usize>, Vec<usize>) = (0..doc.blocks.len())
         .filter(|&i| doc.block_visible(i))
         .partition(|&i| !matches!(doc.blocks[i].kind, BlockKind::FootnoteDef { .. }));
+    note_order.sort_by_key(|&i| footnote_number(&doc.blocks[i]));
     let notes_start = body_order.len();
     let has_notes = !note_order.is_empty();
     let order: Vec<usize> = body_order.into_iter().chain(note_order).collect();
@@ -1543,9 +1563,10 @@ pub fn layout_extend(doc: &Document, pass: &mut LayoutPass) -> bool {
     if doc.blocks.len() <= covered {
         return true;
     }
-    let (body, notes): (Vec<usize>, Vec<usize>) = (covered..doc.blocks.len())
+    let (body, mut notes): (Vec<usize>, Vec<usize>) = (covered..doc.blocks.len())
         .filter(|&i| doc.block_visible(i))
         .partition(|&i| !matches!(doc.blocks[i].kind, BlockKind::FootnoteDef { .. }));
+    notes.sort_by_key(|&i| footnote_number(&doc.blocks[i]));
     pass.covered = doc.blocks.len();
     pass.order.extend(body);
     pass.notes_start = pass.order.len();
@@ -2117,7 +2138,12 @@ fn place_block(
         place_code_line(doc, theme, fonts, cfg, open, out, pass);
         return;
     }
-    if let BlockKind::FootnoteDef { label, .. } = &block.kind {
+    if let BlockKind::FootnoteDef {
+        label,
+        continued: false,
+        ..
+    } = &block.kind
+    {
         out.anchors.push((format!("footnote:{label}"), pass.cursor));
     }
     if let Some(shaped) = pass
@@ -2299,12 +2325,18 @@ pub(crate) fn shape_kind(
             avail,
             scratch,
         ),
-        BlockKind::FootnoteDef { label, spans } => layout_footnote_def(
+        BlockKind::FootnoteDef {
+            number,
+            continued,
+            spans,
+            ..
+        } => layout_footnote_def(
             fonts,
             theme,
             cfg,
             source,
-            label,
+            *number,
+            *continued,
             spans,
             base_size,
             block_index,
@@ -3369,6 +3401,8 @@ struct SpanStyle {
     italic: bool,
     strike: bool,
     underline: bool,
+    /// Dotted underline; an abbreviation with an expansion to show.
+    abbr: bool,
     color: Rgba,
     /// Background pill color for inline code and mark highlights.
     pill: Option<Rgba>,
@@ -3444,6 +3478,7 @@ fn span_style(
         italic: span.italic || span.math,
         strike: span.strike,
         underline: span.underline,
+        abbr: span.abbr.is_some(),
         color,
         // A mark highlight outranks the code pill when both apply.
         pill: if span.mark {
@@ -3856,6 +3891,21 @@ fn shape_segment_chunk(
                     (0.06 * st.size).max(1.0),
                     st.color,
                 ));
+            }
+            if st.abbr {
+                // Square dots a dot apart, the run's own color.
+                let dot = (0.08 * st.size).max(1.0);
+                let mut dx = x;
+                while dx + dot <= x + width {
+                    out.rects.push(DecoRect::fill(
+                        dx,
+                        baseline + 0.1 * st.size,
+                        dot,
+                        dot,
+                        st.color,
+                    ));
+                    dx += 2.0 * dot;
+                }
             }
         }
     }
@@ -4745,13 +4795,26 @@ fn scale_math_layout(m: &mut noad::layout::MathLayout, s: f32) {
 
 /// One footnote definition: the label as a small raised marker in link
 /// color, the note text indented beside it.
+/// The number a footnote block sorts by at the foot; the body's blocks
+/// never ask.
+fn footnote_number(block: &Block) -> u32 {
+    match &block.kind {
+        BlockKind::FootnoteDef { number, .. } => *number,
+        _ => 0,
+    }
+}
+
+/// Lays out one block of a footnote definition: the number in the link
+/// color, the text indented past it. A continued block measures the
+/// number to take the same indent and draws none.
 #[allow(clippy::too_many_arguments)]
 fn layout_footnote_def(
     fonts: &mut FontStore,
     theme: &Theme,
     cfg: &ViewConfig,
     source: &str,
-    label: &str,
+    number: u32,
+    continued: bool,
     spans: &[Span],
     base_size: f32,
     block_index: usize,
@@ -4760,7 +4823,7 @@ fn layout_footnote_def(
     avail: f32,
     out: &mut LayoutDoc,
 ) -> f32 {
-    let marker = [Span::plain(format!("{label}."))];
+    let marker = [Span::plain(format!("{number}."))];
     let marker_base = BlockStyle {
         size: 0.7 * base_size,
         color: theme.text.link,
@@ -4787,6 +4850,9 @@ fn layout_footnote_def(
         .map(|r| r.x + r.width)
         .fold(x0, f32::max)
         - x0;
+    if continued {
+        out.runs.truncate(runs_mark);
+    }
     let indent = (marker_w + 8.0 * cfg.zoom).max(metrics::INDENT * cfg.zoom);
     let base = BlockStyle {
         size: base_size,
@@ -6338,6 +6404,91 @@ mod tests {
             .find(|r| l.run_text(doc, r) == text)
             .unwrap_or_else(|| panic!("no run shows {text:?}"))
             .y
+    }
+
+    #[test]
+    fn an_abbreviation_draws_dots_and_answers_at_the_cursor() {
+        let doc = markdown::parse("The HTML spec.\n\n*[HTML]: Hyper Text Markup Language\n");
+        let l = lay_of(&doc);
+        let word = l
+            .runs
+            .iter()
+            .find(|r| l.run_text(&doc, r) == "HTML")
+            .expect("the word placed");
+        let dots: Vec<&DecoRect> = l
+            .rects
+            .iter()
+            .filter(|r| {
+                r.x >= word.x - 0.5
+                    && r.x + r.width <= word.x + word.width + 0.5
+                    && r.y > word.y
+                    && (r.width - r.height).abs() < 0.01
+                    && r.color == word.color
+            })
+            .collect();
+        assert!(
+            dots.len() >= 4,
+            "a dotted line under the word, {} dots",
+            dots.len()
+        );
+        let gap = dots[1].x - dots[0].x;
+        assert!(gap > dots[0].width, "dots stand apart");
+        let mid_y = word.y + metrics::LINE_HEIGHT * word.size / 2.0;
+        assert_eq!(
+            l.abbr_at(&doc, word.x + word.width / 2.0, mid_y),
+            Some("Hyper Text Markup Language")
+        );
+        let plain = l
+            .runs
+            .iter()
+            .find(|r| l.run_text(&doc, r).starts_with("The"))
+            .expect("the text placed");
+        assert_eq!(l.abbr_at(&doc, plain.x + 2.0, mid_y), None);
+        assert!(
+            l.rects.iter().all(|r| r.width > 0.01 || r.height > 0.01),
+            "no empty rect"
+        );
+    }
+
+    #[test]
+    fn the_foot_orders_notes_by_number_and_continues_under_one_marker() {
+        let doc = markdown::parse(
+            "A[^b] B[^a]\n\n[^a]: first defined.\n\n[^b]: second defined.\n\n    more of b.\n",
+        );
+        let l = lay_of(&doc);
+        let first = run_y(&l, &doc, "first defined.");
+        let second = run_y(&l, &doc, "second defined.");
+        assert!(second < first, "b is number 1 and comes first at the foot");
+        let markers: Vec<&TextRun> = l
+            .runs
+            .iter()
+            .filter(|r| matches!(l.run_text(&doc, r), "1." | "2."))
+            .collect();
+        assert_eq!(
+            markers.len(),
+            2,
+            "one marker per note, none on a continued block"
+        );
+        let head = l
+            .runs
+            .iter()
+            .find(|r| l.run_text(&doc, r) == "second defined.")
+            .unwrap();
+        let more = l
+            .runs
+            .iter()
+            .find(|r| l.run_text(&doc, r) == "more of b.")
+            .unwrap();
+        assert!(
+            (head.x - more.x).abs() < 0.01,
+            "the continued block takes the same indent"
+        );
+        assert!(more.y > head.y);
+        assert_eq!(
+            l.anchors.iter().filter(|(a, _)| a == "footnote:b").count(),
+            1,
+            "one anchor per note"
+        );
     }
 
     #[test]

@@ -2,7 +2,7 @@
 
 ## v1.1.0
 
-This release is about the editor. Added the small tricks a real editor has, a quick note on Ctrl+M, search fields that behave like text boxes, and a new look for the sidebar and for the unsaved changes dialog. The details, by area:
+This release is about the editor and the markdown it reads. Added the small tricks a real editor has, a quick note on Ctrl+M, search fields that behave like text boxes, a new look for the sidebar and for the unsaved changes dialog, and the extended markdown syntax, so every construct of the Markdown Guide's test file renders. The details, by area:
 
 ### Lists and headings
 
@@ -42,6 +42,17 @@ This release is about the editor. Added the small tricks a real editor has, a qu
 - Ctrl+M opens an empty markdown note in the editor, with no dialog. You choose the name, the place and the type at the first Ctrl+S. Until then the note is unsaved work, and Oryx asks the usual question before closing or opening another file.
 - After Save As, the sidebar shows the folder you saved in.
 
+### Markdown
+
+- Heading IDs: `## Title {#custom-id}` gives the heading that anchor, and the braces stay out of the title.
+- Definition lists: a term line followed by `: definition` lines renders like the HTML form, the term bold and the definitions indented.
+- `H~2~O` and `x^2^` render as subscript and superscript. A tilde between spaces still strikes through, as on GitHub.
+- `==text==` and `::text::` highlight the text.
+- Abbreviations: a `*[HTML]: Hyper Text Markup Language` line marks every HTML in the document with a dotted underline, and resting the mouse on the word shows the expansion.
+- Footnotes are numbered in order of use, as on GitHub, whatever their labels. A footnote of several paragraphs shows its number once, with the other paragraphs indented under it. Before, the label repeated on every paragraph.
+- The PDF export carries all of the above.
+- SYNTAX.md was rewritten. Every construct is shown twice, as written and as rendered.
+
 ### The look
 
 - Redesigned the sidebar. Folders have a small triangle and an outlined folder icon. Files have an outlined icon by type. Children hang from thin guide lines. The open file takes the theme's accent color, with a bar at its left. The row under the mouse lights up, and the list has a scrollbar, for the files and for the outline. Every theme works as it is.
@@ -52,6 +63,7 @@ This release is about the editor. Added the small tricks a real editor has, a qu
 - The theme browser opens with the current theme in the middle of the list, so you see where you are. The list has a scrollbar now.
 - In the theme browser, the last row no longer shows below the panel when you scroll with the wheel.
 - On the help page, the Ctrl+` shortcut shows its key. Before, the backtick broke the table cell.
+- A bare URL with a tilde in its path, like `https://cs.edu/~name/`, is linked whole. Before, the link stopped at the tilde.
 
 ## v1.0.0
 

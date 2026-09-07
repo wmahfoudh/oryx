@@ -49,6 +49,7 @@ use oryx::ui::sidebar::{self, Sidebar};
 use oryx::ui::textfield::{Edit, TextField};
 use oryx::ui::theme_browser::ThemeBrowser;
 use oryx::ui::theme_editor::ThemeEditor;
+use oryx::ui::tooltip;
 use winit::application::ApplicationHandler;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::{
@@ -279,6 +280,7 @@ pub fn run(launch: Launch, theme_name: Option<String>) -> anyhow::Result<()> {
         last_edge_click: None,
         hover_edge: false,
         hover_link: false,
+        tooltip: None,
         sel_anchor: None,
         last_click: None,
         selection: None,
@@ -739,6 +741,9 @@ struct App {
     hover_edge: bool,
     /// Whether the cursor currently sits over a link, for the pointer icon.
     hover_link: bool,
+    /// The expansion of the abbreviation under the cursor, shown in a
+    /// tooltip beside it.
+    tooltip: Option<String>,
     /// Selection drag in progress: the caret grabbed at mouse down.
     sel_anchor: Option<ModelPos>,
     /// The last document-area press, for the double and triple click
@@ -5322,6 +5327,18 @@ impl App {
                         || l.summary_at(&self.document, x, y).is_some()
                         || (self.mode == edit::Mode::Read && l.checkbox_at(x, y).is_some())
                 }));
+        let tip = (!on_edge)
+            .then(|| {
+                self.layout
+                    .as_ref()
+                    .and_then(|l| l.abbr_at(&self.document, x, y).map(str::to_owned))
+            })
+            .flatten();
+        // The pill follows the cursor while it stays on the word.
+        if tip.is_some() || self.tooltip.is_some() {
+            self.tooltip = tip;
+            self.request_redraw();
+        }
         if hovering != self.hover_link || on_edge != self.hover_edge {
             self.hover_link = hovering;
             self.hover_edge = on_edge;
@@ -5862,6 +5879,34 @@ impl App {
                 *stale = painter.dirty();
             }
         }
+        if let Some(text) = self.tooltip.as_deref() {
+            let fits = self
+                .notice_canvas
+                .as_ref()
+                .is_some_and(|(p, _)| p.width() == size.width && p.height() == size.height);
+            if !fits {
+                self.notice_canvas =
+                    tiny_skia::Pixmap::new(size.width, size.height).map(|pixmap| (pixmap, None));
+            }
+            if let Some((canvas, stale)) = self.notice_canvas.as_mut() {
+                let mut painter = Painter::new(canvas, &mut self.fonts, stale.take(), self.scale);
+                let (cx, cy) = (
+                    self.cursor.x as f32 / self.scale,
+                    self.cursor.y as f32 / self.scale,
+                );
+                tooltip::draw(
+                    &mut painter,
+                    &self.theme,
+                    text,
+                    cx,
+                    cy,
+                    size.width as f32 / self.scale,
+                    size.height as f32 / self.scale,
+                );
+                painter.composite(&mut buffer, size.width);
+                *stale = painter.dirty();
+            }
+        }
         if self.confirm.is_some() {
             let fits = self
                 .notice_canvas
@@ -6232,6 +6277,9 @@ impl ApplicationHandler for App {
                     if side.clear_hover() {
                         self.request_redraw();
                     }
+                }
+                if self.tooltip.take().is_some() {
+                    self.request_redraw();
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {

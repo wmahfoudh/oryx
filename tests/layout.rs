@@ -2253,8 +2253,8 @@ fn run_accessors_answer_text_family_and_link() {
     let foot_run = lay
         .runs
         .iter()
-        .find(|r| lay.run_text(&doc, r) == "n" && lay.run_link(&doc, r).is_some())
-        .expect("the footnote reference run exists");
+        .find(|r| lay.run_text(&doc, r) == "1" && lay.run_link(&doc, r).is_some())
+        .expect("the footnote reference run shows its number");
     assert_eq!(lay.run_link(&doc, foot_run), Some("footnote:n"));
 
     let marker = lay
@@ -2335,7 +2335,7 @@ fn recolor_preserves_accessor_texts() {
 /// Task 51 pins: selection and search anchor on the model, so neither
 /// needs the layout. The copy separators are the display rules: blocks
 /// join with a blank line, table cells with a tab, rows and code lines
-/// with newlines, footnote definitions carry their label.
+/// with newlines, footnote definitions carry their number.
 #[test]
 fn select_all_and_copy_need_no_layout() {
     let source = "# Title\n\npara one **bold** tail\n\n- item `code`\n\n```rust\nlet a = 1;\n\nlet b = 2;\n```\n\n|h1|h2|\n|-|-|\n|c1|c2|\n\nline one  \nline two\n\n> [!NOTE]\n> alert body\n\nfoot[^n]\n\n[^n]: note text\n";
@@ -2344,7 +2344,7 @@ fn select_all_and_copy_need_no_layout() {
     let plain = oryx::ui::selection::plain_text(&sel, &doc);
     assert_eq!(
         plain,
-        "Title\n\npara one bold tail\n\nitem code\n\nlet a = 1;\n\nlet b = 2;\n\nh1\th2\nc1\tc2\n\nline one\nline two\n\nalert body\n\nfoot n\n\nn.\tnote text"
+        "Title\n\npara one bold tail\n\nitem code\n\nlet a = 1;\n\nlet b = 2;\n\nh1\th2\nc1\tc2\n\nline one\nline two\n\nalert body\n\nfoot 1\n\n1.\tnote text"
     );
     let md = oryx::ui::selection::markdown(&sel, &doc);
     assert!(md.starts_with("# Title"), "got {md:?}");

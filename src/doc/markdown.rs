@@ -35,7 +35,9 @@ pub fn parse_unless(source: impl Into<Arc<str>>, bail: impl Fn() -> bool) -> Opt
         | Options::ENABLE_SMART_PUNCTUATION
         | Options::ENABLE_MATH
         | Options::ENABLE_YAML_STYLE_METADATA_BLOCKS
-        | Options::ENABLE_GFM;
+        | Options::ENABLE_GFM
+        | Options::ENABLE_HEADING_ATTRIBUTES
+        | Options::ENABLE_DEFINITION_LIST;
     let mut builder = Builder::new(Arc::clone(&source));
     for (count, (event, range)) in Parser::new_ext(&source, options)
         .into_offset_iter()
@@ -120,15 +122,38 @@ struct Builder {
     anchors_seen: HashMap<String, usize>,
     /// Verbatim body accumulating between `<pre>` and its close.
     html_pre: Option<HtmlPre>,
-    /// Set between `<dt>` and its close; the term renders bold.
+    /// Set between a term and its close, `<dt>` or a definition list's
+    /// title line; the term renders bold.
     html_dt: bool,
+    /// Inside a definition list's definition; its paragraphs flush as
+    /// indented items, the `<dd>` form.
+    definition: bool,
+    /// The `{#id}` of the open heading, its anchor in place of the slug.
+    heading_id: Option<String>,
+    /// Text events joined until something else arrives; the parser hands
+    /// a run over in pieces wherever it tried a delimiter and gave it up,
+    /// and a bare URL or an inline mark must read the run whole.
+    pending: Option<PendingText>,
+    /// The inline mark of the piece being pushed, set by `marked`.
+    mark: Option<Mark>,
+    /// The offset of a definition marker that is really the first colon
+    /// of a `::text::` highlight line; the text after it takes the colon
+    /// back so the pass reads the highlight whole.
+    marker_colon: Option<usize>,
+    /// The `*[label]: expansion` lines of the whole source, longest label
+    /// first, gathered before parsing since a definition usually sits at
+    /// the foot and the text above must know it.
+    abbreviations: Vec<(String, String)>,
     /// Open HTML lists, outermost first.
     html_lists: Vec<HtmlList>,
     html_underline: u32,
     html_mark: u32,
     html_small: u32,
     image: Option<(String, String)>,
-    footnote: Option<String>,
+    footnote: Option<FootnoteOpen>,
+    /// The number each footnote label took, at its first reference or
+    /// definition, whichever came first.
+    footnote_numbers: HashMap<String, u32>,
     in_metadata: bool,
     metadata: Vec<(String, String)>,
     html_block: bool,
@@ -457,6 +482,7 @@ pub(crate) fn trim_cell(spans: &mut Vec<Span>) {
 
 impl Builder {
     fn new(source: Arc<str>) -> Builder {
+        let abbreviations = scan_abbreviations(&source);
         Builder {
             source,
             blocks: Vec::new(),
@@ -479,12 +505,19 @@ impl Builder {
             anchors_seen: HashMap::new(),
             html_pre: None,
             html_dt: false,
+            definition: false,
+            heading_id: None,
+            pending: None,
+            mark: None,
+            marker_colon: None,
+            abbreviations,
             html_lists: Vec::new(),
             html_underline: 0,
             html_mark: 0,
             html_small: 0,
             image: None,
             footnote: None,
+            footnote_numbers: HashMap::new(),
             in_metadata: false,
             metadata: Vec::new(),
             html_block: false,
@@ -503,6 +536,9 @@ impl Builder {
     }
 
     fn event(&mut self, event: Event, range: Range<usize>) {
+        if !matches!(event, Event::Text(_) | Event::SoftBreak) {
+            self.flush_text();
+        }
         self.current = (range.start, range.end);
         match event {
             Event::Start(tag) => self.start(tag),
@@ -542,8 +578,9 @@ impl Builder {
                 }
             }
             Event::FootnoteReference(label) => {
+                let number = self.footnote_number(&label);
                 let mut span = self.style();
-                span.set_text(label.to_string());
+                span.set_text(number.to_string());
                 span.link = Some(format!("footnote:{label}"));
                 self.push(span);
             }
@@ -565,7 +602,30 @@ impl Builder {
     fn start(&mut self, tag: Tag) {
         match tag {
             Tag::Paragraph => {}
-            Tag::Heading { level, .. } => self.heading = Some(heading_level(level)),
+            Tag::Heading { level, id, .. } => {
+                self.heading = Some(heading_level(level));
+                self.heading_id = id.map(|id| id.into_string());
+            }
+            Tag::DefinitionList => self.flush_spans(),
+            Tag::DefinitionListTitle => {
+                self.flush_spans();
+                // The parser takes any colon at a line's start as a
+                // definition marker, so a `::text::` highlight line after
+                // a paragraph would make the paragraph a term. Such a
+                // line keeps the paragraph plain and stays a paragraph.
+                let after = &self.source[self.current.1..];
+                let next = after.trim_start_matches(['\n', '\r', ' ', '\t']);
+                self.html_dt = !next.starts_with("::");
+            }
+            Tag::DefinitionListDefinition => {
+                self.flush_spans();
+                let at = self.current.0;
+                if self.source[at..].starts_with("::") {
+                    self.marker_colon = Some(at);
+                } else {
+                    self.definition = true;
+                }
+            }
             Tag::BlockQuote(kind) => {
                 self.quote_depth = self.quote_depth.saturating_add(1);
                 self.alerts.push(kind.map(alert_kind));
@@ -607,7 +667,14 @@ impl Builder {
             Tag::Image { dest_url, .. } => {
                 self.image = Some((dest_url.into_string(), String::new()))
             }
-            Tag::FootnoteDefinition(label) => self.footnote = Some(label.into_string()),
+            Tag::FootnoteDefinition(label) => {
+                let number = self.footnote_number(&label);
+                self.footnote = Some(FootnoteOpen {
+                    label: label.into_string(),
+                    number,
+                    emitted: false,
+                });
+            }
             Tag::MetadataBlock(_) => self.in_metadata = true,
             Tag::HtmlBlock => self.html_block = true,
             _ => {}
@@ -620,7 +687,10 @@ impl Builder {
             TagEnd::Heading(_) => {
                 let level = self.heading.take().unwrap_or(1);
                 let spans = std::mem::take(&mut self.spans);
-                let anchor = self.unique_anchor(&spans);
+                let anchor = match self.heading_id.take() {
+                    Some(id) => self.explicit_anchor(id),
+                    None => self.unique_anchor(&spans),
+                };
                 self.emit(BlockKind::Heading {
                     level,
                     spans,
@@ -630,6 +700,18 @@ impl Builder {
             TagEnd::BlockQuote(_) => {
                 self.quote_depth = self.quote_depth.saturating_sub(1);
                 self.alerts.pop();
+            }
+            TagEnd::DefinitionListTitle => {
+                if self.html_dt {
+                    self.html_dt_close();
+                } else {
+                    self.flush_spans();
+                }
+            }
+            TagEnd::DefinitionListDefinition => {
+                self.flush_spans();
+                self.definition = false;
+                self.marker_colon = None;
             }
             TagEnd::CodeBlock => {
                 if let Some((language, text)) = self.code.take() {
@@ -764,12 +846,48 @@ impl Builder {
             return;
         }
         let text = if std::mem::take(&mut self.html_gap) {
+            self.flush_text();
             self.close_gap(text)
         } else {
             text
         };
-        let replaced = replace_emoji(text);
+        if let Some(at) = self.marker_colon.take() {
+            if self.current.0 == at + 1 && self.pending.is_none() {
+                self.pending = Some(PendingText {
+                    start: at,
+                    end: at + 1,
+                    text: ":".to_string(),
+                });
+            }
+        }
+        let (start, end) = self.current;
+        match self.pending.as_mut() {
+            Some(run) if run.end == start => {
+                run.text.push_str(text);
+                run.end = end;
+            }
+            _ => {
+                self.flush_text();
+                self.pending = Some(PendingText {
+                    start,
+                    end,
+                    text: text.to_string(),
+                });
+            }
+        }
+    }
+
+    /// Runs the text passes over the pending run, emoji shortcodes, bare
+    /// URLs, then the inline marks, and pushes the spans.
+    fn flush_text(&mut self) {
+        let Some(run) = self.pending.take() else {
+            return;
+        };
+        let saved = self.current;
+        self.current = (run.start, run.end);
+        let replaced = replace_emoji(&run.text);
         self.linkified(&replaced);
+        self.current = saved;
     }
 
     /// Drops the leading whitespace of text arriving after an invisible
@@ -805,10 +923,7 @@ impl Builder {
         while let Some(start) = next(rest) {
             let (before, from) = rest.split_at(start);
             if !before.is_empty() {
-                let mut span = self.style();
-                span.set_text(before);
-                span.range = (base + pos) as u32..(base + pos + before.len()) as u32;
-                self.push(span);
+                self.marked(before, base + pos);
             }
             let end = from
                 .find(|c: char| c.is_whitespace() || c == '<' || c == '>')
@@ -827,11 +942,65 @@ impl Builder {
             }
         }
         if !rest.is_empty() {
+            self.marked(rest, base + pos);
+        }
+    }
+
+    /// Pushes a text run split at the inline marks, each piece in the
+    /// style its delimiters give it and ranged over its own content.
+    fn marked(&mut self, text: &str, base: usize) {
+        for (range, mark) in marks(text) {
+            self.mark = mark;
+            self.abbreviated(&text[range.clone()], base + range.start);
+        }
+        self.mark = None;
+    }
+
+    /// Pushes a text piece, every whole word that is a defined
+    /// abbreviation carrying its expansion.
+    fn abbreviated(&mut self, text: &str, base: usize) {
+        let mut plain = 0;
+        for (range, which) in abbreviation_hits(text, &self.abbreviations) {
+            if plain < range.start {
+                let mut span = self.style();
+                span.set_text(&text[plain..range.start]);
+                span.range = (base + plain) as u32..(base + range.start) as u32;
+                self.push(span);
+            }
             let mut span = self.style();
-            span.set_text(rest);
-            span.range = (base + pos) as u32..(base + pos + rest.len()) as u32;
+            span.set_text(&text[range.clone()]);
+            span.abbr = Some(self.abbreviations[which].1.clone());
+            span.range = (base + range.start) as u32..(base + range.end) as u32;
+            self.push(span);
+            plain = range.end;
+        }
+        if plain < text.len() {
+            let mut span = self.style();
+            span.set_text(&text[plain..]);
+            span.range = (base + plain) as u32..(base + text.len()) as u32;
             self.push(span);
         }
+    }
+
+    /// Whether a paragraph is nothing but abbreviation definitions, read
+    /// from its source lines; such a paragraph defines and is not shown.
+    fn abbreviation_paragraph(&self, spans: &[Span]) -> bool {
+        if self.abbreviations.is_empty() {
+            return false;
+        }
+        let range = extent(spans.iter());
+        let Some(text) = self.source.get(range) else {
+            return false;
+        };
+        let mut lines = text.lines().filter(|l| !l.trim().is_empty());
+        let mut any = false;
+        for line in &mut lines {
+            if abbreviation_line(line).is_none() {
+                return false;
+            }
+            any = true;
+        }
+        any
     }
 
     /// One HTML event, block or inline, scanned for the GitHub README
@@ -857,6 +1026,7 @@ impl Builder {
                     self.html_tail = tag_on.to_string();
                     return;
                 };
+                self.flush_text();
                 self.html_gap = self
                     .spans
                     .last()
@@ -897,7 +1067,7 @@ impl Builder {
         }
         let blank = |c: char| c.is_ascii_whitespace();
         if text.chars().all(blank) {
-            if !text.is_empty() && !self.spans.is_empty() {
+            if !text.is_empty() && (!self.spans.is_empty() || self.pending.is_some()) {
                 self.text(" ");
             }
             return;
@@ -920,6 +1090,7 @@ impl Builder {
     }
 
     fn html_tag(&mut self, tag: &str) {
+        self.flush_text();
         let inner = tag.trim().trim_end_matches('/').trim();
         let closing = inner.starts_with('/');
         let inner = inner.trim_start_matches('/');
@@ -1266,6 +1437,24 @@ impl Builder {
         }
     }
 
+    /// The number a footnote label shows, taken in order of first use:
+    /// the first label met, in a reference or a definition, is 1.
+    fn footnote_number(&mut self, label: &str) -> u32 {
+        let next = self.footnote_numbers.len() as u32 + 1;
+        *self
+            .footnote_numbers
+            .entry(label.to_string())
+            .or_insert(next)
+    }
+
+    /// The anchor a heading names itself, `{#id}`; the id joins the slug
+    /// count, so a later heading whose slug reads the same gets numbered
+    /// past it instead of pointing two headings at one anchor.
+    fn explicit_anchor(&mut self, id: String) -> String {
+        *self.anchors_seen.entry(id.clone()).or_insert(0) += 1;
+        id
+    }
+
     /// Emits the accumulated `<hN>` heading with its GitHub slug anchor.
     fn html_heading_close(&mut self) {
         let Some(level) = self.html_heading.take() else {
@@ -1451,6 +1640,7 @@ impl Builder {
     /// silently vanishes: tables, headings, pre bodies, list items and
     /// terms emit, details groups fail open.
     fn finish(&mut self) {
+        self.flush_text();
         if self.html_table.is_some() {
             self.html_table_close();
         }
@@ -1474,11 +1664,11 @@ impl Builder {
         span.italic = self.italic > 0;
         span.strike = self.strike > 0;
         span.underline = self.html_underline > 0;
-        span.mark = self.html_mark > 0;
+        span.mark = self.html_mark > 0 || self.mark == Some(Mark::Highlight);
         span.code = self.html_code > 0;
-        span.script = if self.html_sub > 0 {
+        span.script = if self.mark == Some(Mark::Sub) || self.html_sub > 0 {
             SpanScript::Sub
-        } else if self.html_sup > 0 {
+        } else if self.mark == Some(Mark::Sup) || self.html_sup > 0 {
             SpanScript::Sup
         } else if self.html_small > 0 {
             SpanScript::Small
@@ -1507,6 +1697,7 @@ impl Builder {
                 && last.math == span.math
                 && last.script == span.script
                 && last.link == span.link
+                && last.abbr == span.abbr
                 && last.image.is_none()
                 && span.image.is_none()
                 && span.raw_text() != "\n"
@@ -1525,12 +1716,28 @@ impl Builder {
     }
 
     fn flush_spans(&mut self) {
+        self.flush_text();
         if self.spans.is_empty() {
             return;
         }
         let spans = std::mem::take(&mut self.spans);
-        if let Some(label) = self.footnote.clone() {
-            self.emit(BlockKind::FootnoteDef { label, spans });
+        if let Some(open) = self.footnote.as_mut() {
+            let continued = std::mem::replace(&mut open.emitted, true);
+            let (label, number) = (open.label.clone(), open.number);
+            self.emit(BlockKind::FootnoteDef {
+                label,
+                number,
+                continued,
+                spans,
+            });
+            return;
+        }
+        if self.definition {
+            self.emit(BlockKind::ListItem {
+                marker: Marker::None,
+                depth: 0,
+                spans,
+            });
             return;
         }
         // A paragraph that is one plain image and whitespace stays a block
@@ -1566,6 +1773,9 @@ impl Builder {
                 depth,
                 spans,
             });
+            return;
+        }
+        if self.abbreviation_paragraph(&spans) {
             return;
         }
         self.emit(BlockKind::Paragraph { spans });
@@ -1702,6 +1912,210 @@ pub(crate) fn slug(spans: &[Span]) -> String {
         }
     }
     out.trim_matches('-').to_string()
+}
+
+/// The label and expansion of a `*[label]: expansion` line, the
+/// abbreviation definition of PHP Markdown Extra; `None` for any other
+/// line.
+fn abbreviation_line(line: &str) -> Option<(&str, &str)> {
+    let rest = line.trim().strip_prefix("*[")?;
+    let close = rest.find("]:")?;
+    let label = &rest[..close];
+    let expansion = rest[close + 2..].trim();
+    (!label.is_empty() && !label.contains(['[', ']']) && !expansion.is_empty())
+        .then_some((label, expansion))
+}
+
+/// Every abbreviation the source defines, longest label first so a
+/// longer label wins where two share a prefix; a label defined twice
+/// keeps its first expansion. A definition line starts within three
+/// spaces of the margin, and the lines of a fenced code block define
+/// nothing, since a file showing the syntax must not take it.
+fn scan_abbreviations(source: &str) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    let mut fence: Option<(char, usize)> = None;
+    for line in source.lines() {
+        let lead = line.len() - line.trim_start().len();
+        let body = &line[lead..];
+        let run = body
+            .chars()
+            .next()
+            .filter(|&c| c == '`' || c == '~')
+            .map(|c| (c, body.chars().take_while(|&b| b == c).count()));
+        match (fence, run) {
+            (Some((c, n)), Some((d, m))) if c == d && m >= n && body[m..].trim().is_empty() => {
+                fence = None;
+                continue;
+            }
+            (Some(_), _) => continue,
+            (None, Some((c, n))) if n >= 3 && lead <= 3 => {
+                fence = Some((c, n));
+                continue;
+            }
+            _ => {}
+        }
+        if lead > 3 {
+            continue;
+        }
+        if let Some((label, expansion)) = abbreviation_line(body) {
+            if !out.iter().any(|(l, _)| l == label) {
+                out.push((label.to_string(), expansion.to_string()));
+            }
+        }
+    }
+    out.sort_by_key(|(label, _)| std::cmp::Reverse(label.len()));
+    out
+}
+
+/// The whole-word occurrences of the abbreviations in `text`, in order,
+/// each with the index of its definition. A word edge is the start, the
+/// end, or a character that is not a letter or a digit.
+fn abbreviation_hits(text: &str, abbreviations: &[(String, String)]) -> Vec<(Range<usize>, usize)> {
+    let mut hits = Vec::new();
+    if abbreviations.is_empty() {
+        return hits;
+    }
+    let word = |c: char| c.is_alphanumeric();
+    let mut i = 0;
+    'scan: while i < text.len() {
+        if !text.is_char_boundary(i) {
+            i += 1;
+            continue;
+        }
+        let at_edge = !text[..i].chars().next_back().is_some_and(word);
+        if at_edge {
+            for (which, (label, _)) in abbreviations.iter().enumerate() {
+                if !text[i..].starts_with(label.as_str()) {
+                    continue;
+                }
+                let end = i + label.len();
+                if text[end..].chars().next().is_some_and(word) {
+                    continue;
+                }
+                hits.push((i..end, which));
+                i = end;
+                continue 'scan;
+            }
+        }
+        i += 1;
+    }
+    hits
+}
+
+/// The footnote definition being read: its label, its number, and
+/// whether its first block is out, the later ones being continuations.
+struct FootnoteOpen {
+    label: String,
+    number: u32,
+    emitted: bool,
+}
+
+/// A run of text events joined, with its source extent.
+struct PendingText {
+    start: usize,
+    end: usize,
+    text: String,
+}
+
+/// The style an inline mark of the extended syntax gives its content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mark {
+    Sub,
+    Sup,
+    Highlight,
+}
+
+/// Splits a text run at the inline marks of the extended syntax. A single
+/// tilde or caret around a run holding no whitespace is a subscript or a
+/// superscript, `H~2~O` and `X^2^`, Pandoc's rule; a tilde standing
+/// between spaces reached the parser first and is strikethrough, as on
+/// GitHub. `==` and `::` around a run are a highlight when they sit at
+/// word edges, so `std::vector` in prose stays as typed. Returns the
+/// pieces in order with their marks, the delimiters dropped.
+fn marks(text: &str) -> Vec<(Range<usize>, Option<Mark>)> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    let mut plain = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        let hit = match bytes[i] {
+            b'~' | b'^' => script_span(text, i),
+            b'=' | b':' => highlight_span(text, i),
+            _ => None,
+        };
+        let Some((content, end)) = hit else {
+            i += 1;
+            continue;
+        };
+        if plain < i {
+            out.push((plain..i, None));
+        }
+        let mark = match bytes[i] {
+            b'~' => Mark::Sub,
+            b'^' => Mark::Sup,
+            _ => Mark::Highlight,
+        };
+        out.push((content, Some(mark)));
+        plain = end;
+        i = end;
+    }
+    if plain < bytes.len() {
+        out.push((plain..bytes.len(), None));
+    }
+    out
+}
+
+/// A subscript or superscript opening at `at`: the content runs to the
+/// next same delimiter, holds no whitespace and is not empty. Returns
+/// the content's range and the offset past the closer.
+fn script_span(text: &str, at: usize) -> Option<(Range<usize>, usize)> {
+    let bytes = text.as_bytes();
+    let delim = bytes[at];
+    for (j, &b) in bytes.iter().enumerate().skip(at + 1) {
+        if b == delim {
+            return (j > at + 1).then_some((at + 1..j, j + 1));
+        }
+        if b.is_ascii_whitespace() {
+            return None;
+        }
+    }
+    None
+}
+
+/// A highlight opening at `at` on a doubled `=` or `:`: the text before
+/// the opener ends on a non-word character or is empty, the content
+/// starts on a non-space, and the closing pair follows a non-space and
+/// precedes a non-word character or the end. Returns the content's
+/// range and the offset past the closer.
+fn highlight_span(text: &str, at: usize) -> Option<(Range<usize>, usize)> {
+    let bytes = text.as_bytes();
+    let delim = bytes[at];
+    if bytes.get(at + 1) != Some(&delim) {
+        return None;
+    }
+    let word = |c: char| c.is_alphanumeric();
+    if text[..at].chars().next_back().is_some_and(word) {
+        return None;
+    }
+    let first = text[at + 2..].chars().next()?;
+    if first.is_whitespace() || first == delim as char {
+        return None;
+    }
+    let pair = if delim == b'=' { "==" } else { "::" };
+    let mut from = at + 2;
+    while let Some(found) = text[from..].find(pair) {
+        let close = from + found;
+        let before = text[..close].chars().next_back();
+        let after = text[close + 2..].chars().next();
+        let closes = before.is_some_and(|c| !c.is_whitespace() && c != delim as char)
+            && !after.is_some_and(word)
+            && close > at + 2;
+        if closes {
+            return Some((at + 2..close, close + 2));
+        }
+        from = close + 1;
+    }
+    None
 }
 
 fn replace_emoji(text: &str) -> String {
@@ -2223,6 +2637,402 @@ mod tests {
     }
 
     #[test]
+    fn a_heading_id_in_braces_becomes_the_anchor() {
+        let d = parse("### My Great Heading {#custom-id .cls key=val}\n\n[go](#custom-id)\n");
+        let BlockKind::Heading {
+            spans,
+            anchor,
+            level,
+        } = &d.blocks[0].kind
+        else {
+            panic!()
+        };
+        assert_eq!(*level, 3);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].text(&d.source), "My Great Heading");
+        assert_eq!(anchor, "custom-id");
+        let BlockKind::Paragraph { spans } = &d.blocks[1].kind else {
+            panic!()
+        };
+        assert_eq!(spans[0].link.as_deref(), Some("#custom-id"));
+    }
+
+    #[test]
+    fn an_explicit_heading_id_counts_with_the_slugs() {
+        let d = parse("## Intro {#intro}\n\n## Intro\n\n## Other {#x}\n\n## Other\n");
+        let anchors: Vec<&str> = d
+            .blocks
+            .iter()
+            .filter_map(|b| match &b.kind {
+                BlockKind::Heading { anchor, .. } => Some(anchor.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(anchors, ["intro", "intro-1", "x", "other"]);
+    }
+
+    /// One letter per block: `T` a bold term, `D` an indented definition
+    /// item, `P` a plain paragraph, each with its text.
+    fn definition_shape(d: &Document) -> Vec<(char, String)> {
+        d.blocks
+            .iter()
+            .map(|b| match &b.kind {
+                BlockKind::Paragraph { spans } if spans.iter().all(|s| s.bold) => {
+                    ('T', spans[0].text(&d.source).to_string())
+                }
+                BlockKind::Paragraph { spans } => ('P', spans[0].text(&d.source).to_string()),
+                BlockKind::ListItem {
+                    marker: Marker::None,
+                    depth: 0,
+                    spans,
+                } => ('D', spans[0].text(&d.source).to_string()),
+                other => panic!("unexpected block {other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_definition_list_maps_like_its_html_form() {
+        let d = parse(
+            "First Term\n: This is the definition.\n\nSecond Term\n: One definition.\n\
+             : Another definition.\n\nAfter.\n",
+        );
+        let shape = definition_shape(&d);
+        let expected = [
+            ('T', "First Term"),
+            ('D', "This is the definition."),
+            ('T', "Second Term"),
+            ('D', "One definition."),
+            ('D', "Another definition."),
+            ('P', "After."),
+        ];
+        assert_eq!(shape.len(), expected.len(), "{shape:?}");
+        for (got, want) in shape.iter().zip(expected) {
+            assert_eq!((got.0, got.1.as_str()), want);
+        }
+    }
+
+    #[test]
+    fn a_highlight_line_after_a_paragraph_is_no_definition() {
+        let d = parse("==twoequals==\n\n::twohypens::\n\nTerm\n: real\n::lit::\n");
+        let lit: Vec<(String, bool, bool)> = d
+            .blocks
+            .iter()
+            .map(|b| match &b.kind {
+                BlockKind::Paragraph { spans } => (
+                    spans.iter().map(|s| s.text(&d.source)).collect(),
+                    spans.iter().any(|s| s.mark),
+                    spans.iter().any(|s| s.bold),
+                ),
+                BlockKind::ListItem { spans, .. } => (
+                    spans.iter().map(|s| s.text(&d.source)).collect(),
+                    false,
+                    false,
+                ),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            lit,
+            [
+                ("twoequals".to_string(), true, false),
+                ("twohypens".to_string(), true, false),
+                ("Term".to_string(), false, true),
+                ("real".to_string(), false, false),
+                ("lit".to_string(), true, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_definition_of_two_paragraphs_keeps_both_indented() {
+        let d = parse("Term\n: definition\n\n    more indented\n\nAfter.\n");
+        let shape = definition_shape(&d);
+        let expected = [
+            ('T', "Term"),
+            ('D', "definition"),
+            ('D', "more indented"),
+            ('P', "After."),
+        ];
+        assert_eq!(shape.len(), expected.len(), "{shape:?}");
+        for (got, want) in shape.iter().zip(expected) {
+            assert_eq!((got.0, got.1.as_str()), want);
+        }
+    }
+
+    /// Each span's text with its script and highlight, for the mark tests.
+    fn marked_shape(d: &Document) -> Vec<(String, SpanScript, bool)> {
+        let BlockKind::Paragraph { spans } = &d.blocks[0].kind else {
+            panic!("{:?}", d.blocks[0].kind)
+        };
+        spans
+            .iter()
+            .map(|s| (s.text(&d.source).to_string(), s.script, s.mark))
+            .collect()
+    }
+
+    #[test]
+    fn intraword_tildes_and_carets_make_sub_and_superscripts() {
+        let d = parse("H~2~O and X^2^ and E = mc^2^");
+        let plain = |t: &str| (t.to_string(), SpanScript::None, false);
+        let sub = |t: &str| (t.to_string(), SpanScript::Sub, false);
+        let sup = |t: &str| (t.to_string(), SpanScript::Sup, false);
+        assert_eq!(
+            marked_shape(&d),
+            [
+                plain("H"),
+                sub("2"),
+                plain("O and X"),
+                sup("2"),
+                plain(" and E = mc"),
+                sup("2"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_single_tilde_between_spaces_stays_strikethrough() {
+        let d = parse("~one tilde~ and ~word~");
+        let BlockKind::Paragraph { spans } = &d.blocks[0].kind else {
+            panic!()
+        };
+        let struck: Vec<&str> = spans
+            .iter()
+            .filter(|s| s.strike)
+            .map(|s| s.text(&d.source))
+            .collect();
+        assert_eq!(struck, ["one tilde", "word"]);
+        assert!(spans.iter().all(|s| s.script == SpanScript::None));
+    }
+
+    #[test]
+    fn a_script_needs_a_run_without_whitespace() {
+        let d = parse("a~b c~d and 2^10 and 3^ and x~ ~y");
+        assert_eq!(
+            marked_shape(&d),
+            [(
+                "a~b c~d and 2^10 and 3^ and x~ ~y".to_string(),
+                SpanScript::None,
+                false
+            )]
+        );
+    }
+
+    #[test]
+    fn doubled_equals_and_colons_highlight() {
+        let d = parse("==two equals== and ::two colons:: here, (==in brackets==).");
+        let plain = |t: &str| (t.to_string(), SpanScript::None, false);
+        let lit = |t: &str| (t.to_string(), SpanScript::None, true);
+        assert_eq!(
+            marked_shape(&d),
+            [
+                lit("two equals"),
+                plain(" and "),
+                lit("two colons"),
+                plain(" here, ("),
+                lit("in brackets"),
+                plain(")."),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_highlight_needs_word_edges() {
+        let text = "std::vector::iterator and a == b == c and x==y==z and == alone ==";
+        let d = parse(text);
+        assert_eq!(
+            marked_shape(&d),
+            [(text.to_string(), SpanScript::None, false)]
+        );
+    }
+
+    #[test]
+    fn a_tilde_inside_a_bare_url_is_not_a_delimiter() {
+        let d = parse("see https://example.com/~user/~page now");
+        let BlockKind::Paragraph { spans } = &d.blocks[0].kind else {
+            panic!()
+        };
+        let link = spans.iter().find(|s| s.link.is_some()).unwrap();
+        assert_eq!(link.text(&d.source), "https://example.com/~user/~page");
+        assert!(spans.iter().all(|s| s.script == SpanScript::None));
+    }
+
+    #[test]
+    fn a_marked_span_ranges_over_its_content() {
+        let d = parse("H~2~O ==lit==");
+        let BlockKind::Paragraph { spans } = &d.blocks[0].kind else {
+            panic!()
+        };
+        let sub = spans.iter().find(|s| s.script == SpanScript::Sub).unwrap();
+        assert_eq!(sub.range, 2..3);
+        let lit = spans.iter().find(|s| s.mark).unwrap();
+        assert_eq!(lit.range, 8..11);
+        assert_eq!(&d.source[8..11], "lit");
+    }
+
+    #[test]
+    fn abbreviation_definitions_vanish_and_mark_their_words() {
+        let d = parse(
+            "The HTML spec, in HTML5 too.\n\n*[HTML]: Hyper Text Markup Language\n\
+             *[W3C]: World Wide Web Consortium\n\nBy the W3C.\n",
+        );
+        assert_eq!(d.blocks.len(), 2, "{:?}", d.blocks);
+        let shape = |i: usize| -> Vec<(String, Option<String>)> {
+            let BlockKind::Paragraph { spans } = &d.blocks[i].kind else {
+                panic!()
+            };
+            spans
+                .iter()
+                .map(|s| (s.text(&d.source).to_string(), s.abbr.clone()))
+                .collect()
+        };
+        let long = Some("Hyper Text Markup Language".to_string());
+        assert_eq!(
+            shape(0),
+            [
+                ("The ".to_string(), None),
+                ("HTML".to_string(), long),
+                (" spec, in HTML5 too.".to_string(), None),
+            ]
+        );
+        assert_eq!(
+            shape(1),
+            [
+                ("By the ".to_string(), None),
+                (
+                    "W3C".to_string(),
+                    Some("World Wide Web Consortium".to_string())
+                ),
+                (".".to_string(), None),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_definition_inside_a_code_fence_defines_nothing() {
+        let d = parse(
+            "The HTML spec.\n\n```markdown\n*[HTML]: Hyper Text Markup Language\n```\n\n\
+             ~~~\n*[W3C]: World Wide Web Consortium\n~~~\n\n    *[CSS]: too deep\n\nW3C and CSS.\n",
+        );
+        for block in &d.blocks {
+            if let BlockKind::Paragraph { spans } = &block.kind {
+                assert!(spans.iter().all(|s| s.abbr.is_none()), "{spans:?}");
+            }
+        }
+        let d = parse("   *[CSS]: Cascading Style Sheets\n\nCSS here.\n");
+        let BlockKind::Paragraph { spans } = &d.blocks[0].kind else {
+            panic!()
+        };
+        assert_eq!(spans[0].abbr.as_deref(), Some("Cascading Style Sheets"));
+    }
+
+    #[test]
+    fn a_paragraph_holding_more_than_definitions_stays() {
+        let d = parse("Not a definition\n*[X]: since the paragraph says more\n");
+        assert_eq!(d.blocks.len(), 1);
+        let BlockKind::Paragraph { spans } = &d.blocks[0].kind else {
+            panic!()
+        };
+        let text: String = spans.iter().map(|s| s.text(&d.source)).collect();
+        assert_eq!(text, "Not a definition *[X]: since the paragraph says more");
+    }
+
+    #[test]
+    fn an_abbreviation_span_ranges_over_its_word() {
+        let d = parse("See HTML.\n\n*[HTML]: Hyper Text Markup Language\n");
+        let BlockKind::Paragraph { spans } = &d.blocks[0].kind else {
+            panic!()
+        };
+        let word = spans.iter().find(|s| s.abbr.is_some()).unwrap();
+        assert_eq!(word.range, 4..8);
+        assert!(word.is_verbatim());
+    }
+
+    #[test]
+    fn footnotes_number_in_order_of_first_use() {
+        let d = parse(
+            "A claim,[^big] another,[^1] the first again.[^big]\n\n\
+             [^1]: The one labeled one.\n\n[^big]: The big one.\n",
+        );
+        let BlockKind::Paragraph { spans } = &d.blocks[0].kind else {
+            panic!()
+        };
+        let marks: Vec<(&str, &str)> = spans
+            .iter()
+            .filter_map(|s| s.link.as_deref().map(|l| (s.text(&d.source), l)))
+            .collect();
+        assert_eq!(
+            marks,
+            [
+                ("1", "footnote:big"),
+                ("2", "footnote:1"),
+                ("1", "footnote:big")
+            ]
+        );
+        let defs: Vec<(&str, u32, bool)> = d
+            .blocks
+            .iter()
+            .filter_map(|b| match &b.kind {
+                BlockKind::FootnoteDef {
+                    label,
+                    number,
+                    continued,
+                    ..
+                } => Some((label.as_str(), *number, *continued)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(defs, [("1", 2, false), ("big", 1, false)]);
+    }
+
+    #[test]
+    fn a_footnote_of_several_paragraphs_continues_after_its_first() {
+        let d = parse(
+            "Text.[^n]\n\n[^n]: First paragraph.\n\n    Second paragraph.\n\n    \
+             `code` third.\n\nAfter.\n",
+        );
+        let defs: Vec<(u32, bool, String)> = d
+            .blocks
+            .iter()
+            .filter_map(|b| match &b.kind {
+                BlockKind::FootnoteDef {
+                    number,
+                    continued,
+                    spans,
+                    ..
+                } => Some((*number, *continued, spans[0].text(&d.source).to_string())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            defs,
+            [
+                (1, false, "First paragraph.".to_string()),
+                (1, true, "Second paragraph.".to_string()),
+                (1, true, "code".to_string()),
+            ]
+        );
+        let BlockKind::Paragraph { spans } = &d.blocks.last().unwrap().kind else {
+            panic!()
+        };
+        assert_eq!(spans[0].text(&d.source), "After.");
+    }
+
+    #[test]
+    fn a_definition_before_its_reference_takes_the_next_number() {
+        let d = parse("[^a]: Defined first.\n\nUsed[^b] then[^a].\n\n[^b]: Defined second.\n");
+        let numbers: Vec<(&str, u32)> = d
+            .blocks
+            .iter()
+            .filter_map(|b| match &b.kind {
+                BlockKind::FootnoteDef { label, number, .. } => Some((label.as_str(), *number)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(numbers, [("a", 1), ("b", 2)]);
+    }
+
+    #[test]
     fn html_inline_set_maps_to_span_styles() {
         let d = parse(
             "<u>under</u> a <ins>inserted</ins> b <s>gone</s> c <mark>lit</mark> \
@@ -2470,7 +3280,7 @@ mod tests {
         };
         let fr = spans.iter().find(|s| s.link.is_some()).unwrap();
         assert_eq!(fr.link.as_deref(), Some("footnote:1"));
-        let BlockKind::FootnoteDef { label, spans } = &d.blocks[1].kind else {
+        let BlockKind::FootnoteDef { label, spans, .. } = &d.blocks[1].kind else {
             panic!()
         };
         assert_eq!(label, "1");

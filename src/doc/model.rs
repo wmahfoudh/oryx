@@ -257,7 +257,13 @@ pub enum BlockKind {
         alt: String,
     },
     FootnoteDef {
+        /// The label as written, `[^label]`; the link and anchor target.
         label: String,
+        /// The number shown, in order of first use in the document.
+        number: u32,
+        /// A paragraph after the definition's first: it indents under the
+        /// number and draws no marker of its own.
+        continued: bool,
         spans: Vec<Span>,
     },
     MathBlock {
@@ -490,6 +496,10 @@ pub struct Span {
     pub script: SpanScript,
     /// Link target: a URL, a `#anchor`, or `footnote:<label>`.
     pub link: Option<String>,
+    /// The expansion of the abbreviation this text stands for, from a
+    /// `*[label]: expansion` line; drawn with a dotted underline and
+    /// shown on hover.
+    pub abbr: Option<String>,
     /// Set when the span is an inline image flowing with the text.
     pub image: Option<SpanImage>,
     /// Byte range of the span's origin in `Document::source`. The slice may
@@ -511,6 +521,7 @@ impl Default for Span {
             math: false,
             script: SpanScript::None,
             link: None,
+            abbr: None,
             image: None,
             range: 0..0,
         }

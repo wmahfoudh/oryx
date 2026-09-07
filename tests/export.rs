@@ -144,6 +144,22 @@ fn adjacent_and_trailing_chapter_breaks_collapse() {
 
 /// Ledger probe: whole-book export wall time. Run with
 /// ORYX_BOOK=<path> cargo test --release --test export book_export_probe -- --ignored --nocapture
+/// Writes the PDF of a markdown file for a look at the pages, the way a
+/// display proof looks at screenshots: `ORYX_MARKDOWN` names the file,
+/// `ORYX_PDF` where the export goes.
+#[test]
+#[ignore]
+fn markdown_export_probe() {
+    let path = std::env::var("ORYX_MARKDOWN").expect("set ORYX_MARKDOWN");
+    let out = std::env::var("ORYX_PDF").expect("set ORYX_PDF");
+    let source = std::fs::read_to_string(&path).unwrap();
+    let doc = markdown::parse(source);
+    let bytes = export_to_bytes(&doc, PageSize::A4);
+    std::fs::write(&out, &bytes).unwrap();
+    let pages = Pdf::load_mem(&bytes).unwrap().get_pages().len();
+    println!("export: {pages} pages, {} bytes of pdf", bytes.len());
+}
+
 #[test]
 #[ignore]
 fn book_export_probe() {
