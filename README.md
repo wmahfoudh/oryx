@@ -95,7 +95,7 @@ Comic book contents are analyzed and files processed accordingly, not by name, s
 
 ## Tools
 
-- **Find in document**: `Ctrl+F` searches text. The search is smart about case: `oryx` matches Oryx, ORYX and oryx, while `Oryx` performs an exact match. A match can cross styling, so `fast viewer` is found even when it was written as `**fast** *viewer*`, and it can cross a wrapped line. The whole document is searchable even while a big file is still loading. The `.*` button in the search bar (or `Alt+R`) switches to regular expressions, in the Rust `fancy-regex` flavor, so capture groups, backreferences and lookarounds are available. `^` and `$` match at line starts and ends, and on the rendered page each block counts as one line. While a pattern is incomplete, the bar's border changes color instead of showing a match count. Clicking anywhere in the document closes the search bar.
+- **Find in document**: `Ctrl+F` searches text. The search is smart about case: `oryx` matches Oryx, ORYX and oryx, while `Oryx` performs an exact match. A match can cross styling, so `fast viewer` is found even when it was written as `**fast** *viewer*`, and it can cross a wrapped line. The whole document is searchable even while a big file is still loading. The `.*` button in the search bar (or `Alt+R`) switches to regular expressions, in the Rust `fancy-regex` flavor, so capture groups, backreferences and lookarounds are available. `^` and `$` match at line starts and ends, and on the rendered page each block counts as one line. While a pattern is incomplete, the bar's border changes color instead of showing a match count. Clicking anywhere in the document closes the search bar. The search field behaves like a text box: `Ctrl+Left` and `Ctrl+Right` jump by word, `Shift` selects, `Ctrl+Backspace` and `Ctrl+Delete` delete a word, a double click selects the word and a triple click selects everything. While the field has the keyboard, the document's editing keys stay quiet.
 - **Select and copy**: `Ctrl+C` copies a selection as plain text. `Ctrl+Shift+C` copies the original markdown of the selection. A double click selects the word, a triple click the paragraph, the code line or the table cell. Select all is instant at any file size, a selection survives zooming, theme switches and window resizes, and both copies work before a big file has finished loading.
 - **Sidebar**: `Ctrl+Shift+B` opens a two-tab panel: the folder tree around the open file, and an outline of the document's headings that tracks the reading position, folds its branches, and jumps on a click. For a book, the outline is its table of contents. Both tabs drive entirely from the keyboard. A folder reached through a symbolic link is listed too, and opening it moves the tree to the real folder.
 - **Open file**: `Ctrl+O` opens the native file dialog.
@@ -121,6 +121,8 @@ Books cannot be edited, and neither can a file whose text did not read cleanly, 
 
 Editing works the way a text editor does: typing, selections, `Ctrl+X` and `Ctrl+V`, undo with `Ctrl+Z`, redo with `Ctrl+Shift+Z` or `Ctrl+Y`. While editing, `Ctrl+Left` / `Ctrl+Right` jump by word, `Ctrl+Home` / `Ctrl+End` jump to the ends of the file, and `Ctrl+Backspace` / `Ctrl+Delete` delete by word. Typing is instant even in very large files.
 
+A few tricks save keystrokes. With text selected, a bracket or a quote wraps it instead of replacing it, and in a markdown file so do `*`, `_` and a backtick. `Ctrl+B`, `Ctrl+I` and `` Ctrl+` `` make the selection or the word under the caret bold, italic or code, and the same key removes it. `Ctrl+K` turns the selection into a link. `Alt+-`, `Alt+1` and `Alt+X` turn the selected lines into a bullet, numbered or task list, `Alt+.` quotes them, `Ctrl+1` to `Ctrl+6` set the heading level and `Ctrl+L` ticks the task box. `Alt+Up` and `Alt+Down` move the line or the selected lines, `Ctrl+Shift+D` duplicates them, `Ctrl+Shift+K` deletes them and `Ctrl+/` comments them out. Each of these is one `Ctrl+Z` to undo.
+
 `Enter` keeps the indentation of the current line. In a markdown file it also continues what you are writing: a list item gets the next marker (numbered lists count on), a task item continues unchecked, and a quoted line keeps its `>`. `Enter` on an empty item ends the list. `Tab` indents and `Shift+Tab` removes an indent, on every line of a selection at once; with the caret at a list marker, `Tab` nests the item. Whether `Tab` inserts a tab or spaces follows what the file already uses.
 
 `Ctrl+H` opens find and replace: a second field appears under the search box. `Enter` replaces the current match and moves to the next, `Ctrl+Enter` replaces every match at once, and one `Ctrl+Z` brings a replace-all back. With regular expressions, the replacement can reuse captured groups: searching `(\w+)/(\w+)` and replacing with `$2/$1` swaps the two sides of every pair. The replace field only exists in the editor; the search itself works everywhere.
@@ -130,6 +132,8 @@ A task checkbox can be ticked by clicking it on the page, without entering edit 
 `Ctrl+S` saves. Oryx is careful with the file: lines that were not touched are written back unchanged, and every line keeps its own ending, so a file with Windows line endings stays that way. The window title shows a dot next to the file name while changes are unsaved. `Ctrl+Shift+S` saves under a new name.
 
 `Ctrl+N` creates a new file: the save dialog opens first, then the empty page is ready to type into. That is how Oryx knows the type of file you created to be able to apply syntax colors.
+
+`Ctrl+M` opens an empty markdown note in the editor, with no dialog. The name, the place and the type are chosen at the first `Ctrl+S`. Until then the note is unsaved work, and Oryx asks the usual question before closing or opening another file.
 
 Closing the window, quitting or reloading with unsaved changes asks first: `S` saves, `D` discards, `Escape` keeps editing, or the arrows and `Enter` pick one of the three. If the file changes on disk while there are unsaved edits, Oryx shows a notice and leaves the edits alone.
 
@@ -177,8 +181,8 @@ Ten themes are original designs: `oryx-light` and its dark twin `oryx-dark`, `or
 
 Oryx is packaged for the following platforms. Pick yours on the [releases page](https://github.com/wmahfoudh/oryx/releases):
 
-- **Debian and Ubuntu**: the `.deb`, `sudo apt install ./oryx-editor_1.0.0_amd64.deb`.
-- **Fedora and openSUSE**: the `.rpm`, `sudo dnf install ./oryx-editor-1.0.0-1.x86_64.rpm` (or `zypper`).
+- **Debian and Ubuntu**: the `.deb`, `sudo apt install ./oryx-editor_*_amd64.deb`.
+- **Fedora and openSUSE**: the `.rpm`, `sudo dnf install ./oryx-editor-*.x86_64.rpm` (or `zypper`).
 - **Any Linux**: the AppImage, one file to make executable and run, nothing to install.
 - **Windows**: the [Microsoft Store](https://apps.microsoft.com/detail/9NQGHNSJF3VB) (as Oryx Editor), `winget install Steerania.Oryx`, the MSI installer, or the zip with `install.ps1` for an install in your user folder.
 - **Linux without a package**: the tarball, `tar -xzf oryx-*-linux-x86_64.tar.gz && cd oryx && ./install.sh`; `./install.sh --uninstall` removes it.
@@ -226,6 +230,7 @@ oryx --help             # list these options
 | **Files** | |
 | `Ctrl+O` | Open a file |
 | `Ctrl+N` | New file |
+| `Ctrl+M` | New markdown note; the name and the type are chosen when saving |
 | `Ctrl+S` | Save (editing) |
 | `Ctrl+Shift+S` | Save as (editing) |
 | `F5` / `Ctrl+R` | Reload from disk |
@@ -241,6 +246,9 @@ oryx --help             # list these options
 | **Find** | |
 | `Ctrl+F` | Find in document |
 | `F3` / `Shift+F3` | Next / previous match |
+| `Alt+R` | Regex matching on/off |
+| `Ctrl+H` | Find and replace (editing only) |
+| `Ctrl+Enter` | Replace all (replace open) |
 | **Selection** | |
 | `Ctrl+A` | Select all |
 | `Ctrl+C` | Copy selection as text |
@@ -250,6 +258,19 @@ oryx --help             # list these options
 | `Ctrl+X` / `Ctrl+V` | Cut / paste (editing) |
 | `Ctrl+Z` | Undo the last edit |
 | `Ctrl+Shift+Z` / `Ctrl+Y` | Redo an undone edit |
+| `Ctrl+B` / `Ctrl+I` | Bold / italic around the selection or the word, again to remove (markdown editing) |
+| `` Ctrl+` `` | Inline code around the selection or the word, again to remove (markdown editing) |
+| `Ctrl+K` | Link around the selection, or an empty link; pasting an address over a selection links it too (markdown editing) |
+| `Alt+-` | Bullet list on the selected lines, again to remove (markdown editing) |
+| `Alt+1` | Numbered list on the selected lines, again to remove (markdown editing) |
+| `Alt+X` | Task list on the selected lines, again to remove (markdown editing) |
+| `Alt+.` | Quote the selected lines, again to remove (markdown editing) |
+| `Ctrl+1` to `Ctrl+6` | Heading level of the line, the same level again to clear it (markdown editing) |
+| `Ctrl+L` | Tick or untick the task box of the line (markdown editing) |
+| `Alt+Up` / `Alt+Down` | Move the line or the selected lines up / down (editing) |
+| `Ctrl+Shift+D` | Duplicate the line or the selected lines (editing) |
+| `Ctrl+Shift+K` | Delete the line or the selected lines (editing) |
+| `Ctrl+/` | Comment or uncomment the line or the selected lines (code and markdown editing) |
 | **View** | |
 | `Ctrl+T` | Choose a theme |
 | `Ctrl+,` | Settings: fonts, sizes and interface scale |
