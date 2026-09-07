@@ -802,11 +802,11 @@ impl Walker {
                         };
                         let mut span = self.style();
                         span.set_text(alt);
-                        span.image = Some(SpanImage {
+                        span.image = Some(Box::new(SpanImage {
                             src: src.clone(),
                             width: attr("width").and_then(|v| v.parse().ok()),
                             height: attr("height").and_then(|v| v.parse().ok()),
-                        });
+                        }));
                         self.spans.push(span);
                         self.images.push(src);
                     }
@@ -821,11 +821,11 @@ impl Walker {
                 svg_refs(node, &mut refs);
                 let mut span = self.style();
                 span.set_text("");
-                span.image = Some(SpanImage {
+                span.image = Some(Box::new(SpanImage {
                     src: key.clone(),
                     width: attr("width").and_then(|v| v.parse().ok()),
                     height: attr("height").and_then(|v| v.parse().ok()),
-                });
+                }));
                 self.spans.push(span);
                 self.svgs.push(PendingSvg { key, markup, refs });
             }

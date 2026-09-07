@@ -3781,7 +3781,11 @@ impl App {
             details,
             source,
             anchors,
+            abbreviations,
         } = delivered;
+        // The full table serves the kept prefix too: the scan keeps
+        // source order, so the prefix's indices point at the same rows.
+        self.document.abbreviations = abbreviations;
         // A book's delivery grows the source; the prefix is its head bit
         // for bit, so every kept range stays valid on the longer text.
         if let Some(source) = source {

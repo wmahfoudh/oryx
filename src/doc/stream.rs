@@ -142,6 +142,9 @@ pub struct Delivered {
     /// A book's full anchor map, replacing the prefix's; empty for
     /// markdown, whose anchors live on its heading blocks.
     pub anchors: Vec<(String, usize)>,
+    /// The full parse's abbreviation table, which its spans index; the
+    /// prefix's table is its head, the scan keeping source order.
+    pub abbreviations: Vec<String>,
 }
 
 /// A parked delivery and the generation that produced it.
@@ -184,6 +187,7 @@ impl ParseWorker {
                     details: document.details,
                     source: None,
                     anchors: Vec::new(),
+                    abbreviations: document.abbreviations,
                 })
             },
             waker,
@@ -337,6 +341,7 @@ mod tests {
                     details: Vec::new(),
                     source: Some(Arc::from("the grown book source")),
                     anchors: Vec::new(),
+                    abbreviations: Vec::new(),
                 })
             },
             || {},

@@ -656,6 +656,7 @@ fn the_outline_resolves_toc_entries_as_the_worker_delivers() {
         blocks: delivered.blocks,
         source: delivered.source.unwrap(),
         details: delivered.details,
+        abbreviations: delivered.abbreviations,
         anchors: delivered.anchors.into_iter().collect(),
         ..Document::default()
     };

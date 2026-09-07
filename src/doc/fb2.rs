@@ -147,6 +147,7 @@ pub fn open_prefix(bytes: Vec<u8>) -> anyhow::Result<(Document, Vec<TocEntry>, O
         blocks,
         source: Arc::from(source),
         details,
+        abbreviations: Vec::new(),
         title: job.title.clone(),
         anchors: job.walker.anchors().iter().cloned().collect(),
         book_id: job.book_id.clone(),
@@ -182,6 +183,7 @@ pub fn run(
         details,
         source: Some(Arc::from(source)),
         anchors,
+        abbreviations: Vec::new(),
     })
 }
 
@@ -217,6 +219,7 @@ pub fn open_book(bytes: Vec<u8>) -> anyhow::Result<Book> {
             blocks,
             source: Arc::from(source),
             details,
+            abbreviations: Vec::new(),
             title,
             anchors,
             book_id,

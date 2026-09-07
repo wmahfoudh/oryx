@@ -1,5 +1,6 @@
 //! Document model: the visual-free representation every later stage consumes.
 
+use std::num::NonZeroU32;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -16,6 +17,9 @@ pub struct Document {
     pub source: Arc<str>,
     /// The `<details>` regions, indexed by the group id blocks carry.
     pub details: Vec<DetailsGroup>,
+    /// The expansions of the document's abbreviations, in the order the
+    /// spans index them.
+    pub abbreviations: Vec<String>,
     /// A book's `dc:title`, shown in the window title; None for files.
     pub title: Option<String>,
     /// A book's anchor map: `path` and `path#id` to source offsets, the
@@ -44,6 +48,7 @@ impl Default for Document {
             blocks: Vec::new(),
             source: Arc::from(""),
             details: Vec::new(),
+            abbreviations: Vec::new(),
             title: None,
             anchors: std::collections::HashMap::new(),
             book_id: None,
@@ -496,12 +501,15 @@ pub struct Span {
     pub script: SpanScript,
     /// Link target: a URL, a `#anchor`, or `footnote:<label>`.
     pub link: Option<String>,
-    /// The expansion of the abbreviation this text stands for, from a
-    /// `*[label]: expansion` line; drawn with a dotted underline and
-    /// shown on hover.
-    pub abbr: Option<String>,
-    /// Set when the span is an inline image flowing with the text.
-    pub image: Option<SpanImage>,
+    /// One past the index in `Document::abbreviations` of the expansion
+    /// this text stands for, from a `*[label]: expansion` line; drawn
+    /// with a dotted underline, the expansion shown on hover. An index
+    /// and not the text: a span is the model's most numerous piece, and
+    /// one expansion serves every occurrence of its word.
+    pub abbr: Option<NonZeroU32>,
+    /// Set when the span is an inline image flowing with the text. Boxed:
+    /// a span is the model's most numerous piece and few carry an image.
+    pub image: Option<Box<SpanImage>>,
     /// Byte range of the span's origin in `Document::source`. The slice may
     /// differ from the text when parsing transformed it; empty for
     /// synthesized spans.
@@ -548,6 +556,13 @@ impl Span {
     /// True when `range` slices the display text out of the source.
     pub fn is_verbatim(&self) -> bool {
         self.owned.is_none()
+    }
+
+    /// The expansion of the abbreviation this span stands for, if any.
+    pub fn abbr<'a>(&self, doc: &'a Document) -> Option<&'a str> {
+        doc.abbreviations
+            .get(self.abbr?.get() as usize - 1)
+            .map(String::as_str)
     }
 
     pub(crate) fn set_text(&mut self, text: impl Into<String>) {

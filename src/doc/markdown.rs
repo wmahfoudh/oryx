@@ -55,6 +55,11 @@ pub fn parse_unless(source: impl Into<Arc<str>>, bail: impl Fn() -> bool) -> Opt
         blocks,
         source,
         details: builder.details,
+        abbreviations: builder
+            .abbreviations
+            .into_iter()
+            .map(|(_, expansion)| expansion)
+            .collect(),
         ..Document::default()
     })
 }
@@ -777,11 +782,11 @@ impl Builder {
                 if let Some((path, alt)) = self.image.take() {
                     let mut span = self.style();
                     span.set_text(alt);
-                    span.image = Some(SpanImage {
+                    span.image = Some(Box::new(SpanImage {
                         src: path,
                         width: None,
                         height: None,
-                    });
+                    }));
                     self.spans.push(span);
                 }
             }
@@ -998,7 +1003,7 @@ impl Builder {
             }
             let mut span = self.style();
             span.set_text(&text[range.clone()]);
-            span.abbr = Some(self.abbreviations[which].1.clone());
+            span.abbr = std::num::NonZeroU32::new(which as u32 + 1);
             span.range = self.src(at + range.start)..self.src(at + range.end);
             self.push(span);
             plain = range.end;
@@ -1272,11 +1277,11 @@ impl Builder {
                 };
                 let mut span = self.style();
                 span.set_text(html_attr(attrs, "alt").unwrap_or_default());
-                span.image = Some(SpanImage {
+                span.image = Some(Box::new(SpanImage {
                     src,
                     width: html_attr(attrs, "width").and_then(|v| v.parse().ok()),
                     height: html_attr(attrs, "height").and_then(|v| v.parse().ok()),
-                });
+                }));
                 self.spans.push(span);
             }
             ("b" | "strong", false) => self.bold += 1,
@@ -1955,11 +1960,12 @@ fn abbreviation_line(line: &str) -> Option<(&str, &str)> {
         .then_some((label, expansion))
 }
 
-/// Every abbreviation the source defines, longest label first so a
-/// longer label wins where two share a prefix; a label defined twice
-/// keeps its first expansion. A definition line starts within three
-/// spaces of the margin, and the lines of a fenced code block define
-/// nothing, since a file showing the syntax must not take it.
+/// Every abbreviation the source defines, in source order, so the table
+/// of a prefix parse is the head of the full parse's and the spans'
+/// indices agree across the two; a label defined twice keeps its first
+/// expansion. A definition line starts within three spaces of the
+/// margin, and the lines of a fenced code block define nothing, since a
+/// file showing the syntax must not take it.
 fn scan_abbreviations(source: &str) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = Vec::new();
     let mut fence: Option<(char, usize)> = None;
@@ -1992,13 +1998,13 @@ fn scan_abbreviations(source: &str) -> Vec<(String, String)> {
             }
         }
     }
-    out.sort_by_key(|(label, _)| std::cmp::Reverse(label.len()));
     out
 }
 
 /// The whole-word occurrences of the abbreviations in `text`, in order,
-/// each with the index of its definition. A word edge is the start, the
-/// end, or a character that is not a letter or a digit.
+/// each with the index of its definition; where two labels match at one
+/// place, the longer wins. A word edge is the start, the end, or a
+/// character that is not a letter or a digit.
 fn abbreviation_hits(text: &str, abbreviations: &[(String, String)]) -> Vec<(Range<usize>, usize)> {
     let mut hits = Vec::new();
     if abbreviations.is_empty() {
@@ -2013,14 +2019,16 @@ fn abbreviation_hits(text: &str, abbreviations: &[(String, String)]) -> Vec<(Ran
         }
         let at_edge = !text[..i].chars().next_back().is_some_and(word);
         if at_edge {
-            for (which, (label, _)) in abbreviations.iter().enumerate() {
-                if !text[i..].starts_with(label.as_str()) {
-                    continue;
-                }
+            let longest = abbreviations
+                .iter()
+                .enumerate()
+                .filter(|(_, (label, _))| {
+                    text[i..].starts_with(label.as_str())
+                        && !text[i + label.len()..].chars().next().is_some_and(word)
+                })
+                .max_by_key(|(_, (label, _))| label.len());
+            if let Some((which, (label, _))) = longest {
                 let end = i + label.len();
-                if text[end..].chars().next().is_some_and(word) {
-                    continue;
-                }
                 hits.push((i..end, which));
                 i = end;
                 continue 'scan;
@@ -2909,6 +2917,18 @@ mod tests {
         assert_eq!(&d.source[8..11], "lit");
     }
 
+    /// A span is the model's most numerous piece: a field added here
+    /// shows in the memory table of every markdown fixture, as the
+    /// abbreviation did as a string before it became an index.
+    #[test]
+    fn a_span_stays_small() {
+        assert!(
+            std::mem::size_of::<Span>() <= 80,
+            "a span is {} bytes",
+            std::mem::size_of::<Span>()
+        );
+    }
+
     #[test]
     fn abbreviation_definitions_vanish_and_mark_their_words() {
         let d = parse(
@@ -2922,7 +2942,7 @@ mod tests {
             };
             spans
                 .iter()
-                .map(|s| (s.text(&d.source).to_string(), s.abbr.clone()))
+                .map(|s| (s.text(&d.source).to_string(), s.abbr(&d).map(str::to_owned)))
                 .collect()
         };
         let long = Some("Hyper Text Markup Language".to_string());
@@ -2962,7 +2982,29 @@ mod tests {
         let BlockKind::Paragraph { spans } = &d.blocks[0].kind else {
             panic!()
         };
-        assert_eq!(spans[0].abbr.as_deref(), Some("Cascading Style Sheets"));
+        assert_eq!(spans[0].abbr(&d), Some("Cascading Style Sheets"));
+    }
+
+    #[test]
+    fn the_longer_label_wins_and_the_table_keeps_source_order() {
+        let d = parse("HTML5 and HTML.\n\n*[HTML]: markup\n*[HTML5]: the fifth\n");
+        assert_eq!(d.abbreviations, ["markup", "the fifth"]);
+        let BlockKind::Paragraph { spans } = &d.blocks[0].kind else {
+            panic!()
+        };
+        let got: Vec<(&str, Option<&str>)> = spans
+            .iter()
+            .map(|s| (s.text(&d.source), s.abbr(&d)))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("HTML5", Some("the fifth")),
+                (" and ", None),
+                ("HTML", Some("markup")),
+                (".", None),
+            ]
+        );
     }
 
     #[test]

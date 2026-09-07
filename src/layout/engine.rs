@@ -466,7 +466,7 @@ impl LayoutDoc {
                 if !inside {
                     return None;
                 }
-                model_span(doc, r.block, r.span)?.abbr.as_deref()
+                model_span(doc, r.block, r.span)?.abbr(doc)
             })
     }
 

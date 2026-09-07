@@ -53,12 +53,13 @@ This release is about the editor and the markdown it reads. Added the small tric
 - The number at the foot of a footnote links back to where it is cited, in the window and in the PDF.
 - The PDF export carries all of the above.
 - SYNTAX.md was rewritten. Every construct is shown twice, as written and as rendered.
+- Big markdown files take less memory. An 8 MB markdown file settles at 172 MB instead of 201 MB, and its peak while loading is 30 MB lower.
 
 ### The look
 
 - Redesigned the sidebar. Folders have a small triangle and an outlined folder icon. Files have an outlined icon by type. Children hang from thin guide lines. The open file takes the theme's accent color, with a bar at its left. The row under the mouse lights up, and the list has a scrollbar, for the files and for the outline. Every theme works as it is.
-- The sample image in the examples folder shows the current logo.
 - Redesigned the unsaved changes dialog in the same spirit. The page dims behind it and the file's name is shown. The three answers are rows with their key beside them: S saves, D discards, Escape keeps editing. The arrows move between the rows and Enter or Space picks the highlighted one. A click on a row picks it, and a click outside keeps editing.
+- The sample image in the examples folder shows the current logo.
 
 ### Fixes
 

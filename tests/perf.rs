@@ -833,6 +833,7 @@ fn book_bench() {
                         .source
                         .unwrap_or_else(|| std::sync::Arc::clone(&opened.document.source)),
                     details: delivered.details,
+                    abbreviations: delivered.abbreviations,
                     title: opened.document.title.clone(),
                     anchors: delivered.anchors.into_iter().collect(),
                     book_id: opened.document.book_id.clone(),
