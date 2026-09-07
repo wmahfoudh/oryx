@@ -4295,6 +4295,9 @@ fn layout_table(
                 rect.y += dy;
                 out.rects.push(rect);
             }
+            for (name, ay) in tmp.anchors {
+                out.anchors.push((name, ay + dy));
+            }
         }
         y += full_h;
         boundaries.push(y);
@@ -6583,6 +6586,28 @@ mod tests {
             .find(|r| l.run_text(&doc, r) == "1.")
             .expect("the marker run");
         assert_eq!(l.run_link(&doc, marker), Some("fnref:n"));
+    }
+
+    /// A reference inside a table cell shapes into the cell's own
+    /// scratch layout; its back anchor must reach the page's list with
+    /// the cell's offset, like the cell's runs do.
+    #[test]
+    fn a_footnote_cited_in_a_table_cell_has_its_back_anchor() {
+        let doc = markdown::parse("| a | b |\n|---|---|\n| one[^n] | two |\n\n[^n]: The note.\n");
+        let l = lay_of(&doc);
+        let reference = l
+            .runs
+            .iter()
+            .find(|r| l.run_link(&doc, r) == Some("footnote:n"))
+            .expect("the reference run in the cell");
+        let back = l
+            .anchor_y("fnref:n")
+            .expect("an anchor at the cell's reference");
+        assert!(
+            (back - reference.y).abs() < reference.size,
+            "the anchor sits on the cell's line: {back} against {}",
+            reference.y
+        );
     }
 
     #[test]

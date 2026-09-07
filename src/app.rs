@@ -5204,6 +5204,7 @@ impl App {
     fn restart_layout(&mut self) {
         self.layout = None;
         self.band = None;
+        self.tooltip = None;
         self.request_redraw();
     }
 
@@ -5879,7 +5880,10 @@ impl App {
                 *stale = painter.dirty();
             }
         }
-        if let Some(text) = self.tooltip.as_deref() {
+        // A panel or the confirm over the page hides the word the pill
+        // explains; the pill waits for the next hover.
+        let tip_shown = self.overlay.is_none() && self.confirm.is_none();
+        if let Some(text) = self.tooltip.as_deref().filter(|_| tip_shown) {
             let fits = self
                 .notice_canvas
                 .as_ref()

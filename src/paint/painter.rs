@@ -103,6 +103,10 @@ impl<'a> Painter<'a> {
         let Some((cx0, cy0, cx1, cy1)) = self.clip else {
             return Reach::Whole;
         };
+        // An empty clip has no mask to build; nothing crosses it.
+        if cx0 >= cx1 || cy0 >= cy1 {
+            return Reach::None;
+        }
         let (cx0, cy0, cx1, cy1) = (cx0 as f32, cy0 as f32, cx1 as f32, cy1 as f32);
         if x + w <= cx0 || x >= cx1 || y + h <= cy0 || y >= cy1 {
             Reach::None
@@ -521,6 +525,31 @@ mod tests {
         pixmap
             .pixel(x, y)
             .is_some_and(|p| p.alpha() > 0 || p.red() > 0)
+    }
+
+    /// A clip with nothing inside it, a list viewport squeezed to no
+    /// height, lets nothing through: a shape crossing its edges would
+    /// otherwise paint whole, the mask having no rectangle to build.
+    #[test]
+    fn an_empty_clip_paints_nothing() {
+        let mut pixmap = Pixmap::new(100, 100).unwrap();
+        let mut fonts = FontStore::new();
+        let mut painter = Painter::new(&mut pixmap, &mut fonts, None, 1.0);
+        painter.clip(Some((0.0, 40.0, 100.0, 0.0)));
+        painter.fill(10.0, 10.0, 80.0, 80.0, 0.0, RED);
+        painter.line(0.0, 40.0, 100.0, 40.0, 2.0, RED);
+        painter.text(10.0, 30.0, "hidden", BODY_FAMILY, 14.0, 400, RED);
+        painter.clip(Some((0.0, 50.0, 100.0, -20.0)));
+        painter.fill(10.0, 10.0, 80.0, 80.0, 0.0, RED);
+        drop(painter);
+        for y in 0..100 {
+            for x in 0..100 {
+                assert!(
+                    !painted(&pixmap, x, y),
+                    "pixel ({x}, {y}) painted under an empty clip"
+                );
+            }
+        }
     }
 
     #[test]

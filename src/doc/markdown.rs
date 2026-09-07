@@ -134,6 +134,10 @@ struct Builder {
     /// a run over in pieces wherever it tried a delimiter and gave it up,
     /// and a bare URL or an inline mark must read the run whole.
     pending: Option<PendingText>,
+    /// The run being flushed: its piece boundaries as (text offset,
+    /// source offset) and its source end, for `src`.
+    run_map: Vec<(usize, usize)>,
+    run_end: usize,
     /// The inline mark of the piece being pushed, set by `marked`.
     mark: Option<Mark>,
     /// The offset of a definition marker that is really the first colon
@@ -508,6 +512,8 @@ impl Builder {
             definition: false,
             heading_id: None,
             pending: None,
+            run_map: Vec::new(),
+            run_end: 0,
             mark: None,
             marker_colon: None,
             abbreviations,
@@ -854,40 +860,63 @@ impl Builder {
         if let Some(at) = self.marker_colon.take() {
             if self.current.0 == at + 1 && self.pending.is_none() {
                 self.pending = Some(PendingText {
-                    start: at,
-                    end: at + 1,
                     text: ":".to_string(),
+                    boundaries: vec![(0, at)],
+                    end: at + 1,
                 });
             }
         }
         let (start, end) = self.current;
+        let (piece, marks) = replace_emoji(text, start);
         match self.pending.as_mut() {
             Some(run) if run.end == start => {
-                run.text.push_str(text);
+                let at = run.text.len();
+                run.boundaries.push((at, start));
+                run.boundaries
+                    .extend(marks.into_iter().map(|(t, s)| (at + t, s)));
+                run.text.push_str(&piece);
                 run.end = end;
             }
             _ => {
                 self.flush_text();
+                let mut boundaries = vec![(0, start)];
+                boundaries.extend(marks);
                 self.pending = Some(PendingText {
-                    start,
+                    text: piece,
+                    boundaries,
                     end,
-                    text: text.to_string(),
                 });
             }
         }
     }
 
-    /// Runs the text passes over the pending run, emoji shortcodes, bare
-    /// URLs, then the inline marks, and pushes the spans.
+    /// Runs the text passes over the pending run, bare URLs then the
+    /// inline marks, and pushes the spans.
     fn flush_text(&mut self) {
         let Some(run) = self.pending.take() else {
             return;
         };
         let saved = self.current;
-        self.current = (run.start, run.end);
-        let replaced = replace_emoji(&run.text);
-        self.linkified(&replaced);
+        self.current = (run.boundaries[0].1, run.end);
+        self.run_map = run.boundaries;
+        self.run_end = run.end;
+        self.linkified(&run.text);
         self.current = saved;
+    }
+
+    /// The source offset of a text offset in the run being flushed:
+    /// exact at and after every piece boundary, clamped inside a piece
+    /// the parser rewrote to another length (a smart quote, a decoded
+    /// entity, a soft break, an emoji).
+    fn src(&self, at: usize) -> u32 {
+        let i = self
+            .run_map
+            .iter()
+            .rposition(|(t, _)| *t <= at)
+            .unwrap_or(0);
+        let (t, s) = self.run_map[i];
+        let next = self.run_map.get(i + 1).map_or(self.run_end, |(_, s)| *s);
+        (s + at.saturating_sub(t)).min(next) as u32
     }
 
     /// Drops the leading whitespace of text arriving after an invisible
@@ -911,7 +940,6 @@ impl Builder {
     /// ranges assume text offsets match source offsets; when a transform
     /// broke that, consumers detect the mismatch and fall back.
     fn linkified(&mut self, text: &str) {
-        let base = self.current.0;
         let mut pos = 0usize;
         let mut rest = text;
         // Whichever scheme occurs first wins; picking one find over the
@@ -923,7 +951,7 @@ impl Builder {
         while let Some(start) = next(rest) {
             let (before, from) = rest.split_at(start);
             if !before.is_empty() {
-                self.marked(before, base + pos);
+                self.marked(before, pos);
             }
             let end = from
                 .find(|c: char| c.is_whitespace() || c == '<' || c == '>')
@@ -933,7 +961,7 @@ impl Builder {
             let mut span = self.style();
             span.set_text(url);
             span.link = Some(url.to_string());
-            span.range = (base + pos + start) as u32..(base + pos + start + url.len()) as u32;
+            span.range = self.src(pos + start)..self.src(pos + start + url.len());
             self.push(span);
             pos += start + url.len();
             rest = &from[url.len()..];
@@ -942,42 +970,43 @@ impl Builder {
             }
         }
         if !rest.is_empty() {
-            self.marked(rest, base + pos);
+            self.marked(rest, pos);
         }
     }
 
     /// Pushes a text run split at the inline marks, each piece in the
-    /// style its delimiters give it and ranged over its own content.
-    fn marked(&mut self, text: &str, base: usize) {
+    /// style its delimiters give it and ranged over its own content;
+    /// `at` is where `text` starts in the run being flushed.
+    fn marked(&mut self, text: &str, at: usize) {
         for (range, mark) in marks(text) {
             self.mark = mark;
-            self.abbreviated(&text[range.clone()], base + range.start);
+            self.abbreviated(&text[range.clone()], at + range.start);
         }
         self.mark = None;
     }
 
     /// Pushes a text piece, every whole word that is a defined
     /// abbreviation carrying its expansion.
-    fn abbreviated(&mut self, text: &str, base: usize) {
+    fn abbreviated(&mut self, text: &str, at: usize) {
         let mut plain = 0;
         for (range, which) in abbreviation_hits(text, &self.abbreviations) {
             if plain < range.start {
                 let mut span = self.style();
                 span.set_text(&text[plain..range.start]);
-                span.range = (base + plain) as u32..(base + range.start) as u32;
+                span.range = self.src(at + plain)..self.src(at + range.start);
                 self.push(span);
             }
             let mut span = self.style();
             span.set_text(&text[range.clone()]);
             span.abbr = Some(self.abbreviations[which].1.clone());
-            span.range = (base + range.start) as u32..(base + range.end) as u32;
+            span.range = self.src(at + range.start)..self.src(at + range.end);
             self.push(span);
             plain = range.end;
         }
         if plain < text.len() {
             let mut span = self.style();
             span.set_text(&text[plain..]);
-            span.range = (base + plain) as u32..(base + text.len()) as u32;
+            span.range = self.src(at + plain)..self.src(at + text.len());
             self.push(span);
         }
     }
@@ -1732,14 +1761,6 @@ impl Builder {
             });
             return;
         }
-        if self.definition {
-            self.emit(BlockKind::ListItem {
-                marker: Marker::None,
-                depth: 0,
-                spans,
-            });
-            return;
-        }
         // A paragraph that is one plain image and whitespace stays a block
         // image; links, size attributes, or centering keep it inline.
         if self.lists.is_empty() && self.html_center.is_empty() {
@@ -1771,6 +1792,14 @@ impl Builder {
             self.emit(BlockKind::ListItem {
                 marker,
                 depth,
+                spans,
+            });
+            return;
+        }
+        if self.definition {
+            self.emit(BlockKind::ListItem {
+                marker: Marker::None,
+                depth: 0,
                 spans,
             });
             return;
@@ -2010,11 +2039,15 @@ struct FootnoteOpen {
     emitted: bool,
 }
 
-/// A run of text events joined, with its source extent.
+/// A run of text events joined: the text, the boundary of every piece
+/// as (text offset, source offset), and the source end. A piece the
+/// parser rewrote (a smart quote, a decoded entity, a soft break) or an
+/// emoji shortcode is longer or shorter than its source, and the pieces
+/// after it keep their own offsets.
 struct PendingText {
-    start: usize,
-    end: usize,
     text: String,
+    boundaries: Vec<(usize, usize)>,
+    end: usize,
 }
 
 /// The style an inline mark of the extended syntax gives its content.
@@ -2118,11 +2151,16 @@ fn highlight_span(text: &str, at: usize) -> Option<(Range<usize>, usize)> {
     None
 }
 
-fn replace_emoji(text: &str) -> String {
+/// Replaces `:shortcode:` runs by their emoji. Answers the text and,
+/// after each replacement, the boundary as (text offset, source offset
+/// from `source_start`), so what follows a shortcode keeps an exact
+/// source offset although the emoji and the shortcode differ in length.
+fn replace_emoji(text: &str, source_start: usize) -> (String, Vec<(usize, usize)>) {
     if !text.contains(':') {
-        return text.to_string();
+        return (text.to_string(), Vec::new());
     }
     let mut out = String::with_capacity(text.len());
+    let mut marks = Vec::new();
     let mut rest = text;
     while let Some(start) = rest.find(':') {
         let (before, from) = rest.split_at(start);
@@ -2138,6 +2176,7 @@ fn replace_emoji(text: &str) -> String {
                     Some(emoji) => {
                         out.push_str(emoji);
                         rest = &from[len + 2..];
+                        marks.push((out.len(), source_start + text.len() - rest.len()));
                     }
                     None => {
                         out.push(':');
@@ -2152,7 +2191,7 @@ fn replace_emoji(text: &str) -> String {
         }
     }
     out.push_str(rest);
-    out
+    (out, marks)
 }
 
 fn lookup_emoji(code: &str) -> Option<&'static str> {
@@ -3030,6 +3069,58 @@ mod tests {
             })
             .collect();
         assert_eq!(numbers, [("a", 1), ("b", 2)]);
+    }
+
+    /// The parser hands a paragraph over in pieces, and a piece it
+    /// rewrote (a smart quote, a decoded entity, a soft break) is longer
+    /// or shorter than its source; the pieces after it keep their own
+    /// offsets, so a mark, an abbreviation or a URL later in the run
+    /// still slices the source exactly.
+    #[test]
+    fn ranges_stay_exact_across_rewritten_pieces() {
+        let source =
+            "Don't stop &amp; go\r\nthe ==lit== word :tada: HTML https://x.io/~u done\r\n\r\n\
+                      *[HTML]: Hyper Text Markup Language\r\n";
+        let d = parse(source);
+        let BlockKind::Paragraph { spans } = &d.blocks[0].kind else {
+            panic!()
+        };
+        let slice = |s: &Span| &source[s.range.start as usize..s.range.end as usize];
+        let lit = spans.iter().find(|s| s.mark).unwrap();
+        assert_eq!(slice(lit), "lit");
+        assert!(lit.is_verbatim());
+        let abbr = spans.iter().find(|s| s.abbr.is_some()).unwrap();
+        assert_eq!(slice(abbr), "HTML");
+        assert!(abbr.is_verbatim());
+        let url = spans.iter().find(|s| s.link.is_some()).unwrap();
+        assert_eq!(slice(url), "https://x.io/~u");
+        assert!(url.is_verbatim());
+        let tail = spans.last().unwrap();
+        assert_eq!(slice(tail), " done");
+        assert!(tail.is_verbatim());
+    }
+
+    #[test]
+    fn a_list_inside_a_definition_keeps_its_markers() {
+        let d = parse("Term\n: - one\n  - two\n\nNext\n: plain\n");
+        let markers: Vec<Option<&Marker>> = d
+            .blocks
+            .iter()
+            .map(|b| match &b.kind {
+                BlockKind::ListItem { marker, .. } => Some(marker),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            markers,
+            [
+                None,
+                Some(&Marker::Bullet),
+                Some(&Marker::Bullet),
+                None,
+                Some(&Marker::None)
+            ]
+        );
     }
 
     #[test]
