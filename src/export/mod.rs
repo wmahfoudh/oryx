@@ -278,6 +278,7 @@ impl ExportPass {
                 justify: settings.justify,
                 comic: crate::layout::ComicFit::Width,
                 direction: crate::layout::DirectionMode::Auto,
+                print: true,
             },
             geometry,
             target,

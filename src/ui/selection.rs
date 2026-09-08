@@ -125,7 +125,10 @@ pub(crate) fn block_pieces(doc: &Document, index: usize) -> Vec<Piece<'_>> {
                 });
             }
         }
-        BlockKind::Rule | BlockKind::Image { .. } | BlockKind::ChapterBreak { .. } => {}
+        BlockKind::Rule
+        | BlockKind::Image { .. }
+        | BlockKind::ChapterBreak { .. }
+        | BlockKind::PageBreak => {}
     }
     out
 }

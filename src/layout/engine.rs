@@ -36,6 +36,9 @@ pub struct ViewConfig {
     /// The file's reading direction, cycled by Ctrl+D and remembered
     /// per file.
     pub direction: DirectionMode,
+    /// The layout is bound for the page export: marks that only guide a
+    /// reader on screen, the page break's dashed line, are left out.
+    pub print: bool,
 }
 
 impl Default for ViewConfig {
@@ -49,6 +52,7 @@ impl Default for ViewConfig {
             justify: false,
             comic: ComicFit::Width,
             direction: DirectionMode::Auto,
+            print: false,
         }
     }
 }
@@ -1913,7 +1917,8 @@ fn block_metrics(block: &Block, cfg: &ViewConfig, plain: bool) -> Option<(Option
         | BlockKind::Image { .. }
         | BlockKind::MathBlock { .. }
         | BlockKind::Frontmatter { .. }
-        | BlockKind::ChapterBreak { .. } => cfg.body_size * cfg.zoom,
+        | BlockKind::ChapterBreak { .. }
+        | BlockKind::PageBreak => cfg.body_size * cfg.zoom,
         BlockKind::FootnoteDef { .. } => 0.85 * cfg.body_size * cfg.zoom,
     };
     Some((heading, is_list, base_size))
@@ -2280,6 +2285,28 @@ pub(crate) fn shape_kind(
         // The chapter seam: one blank body line, nothing drawn; the
         // block spacing on both sides completes the larger gap.
         BlockKind::ChapterBreak { .. } => metrics::LINE_HEIGHT * base_size,
+        // A page break takes the seam's blank line. On screen a dashed
+        // hairline in the rule color shows where the page ends; the
+        // export draws nothing, the break itself is the paginator's.
+        BlockKind::PageBreak => {
+            let height = metrics::LINE_HEIGHT * base_size;
+            if !cfg.print {
+                let thickness = (1.0 * cfg.zoom).max(1.0);
+                let dash = 8.0 * cfg.zoom;
+                let gap = 6.0 * cfg.zoom;
+                let y = ((height - thickness) / 2.0).round();
+                let end = x_base + avail;
+                let mut x = x_base;
+                while x < end {
+                    let width = dash.min(end - x);
+                    scratch
+                        .rects
+                        .push(DecoRect::fill(x, y, width, thickness, theme.blocks.rule));
+                    x += dash + gap;
+                }
+            }
+            height
+        }
         BlockKind::Rule => {
             let thickness = (1.0 * cfg.zoom).max(1.0);
             scratch.rects.push(DecoRect::fill(
@@ -6779,5 +6806,38 @@ mod tests {
             role_color(&theme, SyntaxRole::Quote),
             theme.syntax.punctuation
         );
+    }
+
+    #[test]
+    fn a_page_break_draws_a_dashed_line_on_screen_only() {
+        let doc = markdown::parse("one\n\n\\newpage\n\ntwo\n");
+        let l = lay_of(&doc);
+        assert!(
+            l.rects.len() >= 8,
+            "a dashed line is a row of short rects, got {}",
+            l.rects.len()
+        );
+        let y = l.rects[0].y;
+        assert!(l.rects.iter().all(|r| (r.y - y).abs() < 0.01), "one row");
+        assert!(
+            l.rects.iter().all(|r| r.height >= 1.0 && r.width < 20.0),
+            "short dashes"
+        );
+        let mut fonts = FontStore::new();
+        let mut media = MediaCache::new(PathBuf::from("."));
+        let cfg = ViewConfig {
+            print: true,
+            ..ViewConfig::default()
+        };
+        let printed = layout(
+            &doc,
+            &Theme::default_dark(),
+            &mut fonts,
+            &mut media,
+            &cfg,
+            800.0,
+        );
+        assert!(printed.rects.is_empty(), "the export draws no dashes");
+        assert_eq!(printed.runs.len(), l.runs.len(), "the text is the same");
     }
 }

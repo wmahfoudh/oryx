@@ -222,14 +222,18 @@ fn block_spans(layout: &LayoutDoc, items: &[Item]) -> HashMap<usize, (usize, usi
     spans
 }
 
-/// Block indices of the chapter-break markers, in order; empty for
-/// everything but books.
+/// Block indices of the forced breaks, in order: a book's chapter seams
+/// and the page breaks a writer asked for. Empty for most documents.
 fn marker_blocks(doc: &Document) -> Vec<usize> {
     doc.blocks
         .iter()
         .enumerate()
         .filter_map(|(index, block)| {
-            matches!(block.kind, BlockKind::ChapterBreak { .. }).then_some(index)
+            matches!(
+                block.kind,
+                BlockKind::ChapterBreak { .. } | BlockKind::PageBreak
+            )
+            .then_some(index)
         })
         .collect()
 }
@@ -932,6 +936,29 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_page_break_forces_a_page_and_adjacent_ones_collapse() {
+        let doc = markdown::parse(
+            "start\n\n<div style=\"page-break-after: always\"></div>\n\nmiddle\n\n\\newpage\n\n\\newpage\n\nend\n\n\\newpage\n",
+        );
+        let l = laid_out(&doc);
+        let g = PageGeometry::new(PageSize::A4, Orientation::Portrait, 11.0);
+        let pages = paginate(&doc, &l, &g);
+        let blocks: Vec<Vec<usize>> = pages
+            .iter()
+            .map(|p| {
+                let mut b: Vec<usize> = l.runs[p.runs.clone()].iter().map(|r| r.block).collect();
+                b.dedup();
+                b
+            })
+            .collect();
+        assert_eq!(
+            blocks,
+            vec![vec![0], vec![2], vec![5]],
+            "one page per stretch, two adjacent breaks make one, a trailing one none"
+        );
     }
 
     #[test]

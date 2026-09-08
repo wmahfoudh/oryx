@@ -4,6 +4,10 @@
 
 A small release from the first two reports on GitHub. The details, by area:
 
+### Page breaks
+
+- A page break in a markdown file ends the page in the PDF export. Write `<div style="page-break-after: always"></div>`, the line most markdown tools honor and GitHub shows as nothing, or `\newpage` alone on a line, the pandoc habit; `\pagebreak` and `\clearpage` work too. On screen the break shows as a dashed line. Two breaks in a row make one new page, and a break at the end adds none. Issue #1.
+
 ### Source view
 
 - The `---` of a rule and the `>` of a quote now read in every theme when a file shows as source (Ctrl+E). They took the color of the drawn line, which is faint on purpose. Quoted text shows in the body color, and bold or italic inside a quote keeps its color. Issue #2.

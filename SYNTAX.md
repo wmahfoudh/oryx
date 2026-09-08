@@ -388,6 +388,20 @@ ___
 ***
 ___
 
+## Page breaks
+
+Either line ends the page in a PDF export. On screen it shows as a dashed line. The first is the HTML most markdown tools honor, and GitHub renders it as nothing; the second is the pandoc habit, `\newpage`, `\pagebreak` or `\clearpage` alone on a line.
+
+```markdown
+<div style="page-break-after: always"></div>
+
+\newpage
+```
+
+<div style="page-break-after: always"></div>
+
+\newpage
+
 ## Embedded HTML
 
 Oryx renders the HTML subset GitHub allows in READMEs. Anything outside it is stripped, keeping the inner text.

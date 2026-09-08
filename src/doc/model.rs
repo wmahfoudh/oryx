@@ -288,6 +288,11 @@ pub enum BlockKind {
     ChapterBreak {
         spine: usize,
     },
+    /// A page break the writer asked for: the PDF export starts a new
+    /// page here, the screen shows a dashed line. Written as an HTML
+    /// block whose style carries a page break, or as `\newpage`,
+    /// `\pagebreak` or `\clearpage` alone on a line.
+    PageBreak,
 }
 
 /// A code block's lines as byte ranges. The ranges index the document

@@ -174,7 +174,7 @@ struct Builder {
     /// the neighbors meet on one space as a browser shows them.
     html_gap: bool,
     /// One entry per open `<p>`/`<div>`, true when it centers its content.
-    html_center: Vec<bool>,
+    html_divs: Vec<HtmlDiv>,
     html_code: u32,
     html_sub: u32,
     html_sup: u32,
@@ -219,6 +219,20 @@ struct HtmlPre {
 }
 
 /// One open HTML list level.
+/// An open `<p>` or `<div>`: whether it centers its content, and
+/// whether a page break follows it (`page-break-after`).
+struct HtmlDiv {
+    centered: bool,
+    break_after: bool,
+}
+
+/// Which side of an element a page break style puts the break on.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BreakSide {
+    Before,
+    After,
+}
+
 struct HtmlList {
     ordered: bool,
     next: u64,
@@ -534,7 +548,7 @@ impl Builder {
             html_block: false,
             html_tail: String::new(),
             html_gap: false,
-            html_center: Vec::new(),
+            html_divs: Vec::new(),
             html_code: 0,
             html_sub: 0,
             html_sup: 0,
@@ -1144,14 +1158,23 @@ impl Builder {
                 self.flush_spans();
                 let centered =
                     html_attr(attrs, "align").is_some_and(|a| a.eq_ignore_ascii_case("center"));
-                self.html_center.push(centered);
+                let side = html_attr(attrs, "style").and_then(|s| page_break_side(&s));
+                if side == Some(BreakSide::Before) {
+                    self.emit(BlockKind::PageBreak);
+                }
+                self.html_divs.push(HtmlDiv {
+                    centered,
+                    break_after: side == Some(BreakSide::After),
+                });
             }
             ("p" | "div", true) => {
                 if self.html_capturing() {
                     return;
                 }
                 self.flush_spans();
-                self.html_center.pop();
+                if self.html_divs.pop().is_some_and(|d| d.break_after) {
+                    self.emit(BlockKind::PageBreak);
+                }
             }
             ("table", false) => {
                 if let Some(t) = self.html_table.as_mut() {
@@ -1616,9 +1639,12 @@ impl Builder {
             return;
         };
         if let Some(caption) = t.caption {
-            self.html_center.push(true);
+            self.html_divs.push(HtmlDiv {
+                centered: true,
+                break_after: false,
+            });
             self.emit(BlockKind::Paragraph { spans: caption });
-            self.html_center.pop();
+            self.html_divs.pop();
         }
         if t.header.is_empty() && t.rows.is_empty() {
             return;
@@ -1766,9 +1792,17 @@ impl Builder {
             });
             return;
         }
+        // A paragraph that is nothing but `\newpage` (or its two
+        // siblings) is the pandoc spelling of a page break.
+        if self.lists.is_empty() && self.html_divs.is_empty() && !self.definition {
+            if let Some(range) = page_command(&self.source, &spans) {
+                self.emit_at(BlockKind::PageBreak, range);
+                return;
+            }
+        }
         // A paragraph that is one plain image and whitespace stays a block
         // image; links, size attributes, or centering keep it inline.
-        if self.lists.is_empty() && self.html_center.is_empty() {
+        if self.lists.is_empty() && self.html_divs.is_empty() {
             let solo = spans
                 .iter()
                 .filter(|s| s.image.is_none())
@@ -1831,11 +1865,17 @@ impl Builder {
                     .flatten()
                     .chain(rows.iter().flatten().flatten()),
             ),
+            BlockKind::PageBreak => trimmed(&self.source, self.current.0..self.current.1),
             _ => self.current.0..self.current.1,
         }
     }
 
     fn emit(&mut self, kind: BlockKind) {
+        let range = self.block_range(&kind);
+        self.emit_at(kind, range);
+    }
+
+    fn emit_at(&mut self, kind: BlockKind, range: Range<usize>) {
         // A summary row belongs to the group enclosing its own; it is
         // the toggle, visible while its group is closed.
         let details = match &kind {
@@ -1845,8 +1885,8 @@ impl Builder {
         self.blocks.push(Block {
             quote_depth: self.quote_depth,
             alert: self.alerts.iter().rev().find_map(|a| *a),
-            range: self.block_range(&kind),
-            centered: self.html_center.iter().any(|&c| c),
+            range,
+            centered: self.html_divs.iter().any(|d| d.centered),
             details,
             kind,
         });
@@ -1896,6 +1936,57 @@ fn html_attr(attrs: &str, name: &str) -> Option<String> {
 }
 
 /// Smallest range covering every nonempty span range.
+/// The page break a `style` attribute asks for, if any: the CSS 2 names
+/// (`page-break-before`, `page-break-after`) with `always`, or the CSS 3
+/// names (`break-before`, `break-after`) with `page`; either value on
+/// either name is accepted, the intent being plain.
+fn page_break_side(style: &str) -> Option<BreakSide> {
+    style.split(';').find_map(|declaration| {
+        let (name, value) = declaration.split_once(':')?;
+        let value = value.trim().to_ascii_lowercase();
+        if value != "always" && value != "page" {
+            return None;
+        }
+        match name.trim().to_ascii_lowercase().as_str() {
+            "page-break-before" | "break-before" => Some(BreakSide::Before),
+            "page-break-after" | "break-after" => Some(BreakSide::After),
+            _ => None,
+        }
+    })
+}
+
+/// The source range of a paragraph that is one plain `\newpage`,
+/// `\pagebreak` or `\clearpage` and nothing else, the pandoc spelling
+/// of a page break; None for any other paragraph.
+fn page_command(source: &str, spans: &[Span]) -> Option<Range<usize>> {
+    let [span] = spans else {
+        return None;
+    };
+    let plain = !span.bold
+        && !span.italic
+        && !span.strike
+        && !span.underline
+        && !span.mark
+        && !span.code
+        && !span.math
+        && span.script == SpanScript::None
+        && span.link.is_none()
+        && span.image.is_none();
+    let command = matches!(
+        span.raw_text().trim(),
+        "\\newpage" | "\\pagebreak" | "\\clearpage"
+    );
+    (plain && command).then(|| trimmed(source, span.range.start as usize..span.range.end as usize))
+}
+
+/// A range shrunk past the whitespace at both ends.
+fn trimmed(source: &str, range: Range<usize>) -> Range<usize> {
+    let text = &source[range.clone()];
+    let start = range.start + (text.len() - text.trim_start().len());
+    let end = range.end - (text.len() - text.trim_end().len());
+    start..end.max(start)
+}
+
 fn extent<'a>(spans: impl Iterator<Item = &'a Span>) -> Range<usize> {
     let mut start = u32::MAX;
     let mut end = 0;
@@ -2662,6 +2753,93 @@ mod tests {
     fn html_hr_is_a_rule() {
         let d = parse("before\n\n<hr>\n\nafter");
         assert!(d.blocks.iter().any(|b| matches!(b.kind, BlockKind::Rule)));
+    }
+
+    #[test]
+    fn a_page_break_div_parses_to_the_block() {
+        for src in [
+            "<div style=\"page-break-after: always\"></div>",
+            "<div style=\"page-break-before: always;\"></div>",
+            "<div style=\"break-after: page\"></div>",
+            "<p style=\"break-before: page\"></p>",
+            "<div style=\"PAGE-BREAK-AFTER: Always\"></div>",
+            "<div style='margin: 0; page-break-after:always'></div>",
+        ] {
+            let d = parse(format!("one\n\n{src}\n\ntwo\n"));
+            let kinds: Vec<_> = d.blocks.iter().map(|b| &b.kind).collect();
+            assert_eq!(d.blocks.len(), 3, "{src}: {kinds:?}");
+            assert!(
+                matches!(d.blocks[1].kind, BlockKind::PageBreak),
+                "{src}: {kinds:?}"
+            );
+            assert_eq!(
+                &d.source[d.blocks[1].range.clone()],
+                src,
+                "{src}: the block's source"
+            );
+        }
+    }
+
+    #[test]
+    fn a_break_after_a_div_with_content_follows_the_content() {
+        let d = parse("<div style=\"page-break-after: always\">inside</div>\n\nafter\n");
+        let kinds: Vec<_> = d.blocks.iter().map(|b| &b.kind).collect();
+        assert_eq!(d.blocks.len(), 3, "{kinds:?}");
+        assert!(
+            matches!(d.blocks[0].kind, BlockKind::Paragraph { .. }),
+            "{kinds:?}"
+        );
+        assert!(
+            matches!(d.blocks[1].kind, BlockKind::PageBreak),
+            "{kinds:?}"
+        );
+        assert!(
+            matches!(d.blocks[2].kind, BlockKind::Paragraph { .. }),
+            "{kinds:?}"
+        );
+        let d = parse("<div style=\"page-break-before: always\">inside</div>\n");
+        assert!(matches!(d.blocks[0].kind, BlockKind::PageBreak));
+        assert!(matches!(d.blocks[1].kind, BlockKind::Paragraph { .. }));
+    }
+
+    #[test]
+    fn a_div_with_another_style_stays_a_div() {
+        let d = parse("<div style=\"color: red; page-break-inside: avoid\">text</div>\n");
+        assert_eq!(d.blocks.len(), 1);
+        assert!(matches!(d.blocks[0].kind, BlockKind::Paragraph { .. }));
+    }
+
+    #[test]
+    fn a_bare_tex_page_command_parses_to_the_block() {
+        for cmd in ["\\newpage", "\\pagebreak", "\\clearpage", "  \\newpage  "] {
+            let d = parse(format!("one\n\n{cmd}\n\ntwo\n"));
+            let kinds: Vec<_> = d.blocks.iter().map(|b| &b.kind).collect();
+            assert_eq!(d.blocks.len(), 3, "{cmd:?}: {kinds:?}");
+            assert!(
+                matches!(d.blocks[1].kind, BlockKind::PageBreak),
+                "{cmd:?}: {kinds:?}"
+            );
+            assert_eq!(
+                &d.source[d.blocks[1].range.clone()],
+                cmd.trim(),
+                "{cmd:?}: the block's source"
+            );
+        }
+        let d = parse("say \\newpage here\n");
+        assert!(
+            matches!(d.blocks[0].kind, BlockKind::Paragraph { .. }),
+            "inside a sentence it is text"
+        );
+        let d = parse("$$\n\\newpage\n$$\n");
+        assert!(
+            matches!(d.blocks[0].kind, BlockKind::MathBlock { .. }),
+            "inside math it is math"
+        );
+        let d = parse("- \\newpage\n");
+        assert!(
+            matches!(d.blocks[0].kind, BlockKind::ListItem { .. }),
+            "in a list item it is text"
+        );
     }
 
     #[test]

@@ -35,6 +35,7 @@ fn export_book_with(book: &oryx::doc::epub::Book, media: &mut MediaCache) -> Vec
         body_size: 11.0,
         code_size: 9.0,
         zoom: 1.0,
+        print: true,
         ..ViewConfig::default()
     };
     let theme = Theme::default_dark();
@@ -142,6 +143,34 @@ fn adjacent_and_trailing_chapter_breaks_collapse() {
     );
 }
 
+#[test]
+fn markdown_page_breaks_start_fresh_pages() {
+    let doc = markdown::parse(
+        "Alpha text.\n\n<div style=\"page-break-after: always\"></div>\n\nBeta text.\n\n\\newpage\n\nGamma text.\n",
+    );
+    let pdf = Pdf::load_mem(&export_to_bytes(&doc, PageSize::A4)).unwrap();
+    assert_eq!(pdf.get_pages().len(), 3, "one page per stretch");
+    let first = pdf.extract_text(&[1]).unwrap();
+    assert!(
+        first.contains("Alpha") && !first.contains("Beta"),
+        "{first}"
+    );
+    let second = pdf.extract_text(&[2]).unwrap();
+    assert!(
+        second.contains("Beta") && !second.contains("Gamma"),
+        "{second}"
+    );
+    let third = pdf.extract_text(&[3]).unwrap();
+    assert!(third.contains("Gamma"), "{third}");
+    // The one fill on a page is the background; the dashed line of the
+    // screen, a row of filled paths, stays off the paper.
+    for (_, id) in pdf.get_pages() {
+        let content = String::from_utf8_lossy(&pdf.get_page_content(id)).to_string();
+        let fills = content.matches("\nf\n").count();
+        assert_eq!(fills, 1, "one fill, the background: {content}");
+    }
+}
+
 /// Ledger probe: whole-book export wall time. Run with
 /// ORYX_BOOK=<path> cargo test --release --test export book_export_probe -- --ignored --nocapture
 /// Writes the PDF of a markdown file for a look at the pages, the way a
@@ -236,6 +265,7 @@ fn export_cfg(
         body_size: 11.0,
         code_size: 9.0,
         zoom: 1.0,
+        print: true,
         ..ViewConfig::default()
     };
     if let Some(family) = body_family {
