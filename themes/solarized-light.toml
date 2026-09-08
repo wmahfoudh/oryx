@@ -44,7 +44,7 @@ type = "#B58900"
 comment = "#93A1A1"
 operator = "#859900"
 variable = "#657B83"
-punctuation = "#839496"
+punctuation = "#657B83"
 
 [alerts]
 note = "#268BD2"

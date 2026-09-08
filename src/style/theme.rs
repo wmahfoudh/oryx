@@ -150,6 +150,25 @@ impl<'de> Deserialize<'de> for Rgba {
     }
 }
 
+/// WCAG 2 contrast ratio between two opaque colors, 1 to 21: relative
+/// luminance from linearized sRGB, the lighter plus 0.05 over the darker
+/// plus 0.05. The floor for text and interface marks is 3, for body text 4.5.
+pub fn contrast(a: Rgba, b: Rgba) -> f32 {
+    fn luminance(c: Rgba) -> f32 {
+        fn channel(v: u8) -> f32 {
+            let v = v as f32 / 255.0;
+            if v <= 0.03928 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        }
+        0.2126 * channel(c.r) + 0.7152 * channel(c.g) + 0.0722 * channel(c.b)
+    }
+    let (la, lb) = (luminance(a), luminance(b));
+    (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
+}
+
 /// Accepts #RGB, #RRGGBB, and #RRGGBBAA.
 pub fn parse_hex(s: &str) -> Option<Rgba> {
     let hex = s.strip_prefix('#')?;
@@ -879,6 +898,30 @@ selection_bg = "#33445566"
         assert!(missing.contains(&"surface.foreground".to_string()));
         assert!(missing.contains(&"syntax.type_".to_string()));
         assert!(!missing.contains(&"surface.background".to_string()));
+    }
+
+    #[test]
+    fn shipped_punctuation_reads_on_its_background() {
+        // The source view draws the markers of rules and quotes in the
+        // punctuation role, so it must read as text: WCAG's floor for
+        // text and marks is 3 to 1 against the background.
+        let themes = Path::new(env!("CARGO_MANIFEST_DIR")).join("themes");
+        for entry in scan(&themes) {
+            let theme = load_file(&entry.path).unwrap();
+            let ratio = contrast(theme.syntax.punctuation, theme.surface.background);
+            assert!(
+                ratio >= 3.0,
+                "{}: punctuation reads {ratio:.2} to 1 on its background",
+                entry.name
+            );
+        }
+    }
+
+    #[test]
+    fn contrast_follows_wcag() {
+        assert!((contrast(hex("#000000"), hex("#FFFFFF")) - 21.0).abs() < 0.01);
+        assert!((contrast(hex("#FFFFFF"), hex("#FFFFFF")) - 1.0).abs() < 0.01);
+        assert!((contrast(hex("#777777"), hex("#FFFFFF")) - 4.48).abs() < 0.01);
     }
 
     #[test]

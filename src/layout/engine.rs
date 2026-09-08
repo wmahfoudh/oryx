@@ -6312,6 +6312,9 @@ fn role_color(theme: &Theme, role: SyntaxRole) -> Rgba {
         SyntaxRole::Plain => theme.surface.foreground,
         // A markdown source is drawn in the colors its own rendering
         // uses, so the file on screen and the page it becomes agree.
+        // The rule's dashes and the quote's `>` are the exception: their
+        // rendering is a line in a color chosen for a line, too faint
+        // for text, so they take the punctuation color instead.
         SyntaxRole::Heading(level) => {
             let h = &theme.headings;
             match level {
@@ -6327,8 +6330,7 @@ fn role_color(theme: &Theme, role: SyntaxRole) -> Rgba {
         SyntaxRole::Italic => theme.text.italic,
         SyntaxRole::InlineCode => theme.text.inline_code,
         SyntaxRole::Link => theme.text.link,
-        SyntaxRole::Quote => theme.blocks.quote_bar,
-        SyntaxRole::Rule => theme.blocks.rule,
+        SyntaxRole::Quote | SyntaxRole::Rule => theme.syntax.punctuation,
     }
 }
 
@@ -6764,5 +6766,18 @@ mod tests {
                 "{text} asks for the weight the family has"
             );
         }
+    }
+
+    #[test]
+    fn rule_and_quote_markers_take_the_punctuation_color() {
+        let theme = Theme::default_dark();
+        assert_eq!(
+            role_color(&theme, SyntaxRole::Rule),
+            theme.syntax.punctuation
+        );
+        assert_eq!(
+            role_color(&theme, SyntaxRole::Quote),
+            theme.syntax.punctuation
+        );
     }
 }

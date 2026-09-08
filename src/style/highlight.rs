@@ -696,8 +696,13 @@ fn markdown_role(stack: &ScopeStack, hashes: u8) -> SyntaxRole {
             SyntaxRole::InlineCode
         } else if name.starts_with("meta.link") || name.starts_with("markup.underline.link") {
             SyntaxRole::Link
-        } else if name.starts_with("markup.quote") {
+        } else if name.starts_with("punctuation.definition.blockquote") {
             SyntaxRole::Quote
+        } else if name.starts_with("markup.quote") {
+            // The quoted text reads as body text, as it renders; only
+            // the `>` wears the role, and marks inside the quote keep
+            // their own.
+            continue;
         } else if name.starts_with("meta.separator") {
             SyntaxRole::Rule
         } else {
@@ -850,7 +855,18 @@ mod tests {
         whole_construct("Text *slanted* here.", "*slanted*", SyntaxRole::Italic);
         whole_construct("Text `code` here.", "`code`", SyntaxRole::InlineCode);
         whole_construct("# Title", "# Title", SyntaxRole::Heading(1));
-        whole_construct("> quoted line", "> quoted line", SyntaxRole::Quote);
+        whole_construct("> quoted line", ">", SyntaxRole::Quote);
+        whole_construct("> quoted line", "quoted line", SyntaxRole::Plain);
+        let nested = spans("", &lines(&["> > deeper"]), Some("md"));
+        for pos in [0, 2] {
+            assert_eq!(
+                role_at(&nested[0], pos),
+                SyntaxRole::Quote,
+                "nested marker at {pos}"
+            );
+        }
+        assert_eq!(role_at(&nested[0], 4), SyntaxRole::Plain, "nested text");
+        whole_construct("> **bold** here", "**bold**", SyntaxRole::Bold);
         whole_construct("---", "---", SyntaxRole::Rule);
         whole_construct(
             "A [label](https://example.com) here.",
