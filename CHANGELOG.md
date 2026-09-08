@@ -2,16 +2,18 @@
 
 ## v1.1.1
 
-A small release from the first two reports on GitHub. The details, by area:
+A small release for the first two reports from a user, issues #1 and #2 on GitHub. The details, by area:
 
 ### Page breaks
 
-- A page break in a markdown file ends the page in the PDF export. Write `<div style="page-break-after: always"></div>`, the line most markdown tools honor and GitHub shows as nothing, or `\newpage` alone on a line, the pandoc habit; `\pagebreak` and `\clearpage` work too. On screen the break shows as a dashed line. Two breaks in a row make one new page, and a break at the end adds none. Issue #1.
+- You can now force a page break in the PDF. Write `<div style="page-break-after: always"></div>` or `\newpage` on a line of its own. The PDF starts a new page there, and the window shows a dashed line. `\pagebreak` and `\clearpage` work too. SYNTAX.md lists every spelling.
+- Two breaks in a row make one new page. A break at the end of the file adds no empty page.
 
 ### Source view
 
-- The `---` of a rule and the `>` of a quote now read in every theme when a file shows as source (Ctrl+E). They took the color of the drawn line, which is faint on purpose. Quoted text shows in the body color, and bold or italic inside a quote keeps its color. Issue #2.
-- Code comments read in every theme. Eleven themes had a comment color under 3 to 1 on the page, the floor for text; each moved one step along its own hue. Inkstone and Solarized Light got the same for their punctuation. A test now holds every shipped theme to the floor.
+- The `---` of a rule and the `>` of a quote were nearly invisible in most themes when a file showed as source (Ctrl+E). They took the color of the thin line they draw. They now use the punctuation color, and quoted text shows in the normal text color.
+- Bold and italic inside a quote keep their colors in the source view.
+- Code comments were too faint to read in eleven themes. Each comment color moved one step darker or lighter, and a test now keeps every theme readable.
 
 ## v1.1.0
 
