@@ -390,17 +390,49 @@ ___
 
 ## Page breaks
 
-Either line ends the page in a PDF export. On screen it shows as a dashed line. The first is the HTML most markdown tools honor, and GitHub renders it as nothing; the second is the pandoc habit, `\newpage`, `\pagebreak` or `\clearpage` alone on a line.
+A page break ends the page in a PDF export. On screen it shows as a dashed line. Seven spellings work, each alone on its line: the HTML most markdown tools honor, with the CSS 2 names (`page-break-after`, `page-break-before` with `always`) or the CSS 3 names (`break-after`, `break-before` with `page`), and the pandoc habit, three TeX commands. GitHub shows the HTML as nothing and the commands as text.
 
 ```markdown
 <div style="page-break-after: always"></div>
-
+<div style="page-break-before: always"></div>
+<div style="break-after: page"></div>
+<div style="break-before: page"></div>
 \newpage
+\pagebreak
+\clearpage
 ```
+
+Written in a document, then rendered:
+
+```markdown
+The first stretch.
 
 <div style="page-break-after: always"></div>
 
+The second stretch.
+
 \newpage
+
+The third stretch.
+```
+
+The first stretch.
+
+<div style="page-break-after: always"></div>
+
+The second stretch.
+
+\newpage
+
+The third stretch.
+
+The rules:
+
+- A `<p>` works in place of the `<div>`. Capitals, a trailing semicolon and other declarations in the same `style` are fine.
+- `after` and `before` differ only when the tag holds text: `<div style="page-break-after: always">Last words</div>` breaks after the words, `before` breaks before them. An empty tag breaks either way.
+- A command stands alone in its paragraph, with a blank line above and below. Inside a sentence, a list item or a math block it stays text, so `\newpage` between `$$` fences is TeX, not a break.
+- Two breaks in a row make one new page. A break at the end of the file adds no empty page.
+- A book's chapters start on new pages on their own.
 
 ## Embedded HTML
 
