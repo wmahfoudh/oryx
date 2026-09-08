@@ -14,13 +14,13 @@
 
 ## Philosophy
 
-Oryx started as a personal project. I work with markdown files and did not find a (very) fast tool that could render them beautifully on the desktop without a browser or an Electron app and without a third party watching my personal notes. Exporting to (a nice-looking) PDF would have been a plus. That was the first version of the functional specs. Oryx has grown a lot since: it became a universal reader and a light editor, and it stayed fast and beautiful.
+Oryx started as a personal project. I work with markdown files and did not find a (very) fast tool that could render them beautifully on the desktop without a browser or an Electron app and without a third party watching my personal notes. Exporting to (a nice-looking) PDF would have been a plus. That was the first version of the functional specs. Oryx has grown a lot since: it became a universal reader and editor, and it stayed fast and beautiful (See [CHANGELOG.md](CHANGELOG.md) for details).
 
-Most markdown editors start by showing the code and then trying to render it. I think the fact that Oryx was designed to be a renderer and not an editor made it something different; after all, nobody develops a browser to start by showing raw HTML. Afterwards, editing and reading ebooks came along the way; it was a consequence. Some ideas like rendering PDF files were tested and rejected. PDF reading would have grown the binary by 5.5 MB and would not have added anything better to the community. Features that will remain within `Fast & Beautiful` could be added in the future. Others like git or agentic work integration probably won't. Hopefully, Oryx will remain:  
+Most markdown editors start by showing the code and then trying to render it. I think the fact that Oryx started as a renderer and not an editor made it something different; after all, nobody develops a browser to start by showing raw HTML. Afterwards, editing and reading ebooks came along the way; it was a consequence. Some ideas like rendering PDF files were tested and rejected for now. PDF reading would have grown the binary by 5.5 MB and would not have added anything better to the community. Features that will remain within `Fast & Beautiful` could be added in the future. Others like git or agentic work integration probably won't. Hopefully, Oryx will remain:  
 
 - **Instant**: A document displays in under 100 ms from cold, even an 8 MB markdown file or a 200 MB ebook.
 - **Light**: Memory stays flat however you scroll, whatever the file size. The same speed on a new laptop or an old machine with no graphics card (like mine).
-- **Distraction-free**: No panes, no toolbars, no menus. `F1` lists the shortcuts, `Esc` closes whatever is open.
+- **Distraction-free**: Keyboard centric, no panes, no toolbars, no menus. `F1` lists the shortcuts, `Esc` closes whatever is open.
 - **Beautiful**: 30+ themes, with 51 color roles each, for reading and for PDF export alike.
 - **Self-contained**: One binary and a folder of themes and examples. No browser engine, no runtime, no GPU requirement and no need to download themes or syntax highlighting stuff. No account and no telemetry either; what Oryx keeps on your machine is listed in [PRIVACY.md](PRIVACY.md).
 - **Opinionated**:
@@ -31,7 +31,7 @@ Most markdown editors start by showing the code and then trying to render it. I 
 
 ## Oryx Scope
 
-Oryx reads CommonMark, the GitHub Flavored Markdown extensions (tables, task lists, strikethrough, footnotes, alerts and math) and the extended syntax listed by the Markdown Guide: heading IDs, definition lists, subscript and superscript, highlight and abbreviations. It also renders the HTML subset GitHub allows in READMEs. [SYNTAX.md](SYNTAX.md) shows every construct twice, as written and as rendered. The [examples](examples/) folder is installed with Oryx and shows the syntax on real documents.
+Oryx reads CommonMark, the GitHub Flavored Markdown extensions (tables, task lists, strikethrough, footnotes, alerts and math) and the extended syntax listed by the Markdown Guide: heading IDs, definition lists, subscript and superscript, highlight and abbreviations. It also renders the HTML subset GitHub allows in READMEs. [SYNTAX.md](SYNTAX.md) shows every construct twice, as written and as rendered. Ensure you open it with Oryx because some constructs are not supported by GitHub. The [examples](examples/) folder is installed with Oryx and shows the syntax on real documents.
 
 ### Markdown
 
@@ -110,6 +110,8 @@ Comic book contents are analyzed and files processed accordingly, not by name, s
 </p>
 
 ## Editing
+
+With version 1.1.0, Oryx became an complete editor focused on keyboard workflow, but please note that it is not meant to compete with `vscode` or `zed`. Oryx is a good daily driver for quick code editing, note taking and markdown production, extremely fast, simple and distraction free.
 
 Press `Ctrl+E` to enter edit mode, with a caret and the usual keys; `Escape` (or `Ctrl+E` again) returns to reading. The window title shows `editing` and a thin line in the theme's selection color runs along the top of the page, so the mode is always visible.
 
@@ -279,8 +281,8 @@ oryx --help             # list these options
 | `Ctrl+J` | Justify prose (markdown and books) |
 | `Ctrl+D` | Reading direction: automatic, right to left, left to right |
 | **Export** | |
-| `Ctrl+P` | Export to PDF |
-| `Ctrl+Shift+P` | Choose export settings, then export |
+| `Ctrl+P` | Quick export to PDF |
+| `Ctrl+Shift+P` | Define export settings, then export |
 | **Help** | |
 | `F1` | Open the help page, and close it |
 | `Escape` | Close overlay, clear the selection, leave editing, quit |
