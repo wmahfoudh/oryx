@@ -7,7 +7,7 @@ A small release from the first two reports on GitHub. The details, by area:
 ### Source view
 
 - The `---` of a rule and the `>` of a quote now read in every theme when a file shows as source (Ctrl+E). They took the color of the drawn line, which is faint on purpose. Quoted text shows in the body color, and bold or italic inside a quote keeps its color. Issue #2.
-- Inkstone and Solarized Light: the punctuation color is a touch darker, so it reads at 3 to 1 on the page, the floor for text. A test now holds every shipped theme to it.
+- Inkstone and Solarized Light: the punctuation color is a touch darker, so it reads at 3 to 1 on the page, the floor for text. A test now holds every shipped theme to it. The comment color of Inkstone, Everforest Light and Solarized Light moved the same way.
 
 ## v1.1.0
 
