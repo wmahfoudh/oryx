@@ -1,0 +1,32 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.12.0.schema.json
+PackageIdentifier: Steerania.Oryx
+PackageVersion: "1.1.1"
+InstallerType: wix
+Scope: machine
+InstallModes:
+- interactive
+- silent
+- silentWithProgress
+UpgradeBehavior: install
+FileExtensions:
+- md
+- markdown
+- txt
+- epub
+- fb2
+- fbz
+- mobi
+- azw3
+- azw
+- cbz
+- cbr
+ReleaseDate: 2026-09-09
+Installers:
+- Architecture: x64
+  InstallerUrl: https://github.com/wmahfoudh/oryx/releases/download/v1.1.1/oryx-1.1.1-windows-x86_64.msi
+  InstallerSha256: 64171E5C9FF69B6DF9BB2A8202226B42715184AD36CC4295DF92907110D02E48
+  ProductCode: '{25A77C4D-51AC-4805-AF73-2441FDA9A936}'
+  AppsAndFeaturesEntries:
+  - UpgradeCode: '{8EA2EE23-91F8-46EC-9310-6DFBF39A04C9}'
+ManifestType: installer
+ManifestVersion: 1.12.0
