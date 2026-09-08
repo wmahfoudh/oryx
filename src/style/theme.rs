@@ -901,19 +901,25 @@ selection_bg = "#33445566"
     }
 
     #[test]
-    fn shipped_punctuation_reads_on_its_background() {
+    fn shipped_punctuation_and_comments_read_on_their_background() {
         // The source view draws the markers of rules and quotes in the
-        // punctuation role, so it must read as text: WCAG's floor for
-        // text and marks is 3 to 1 against the background.
+        // punctuation role, and a comment is text like any other, so
+        // both must read: WCAG's floor for text and marks is 3 to 1
+        // against the background.
         let themes = Path::new(env!("CARGO_MANIFEST_DIR")).join("themes");
         for entry in scan(&themes) {
             let theme = load_file(&entry.path).unwrap();
-            let ratio = contrast(theme.syntax.punctuation, theme.surface.background);
-            assert!(
-                ratio >= 3.0,
-                "{}: punctuation reads {ratio:.2} to 1 on its background",
-                entry.name
-            );
+            for (role, color) in [
+                ("punctuation", theme.syntax.punctuation),
+                ("comment", theme.syntax.comment),
+            ] {
+                let ratio = contrast(color, theme.surface.background);
+                assert!(
+                    ratio >= 3.0,
+                    "{}: {role} reads {ratio:.2} to 1 on its background",
+                    entry.name
+                );
+            }
         }
     }
 
