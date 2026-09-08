@@ -402,7 +402,7 @@ A page break ends the page in a PDF export. On screen it shows as a dashed line.
 \clearpage
 ```
 
-Written in a document, then rendered:
+Written in a document, it should look like this:
 
 ```markdown
 The first stretch.
@@ -415,16 +415,6 @@ The second stretch.
 
 The third stretch.
 ```
-
-The first stretch.
-
-<div style="page-break-after: always"></div>
-
-The second stretch.
-
-\newpage
-
-The third stretch.
 
 The rules:
 

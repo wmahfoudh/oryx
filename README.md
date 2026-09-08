@@ -168,7 +168,7 @@ Ten themes are original designs: `oryx-light` and its dark twin `oryx-dark`, `or
   <img src="screenshots/pdf-export.png" alt="Oryx export settings">
 </p>
 
-`Ctrl+P` exports the document using the configured export settings. After setting your preferences, this is usually the way to go. Markdown headings are converted to PDF outlines, and the fonts are embedded. Emoji render in the PDF as images. A book exports with each chapter starting on a new page, and its table of contents becomes the PDF outline. To force a page break in a markdown file, write `<div style="page-break-after: always"></div>` or `\newpage` on a line of its own. The PDF starts a new page there, and the screen shows a dashed line. [SYNTAX.md](SYNTAX.md) lists every spelling.
+`Ctrl+P` exports the document using the configured export settings. After setting your preferences, this is usually the way to go. Markdown headings are converted to PDF outlines, and the fonts are embedded. Emoji render in the PDF as images. A book exports with each chapter starting on a new page, and its table of contents becomes the PDF outline. To force a page break in a markdown file, write `<div style="page-break-after: always"></div>` or `\newpage` on a separate line. The PDF starts a new page there, and the screen shows a dashed line. [SYNTAX.md](SYNTAX.md) shows more ways of forcing a page break.
 
 **During export, Oryx tries to avoid that**:
 
