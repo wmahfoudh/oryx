@@ -1,5 +1,7 @@
 # Changelog
 
+## v1.1.1
+
 ## v1.1.0
 
 This release is about the editor and the markdown it reads. Added the small tricks a real editor has, a quick note on Ctrl+M, search fields that behave like text boxes, a new look for the sidebar and for the unsaved changes dialog, and the extended markdown syntax, so every construct of the Markdown Guide's test file renders. The details, by area:
