@@ -135,11 +135,20 @@ pub fn strip(
     let mut pixmap = Pixmap::new(width, height)?;
     pixmap.fill(tiny_skia::Color::from_rgba8(paper.r, paper.g, paper.b, 255));
     let size = SCALE * layout.code_size;
-    let digits = shaped(fonts, &(line + 1).to_string(), &layout.code_family, size);
+    let mut digits = shaped(fonts, &(line + 1).to_string(), &layout.code_family, size);
+    let (digits_w, own_baseline) = line_metrics(&digits);
     let right = seat.x - GAP * size;
+    let origin_y = seat.y + text_baseline(fonts, layout, seat.height) - own_baseline - y;
     let (pad, box_h) = (BOX_PAD * size, (BOX_HEIGHT * size).min(height as f32));
-    let left = right - line_metrics(&digits).0 - pad;
-    let top = (seat.y - y) + (seat.height - box_h) / 2.0;
+    // The box is centered on the digits' ink, not on the row: digits
+    // stand on the baseline with nothing under it, so the row's middle
+    // lies below theirs, by more as the size grows.
+    let middle = ink_rows(fonts, &mut digits)
+        .map_or((seat.y - y) + seat.height / 2.0, |(first, last)| {
+            origin_y.trunc() + (first + last + 1) as f32 / 2.0
+        });
+    let top = (middle - box_h / 2.0).clamp(0.0, height as f32 - box_h);
+    let left = right - digits_w - pad;
     if let Some(path) = round_rect(left, top, right + pad - left, box_h, BOX_RADIUS * size) {
         let mut fill = tiny_skia::Paint::default();
         fill.set_color_rgba8(ink.r, ink.g, ink.b, 255);
@@ -152,8 +161,14 @@ pub fn strip(
             None,
         );
     }
-    let baseline = text_baseline(fonts, layout, seat.height);
-    number(&mut pixmap, fonts, layout, seat, line, paper, baseline, y);
+    blend_buffer(
+        &mut pixmap,
+        fonts,
+        &mut digits,
+        Color::rgba(paper.r, paper.g, paper.b, paper.a),
+        right - digits_w,
+        origin_y,
+    );
     let pixels = pixmap
         .data()
         .chunks_exact(4)
@@ -176,6 +191,24 @@ fn text_baseline(fonts: &mut FontStore, layout: &LayoutDoc, row_height: f32) -> 
     );
     let buffer = with_text(fonts, buffer, "0", &layout.code_family);
     line_metrics(&buffer).1
+}
+
+/// The first and last pixel rows a shaped buffer's glyphs cover, counted
+/// from the buffer's origin; None for a buffer with no ink.
+fn ink_rows(fonts: &mut FontStore, buffer: &mut Buffer) -> Option<(i32, i32)> {
+    let mut rows: Option<(i32, i32)> = None;
+    buffer.draw(
+        &mut fonts.font_system,
+        &mut fonts.swash,
+        Color::rgb(0xFF, 0xFF, 0xFF),
+        |_, y, _, h, c| {
+            if c.a() > 0 {
+                let (first, last) = (y, y + h as i32 - 1);
+                rows = Some(rows.map_or((first, last), |(f, l)| (f.min(first), l.max(last))));
+            }
+        },
+    );
+    rows
 }
 
 /// Paints the number of line `line`, seated at `seat`, right-aligned
@@ -517,6 +550,48 @@ mod tests {
             digits.1.abs_diff(right) <= 1,
             "right edge {digits:?} against {right}"
         );
+    }
+
+    #[test]
+    fn the_digits_stand_in_the_middle_of_their_box() {
+        let doc = load::code_document(Some("rust"), "let a = 1;\nlet b = 2;\nlet c = 3;\n");
+        let mut fonts = FontStore::new();
+        let theme = Theme::default_dark();
+        let (page, ink) = (paper(&doc, &theme), theme.syntax.punctuation);
+        for zoom in [1.0, 1.25, 1.5, 2.0] {
+            // The margin the app makes for the digits at this zoom.
+            let base = ViewConfig {
+                zoom,
+                ..ViewConfig::default()
+            };
+            let (family, size) = crate::layout::line_face(&doc, &base);
+            let family = family.to_string();
+            let cfg = ViewConfig {
+                gutter: reserve(&mut fonts, &family, size, last_number(&doc)),
+                ..base
+            };
+            let lay = lay(&doc, &cfg, &mut fonts);
+            let numbered = painted(&doc, &lay, &mut fonts, true);
+            let strip = strip(&mut fonts, &lay, &doc, 0, 1, page, ink).expect("the line is placed");
+            let (left, right) = band_number_edges(&numbered, packed(page), &strip);
+            let at = |x: usize, row: usize| strip.pixels[row * strip.width as usize + x];
+            // The box's solid rows, read in its padding, its soft edges
+            // left out; the digits' rows, the ones where the number's
+            // columns are not the box.
+            let boxed: Vec<usize> = (0..strip.height as usize)
+                .filter(|&row| at(left - 2, row) == packed(ink))
+                .collect();
+            let (top, bottom) = (boxed[0], *boxed.last().unwrap());
+            let digits: Vec<usize> = (top..=bottom)
+                .filter(|&row| (left..=right).any(|x| at(x, row) != packed(ink)))
+                .collect();
+            let above = digits[0] - top;
+            let below = bottom - digits.last().unwrap();
+            assert!(
+                above.abs_diff(below) <= 1,
+                "zoom {zoom}: {above} rows above the digits, {below} below"
+            );
+        }
     }
 
     #[test]
