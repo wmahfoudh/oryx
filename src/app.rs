@@ -7577,7 +7577,7 @@ impl App {
                     0,
                     line,
                     paint::paper(&self.document, &self.theme),
-                    self.theme.surface.foreground,
+                    self.theme.syntax.punctuation,
                 )
             });
             if let Some(strip) = strip {

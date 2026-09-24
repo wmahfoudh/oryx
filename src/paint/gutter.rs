@@ -97,8 +97,9 @@ pub(crate) fn paint(
 /// One line's stretch of the margin, painted apart from the band: the
 /// page's color, and the line's number in the page's color on a box of
 /// `ink`. The editor lays it over the band on the caret's line, so the
-/// caret's number is found at a glance; the text's color on the page's
-/// is the pair every theme is made to be read in, dark or light.
+/// caret's number is found at a glance. The editor's ink is the theme's
+/// punctuation color: a mid-tone, quieter than the text, whose digits
+/// read at least as well as the other numbers in the comment color.
 pub struct Strip {
     /// Packed as the band's pixels are.
     pub pixels: Vec<u32>,
@@ -482,7 +483,7 @@ mod tests {
         let mut fonts = FontStore::new();
         let lay = lay(&doc, &ViewConfig::default(), &mut fonts);
         let theme = Theme::default_dark();
-        let (page, ink) = (paper(&doc, &theme), theme.surface.foreground);
+        let (page, ink) = (paper(&doc, &theme), theme.syntax.punctuation);
         let numbered = painted(&doc, &lay, &mut fonts, true);
         let strip = strip(&mut fonts, &lay, &doc, 0, 1, page, ink).expect("the line is placed");
         let seat = lay.code_line_seat(0, 1).unwrap();
@@ -524,7 +525,7 @@ mod tests {
         let mut fonts = FontStore::new();
         let lay = lay(&doc, &ViewConfig::default(), &mut fonts);
         let theme = Theme::default_dark();
-        let (page, ink) = (paper(&doc, &theme), theme.surface.foreground);
+        let (page, ink) = (paper(&doc, &theme), theme.syntax.punctuation);
         let numbered = painted(&doc, &lay, &mut fonts, true);
         let strip = strip(&mut fonts, &lay, &doc, 0, 1, page, ink).expect("the line is placed");
         let (left, right) = band_number_edges(&numbered, packed(page), &strip);
