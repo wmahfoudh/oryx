@@ -630,6 +630,17 @@ impl Place {
     fn top(offset: usize) -> Place {
         Place { offset, below: 0.0 }
     }
+
+    /// A jump to a line: the line stands in the middle of the view,
+    /// with as much of the file above it as below. The scroll's clamp
+    /// keeps a line near the file's start or end as close to the
+    /// middle as the file allows.
+    fn centered(offset: usize, view_h: f32, row_h: f32) -> Place {
+        Place {
+            offset,
+            below: ((view_h - row_h) / 2.0).max(0.0),
+        }
+    }
 }
 
 /// The rendered page set aside while its source is edited. A return
@@ -1722,11 +1733,11 @@ impl App {
     }
 
     /// Puts the row holding the place's offset at its height in the
-    /// editor: at the top the way a jump lands, or where a crossing
-    /// found the line on the page, never the way a typed caret is kept
-    /// in view. A placed row answers exactly; past the placed height
-    /// the block table answers by line index, which is what a source
-    /// view is indexed by.
+    /// editor: at the top the way an outline jump lands, in the middle
+    /// for a jump to a line, or where a crossing found the line on the
+    /// page, never the way a typed caret is kept in view. A placed row
+    /// answers exactly; past the placed height the block table answers
+    /// by line index, which is what a source view is indexed by.
     fn seat_editor_on(&mut self, place: Place) {
         // A row the block table knows may still lie below the height the
         // pass has placed; scrolling now would stop short, so the target
@@ -4149,9 +4160,9 @@ impl App {
 
     /// Goes to a line of the open file. In the editor the caret lands
     /// on the line, at the column when one was given, and the row comes
-    /// to the top the way every jump lands. While reading, the row of a
-    /// code or text file comes to the top, or the block of a rendered
-    /// page that holds the line; the place left is kept for Back.
+    /// to the middle of the view. While reading, the row of a code or
+    /// text file comes to the middle, or the block of a rendered page
+    /// that holds the line; the place left is kept for Back.
     fn go_to(&mut self, target: goto::Target) {
         if !self.has_lines() {
             return;
@@ -4187,12 +4198,16 @@ impl App {
                 if folded {
                     self.restart_layout();
                 }
-                self.pending_offset = Some(Place::top(line_end));
+                self.pending_offset = Some(Place::centered(
+                    line_end,
+                    self.viewport_h(),
+                    self.line_step(),
+                ));
                 self.request_redraw();
                 return;
             }
         }
-        self.seat_editor_on(Place::top(offset));
+        self.seat_editor_on(Place::centered(offset, self.viewport_h(), self.line_step()));
         self.request_redraw();
     }
 
@@ -8385,6 +8400,26 @@ impl ApplicationHandler for App {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_jump_to_a_line_stands_it_in_the_middle() {
+        let place = super::Place::centered(7, 600.0, 20.0);
+        assert_eq!(
+            place,
+            super::Place {
+                offset: 7,
+                below: 290.0
+            }
+        );
+        let scroll = super::caret::seated(1000.0, place.below);
+        assert_eq!(1000.0 - scroll, 290.0, "as much room above the line");
+        assert_eq!(scroll + 600.0 - (1000.0 + 20.0), 290.0, "as below it");
+    }
+
+    #[test]
+    fn a_view_shorter_than_a_line_lands_it_at_the_top() {
+        assert_eq!(super::Place::centered(7, 10.0, 20.0).below, 0.0);
+    }
+
     #[test]
     fn wheel_deltas_add_up_to_whole_notches() {
         let mut carry = 0.0;
