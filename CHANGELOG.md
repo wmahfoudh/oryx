@@ -8,6 +8,13 @@
 
 - Oryx can be installed on a Mac with Homebrew: `brew install --cask wmahfoudh/tap/oryx`.
 
+### Fixes
+
+- In a book, the outline now highlights the chapter you are reading. Before, in some books, the wrong entry was highlighted.
+- `Ctrl+G` now shows the line in the middle of the window. Before, the line was at the very top.
+- `Alt+Left` and `Alt+Right` now bring you back to the same view you left. Before, the line went to the top of the window.
+- In the editor, the current line number is now shown in a small box, so it is easier to see.
+
 ## v1.2.0
 
 ### New features
