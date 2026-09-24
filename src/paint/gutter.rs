@@ -15,6 +15,7 @@ use tiny_skia::Pixmap;
 use crate::doc::model::{BlockKind, Document};
 use crate::layout::{code_lines_in, metrics, LayoutDoc, LineSeat};
 use crate::paint::band::blend_buffer;
+use crate::paint::painter::round_rect;
 use crate::style::fonts::FontStore;
 use crate::style::theme::Rgba;
 
@@ -25,6 +26,13 @@ pub const SCALE: f32 = 0.85;
 const GAP: f32 = 1.0;
 /// Space between the window's edge and the widest number, in the same ems.
 const INSET: f32 = 0.5;
+/// The caret's line number stands in a box: its padding either side of
+/// the digits, its height, and its corners, in the same ems. The padding
+/// stays under the inset and under half the gap, so the box clears the
+/// window's edge and the text.
+const BOX_PAD: f32 = 0.35;
+const BOX_HEIGHT: f32 = 1.25;
+const BOX_RADIUS: f32 = 0.25;
 
 /// True for a document whose rows are the lines of its file.
 pub fn numbered(doc: &Document) -> bool {
@@ -87,8 +95,10 @@ pub(crate) fn paint(
 }
 
 /// One line's stretch of the margin, painted apart from the band: the
-/// page's color with the line's number in `color`. The editor lays it
-/// over the band on the caret's line, where the number reads brighter.
+/// page's color, and the line's number in the page's color on a box of
+/// `ink`. The editor lays it over the band on the caret's line, so the
+/// caret's number is found at a glance; the text's color on the page's
+/// is the pair every theme is made to be read in, dark or light.
 pub struct Strip {
     /// Packed as the band's pixels are.
     pub pixels: Vec<u32>,
@@ -108,7 +118,7 @@ pub fn strip(
     block: usize,
     line: usize,
     paper: Rgba,
-    color: Rgba,
+    ink: Rgba,
 ) -> Option<Strip> {
     if !numbered(doc) {
         return None;
@@ -123,8 +133,26 @@ pub fn strip(
     let height = ((seat.y + seat.height).floor() - y).max(1.0) as u32;
     let mut pixmap = Pixmap::new(width, height)?;
     pixmap.fill(tiny_skia::Color::from_rgba8(paper.r, paper.g, paper.b, 255));
+    let size = SCALE * layout.code_size;
+    let digits = shaped(fonts, &(line + 1).to_string(), &layout.code_family, size);
+    let right = seat.x - GAP * size;
+    let (pad, box_h) = (BOX_PAD * size, (BOX_HEIGHT * size).min(height as f32));
+    let left = right - line_metrics(&digits).0 - pad;
+    let top = (seat.y - y) + (seat.height - box_h) / 2.0;
+    if let Some(path) = round_rect(left, top, right + pad - left, box_h, BOX_RADIUS * size) {
+        let mut fill = tiny_skia::Paint::default();
+        fill.set_color_rgba8(ink.r, ink.g, ink.b, 255);
+        fill.anti_alias = true;
+        pixmap.fill_path(
+            &path,
+            &fill,
+            tiny_skia::FillRule::Winding,
+            tiny_skia::Transform::identity(),
+            None,
+        );
+    }
     let baseline = text_baseline(fonts, layout, seat.height);
-    number(&mut pixmap, fonts, layout, seat, line, color, baseline, y);
+    number(&mut pixmap, fonts, layout, seat, line, paper, baseline, y);
     let pixels = pixmap
         .data()
         .chunks_exact(4)
@@ -434,16 +462,29 @@ mod tests {
         );
     }
 
+    /// The columns the band inked for a line's number, on the rows of
+    /// that line's strip: the number's left and right edges.
+    fn band_number_edges(numbered: &[u32], page: u32, strip: &Strip) -> (usize, usize) {
+        let mut edges = (usize::MAX, 0);
+        for row in 0..strip.height as usize {
+            for x in 0..strip.width as usize {
+                if numbered[(strip.y as usize + row) * WIDTH as usize + x] != page {
+                    edges = (edges.0.min(x), edges.1.max(x));
+                }
+            }
+        }
+        edges
+    }
+
     #[test]
     fn the_strip_puts_the_number_on_the_pixels_the_band_gave_it() {
         let doc = load::code_document(Some("rust"), "let a = 1;\nlet b = 2;\nlet c = 3;\n");
         let mut fonts = FontStore::new();
         let lay = lay(&doc, &ViewConfig::default(), &mut fonts);
         let theme = Theme::default_dark();
-        let page = paper(&doc, &theme);
+        let (page, ink) = (paper(&doc, &theme), theme.surface.foreground);
         let numbered = painted(&doc, &lay, &mut fonts, true);
-        let strip = strip(&mut fonts, &lay, &doc, 0, 1, page, theme.surface.foreground)
-            .expect("the line is placed");
+        let strip = strip(&mut fonts, &lay, &doc, 0, 1, page, ink).expect("the line is placed");
         let seat = lay.code_line_seat(0, 1).unwrap();
         assert_eq!(strip.y, seat.y.floor());
         assert!(
@@ -451,15 +492,52 @@ mod tests {
             "the strip stays left of the text"
         );
         assert_eq!(strip.pixels.len(), (strip.width * strip.height) as usize);
-        let mut inked = 0;
-        for row in 0..strip.height as usize {
-            for x in 0..strip.width as usize {
-                let own = strip.pixels[row * strip.width as usize + x] != packed(page);
-                let band = numbered[(strip.y as usize + row) * WIDTH as usize + x] != packed(page);
-                assert_eq!(own, band, "row {row}, column {x}");
-                inked += own as usize;
+        // The digits are the page's color cut out of the box: on the rows
+        // the band drew them, and within the box's padding, whatever is
+        // not the box is a digit, and its columns are the band's.
+        let (left, right) = band_number_edges(&numbered, packed(page), &strip);
+        let rows = (0..strip.height as usize).filter(|&row| {
+            (left..=right)
+                .any(|x| numbered[(strip.y as usize + row) * WIDTH as usize + x] != packed(page))
+        });
+        let mut digits = (usize::MAX, 0);
+        for row in rows {
+            for x in left - 3..=right + 3 {
+                if strip.pixels[row * strip.width as usize + x] != packed(ink) {
+                    digits = (digits.0.min(x), digits.1.max(x));
+                }
             }
         }
-        assert!(inked > 0, "the strip carries the number");
+        assert!(
+            digits.0.abs_diff(left) <= 1,
+            "left edge {digits:?} against {left}"
+        );
+        assert!(
+            digits.1.abs_diff(right) <= 1,
+            "right edge {digits:?} against {right}"
+        );
+    }
+
+    #[test]
+    fn the_active_number_stands_in_a_box_of_the_ink() {
+        let doc = load::code_document(Some("rust"), "let a = 1;\nlet b = 2;\nlet c = 3;\n");
+        let mut fonts = FontStore::new();
+        let lay = lay(&doc, &ViewConfig::default(), &mut fonts);
+        let theme = Theme::default_dark();
+        let (page, ink) = (paper(&doc, &theme), theme.surface.foreground);
+        let numbered = painted(&doc, &lay, &mut fonts, true);
+        let strip = strip(&mut fonts, &lay, &doc, 0, 1, page, ink).expect("the line is placed");
+        let (left, right) = band_number_edges(&numbered, packed(page), &strip);
+        let middle = strip.height as usize / 2;
+        let at = |x: usize, row: usize| strip.pixels[row * strip.width as usize + x];
+        assert_eq!(at(left - 2, middle), packed(ink), "padded on the left");
+        assert_eq!(at(right + 2, middle), packed(ink), "padded on the right");
+        assert_eq!(at(0, middle), packed(page), "the box hugs the number");
+        assert_eq!(at(right + 2, 0), packed(page), "and stays inside the row");
+        assert_eq!(
+            at(right + 2, strip.height as usize - 1),
+            packed(page),
+            "at both ends"
+        );
     }
 }
