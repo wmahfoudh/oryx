@@ -189,13 +189,24 @@ impl OutlineTree {
         }
     }
 
-    /// The current section: the last heading placed at or above the
-    /// viewport top. `top` answers a heading block's document y, None
-    /// while it is folded away or not yet placed.
+    /// The current section: the entry placed nearest at or above the
+    /// viewport top, wherever the list puts it, since a book's table of
+    /// contents need not follow the reading order. Among entries at the
+    /// same place, the one listed last wins. `top` answers a heading
+    /// block's document y, None while it is folded away or not yet
+    /// placed.
     pub fn current_of(&self, scroll_y: f32, top: impl Fn(usize) -> Option<f32>) -> Option<usize> {
         self.entries
             .iter()
-            .rposition(|e| top(e.block).is_some_and(|y| y <= scroll_y + 1.0))
+            .enumerate()
+            .filter_map(|(i, e)| {
+                top(e.block)
+                    .filter(|&y| y <= scroll_y + 1.0)
+                    .map(|y| (i, y))
+            })
+            // max_by keeps the last of equal maxima.
+            .max_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(i, _)| i)
     }
 
     /// The entry carrying the current highlight: the current section
@@ -393,6 +404,55 @@ mod tests {
         assert_eq!(tree.current_of(5000.0, tops), Some(2), "past the last");
         let none = |_: usize| None;
         assert_eq!(tree.current_of(600.0, none), None, "nothing placed yet");
+    }
+
+    /// A book's outline with each entry resolved to the given block, in
+    /// the order the table of contents lists them.
+    fn book(entries: &[(&str, usize)]) -> OutlineTree {
+        let mut tree = OutlineTree::default();
+        for &(text, block) in entries {
+            tree.entries.push(Entry {
+                text: text.to_string(),
+                block,
+                level: 1,
+                parent: None,
+                depth: 0,
+                has_children: false,
+            });
+        }
+        tree
+    }
+
+    #[test]
+    fn a_table_of_contents_out_of_reading_order_follows_the_page() {
+        // Lonely Planet's Discover Europe lists "Table of Contents"
+        // last, while its page is the book's first.
+        let tree = book(&[
+            ("Cover", 1),
+            ("25 Top Highlights", 5),
+            ("Top Itineraries", 9),
+            ("Table of Contents", 0),
+        ]);
+        let tops = |block: usize| Some(block as f32 * 1000.0);
+        assert_eq!(tree.current_of(0.0, tops), Some(3), "on the contents page");
+        assert_eq!(tree.current_of(1500.0, tops), Some(0));
+        assert_eq!(
+            tree.current_of(5000.0, tops),
+            Some(1),
+            "the entry jumped to, not the one listed last"
+        );
+        assert_eq!(tree.current_of(9500.0, tops), Some(2));
+    }
+
+    #[test]
+    fn entries_at_the_same_place_keep_the_list_order() {
+        // A chapter and its first section often point at the same page:
+        // the section, listed after, carries the highlight.
+        let tree = book(&[("Chapter", 4), ("First section", 4), ("Second section", 7)]);
+        let tops = |block: usize| Some(block as f32 * 1000.0);
+        assert_eq!(tree.current_of(4000.0, tops), Some(1));
+        assert_eq!(tree.current_of(6000.0, tops), Some(1));
+        assert_eq!(tree.current_of(7000.0, tops), Some(2));
     }
 
     #[test]
