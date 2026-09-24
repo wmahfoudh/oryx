@@ -641,6 +641,18 @@ impl Place {
             below: ((view_h - row_h) / 2.0).max(0.0),
         }
     }
+
+    /// A step of the history: the line comes back at the height it
+    /// stood at, kept inside the view when the window shrank since.
+    /// While editing the caret's row comes back whole; while reading, a
+    /// line the top edge cut keeps its cut, so the view is the one left.
+    fn returned(offset: usize, below: f32, view_h: f32, row_h: f32, editing: bool) -> Place {
+        let floor = if editing { 0.0 } else { f32::MIN };
+        Place {
+            offset,
+            below: below.min((view_h - row_h).max(0.0)).max(floor),
+        }
+    }
 }
 
 /// The rendered page set aside while its source is edited. A return
@@ -5608,13 +5620,27 @@ impl App {
         if self.on_note() {
             return None;
         }
-        let offset = match (self.mode, self.caret) {
-            (edit::Mode::Edit, Some(caret)) => caret.offset,
-            _ => self.top_offset()?,
+        let (offset, below) = match (self.mode, self.caret) {
+            (edit::Mode::Edit, Some(caret)) => {
+                let below = self.editor_row_y(caret.offset).map_or(0.0, |y| {
+                    caret::held(y, self.line_step(), self.scroll_y, self.viewport_h())
+                });
+                (caret.offset, below)
+            }
+            _ => {
+                let offset = self.top_offset()?;
+                let below = self
+                    .layout
+                    .as_ref()
+                    .and_then(|lay| scroll::offset_top(lay, &self.document, offset))
+                    .map_or(0.0, |y| y - self.scroll_y);
+                (offset, below)
+            }
         };
         Some(history::Entry {
             file: self.path.clone(),
             offset,
+            below,
         })
     }
 
@@ -5651,7 +5677,7 @@ impl App {
         };
         if target.file == self.path {
             self.history.step(forward, here);
-            self.land_on(target.offset);
+            self.land_on(target.offset, target.below);
             return;
         }
         let Some(path) = target.file else {
@@ -5663,16 +5689,19 @@ impl App {
         }
     }
 
-    /// Shows a place of the open file: the caret goes there while
-    /// editing, the page while reading, a folded section opened first.
-    fn land_on(&mut self, offset: usize) {
-        if self.mode == edit::Mode::Edit {
+    /// Shows a place of the open file at the height its line stood:
+    /// the caret goes there while editing, the page while reading, a
+    /// folded section opened first.
+    fn land_on(&mut self, offset: usize, below: f32) {
+        let editing = self.mode == edit::Mode::Edit;
+        let (view_h, row_h) = (self.viewport_h(), self.line_step());
+        if editing {
             let offset = caret::clamp(&self.document, offset);
             self.selection = None;
             self.sel_anchor = None;
             self.band = None;
             self.caret = Some(Caret::at(offset));
-            self.seat_editor_on(Place::top(offset));
+            self.seat_editor_on(Place::returned(offset, below, view_h, row_h, true));
             self.wake_caret();
         } else {
             let folded = self
@@ -5682,12 +5711,12 @@ impl App {
             if folded {
                 self.restart_layout();
             }
-            self.pending_offset = Some(Place::top(offset));
+            self.pending_offset = Some(Place::returned(offset, below, view_h, row_h, false));
         }
         self.request_redraw();
     }
 
-    /// Files what an open leaves behind, and answers the offset to land
+    /// Files what an open leaves behind, and answers the place to land
     /// on when the open is a step of the history. Any other open is a
     /// jump like a link's: the place left is one to come back to.
     fn history_at_open(
@@ -5695,7 +5724,7 @@ impl App {
         step: Option<bool>,
         here: Option<history::Entry>,
         path: &Path,
-    ) -> Option<usize> {
+    ) -> Option<history::Entry> {
         if self.path.as_deref() == Some(path) {
             return None;
         }
@@ -5709,7 +5738,7 @@ impl App {
                 .is_some_and(|place| place.file.as_deref() == Some(path))
         });
         match step {
-            Some(forward) => self.history.step(forward, here).map(|place| place.offset),
+            Some(forward) => self.history.step(forward, here),
             None => {
                 if let Some(here) = here {
                     self.history.jump(here);
@@ -6139,8 +6168,8 @@ impl App {
         }
         // A step of the history lands on its own place, over the one
         // the file remembered.
-        if let Some(offset) = landing.filter(|_| opened) {
-            self.land_on(offset);
+        if let Some(place) = landing.filter(|_| opened) {
+            self.land_on(place.offset, place.below);
         }
         self.request_redraw();
     }
@@ -8418,6 +8447,25 @@ mod tests {
     #[test]
     fn a_view_shorter_than_a_line_lands_it_at_the_top() {
         assert_eq!(super::Place::centered(7, 10.0, 20.0).below, 0.0);
+    }
+
+    #[test]
+    fn a_step_back_lands_at_its_height_inside_the_view() {
+        use super::Place;
+        let (view_h, row_h) = (600.0, 20.0);
+        assert_eq!(Place::returned(5, 400.0, view_h, row_h, true).below, 400.0);
+        assert_eq!(
+            Place::returned(5, 700.0, view_h, row_h, true).below,
+            580.0,
+            "a window that shrank keeps the caret's row inside"
+        );
+        assert_eq!(Place::returned(5, -8.0, view_h, row_h, true).below, 0.0);
+        assert_eq!(
+            Place::returned(5, -8.0, view_h, row_h, false).below,
+            -8.0,
+            "while reading, a line cut by the top edge keeps its cut"
+        );
+        assert_eq!(Place::returned(5, 700.0, view_h, row_h, false).below, 580.0);
     }
 
     #[test]

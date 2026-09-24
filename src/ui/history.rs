@@ -2,20 +2,35 @@
 //! way a browser's history is: a jump files the place it leaves and
 //! drops what lay ahead, a step back files the place it leaves ahead.
 //! A place is a file and a source offset, one currency for reading and
-//! for editing, so the walk crosses files and modes alike.
+//! for editing, so the walk crosses files and modes alike; the height
+//! its line stood at on the screen comes along, so a step brings back
+//! the view that was left.
 
 use std::path::PathBuf;
 
 /// How many places each direction keeps; the oldest goes first.
 const DEPTH: usize = 100;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct Entry {
     /// None for a page with no file behind it, the welcome page or the
     /// quick reference: a place to return to only while that page shows.
     pub file: Option<PathBuf>,
     pub offset: usize,
+    /// How far under the top of the view the place's line stood, so a
+    /// step brings the view back as it was left. Negative for a line cut
+    /// by the top edge.
+    pub below: f32,
 }
+
+/// Two visits to one line are one place, whatever height it stood at.
+impl PartialEq for Entry {
+    fn eq(&self, other: &Entry) -> bool {
+        self.file == other.file && self.offset == other.offset
+    }
+}
+
+impl Eq for Entry {}
 
 #[derive(Debug, Default)]
 pub struct History {
@@ -70,9 +85,11 @@ impl History {
     }
 }
 
-/// Files a place on a stack, once, inside the depth.
+/// Files a place on a stack, once, inside the depth. Filed again, the
+/// place keeps its later height.
 fn file(stack: &mut Vec<Entry>, place: Entry) {
-    if stack.last() == Some(&place) {
+    if let Some(last) = stack.last_mut().filter(|last| **last == place) {
+        *last = place;
         return;
     }
     stack.push(place);
@@ -86,9 +103,14 @@ mod tests {
     use super::*;
 
     fn at(offset: usize) -> Entry {
+        at_height(offset, 0.0)
+    }
+
+    fn at_height(offset: usize, below: f32) -> Entry {
         Entry {
             file: Some(PathBuf::from("/notes/a.md")),
             offset,
+            below,
         }
     }
 
@@ -96,7 +118,29 @@ mod tests {
         Entry {
             file: Some(PathBuf::from("/notes/b.md")),
             offset,
+            below: 0.0,
         }
+    }
+
+    #[test]
+    fn a_place_comes_back_at_the_height_it_stood() {
+        let mut h = History::default();
+        h.jump(at_height(10, 120.0));
+        let back = h.step(false, Some(at_height(900, 290.0))).unwrap();
+        assert_eq!(back.below, 120.0);
+        let ahead = h.step(true, Some(back)).unwrap();
+        assert_eq!(ahead.below, 290.0, "forward returns the jump's own height");
+    }
+
+    #[test]
+    fn the_height_is_not_part_of_the_place() {
+        assert_eq!(at_height(10, 0.0), at_height(10, 50.0));
+        let mut h = History::default();
+        h.jump(at_height(10, 50.0));
+        h.jump(at_height(10, 80.0));
+        let back = h.step(false, Some(at(99))).unwrap();
+        assert_eq!(back.below, 80.0, "the later height");
+        assert_eq!(h.step(false, Some(back)), None, "one return");
     }
 
     #[test]
