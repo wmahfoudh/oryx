@@ -55,6 +55,75 @@ pub fn offset_top(lay: &LayoutDoc, doc: &Document, offset: usize) -> Option<f32>
     lay.approx_top(block, line)
 }
 
+/// How far under the top of the view a landing stands its block, when
+/// `below` was asked for a line inside it that draws no row of its own,
+/// an image's or a rule's. A block that would run past the bottom edge
+/// is lifted until it shows whole, and one taller than the view stands
+/// at the top edge, so the reader sees where it starts. A line of a
+/// code block whose lines are the source's own is placed itself, not
+/// its block, and keeps `below`.
+pub fn fitted_below(
+    lay: &LayoutDoc,
+    doc: &Document,
+    offset: usize,
+    below: f32,
+    view_h: f32,
+) -> f32 {
+    let Some(block) = doc.block_at_offset(offset) else {
+        return below;
+    };
+    if matches!(&doc.blocks[block].kind, BlockKind::CodeBlock { lines, .. } if !lines.is_empty()) {
+        return below;
+    }
+    match lay.block_span(block) {
+        Some(span) => fit(below, span.end - span.start, view_h),
+        None => below,
+    }
+}
+
+/// Where the row of the source line holding `offset` stands before the
+/// page has drawn it: its block's top plus the line's share of the
+/// block's height, counted in bytes. Only for a line with text in a
+/// block drawn as rows of text, whose exact row the frame finds once
+/// the slide draws it (`caret::line_top`); None for a blank line, for
+/// the other blocks, and before the pass places the block.
+pub fn line_estimate(lay: &LayoutDoc, doc: &Document, offset: usize) -> Option<f32> {
+    let source = &doc.source;
+    let offset = offset.min(source.len());
+    let start = source[..offset].rfind('\n').map_or(0, |at| at + 1);
+    let end = source[offset..]
+        .find('\n')
+        .map_or(source.len(), |at| offset + at);
+    if source[start..end].trim().is_empty() {
+        return None;
+    }
+    let index = doc.block_at_offset(end)?;
+    let block = &doc.blocks[index];
+    let rows = matches!(
+        block.kind,
+        BlockKind::Heading { .. }
+            | BlockKind::Paragraph { .. }
+            | BlockKind::ListItem { .. }
+            | BlockKind::Table { .. }
+            | BlockKind::FootnoteDef { .. }
+            | BlockKind::Summary { .. }
+    );
+    if !rows {
+        return None;
+    }
+    let span = lay.block_span(index)?;
+    let share = start.saturating_sub(block.range.start) as f32 / block.range.len().max(1) as f32;
+    Some(span.start + share.min(1.0) * (span.end - span.start))
+}
+
+/// A top the edge already cut keeps its height.
+fn fit(below: f32, block_h: f32, view_h: f32) -> f32 {
+    if below <= 0.0 {
+        return below;
+    }
+    below.min((view_h - block_h).max(0.0))
+}
+
 /// The offset a frame paints the page at: the scroll position floored
 /// to a whole device pixel. The position itself keeps its fraction,
 /// since a touchpad delivers fractions of a pixel per event and a slow
@@ -296,6 +365,92 @@ mod tests {
         assert_eq!(
             top_offset(&lay, &doc, offset_top(&lay, &doc, end).unwrap()),
             end
+        );
+    }
+
+    #[test]
+    fn a_landing_block_shows_whole_or_from_its_top() {
+        let view_h = 600.0;
+        assert_eq!(
+            fit(290.0, 40.0, view_h),
+            290.0,
+            "a short block keeps the middle"
+        );
+        assert_eq!(
+            fit(290.0, 450.0, view_h),
+            150.0,
+            "a block that fits is lifted until its bottom shows"
+        );
+        assert_eq!(
+            fit(290.0, 2000.0, view_h),
+            0.0,
+            "a taller one stands at the top"
+        );
+        assert_eq!(fit(0.0, 2000.0, view_h), 0.0);
+        assert_eq!(
+            fit(-12.0, 450.0, view_h),
+            -12.0,
+            "a top the edge cut keeps its cut"
+        );
+    }
+
+    #[test]
+    fn a_tall_block_stands_from_its_top_and_a_code_line_by_itself() {
+        let mut source = String::from("Before the table.\n\n| a | b |\n|---|---|\n");
+        for i in 0..80 {
+            source.push_str(&format!("| row {i} | cell {i} |\n"));
+        }
+        source.push_str("\nA short paragraph.\n\n```rust\n");
+        source.push_str(&code_lines(200));
+        source.push_str("```\n");
+        let doc = crate::doc::markdown::parse(source.as_str());
+        let lay = lay_of(&doc);
+        let view_h = 600.0;
+        let row = source.find("| row 40 ").unwrap();
+        assert_eq!(fitted_below(&lay, &doc, row, 290.0, view_h), 0.0);
+        let short = source.find("A short").unwrap();
+        assert_eq!(fitted_below(&lay, &doc, short, 290.0, view_h), 290.0);
+        let code = source.find("let line_120 ").unwrap();
+        assert_eq!(
+            fitted_below(&lay, &doc, code, 290.0, view_h),
+            290.0,
+            "a code line stands itself in the middle, not its block"
+        );
+    }
+
+    #[test]
+    fn a_line_not_drawn_yet_stands_near_its_row() {
+        let mut source = String::from("Before the table.\n\n| a | b |\n|---|---|\n");
+        for i in 0..80 {
+            source.push_str(&format!("| row {i} | cell {i} |\n"));
+        }
+        source.push_str("\n---\n\n```rust\n");
+        source.push_str(&code_lines(20));
+        source.push_str("```\n");
+        let doc = crate::doc::markdown::parse(source.as_str());
+        let lay = lay_of(&doc);
+        for row in [5, 40, 74] {
+            let at = source.find(&format!("| row {row} ")).unwrap();
+            let exact = crate::edit::caret::line_top(&lay, &doc, at).unwrap();
+            let guess = line_estimate(&lay, &doc, at).unwrap();
+            assert!(
+                (guess - exact).abs() < 90.0,
+                "row {row}: the guess {guess} stands within two rows of {exact}"
+            );
+        }
+        assert_eq!(
+            line_estimate(&lay, &doc, source.find("---\n\n```").unwrap()),
+            None
+        );
+        let blank = source.find("\n\n---").unwrap() + 1;
+        assert_eq!(
+            line_estimate(&lay, &doc, blank),
+            None,
+            "a blank line draws no row"
+        );
+        assert_eq!(
+            line_estimate(&lay, &doc, source.find("let line_5 ").unwrap()),
+            None
         );
     }
 

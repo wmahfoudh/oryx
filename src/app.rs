@@ -296,6 +296,7 @@ pub fn run(
         pending_scroll: None,
         pending_anchor: None,
         pending_offset: None,
+        landing_settle: None,
         history: History::default(),
         pending_step: None,
         search_origin: None,
@@ -624,11 +625,25 @@ fn window_rects(
 struct Place {
     offset: usize,
     below: f32,
+    /// The offset names a line to show, a caret's or a jump's, rather
+    /// than what stood at the top of the page: on a rendered page the
+    /// line's own row stands at `below`, not its block's top (`line_landing`).
+    /// Never set for a place the page itself recorded, which comes back
+    /// pixel for pixel through its block.
+    line: bool,
 }
 
 impl Place {
     fn top(offset: usize) -> Place {
-        Place { offset, below: 0.0 }
+        Place {
+            offset,
+            below: 0.0,
+            line: false,
+        }
+    }
+
+    fn by_line(self, line: bool) -> Place {
+        Place { line, ..self }
     }
 
     /// A jump to a line: the line stands in the middle of the view,
@@ -639,6 +654,7 @@ impl Place {
         Place {
             offset,
             below: ((view_h - row_h) / 2.0).max(0.0),
+            line: false,
         }
     }
 
@@ -651,6 +667,7 @@ impl Place {
         Place {
             offset,
             below: below.min((view_h - row_h).max(0.0)).max(floor),
+            line: false,
         }
     }
 }
@@ -1054,6 +1071,9 @@ struct App {
     /// A book source offset to land on once delivered and placed: a
     /// restored reading position or an internal link's target.
     pending_offset: Option<Place>,
+    /// A line landing made this frame, whose exact row `settle_landing`
+    /// finds once the slide has drawn the rows around it.
+    landing_settle: Option<Place>,
     /// The places jumps left behind, in this file and in the ones open
     /// before it; Alt+Left and Alt+Right walk them as a browser does.
     history: History,
@@ -1711,7 +1731,11 @@ impl App {
             // two documents share no coordinate but the bytes. The row
             // the caret landed on takes the height its line had on the
             // page, so the line does not move under the reader's eyes.
-            self.seat_editor_on(Place { offset, below });
+            self.seat_editor_on(Place {
+                offset,
+                below,
+                line: false,
+            });
         }
         // The caret owns the keys; a sidebar holding them would strand
         // the arrows. Same funnel as the Right key's explicit handoff.
@@ -1878,7 +1902,13 @@ impl App {
                     .and_then(|lay| caret::row_top(lay, &self.document, offset))
                 {
                     Some(y) => self.scroll_to(caret::seated(y, below)),
-                    None => self.pending_offset = Some(Place { offset, below }),
+                    None => {
+                        self.pending_offset = Some(Place {
+                            offset,
+                            below,
+                            line: true,
+                        })
+                    }
                 }
             }
         }
@@ -4210,11 +4240,9 @@ impl App {
                 if folded {
                     self.restart_layout();
                 }
-                self.pending_offset = Some(Place::centered(
-                    line_end,
-                    self.viewport_h(),
-                    self.line_step(),
-                ));
+                self.pending_offset = Some(
+                    Place::centered(line_end, self.viewport_h(), self.line_step()).by_line(true),
+                );
                 self.request_redraw();
                 return;
             }
@@ -5620,12 +5648,12 @@ impl App {
         if self.on_note() {
             return None;
         }
-        let (offset, below) = match (self.mode, self.caret) {
+        let (offset, below, editing) = match (self.mode, self.caret) {
             (edit::Mode::Edit, Some(caret)) => {
                 let below = self.editor_row_y(caret.offset).map_or(0.0, |y| {
                     caret::held(y, self.line_step(), self.scroll_y, self.viewport_h())
                 });
-                (caret.offset, below)
+                (caret.offset, below, true)
             }
             _ => {
                 let offset = self.top_offset()?;
@@ -5634,13 +5662,14 @@ impl App {
                     .as_ref()
                     .and_then(|lay| scroll::offset_top(lay, &self.document, offset))
                     .map_or(0.0, |y| y - self.scroll_y);
-                (offset, below)
+                (offset, below, false)
             }
         };
         Some(history::Entry {
             file: self.path.clone(),
             offset,
             below,
+            editing,
         })
     }
 
@@ -5677,7 +5706,7 @@ impl App {
         };
         if target.file == self.path {
             self.history.step(forward, here);
-            self.land_on(target.offset, target.below);
+            self.land_on(&target);
             return;
         }
         let Some(path) = target.file else {
@@ -5691,8 +5720,10 @@ impl App {
 
     /// Shows a place of the open file at the height its line stood:
     /// the caret goes there while editing, the page while reading, a
-    /// folded section opened first.
-    fn land_on(&mut self, offset: usize, below: f32) {
+    /// folded section opened first. A caret's place shown on the page
+    /// stands its block there instead, fitted to the view.
+    fn land_on(&mut self, place: &history::Entry) {
+        let (offset, below) = (place.offset, place.below);
         let editing = self.mode == edit::Mode::Edit;
         let (view_h, row_h) = (self.viewport_h(), self.line_step());
         if editing {
@@ -5711,7 +5742,8 @@ impl App {
             if folded {
                 self.restart_layout();
             }
-            self.pending_offset = Some(Place::returned(offset, below, view_h, row_h, false));
+            self.pending_offset =
+                Some(Place::returned(offset, below, view_h, row_h, false).by_line(place.editing));
         }
         self.request_redraw();
     }
@@ -6169,7 +6201,7 @@ impl App {
         // A step of the history lands on its own place, over the one
         // the file remembered.
         if let Some(place) = landing.filter(|_| opened) {
-            self.land_on(place.offset, place.below);
+            self.land_on(&place);
         }
         self.request_redraw();
     }
@@ -7254,6 +7286,41 @@ impl App {
         }
     }
 
+    /// The scroll that shows the source line at `offset` with its row
+    /// `below` the top of the view. The row the page drew answers
+    /// exactly. A row not drawn yet stands at its share of its block,
+    /// and `settle_landing` puts the exact row there once the frame's
+    /// slide draws it. A line of code is placed by the block table, and
+    /// a line that draws no row, an image's, stands its block whole in
+    /// the view, or from its top when taller.
+    fn line_landing(&self, lay: &LayoutDoc, offset: usize, below: f32) -> Option<f32> {
+        let doc = &self.document;
+        let row =
+            caret::line_top(lay, doc, offset).or_else(|| scroll::line_estimate(lay, doc, offset));
+        if let Some(y) = row {
+            return Some(caret::seated(y, below));
+        }
+        let below = scroll::fitted_below(lay, doc, offset, below, self.viewport_h());
+        scroll::offset_top(lay, doc, offset).map(|y| caret::seated(y, below))
+    }
+
+    /// Finishes a line landing on the frame that made it: the slide has
+    /// drawn the rows around the landing, so the line's own row now
+    /// answers and stands at its height. A row that still does not
+    /// answer leaves the landing as it was.
+    fn settle_landing(&mut self) {
+        let Some(place) = self.landing_settle.take() else {
+            return;
+        };
+        let row = self
+            .layout
+            .as_ref()
+            .and_then(|lay| caret::line_top(lay, &self.document, place.offset));
+        if let Some(y) = row {
+            self.scroll_to(caret::seated(y, place.below));
+        }
+    }
+
     /// Applies a scroll position or an anchor asked for before the pass
     /// had placed it.
     fn resolve_pending(&mut self) {
@@ -7294,19 +7361,24 @@ impl App {
                 _ => {}
             }
         }
-        if let Some(Place { offset, below }) = self.pending_offset {
+        if let Some(place) = self.pending_offset {
+            let Place { offset, below, .. } = place;
             // Held while the offset lies past the delivered source; the
             // worker's delivery brings the rest.
             let covered = offset < self.document.source.len() || !self.parse_pending;
             if covered {
-                let placed = self
-                    .layout
-                    .as_ref()
-                    .and_then(|lay| scroll::offset_top(lay, &self.document, offset))
-                    .map(|y| caret::seated(y, below));
+                let placed = self.layout.as_ref().and_then(|lay| {
+                    if place.line {
+                        self.line_landing(lay, offset, below)
+                    } else {
+                        scroll::offset_top(lay, &self.document, offset)
+                            .map(|y| caret::seated(y, below))
+                    }
+                });
                 match placed {
                     Some(y) if scroll::reached(y, height, vh) || !self.layout_pending() => {
                         self.pending_offset = None;
+                        self.landing_settle = Some(place).filter(|place| place.line);
                         self.scroll_to(y);
                     }
                     None if !self.layout_pending() && !self.parse_pending => {
@@ -7401,6 +7473,7 @@ impl App {
         let before_search = self.scroll_y;
         self.sync_search();
         self.settle_search_anchor();
+        self.settle_landing();
         // A typing edit landed under a fresh layout: snap the view to
         // the caret once its line is placed, inside the same re-window
         // the search landing uses.
@@ -8436,7 +8509,8 @@ mod tests {
             place,
             super::Place {
                 offset: 7,
-                below: 290.0
+                below: 290.0,
+                line: false,
             }
         );
         let scroll = super::caret::seated(1000.0, place.below);

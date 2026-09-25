@@ -21,9 +21,13 @@ pub struct Entry {
     /// step brings the view back as it was left. Negative for a line cut
     /// by the top edge.
     pub below: f32,
+    /// Taken in the editor, where `below` is the caret's row. The page
+    /// has no row for most lines, and stands the line's block there.
+    pub editing: bool,
 }
 
-/// Two visits to one line are one place, whatever height it stood at.
+/// Two visits to one line are one place, whatever height it stood at
+/// and in whichever mode.
 impl PartialEq for Entry {
     fn eq(&self, other: &Entry) -> bool {
         self.file == other.file && self.offset == other.offset
@@ -111,6 +115,7 @@ mod tests {
             file: Some(PathBuf::from("/notes/a.md")),
             offset,
             below,
+            editing: false,
         }
     }
 
@@ -119,7 +124,22 @@ mod tests {
             file: Some(PathBuf::from("/notes/b.md")),
             offset,
             below: 0.0,
+            editing: false,
         }
+    }
+
+    #[test]
+    fn a_place_filed_again_keeps_the_later_mode() {
+        let mut h = History::default();
+        h.jump(at_height(10, 120.0));
+        h.jump(Entry {
+            editing: true,
+            ..at_height(10, 40.0)
+        });
+        let back = h.step(false, Some(at(900))).unwrap();
+        assert!(back.editing, "one place, taken last in the editor");
+        assert_eq!(back.below, 40.0);
+        assert!(h.step(false, Some(at(10))).is_none());
     }
 
     #[test]

@@ -337,6 +337,65 @@ pub fn row_top(lay: &LayoutDoc, doc: &Document, offset: usize) -> Option<f32> {
     locate(&lines, offset).map(|i| lines[i].y)
 }
 
+/// The top of the first row the page draws for the source line holding
+/// `offset`, the row a line of a table, a list or a hard-wrapped
+/// paragraph starts on, whatever markup opens it. None for a line that
+/// draws no text, an image, a rule or a blank line, and for a row
+/// outside what the layout holds right now.
+pub fn line_top(lay: &LayoutDoc, doc: &Document, offset: usize) -> Option<f32> {
+    let source = &doc.source;
+    let offset = offset.min(source.len());
+    let start = source[..offset].rfind('\n').map_or(0, |at| at + 1);
+    let end = source[offset..]
+        .find('\n')
+        .map_or(source.len(), |at| offset + at);
+    // A block's range starts after the markup opening its first line
+    // (`#`, `-`, `|`); the line's end lies inside the block it belongs to.
+    let block = doc.block_at_offset(end)?;
+    let spans = run_spans(&doc.blocks[block].kind);
+    let mut top: Option<f32> = None;
+    for run in lay.runs.iter().filter(|run| run.block == block) {
+        let TextRef::Model { start: at, len } = run.text else {
+            continue;
+        };
+        let Some(span) = spans.get(run.span) else {
+            continue;
+        };
+        let shown = shown_source(span, source, at as usize, len as usize);
+        if shown.start < end && start < shown.end && top.is_none_or(|y| run.y < y) {
+            top = Some(run.y);
+        }
+    }
+    top
+}
+
+/// The source bytes a run of a span shows. A verbatim span slices the
+/// source. A span with text of its own maps by proportion: exact when
+/// soft line breaks turned into spaces kept its length, the common
+/// case, and within a row when an entity or a code mark shortened it.
+fn shown_source(span: &Span, source: &str, at: usize, len: usize) -> Range<usize> {
+    let range = span.range.start as usize..span.range.end as usize;
+    if span.is_verbatim() {
+        return range.start + at..range.start + at + len;
+    }
+    let text = span.text(source).len().max(1);
+    let scale = |byte: usize| range.start + byte * range.len() / text;
+    scale(at)..scale(at + len)
+}
+
+/// A block's spans in the order its runs index them: a table's header
+/// cells, then its rows' cells.
+fn run_spans(kind: &BlockKind) -> Vec<&Span> {
+    match kind {
+        BlockKind::Table { header, rows } => header
+            .iter()
+            .flatten()
+            .chain(rows.iter().flatten().flatten())
+            .collect(),
+        kind => block_spans(kind).map_or_else(Vec::new, |spans| spans.iter().collect()),
+    }
+}
+
 /// Where an offset stands on the page, as a top and a height: its row
 /// when the page shows one, else the top of its block with no height.
 /// An image line, a rule and a fence have a block and no row; a blank
@@ -2055,6 +2114,72 @@ mod tests {
             2000.0,
         );
         (doc, l)
+    }
+
+    /// The top of the first run whose text starts with `text`.
+    fn run_top(l: &LayoutDoc, doc: &Document, text: &str) -> f32 {
+        l.runs
+            .iter()
+            .find(|run| l.run_text(doc, run).starts_with(text))
+            .unwrap_or_else(|| panic!("no run starts with {text:?}"))
+            .y
+    }
+
+    #[test]
+    fn a_table_line_answers_its_own_row() {
+        let mut src = String::from("Before.\n\n| n | name |\n|---|---|\n");
+        for i in 1..=80 {
+            src.push_str(&format!("| {i} | item {i} |\n"));
+        }
+        src.push_str("\nAfter.\n");
+        let doc = md_doc(&src);
+        let (l, _) = lay_of(&doc);
+        let row = at(&doc, "| 74 |");
+        assert_eq!(line_top(&l, &doc, row), Some(run_top(&l, &doc, "item 74")));
+        let header = at(&doc, "| n |");
+        assert_eq!(line_top(&l, &doc, header), Some(run_top(&l, &doc, "name")));
+        assert!(
+            line_top(&l, &doc, row + 8).is_some(),
+            "anywhere on the line"
+        );
+    }
+
+    #[test]
+    fn a_hard_wrapped_line_answers_the_row_it_starts_on() {
+        let mut src = String::from("Before.\n\n");
+        for i in 1..=40 {
+            src.push_str(&format!(
+                "Line {i} of the long paragraph, hard wrapped in the source.\n"
+            ));
+        }
+        let doc = md_doc(&src);
+        let (l, _) = lay_of(&doc);
+        let line = at(&doc, "Line 20 ");
+        let top = line_top(&l, &doc, line).expect("the line is drawn");
+        let holder = l
+            .runs
+            .iter()
+            .filter(|run| run.y == top)
+            .any(|run| l.run_text(&doc, run).contains("Line 20 "));
+        assert!(holder, "the row at {top} shows where line 20 starts");
+        assert!(top > line_top(&l, &doc, at(&doc, "Line 2 ")).unwrap());
+    }
+
+    #[test]
+    fn a_list_line_answers_from_its_marker() {
+        let doc = md_doc("Intro.\n\n- first\n- second\n- third\n");
+        let (l, _) = lay_of(&doc);
+        let marker = at(&doc, "- second");
+        assert_eq!(
+            line_top(&l, &doc, marker),
+            Some(run_top(&l, &doc, "second"))
+        );
+    }
+
+    #[test]
+    fn an_image_line_answers_no_row() {
+        let (doc, l) = image_page();
+        assert_eq!(line_top(&l, &doc, at(&doc, "![oryx]")), None);
     }
 
     #[test]
