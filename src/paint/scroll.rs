@@ -55,6 +55,26 @@ pub fn offset_top(lay: &LayoutDoc, doc: &Document, offset: usize) -> Option<f32>
     lay.approx_top(block, line)
 }
 
+/// The line of its block an offset stands on, counted as the editor
+/// counts rows: a line's break belongs to the line, and past the final
+/// break stands the row the caret opens there. A code block's line
+/// table answers by a binary search, where a count of the breaks from
+/// the block's start grew with the file on every call; a body with text
+/// of its own, which has no source coordinates, still counts them.
+pub fn source_row(doc: &Document, block: usize, offset: usize) -> usize {
+    let Some(block) = doc.blocks.get(block) else {
+        return 0;
+    };
+    if let BlockKind::CodeBlock { lines, .. } = &block.kind {
+        if let Some(row) = lines.row_at(&doc.source, offset) {
+            return row;
+        }
+    }
+    let start = block.range.start;
+    let end = offset.min(doc.source.len()).max(start);
+    doc.source[start..end].matches('\n').count()
+}
+
 /// How far under the top of the view a landing stands its block, when
 /// `below` was asked for a line inside it that draws no row of its own,
 /// an image's or a rule's. A block that would run past the bottom edge
@@ -452,6 +472,40 @@ mod tests {
             line_estimate(&lay, &doc, source.find("let line_5 ").unwrap()),
             None
         );
+    }
+
+    #[test]
+    fn a_line_counts_by_the_table_as_by_the_breaks() {
+        let sources = [
+            code_lines(30) + "\n\nlast",
+            code_lines(12),
+            "\n\n\n".to_string(),
+            "one line".to_string(),
+        ];
+        for source in &sources {
+            for doc in [
+                load::code_document(Some("rust"), source),
+                load::text_document(source),
+            ] {
+                if let Some(BlockKind::CodeBlock { lines, .. }) =
+                    doc.blocks.first().map(|b| &b.kind)
+                {
+                    assert!(lines.row_at(&doc.source, 0).is_some(), "the table answers");
+                }
+                for offset in 0..=source.len() {
+                    let Some(block) = doc.block_at_offset(offset) else {
+                        continue;
+                    };
+                    let start = doc.blocks[block].range.start;
+                    let counted = source[start..offset.max(start)].matches('\n').count();
+                    assert_eq!(
+                        source_row(&doc, block, offset),
+                        counted,
+                        "offset {offset} of {source:?}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

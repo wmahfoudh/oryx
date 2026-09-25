@@ -1802,10 +1802,7 @@ impl App {
             return Some(y);
         }
         let block = self.document.block_at_offset(offset)?;
-        let start = self.document.blocks.get(block)?.range.start;
-        let end = offset.min(self.document.source.len()).max(start);
-        let line = self.document.source[start..end].matches('\n').count();
-        lay.approx_top(block, line)
+        lay.approx_top(block, scroll::source_row(&self.document, block, offset))
     }
 
     /// Rebuilds the page held behind the editor from the buffer, which
