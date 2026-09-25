@@ -672,6 +672,19 @@ impl Place {
     }
 }
 
+/// The height of the row a jump or a step of the history lands: a file
+/// of lines, the editor's source view among them, draws its rows in
+/// the lines' face (`layout::line_face`), the code size unless the file
+/// is plain text; a rendered page's rows are body text.
+fn row_height(doc: &Document, cfg: &ViewConfig) -> f32 {
+    let size = if doc.code_file || doc.plain_file {
+        layout::line_face(doc, cfg).1
+    } else {
+        cfg.body_size * cfg.zoom
+    };
+    metrics::LINE_HEIGHT * size
+}
+
 /// A page set aside, behind the editor or the help page, keeps its
 /// layout on return while the zoom is the same. Under another theme the
 /// rows around the view are refilled in the new colors, a theme being
@@ -1487,6 +1500,10 @@ type OverlayCanvas = (tiny_skia::Pixmap, Option<(f32, f32, f32, f32)>);
 impl App {
     fn line_step(&self) -> f32 {
         metrics::LINE_HEIGHT * self.cfg.body_size * self.cfg.zoom
+    }
+
+    fn row_h(&self) -> f32 {
+        row_height(&self.document, &self.cfg)
     }
 
     fn doc_height(&self) -> f32 {
@@ -4266,14 +4283,13 @@ impl App {
                 if folded {
                     self.restart_layout();
                 }
-                self.pending_offset = Some(
-                    Place::centered(line_end, self.viewport_h(), self.line_step()).by_line(true),
-                );
+                self.pending_offset =
+                    Some(Place::centered(line_end, self.viewport_h(), self.row_h()).by_line(true));
                 self.request_redraw();
                 return;
             }
         }
-        self.seat_editor_on(Place::centered(offset, self.viewport_h(), self.line_step()));
+        self.seat_editor_on(Place::centered(offset, self.viewport_h(), self.row_h()));
         self.request_redraw();
     }
 
@@ -5677,7 +5693,7 @@ impl App {
         let (offset, below, editing) = match (self.mode, self.caret) {
             (edit::Mode::Edit, Some(caret)) => {
                 let below = self.editor_row_y(caret.offset).map_or(0.0, |y| {
-                    caret::held(y, self.line_step(), self.scroll_y, self.viewport_h())
+                    caret::held(y, self.row_h(), self.scroll_y, self.viewport_h())
                 });
                 (caret.offset, below, true)
             }
@@ -5751,7 +5767,7 @@ impl App {
     fn land_on(&mut self, place: &history::Entry) {
         let (offset, below) = (place.offset, place.below);
         let editing = self.mode == edit::Mode::Edit;
-        let (view_h, row_h) = (self.viewport_h(), self.line_step());
+        let (view_h, row_h) = (self.viewport_h(), self.row_h());
         if editing {
             let offset = caret::clamp(&self.document, offset);
             self.selection = None;
@@ -8618,6 +8634,40 @@ mod tests {
         let (lay, pass) = kept_page(true);
         let (lay, pass) = kept_layout(Some(lay), Some(pass), false, true);
         assert!(lay.is_none() && pass.is_none(), "another zoom starts over");
+    }
+
+    #[test]
+    fn a_landing_row_is_as_tall_as_the_text_it_stands_on() {
+        use oryx::doc::load::FileKind;
+        use oryx::layout::{metrics, ViewConfig};
+        let cfg = ViewConfig {
+            body_size: 16.0,
+            code_size: 12.0,
+            zoom: 1.5,
+            ..ViewConfig::default()
+        };
+        let text = "# Title\n\nSome words.\n";
+        let page = oryx::doc::markdown::parse(text);
+        let source = oryx::edit::source_document(FileKind::Markdown, text).unwrap();
+        let opened = |name: &str, text: &str| {
+            let path = std::env::temp_dir().join(name);
+            std::fs::write(&path, text).unwrap();
+            let doc = oryx::doc::load::open(&path, None).unwrap().document;
+            std::fs::remove_file(&path).ok();
+            doc
+        };
+        let code = opened("oryx_row_height_test.rs", "fn main() {}\n");
+        let plain = opened("oryx_row_height_test.txt", "some words\n");
+        let body = metrics::LINE_HEIGHT * 16.0 * 1.5;
+        let lines = metrics::LINE_HEIGHT * 12.0 * 1.5;
+        assert_eq!(super::row_height(&page, &cfg), body, "a rendered page");
+        assert_eq!(
+            super::row_height(&source, &cfg),
+            lines,
+            "the editor's source view"
+        );
+        assert_eq!(super::row_height(&code, &cfg), lines, "a code file");
+        assert_eq!(super::row_height(&plain, &cfg), body, "a text file");
     }
 
     #[test]
