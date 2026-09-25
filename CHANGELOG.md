@@ -14,6 +14,7 @@
 - `Ctrl+G` now shows the line in the middle of the window. Before, the line was at the very top.
 - `Alt+Left` and `Alt+Right` now bring you back to the same view you left. Before, the line went to the top of the window.
 - In the editor, the current line number is now shown in a small box, so it is easier to see.
+- On Windows, the sidebar can now reach your other drives: `..` at the top of a drive shows the list of drives. Before, the sidebar could not leave the drive it started on.
 
 ## v1.2.0
 

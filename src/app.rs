@@ -5968,7 +5968,7 @@ impl App {
         let dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
         self.remember_dir(&dir);
         match self.sidebar.as_mut() {
-            Some(side) if side.root() == dir => {}
+            Some(side) if side.shows(&dir) => {}
             Some(side) => {
                 let tab = side.tab();
                 *side = Sidebar::new(&dir);
@@ -6132,7 +6132,7 @@ impl App {
             })
             .map(Place::top);
         if let Some(side) = self.sidebar.as_mut() {
-            if reroot && side.root() != dir {
+            if reroot && !side.shows(&dir) {
                 let tab = side.tab();
                 *side = Sidebar::new(&dir);
                 side.set_show_hidden(self.config.show_hidden);
