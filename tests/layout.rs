@@ -4562,3 +4562,96 @@ fn an_empty_fence_at_the_top_answers_the_page_start() {
     assert_eq!(scroll::top_offset(&l, &doc, 0.0), 0);
     assert_eq!(scroll::top_offset(&l, &doc, 1.0), 0);
 }
+
+/// A windowed layout of `doc` under `theme`, complete, slid to `scroll`.
+fn windowed_in(doc: &Document, theme: &Theme, scroll: f32, viewport: f32) -> LayoutDoc {
+    let mut fonts = fonts();
+    let mut media = MediaCache::new(PathBuf::from("."));
+    let (mut out, mut pass) = layout_begin(doc, &cfg(), 900.0);
+    pass.retain_around(scroll, viewport);
+    layout_more(
+        doc,
+        theme,
+        &mut fonts,
+        &mut media,
+        &cfg(),
+        &mut out,
+        &mut pass,
+        None,
+    );
+    window_to(
+        doc,
+        theme,
+        &mut fonts,
+        &mut media,
+        &cfg(),
+        &mut out,
+        None,
+        scroll,
+        viewport,
+        true,
+    );
+    out.index_more();
+    out
+}
+
+/// A theme is colors only, so a theme change keeps the page's positions
+/// and refills the window's colors, whatever line the view stands on:
+/// the refill equals a fresh layout under the new theme, and its runs
+/// and rects stand where the old theme's stood.
+#[test]
+fn a_theme_change_refills_the_colors_and_moves_nothing() {
+    let mut page = String::new();
+    for i in 0..30 {
+        page.push_str(&format!(
+            "## Part {i}\n\nSome **bold**, a [link](https://example.com) and `code` in part {i}.\n\n\
+             | a | b |\n|---|---|\n| one {i} | two |\n| three | four |\n\n\
+             ```rust\nfn part_{i}() -> u32 {{\n    {i}\n}}\n```\n\n\
+             - [x] done {i}\n- [ ] open\n\n> A quote in part {i}.\n\n> [!NOTE]\n> A note.\n\n---\n\n"
+        ));
+    }
+    let code: String = (0..3000)
+        .map(|i| format!("    let value_{i} = compute({i}); // line {i}\n"))
+        .collect();
+    let path = std::env::temp_dir().join("oryx_theme_refill_test.rs");
+    std::fs::write(&path, &code).unwrap();
+    let code_doc = load::open(&path, None).unwrap().document;
+    std::fs::remove_file(&path).ok();
+    let docs = [markdown::parse(page.as_str()), code_doc];
+    let dark = Theme::default_dark();
+    let light = oryx::style::theme::load_file(std::path::Path::new("themes/solarized-light.toml"))
+        .expect("the shipped theme loads");
+    let (scroll, vh) = (9000.0, 600.0);
+    for doc in &docs {
+        let mut lay = windowed_in(doc, &dark, scroll, vh);
+        let fresh = windowed_in(doc, &light, scroll, vh);
+        let (y0, y1) = (scroll - vh, scroll + 2.0 * vh);
+        assert_ne!(
+            run_keys_in(&lay, doc, y0, y1),
+            run_keys_in(&fresh, doc, y0, y1),
+            "the two themes color the page differently"
+        );
+        assert!(lay.rematerialize(), "the app's layout is windowed");
+        let mut fonts = fonts();
+        let mut media = MediaCache::new(PathBuf::from("."));
+        window_to(
+            doc,
+            &light,
+            &mut fonts,
+            &mut media,
+            &cfg(),
+            &mut lay,
+            None,
+            scroll,
+            vh,
+            true,
+        );
+        lay.index_more();
+        assert_eq!(lay.height, fresh.height);
+        assert_eq!(
+            run_keys_in(&lay, doc, y0, y1),
+            run_keys_in(&fresh, doc, y0, y1)
+        );
+        assert_eq!(rect_keys_in(&lay, y0, y1), rect_keys_in(&fresh, y0, y1));
+    }
+}

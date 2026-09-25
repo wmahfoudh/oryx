@@ -672,6 +672,32 @@ impl Place {
     }
 }
 
+/// A page set aside, behind the editor or the help page, keeps its
+/// layout on return while the zoom is the same. Under another theme the
+/// rows around the view are refilled in the new colors, a theme being
+/// colors only, provided the page was measured to its end; a page still
+/// being measured, or at another zoom, is laid out again.
+fn kept_layout(
+    layout: Option<LayoutDoc>,
+    pass: Option<LayoutPass>,
+    same_zoom: bool,
+    same_theme: bool,
+) -> (Option<LayoutDoc>, Option<LayoutPass>) {
+    if !same_zoom {
+        return (None, None);
+    }
+    if same_theme {
+        return (layout, pass);
+    }
+    let mut layout = layout;
+    let settled = pass.as_ref().is_some_and(LayoutPass::is_complete);
+    if settled && layout.as_mut().is_some_and(LayoutDoc::rematerialize) {
+        (layout, pass)
+    } else {
+        (None, None)
+    }
+}
+
 /// The rendered page set aside while its source is edited. A return
 /// that changed no byte puts it back whole, so looking at the source
 /// and coming out costs nothing at any file size.
@@ -684,10 +710,11 @@ struct Parked {
     /// The undo head at the crossing; an equal head on the way out
     /// means equal bytes, so the parked page is still the truth.
     head: usize,
-    /// The look the parked layout was built under. A theme or zoom
-    /// change while editing drops the layout and keeps the model.
+    /// The look the parked layout was built under: a zoom change while
+    /// editing drops the layout and keeps the model, a theme change
+    /// refills its colors (`kept_layout`).
     zoom: f32,
-    theme: String,
+    theme: Theme,
 }
 
 /// Everything the help page displaces, moved back verbatim on return.
@@ -713,10 +740,10 @@ struct Stash {
     /// The selection anchors on the model, which returns untouched, so
     /// it survives the trip whole.
     selection: Option<Selection>,
-    /// The look the stashed layout was built under; a change while the
-    /// help page showed drops it on return.
+    /// The look the stashed layout was built under, weighed on return
+    /// as the parked page's is (`kept_layout`).
     zoom: f32,
-    theme: String,
+    theme: Theme,
     /// A parse was still streaming at the swap, so the model is
     /// partial; the return reopens from disk instead of restoring it.
     reopen: bool,
@@ -1723,7 +1750,7 @@ impl App {
                 layout_width: self.layout_width,
                 head,
                 zoom: self.cfg.zoom,
-                theme: self.config.theme.clone(),
+                theme: self.theme.clone(),
             };
             self.edit_park = Some(Box::new(parked));
             self.swapped_document(None, None);
@@ -1862,16 +1889,18 @@ impl App {
         }
         if let Some(parked) = self.edit_park.take() {
             let head = self.undo.as_ref().map_or(0, Undo::head);
-            let same_look = self.cfg.zoom == parked.zoom && self.config.theme == parked.theme;
             if head == parked.head {
                 // The held outline describes this very page; rebuilding
                 // it here would cost a parse of the whole page for nothing.
                 self.document = parked.document;
                 self.layout_width = parked.layout_width;
-                self.swapped_document(
-                    parked.layout.filter(|_| same_look),
-                    parked.pass.filter(|_| same_look),
+                let (layout, pass) = kept_layout(
+                    parked.layout,
+                    parked.pass,
+                    self.cfg.zoom == parked.zoom,
+                    self.theme == parked.theme,
                 );
+                self.swapped_document(layout, pass);
             } else {
                 let text = Arc::clone(&self.document.source);
                 let kind = self
@@ -6489,7 +6518,7 @@ impl App {
             disk_seen: self.disk_seen.take(),
             selection: self.selection.take(),
             zoom: self.cfg.zoom,
-            theme: self.config.theme.clone(),
+            theme: self.theme.clone(),
             reopen,
         }));
         self.document = markdown_help();
@@ -6510,8 +6539,9 @@ impl App {
     }
 
     /// Back from the help page: the stashed document returns exactly
-    /// as it was. A look changed while help showed (zoom, theme) drops
-    /// the stashed layout, and the streaming pass re-measures.
+    /// as it was. A zoom changed while help showed drops the stashed
+    /// layout, and the streaming pass re-measures; a theme changed
+    /// refills its colors.
     fn help_return(&mut self) {
         let Some(stash) = self.help_stash.take() else {
             return;
@@ -6541,9 +6571,12 @@ impl App {
         self.media = stash.media;
         self.book_toc = stash.book_toc;
         self.disk_seen = stash.disk_seen;
-        let same_look = self.cfg.zoom == stash.zoom && self.config.theme == stash.theme;
-        self.layout = stash.layout.filter(|_| same_look);
-        self.pass = stash.pass.filter(|_| same_look);
+        (self.layout, self.pass) = kept_layout(
+            stash.layout,
+            stash.pass,
+            self.cfg.zoom == stash.zoom,
+            self.theme == stash.theme,
+        );
         // The outline belongs to the rendered page. A return into a
         // parked markdown edit must read the parked page, not the
         // source view on screen, or the panel blanks to "No headings"
@@ -6897,10 +6930,25 @@ impl App {
     }
 
     /// Restyles with an in-memory theme, persisting nothing.
+    /// A theme is colors only, so a page already measured keeps every
+    /// position and refills the rows around the view in the new colors:
+    /// the view stays on its line, however deep in the file. A page still
+    /// being measured is laid out again.
     fn set_live_theme(&mut self, theme: Theme) {
         self.theme = theme;
-        self.layout = None;
         self.band = None;
+        let settled = self.pass.as_ref().is_some_and(LayoutPass::is_complete);
+        let refilled = settled
+            && self
+                .layout
+                .as_mut()
+                .is_some_and(layout::LayoutDoc::rematerialize);
+        if refilled {
+            self.pending_band_for = None;
+            self.request_redraw();
+        } else {
+            self.layout = None;
+        }
     }
 
     /// Selects the whole document, placing the rest of it first so the
@@ -8513,6 +8561,63 @@ mod tests {
         let scroll = super::caret::seated(1000.0, place.below);
         assert_eq!(1000.0 - scroll, 290.0, "as much room above the line");
         assert_eq!(scroll + 600.0 - (1000.0 + 20.0), 290.0, "as below it");
+    }
+
+    /// A complete or a started windowed layout of a page of sections.
+    fn kept_page(complete: bool) -> (super::LayoutDoc, super::LayoutPass) {
+        use oryx::doc::images::MediaCache;
+        use oryx::layout::{layout_begin, layout_more, ViewConfig};
+        let source: String = (0..200)
+            .map(|i| format!("## Part {i}\n\nA paragraph for part {i}.\n\n"))
+            .collect();
+        let doc = oryx::doc::markdown::parse(source.as_str());
+        let cfg = ViewConfig::default();
+        let mut fonts = oryx::style::fonts::FontStore::new();
+        let mut media = MediaCache::new(std::path::PathBuf::from("."));
+        let (mut lay, mut pass) = layout_begin(&doc, &cfg, 900.0);
+        pass.retain_around(0.0, 600.0);
+        if complete {
+            layout_more(
+                &doc,
+                &super::Theme::default_dark(),
+                &mut fonts,
+                &mut media,
+                &cfg,
+                &mut lay,
+                &mut pass,
+                None,
+            );
+        }
+        (lay, pass)
+    }
+
+    #[test]
+    fn a_page_set_aside_comes_back_in_the_new_colors() {
+        use super::kept_layout;
+        let (lay, pass) = kept_page(true);
+        let (lay, pass) = kept_layout(Some(lay), Some(pass), true, true);
+        assert!(
+            lay.is_some() && pass.is_some(),
+            "the same look comes back as is"
+        );
+        assert_ne!(lay.unwrap().window_span(), Some(0.0..0.0));
+        let (lay, pass) = kept_page(true);
+        let (lay, pass) = kept_layout(Some(lay), Some(pass), true, false);
+        assert!(pass.is_some(), "another theme keeps the measured page");
+        assert_eq!(
+            lay.unwrap().window_span(),
+            Some(0.0..0.0),
+            "with its rows emptied for the new colors"
+        );
+        let (lay, pass) = kept_page(false);
+        let (lay, pass) = kept_layout(Some(lay), Some(pass), true, false);
+        assert!(
+            lay.is_none() && pass.is_none(),
+            "a page still measuring starts over"
+        );
+        let (lay, pass) = kept_page(true);
+        let (lay, pass) = kept_layout(Some(lay), Some(pass), false, true);
+        assert!(lay.is_none() && pass.is_none(), "another zoom starts over");
     }
 
     #[test]
