@@ -6,7 +6,11 @@
 
 #### Linux
 
-- The AppImage now updates in place with AppImageUpdate, AppImageLauncher or Gear Lever: it carries the address of its updates, and the update file is on the release page beside it. Before, each release was downloaded by hand.
+- You can now update the AppImage in place with AppImageUpdate, AppImageLauncher or Gear Lever. Before, you downloaded each new version yourself.
+
+### Fixes
+
+- The zip library, used for EPUB books, CBZ comics and zipped FB2 books, was updated to version 9. Three security advisories were published on the old version in October 2026. They are about extracting an archive to disk. Oryx never does that. No release was affected.
 
 ## v1.2.2
 

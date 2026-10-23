@@ -46,7 +46,7 @@ chmod +x Oryx-*-x86_64.AppImage
 ./Oryx-*-x86_64.AppImage
 ```
 
-The file carries the address of its updates. AppImageUpdate, AppImageLauncher and Gear Lever use it to update the file in place.
+You can update it in place with AppImageUpdate, AppImageLauncher or Gear Lever.
 
 ### Tarball
 
