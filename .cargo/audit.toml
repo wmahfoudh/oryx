@@ -12,11 +12,4 @@ ignore = [
     # In the lock file only: pulled by image formats (exr, avif) that
     # the image crate offers and Oryx never enables, so never compiled.
     "RUSTSEC-2024-0436", # paste, through exr and rav1e
-    # The extract functions of the zip crate (ZipArchive::extract and
-    # ZipStreamReader::extract) write an archive to disk. Oryx reads the
-    # entries of an EPUB, an FB2 or a CBZ in memory and never calls them.
-    # The three leave with the move to zip 9, at the opening of 1.3.0.
-    "RUSTSEC-2026-0367", # SUID and SGID bits kept at extraction
-    "RUSTSEC-2026-0368", # symbolic links outside the destination
-    "RUSTSEC-2026-0369", # permissions applied through a symbolic link
 ]

@@ -244,11 +244,15 @@ fn unwrap_zip(bytes: Vec<u8>) -> anyhow::Result<Vec<u8>> {
         let Ok(entry) = zip.by_index_raw(index) else {
             continue;
         };
-        if entry.name().to_ascii_lowercase().ends_with(".fb2") {
+        // A name that is neither UTF-8 nor CP437 cannot name the book.
+        let Ok(entry_name) = entry.name() else {
+            continue;
+        };
+        if entry_name.to_ascii_lowercase().ends_with(".fb2") {
             if entry.size() > CEILING {
                 return Err(Refusal::TooLarge.into());
             }
-            name = Some(entry.name().to_string());
+            name = Some(entry_name.into_owned());
             break;
         }
     }

@@ -406,14 +406,17 @@ fn msix_sh_builds_a_package_that_unpacks_to_the_staged_files() {
     // The reader writes the payload and the manifest; the two other
     // footprint files stay inside the archive and are listed from it.
     let archive = zip::ZipArchive::new(std::fs::File::open(&msix).unwrap()).unwrap();
-    let names: Vec<&str> = archive.file_names().collect();
+    let names: Vec<String> = archive
+        .file_names()
+        .map(|name| name.unwrap().into_owned())
+        .collect();
     for footprint in [
         "AppxManifest.xml",
         "AppxBlockMap.xml",
         "[Content_Types].xml",
     ] {
         assert!(
-            names.contains(&footprint),
+            names.iter().any(|name| name == footprint),
             "{footprint} missing from {names:?}"
         );
     }

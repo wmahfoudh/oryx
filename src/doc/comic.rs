@@ -138,14 +138,18 @@ fn zip_pages(bytes: Vec<u8>) -> anyhow::Result<Vec<BookSource>> {
     let mut declared = 0u64;
     for index in 0..zip.len() {
         let entry = zip.by_index_raw(index).map_err(|_| Refusal::NotComic)?;
-        if !is_page(entry.name()) {
+        // A name that is neither UTF-8 nor CP437 cannot name a page.
+        let Ok(name) = entry.name() else {
+            continue;
+        };
+        if !is_page(&name) {
             continue;
         }
         if entry.encrypted() {
             return Err(Refusal::Encrypted.into());
         }
         declared = declared.saturating_add(entry.size());
-        entries.push((index, entry.name().to_string()));
+        entries.push((index, name.into_owned()));
     }
     if declared > CEILING {
         return Err(Refusal::TooLarge.into());
