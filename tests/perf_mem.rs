@@ -235,6 +235,7 @@ fn seam_table_measured() {
         language.as_deref(),
         CHUNK_LINES,
         None,
+        || true,
         |_| true,
     );
     alloc_track::set_enabled(true);
@@ -246,6 +247,7 @@ fn seam_table_measured() {
         language.as_deref(),
         CHUNK_LINES,
         None,
+        || true,
         |c| {
             highlight::record_seam(&mut table, c.start_line + c.spans.len(), &c.seam);
             true

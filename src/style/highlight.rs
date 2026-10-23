@@ -108,6 +108,10 @@ pub struct Resume {
     pub start_line: usize,
     pub seam: Option<Seam>,
     pub expected: Vec<(usize, Seam)>,
+    /// Lines where a chunk ends whatever the table says, so that a
+    /// seam is filed there: the lines of the last key, where the next
+    /// key's walk then starts.
+    pub cuts: Vec<usize>,
 }
 
 /// Files a sweep's seam in the table, ordered by line: a line already
@@ -161,6 +165,15 @@ pub fn shift_line(line: usize, old: &Range<usize>, new: &Range<usize>) -> usize 
     }
 }
 
+/// Drops the seams between the frontier and the burst's end before a
+/// resume: they describe lines an edit of the burst changed, and the
+/// resumed sweep neither starts from them nor converges on them. The
+/// seams at or before the frontier stand, and so do the ones past the
+/// burst, which the sweep refreshes on its way.
+pub fn drop_stale_seams(table: &mut Vec<(usize, Seam)>, exact: usize, past: usize) {
+    table.retain(|(line, _)| *line <= exact || *line > past);
+}
+
 /// One delivered chunk: its lines' spans, the seam closing it, and
 /// whether that seam matched the stored table, which stops the sweep
 /// with the tail's colors and seams standing.
@@ -181,14 +194,17 @@ pub struct Chunk {
 /// line-exact whatever line delta the table was shifted by; it stops
 /// early after a chunk whose seam matches the table when the table
 /// reaches the block's end, and goes on from the table's last seam when
-/// it does not. Returns whether the block completed, a converged stop
-/// included.
+/// it does not. A chunk also ends at the resume's cuts. `alive` is read
+/// before each line: false stops the sweep there, the chunk in progress
+/// undelivered, so a kill costs one line and not a chunk. Returns
+/// whether the block completed, a converged stop included.
 pub fn spans_chunked(
     source: &str,
     lines: &CodeBody,
     language: Option<&str>,
     chunk_size: usize,
     resume: Option<&Resume>,
+    mut alive: impl FnMut() -> bool,
     mut deliver: impl FnMut(Chunk) -> bool,
 ) -> bool {
     let chunk_size = chunk_size.max(1);
@@ -197,19 +213,25 @@ pub fn spans_chunked(
         None => Parser::new(language),
     };
     let expected: &[(usize, Seam)] = resume.map_or(&[], |r| &r.expected);
+    let cuts: &[usize] = resume.map_or(&[], |r| &r.cuts);
     let mut start = resume.map_or(0, |r| r.start_line);
     while start < lines.len() {
         let cap = start + chunk_size;
         let end = expected
             .iter()
             .map(|(line, _)| *line)
+            .chain(cuts.iter().copied())
             .filter(|line| *line > start && *line < cap)
             .min()
             .unwrap_or(cap)
             .min(lines.len());
-        let spans: Vec<LineSpans> = (start..end)
-            .map(|i| parser.line(lines.line(source, i)))
-            .collect();
+        let mut spans: Vec<LineSpans> = Vec::with_capacity(end - start);
+        for i in start..end {
+            if !alive() {
+                return false;
+            }
+            spans.push(parser.line(lines.line(source, i)));
+        }
         let seam = parser.seam();
         let converged = expected.iter().any(|(line, s)| *line == end && *s == seam);
         // A converged stop vouches for the lines up to the table's
@@ -249,6 +271,66 @@ pub fn spans_chunked(
         start = end;
     }
     true
+}
+
+/// What a walk on the window's thread delivers: the spans of the lines
+/// it parsed, where it stopped, and the states it recorded on the way.
+pub struct Walk {
+    /// The first line parsed.
+    pub start_line: usize,
+    /// The spans of the lines from `start_line` to `reached`.
+    pub spans: Vec<LineSpans>,
+    /// The line the walk stopped before, the next one to parse.
+    pub reached: usize,
+    /// The state before `reached`.
+    pub seam: Seam,
+    /// The state before `mark`, when the walk passed that line.
+    pub at_mark: Option<Seam>,
+}
+
+/// Parses the lines from `start_line`, continuing from `seam` (None
+/// starts fresh, meaningful only at line 0), toward `until`, and stops
+/// after the line on which `budget` runs out, one line at least: the
+/// coloring of a key's lines on the window's thread, which the next
+/// key continues from the seam it stopped at. Records the state before
+/// `mark`, the first touched line, when the walk passes it.
+#[allow(clippy::too_many_arguments)]
+pub fn walk(
+    source: &str,
+    lines: &CodeBody,
+    language: Option<&str>,
+    start_line: usize,
+    seam: Option<Seam>,
+    mark: usize,
+    until: usize,
+    budget: std::time::Duration,
+) -> Walk {
+    let mut parser = match seam {
+        Some(seam) => Parser::from_seam(seam, language),
+        None => Parser::new(language),
+    };
+    let until = until.min(lines.len());
+    let started = Instant::now();
+    let mut at_mark = (mark == start_line).then(|| parser.seam());
+    let mut spans = Vec::new();
+    let mut line = start_line;
+    while line < until {
+        spans.push(parser.line(lines.line(source, line)));
+        line += 1;
+        if line == mark {
+            at_mark = Some(parser.seam());
+        }
+        if line < until && started.elapsed() >= budget {
+            break;
+        }
+    }
+    Walk {
+        start_line,
+        spans,
+        reached: line,
+        seam: parser.seam(),
+        at_mark,
+    }
 }
 
 /// Lines per background delivery. Small enough that the top of a huge
@@ -372,11 +454,24 @@ pub struct SpecJob {
     pub range: Range<usize>,
 }
 
+/// A caret seam to compute ahead of the next key: the state before
+/// `line`, parsed from `start_line` on from `seam` (None starts fresh
+/// at line 0).
+pub struct SeamJob {
+    pub block: usize,
+    pub language: Option<String>,
+    pub source: Arc<str>,
+    pub lines: CodeBody,
+    pub start_line: usize,
+    pub seam: Option<Seam>,
+    pub line: usize,
+}
+
 /// Owns the background highlight worker and its arrivals queue. One
 /// generation is live at a time; starting again cancels the old worker
-/// between chunks and its arrivals are dropped at drain. Speculation
-/// runs beside it on its own generation, and a document swap cancels
-/// both.
+/// at its next line and its arrivals are dropped at drain. Speculation
+/// and the caret seam run beside it on generations of their own, and a
+/// document swap cancels all three.
 pub struct Highlighter {
     arrivals: Arc<Mutex<Vec<(u64, Arrival)>>>,
     generation: Arc<AtomicU64>,
@@ -388,6 +483,8 @@ pub struct Highlighter {
     /// The live speculation's generation; a new band or a document
     /// swap bumps it and the old one's result is discarded.
     spec: Arc<AtomicU64>,
+    /// The live caret seam's generation, bumped the same way.
+    caret: Arc<AtomicU64>,
 }
 
 impl Default for Highlighter {
@@ -403,7 +500,48 @@ impl Highlighter {
             generation: Arc::new(AtomicU64::new(0)),
             done: Arc::new(AtomicU64::new(0)),
             spec: Arc::new(AtomicU64::new(0)),
+            caret: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// Computes a caret seam off the window's thread: the arrival
+    /// carries the state before `job.line` and no spans, the sign the
+    /// fold reads it by, and lands in the queue for the next drain. A
+    /// new ask or a document swap discards a result still in flight.
+    pub fn seam_at(&mut self, job: SeamJob, waker: impl Fn() + Send + 'static) {
+        let ask = self.caret.fetch_add(1, Ordering::SeqCst) + 1;
+        let generation = self.generation.load(Ordering::SeqCst);
+        let live_ask = Arc::clone(&self.caret);
+        let live = Arc::clone(&self.generation);
+        let arrivals = Arc::clone(&self.arrivals);
+        std::thread::spawn(move || {
+            let walked = walk(
+                &job.source,
+                &job.lines,
+                job.language.as_deref(),
+                job.start_line,
+                job.seam,
+                job.line,
+                job.line,
+                std::time::Duration::MAX,
+            );
+            if live_ask.load(Ordering::SeqCst) != ask || live.load(Ordering::SeqCst) != generation {
+                return;
+            }
+            arrivals.lock().expect("arrivals lock").push((
+                generation,
+                Arrival {
+                    block: job.block,
+                    start_line: job.line,
+                    spans: Vec::new(),
+                    seam: Some(walked.seam),
+                    converged: false,
+                    reach: 0,
+                    speculative: false,
+                },
+            ));
+            waker();
+        });
     }
 
     /// Colors one band from the cold guess state, off the exact
@@ -448,9 +586,10 @@ impl Highlighter {
     /// back on a fresh thread; each chunk lands in the arrivals queue
     /// and `waker` runs after it so the event loop can drain.
     pub fn start(&mut self, pending: Vec<PendingBlock>, waker: impl Fn() + Send + 'static) {
-        // Speculation describes the text the old generation held; a
-        // start means that text moved.
+        // Speculation and the caret seam describe the text the old
+        // generation held; a start means that text moved.
         self.spec.fetch_add(1, Ordering::SeqCst);
+        self.caret.fetch_add(1, Ordering::SeqCst);
         let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         if pending.is_empty() {
             self.done.fetch_max(generation, Ordering::SeqCst);
@@ -467,6 +606,7 @@ impl Highlighter {
                     p.language.as_deref(),
                     CHUNK_LINES,
                     p.resume.as_ref(),
+                    || current.load(Ordering::SeqCst) == generation,
                     |chunk| {
                         if current.load(Ordering::SeqCst) != generation {
                             return false;
@@ -1296,11 +1436,19 @@ mod tests {
         );
         let mut starts = Vec::new();
         let mut joined = Vec::new();
-        let complete = spans_chunked("", &src, Some("rust"), 4, None, |c| {
-            starts.push(c.start_line);
-            joined.extend(c.spans);
-            true
-        });
+        let complete = spans_chunked(
+            "",
+            &src,
+            Some("rust"),
+            4,
+            None,
+            || true,
+            |c| {
+                starts.push(c.start_line);
+                joined.extend(c.spans);
+                true
+            },
+        );
         assert!(complete);
         assert_eq!(starts, vec![0, 4, 8]);
         assert_eq!(joined, spans("", &src, Some("rust")));
@@ -1314,10 +1462,18 @@ mod tests {
                 .collect::<String>(),
         );
         let mut deliveries = 0;
-        let complete = spans_chunked("", &src, Some("rust"), 4, None, |_| {
-            deliveries += 1;
-            false
-        });
+        let complete = spans_chunked(
+            "",
+            &src,
+            Some("rust"),
+            4,
+            None,
+            || true,
+            |_| {
+                deliveries += 1;
+                false
+            },
+        );
         assert!(!complete);
         assert_eq!(deliveries, 1);
     }
@@ -1394,10 +1550,18 @@ mod tests {
     /// chunk cadence.
     fn sweep_seams(src: &CodeBody, chunk: usize) -> Vec<(usize, Seam)> {
         let mut seams = Vec::new();
-        spans_chunked("", src, Some("rust"), chunk, None, |c| {
-            seams.push((c.start_line + c.spans.len(), c.seam));
-            true
-        });
+        spans_chunked(
+            "",
+            src,
+            Some("rust"),
+            chunk,
+            None,
+            || true,
+            |c| {
+                seams.push((c.start_line + c.spans.len(), c.seam));
+                true
+            },
+        );
         seams
     }
 
@@ -1406,11 +1570,19 @@ mod tests {
         let src = let_lines(1200);
         let mut full = Vec::new();
         let mut seams = Vec::new();
-        spans_chunked("", &src, Some("rust"), 512, None, |c| {
-            seams.push((c.start_line + c.spans.len(), c.seam));
-            full.extend(c.spans);
-            true
-        });
+        spans_chunked(
+            "",
+            &src,
+            Some("rust"),
+            512,
+            None,
+            || true,
+            |c| {
+                seams.push((c.start_line + c.spans.len(), c.seam));
+                full.extend(c.spans);
+                true
+            },
+        );
         assert_eq!(
             seams.iter().map(|s| s.0).collect::<Vec<_>>(),
             vec![512, 1024, 1200],
@@ -1421,12 +1593,21 @@ mod tests {
             start_line: line,
             seam: Some(seam),
             expected: Vec::new(),
+            cuts: Vec::new(),
         };
         let mut tail = Vec::new();
-        spans_chunked("", &src, Some("rust"), 512, Some(&resume), |c| {
-            tail.extend(c.spans);
-            true
-        });
+        spans_chunked(
+            "",
+            &src,
+            Some("rust"),
+            512,
+            Some(&resume),
+            || true,
+            |c| {
+                tail.extend(c.spans);
+                true
+            },
+        );
         assert_eq!(tail, full[line..]);
     }
 
@@ -1439,12 +1620,21 @@ mod tests {
             start_line: line,
             seam: Some(seam),
             expected: seams,
+            cuts: Vec::new(),
         };
         let mut chunks = Vec::new();
-        let complete = spans_chunked("", &src, Some("rust"), 512, Some(&resume), |c| {
-            chunks.push(c);
-            true
-        });
+        let complete = spans_chunked(
+            "",
+            &src,
+            Some("rust"),
+            512,
+            Some(&resume),
+            || true,
+            |c| {
+                chunks.push(c);
+                true
+            },
+        );
         assert!(complete, "a converged stop completes the block");
         assert_eq!(chunks.len(), 1, "one chunk re-colors and the sweep stops");
         assert!(chunks[0].converged);
@@ -1467,12 +1657,21 @@ mod tests {
             start_line: line,
             seam: Some(seam),
             expected,
+            cuts: Vec::new(),
         };
         let mut chunks = Vec::new();
-        let complete = spans_chunked("", &edited, Some("rust"), 512, Some(&resume), |c| {
-            chunks.push(c);
-            true
-        });
+        let complete = spans_chunked(
+            "",
+            &edited,
+            Some("rust"),
+            512,
+            Some(&resume),
+            || true,
+            |c| {
+                chunks.push(c);
+                true
+            },
+        );
         assert!(complete);
         assert!(chunks.iter().all(|c| !c.converged));
         assert_eq!(
@@ -1496,12 +1695,21 @@ mod tests {
             start_line: line,
             seam: Some(seam),
             expected: vec![seam700],
+            cuts: Vec::new(),
         };
         let mut chunks = Vec::new();
-        spans_chunked("", &src, Some("rust"), 512, Some(&resume), |c| {
-            chunks.push(c);
-            true
-        });
+        spans_chunked(
+            "",
+            &src,
+            Some("rust"),
+            512,
+            Some(&resume),
+            || true,
+            |c| {
+                chunks.push(c);
+                true
+            },
+        );
         assert_eq!(
             chunks[0].spans.len(),
             188,
@@ -1535,6 +1743,7 @@ mod tests {
                     start_line: line,
                     seam: Some(seam),
                     expected: seams.clone(),
+                    cuts: Vec::new(),
                 }),
             }],
             move || {
@@ -1574,17 +1783,26 @@ mod tests {
             start_line: 0,
             seam: None,
             expected: seams,
+            cuts: Vec::new(),
         };
         let mut delivered: Vec<(usize, usize, bool, usize)> = Vec::new();
-        let complete = spans_chunked("", &src, Some("rust"), CHUNK_LINES, Some(&resume), |c| {
-            delivered.push((
-                c.start_line,
-                c.start_line + c.spans.len(),
-                c.converged,
-                c.reach,
-            ));
-            true
-        });
+        let complete = spans_chunked(
+            "",
+            &src,
+            Some("rust"),
+            CHUNK_LINES,
+            Some(&resume),
+            || true,
+            |c| {
+                delivered.push((
+                    c.start_line,
+                    c.start_line + c.spans.len(),
+                    c.converged,
+                    c.reach,
+                ));
+                true
+            },
+        );
         assert!(complete);
         let converged: Vec<_> = delivered.iter().filter(|d| d.2).collect();
         assert_eq!(converged.len(), 1, "one converged stop: {delivered:?}");
@@ -1637,19 +1855,210 @@ mod tests {
             start_line: 0,
             seam: None,
             expected: seams,
+            cuts: Vec::new(),
         };
         let mut delivered = 0;
         let mut last_end = 0;
-        let complete = spans_chunked("", &src, Some("rust"), CHUNK_LINES, Some(&resume), |c| {
-            delivered += 1;
-            last_end = c.start_line + c.spans.len();
-            delivered <= 20
-        });
+        let complete = spans_chunked(
+            "",
+            &src,
+            Some("rust"),
+            CHUNK_LINES,
+            Some(&resume),
+            || true,
+            |c| {
+                delivered += 1;
+                last_end = c.start_line + c.spans.len();
+                delivered <= 20
+            },
+        );
         assert!(
             complete,
             "the sweep ends by itself: {delivered} deliveries, the last to {last_end}"
         );
         assert_eq!(last_end, 3000, "and reaches the block's end");
+    }
+
+    /// The walk of a key: from a stored seam toward the end of the
+    /// touched lines, with the budget to spare, the spans equal the
+    /// full parse and the walk reaches the end.
+    #[test]
+    fn a_walk_from_a_seam_colors_as_the_full_parse_does() {
+        let src = let_lines(700);
+        let full = spans("", &src, Some("rust"));
+        let seams = sweep_seams(&src, 512);
+        let (line, seam) = seams[0].clone();
+        let walked = walk(
+            "",
+            &src,
+            Some("rust"),
+            line,
+            Some(seam),
+            600,
+            603,
+            std::time::Duration::from_secs(60),
+        );
+        assert_eq!(walked.start_line, 512);
+        assert_eq!(walked.reached, 603, "the end of the touched lines");
+        assert_eq!(walked.spans, full[512..603]);
+    }
+
+    /// The states a walk records, before the mark and at its end, are
+    /// the seams a chunked sweep files at those lines: a sweep resumed
+    /// against them converges.
+    #[test]
+    fn a_walk_records_the_states_a_sweep_would_file() {
+        let src = let_lines(700);
+        let seams = sweep_seams(&src, 512);
+        let (line, seam) = seams[0].clone();
+        let walked = walk(
+            "",
+            &src,
+            Some("rust"),
+            line,
+            Some(seam.clone()),
+            600,
+            603,
+            std::time::Duration::from_secs(60),
+        );
+        let at_mark = walked.at_mark.expect("the state before the mark");
+        for (at, state) in [(600, at_mark), (603, walked.seam)] {
+            let resume = Resume {
+                start_line: line,
+                seam: Some(seam.clone()),
+                expected: vec![(at, state)],
+                cuts: Vec::new(),
+            };
+            let mut converged = false;
+            spans_chunked(
+                "",
+                &src,
+                Some("rust"),
+                512,
+                Some(&resume),
+                || true,
+                |c| {
+                    converged |= c.converged;
+                    !c.converged
+                },
+            );
+            assert!(
+                converged,
+                "the state before line {at} is what a sweep finds there"
+            );
+        }
+    }
+
+    /// A walk with no budget parses one line and stops; its seam is the
+    /// state before the next line, where the next walk continues.
+    #[test]
+    fn a_walk_out_of_budget_stops_after_one_line() {
+        let src = let_lines(100);
+        let walked = walk(
+            "",
+            &src,
+            Some("rust"),
+            0,
+            None,
+            50,
+            51,
+            std::time::Duration::ZERO,
+        );
+        assert_eq!(walked.reached, 1);
+        assert_eq!(walked.spans.len(), 1);
+        assert!(walked.at_mark.is_none(), "the mark was not reached");
+        let next = walk(
+            "",
+            &src,
+            Some("rust"),
+            1,
+            Some(walked.seam),
+            50,
+            51,
+            std::time::Duration::from_secs(60),
+        );
+        assert_eq!(next.reached, 51);
+        let full = spans("", &src, Some("rust"));
+        assert_eq!(next.spans, full[1..51]);
+        assert!(next.at_mark.is_some(), "the mark passed on the way");
+    }
+
+    /// A sweep cuts a chunk at the lines it is asked to, so that a seam
+    /// is filed there, and converges against the table as before.
+    #[test]
+    fn a_sweep_cuts_at_the_asked_lines() {
+        let src = let_lines(1200);
+        let seams = sweep_seams(&src, 512);
+        let resume = Resume {
+            start_line: 0,
+            seam: None,
+            expected: seams,
+            cuts: vec![100, 103],
+        };
+        let mut ends = Vec::new();
+        spans_chunked(
+            "",
+            &src,
+            Some("rust"),
+            512,
+            Some(&resume),
+            || true,
+            |c| {
+                ends.push(c.start_line + c.spans.len());
+                true
+            },
+        );
+        assert_eq!(
+            ends,
+            vec![100, 103, 512],
+            "cut at the asked lines, then converged at the table's first seam"
+        );
+    }
+
+    /// A killed sweep stops at the next line, and nothing of the chunk
+    /// in progress is delivered.
+    #[test]
+    fn a_killed_sweep_stops_at_the_next_line() {
+        let src = let_lines(1200);
+        let mut asked = 0usize;
+        let mut delivered = 0;
+        let complete = spans_chunked(
+            "",
+            &src,
+            Some("rust"),
+            512,
+            None,
+            || {
+                asked += 1;
+                asked <= 10
+            },
+            |_| {
+                delivered += 1;
+                true
+            },
+        );
+        assert!(!complete);
+        assert_eq!(delivered, 0, "the chunk in progress is not delivered");
+        assert_eq!(asked, 11, "the kill is read before each line");
+    }
+
+    /// The seams between the frontier and the burst's end describe lines
+    /// the burst changed: they are dropped before a resume, and the ones
+    /// at or before the frontier and past the burst stand.
+    #[test]
+    fn the_stale_seams_of_a_burst_are_dropped() {
+        let mut table = sweep_seams(&let_lines(3000), CHUNK_LINES);
+        drop_stale_seams(&mut table, 1024, 2047);
+        assert_eq!(
+            table.iter().map(|s| s.0).collect::<Vec<_>>(),
+            vec![512, 1024, 2048, 2560, 3000]
+        );
+        drop_stale_seams(&mut table, 600, 600);
+        assert_eq!(
+            table.iter().map(|s| s.0).collect::<Vec<_>>(),
+            vec![512, 1024, 2048, 2560, 3000],
+            "a burst past no seam drops nothing"
+        );
     }
 
     #[test]
@@ -1768,12 +2177,21 @@ mod tests {
             start_line: 0,
             seam: None,
             expected: seams,
+            cuts: Vec::new(),
         };
         let mut chunks = Vec::new();
-        let complete = spans_chunked("", &src, Some("rust"), 512, Some(&resume), |c| {
-            chunks.push(c);
-            true
-        });
+        let complete = spans_chunked(
+            "",
+            &src,
+            Some("rust"),
+            512,
+            Some(&resume),
+            || true,
+            |c| {
+                chunks.push(c);
+                true
+            },
+        );
         assert!(complete);
         assert_eq!(chunks.len(), 1, "the first boundary already converges");
         assert!(chunks[0].converged);

@@ -497,6 +497,7 @@ fn wash_edit_measured() {
         language.as_deref(),
         CHUNK_LINES,
         None,
+        || true,
         |c| {
             table.push((c.start_line + c.spans.len(), c.seam));
             true
@@ -533,6 +534,7 @@ fn wash_edit_measured() {
             start_line,
             seam,
             expected: table[at..].to_vec(),
+            cuts: Vec::new(),
         };
         let mut delivered = 0usize;
         let mut converged = false;
@@ -542,6 +544,7 @@ fn wash_edit_measured() {
             language.as_deref(),
             CHUNK_LINES,
             Some(&resume),
+            || true,
             |c| {
                 delivered += c.spans.len();
                 converged |= c.converged;
@@ -1222,4 +1225,74 @@ fn top_offset_measured() {
          code {code_ms:.2}ms (offset {code_top}); landing with a blank line remembered near \
          the end of 8 MB code: {land_ms:.2}ms (offset {landed})"
     );
+}
+
+/// What one line costs the grammar, the figure that sizes a coloring of
+/// the typed line on the key (Task 327): per grammar and per kind of
+/// file, the mean over the file by `spans`, and the distribution by a
+/// chunked sweep of one line per chunk, which clones the seam at every
+/// line as the typed line's coloring would.
+#[test]
+#[ignore = "measurement only"]
+fn line_cost_measured() {
+    use oryx::doc::load::FileKind;
+    use oryx::doc::model::Document;
+    use oryx::edit::source_document;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let read = |p: &str| std::fs::read_to_string(root.join(p)).expect(p);
+    let ts = read("examples/sample.ts").repeat(200);
+    let app = read("src/app.rs");
+    let readme = read("README.md").repeat(4);
+    let generated = large_gen::generate_code(1024 * 1024);
+    let cases: Vec<(&str, Document)> = vec![
+        ("ts sample x200", measure_open(&ts, "ts").2),
+        ("rs src/app.rs", measure_open(&app, "rs").2),
+        ("rs generated 1MB", measure_open(&generated, "rs").2),
+        (
+            "md README x4 (source view)",
+            source_document(FileKind::Markdown, &readme).expect("the markdown source view"),
+        ),
+    ];
+    for (name, doc) in &cases {
+        let (language, lines) = match &doc.blocks[0].kind {
+            BlockKind::CodeBlock {
+                language, lines, ..
+            } => (language.clone(), lines.clone()),
+            _ => panic!("one code block"),
+        };
+        // The first pass pays the grammar's load; the second is the figure.
+        let _ = highlight::spans(&doc.source, &lines, language.as_deref());
+        let started = Instant::now();
+        let _ = highlight::spans(&doc.source, &lines, language.as_deref());
+        let total = started.elapsed();
+        let mut per: Vec<u128> = Vec::with_capacity(lines.len());
+        let mut last = Instant::now();
+        highlight::spans_chunked(
+            &doc.source,
+            &lines,
+            language.as_deref(),
+            1,
+            None,
+            || true,
+            |_| {
+                let now = Instant::now();
+                per.push((now - last).as_nanos());
+                last = now;
+                true
+            },
+        );
+        per.sort_unstable();
+        let n = per.len().max(1);
+        let at = |q: f64| per[((n as f64 - 1.0) * q) as usize] as f64 / 1000.0;
+        println!(
+            "line cost {name}: {} lines, {:.1}ms whole, {:.1}us a line by spans; one line a \
+             chunk: median {:.1}us, p99 {:.1}us, max {:.1}us",
+            lines.len(),
+            total.as_secs_f64() * 1000.0,
+            total.as_micros() as f64 / lines.len().max(1) as f64,
+            at(0.5),
+            at(0.99),
+            at(1.0),
+        );
+    }
 }

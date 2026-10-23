@@ -425,6 +425,16 @@ impl CodeBody {
         slice(base, &self.lines[index])
     }
 
+    /// The line an offset falls on: the last line starting at or before
+    /// it, its line break included, and the last line past the end;
+    /// None for a body without lines. The offset is a source offset for
+    /// a verbatim body, an offset into its own text for an owned one.
+    pub fn line_at(&self, offset: usize) -> Option<usize> {
+        self.lines
+            .partition_point(|range| range.start as usize <= offset)
+            .checked_sub(1)
+    }
+
     /// The source byte range of a line, only when the body slices the
     /// source directly; the ranges of an owned body index its own text.
     pub fn line_range(&self, index: usize) -> Option<Range<usize>> {
@@ -739,6 +749,26 @@ pub(crate) fn seal_blocks(blocks: &mut [Block], source: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The line an offset falls on: the last line starting at or before
+    /// it, the line break included, and the last line past the end.
+    #[test]
+    fn the_line_of_an_offset_is_the_last_starting_at_or_before_it() {
+        let body = CodeBody::from_text("ab\ncd");
+        assert_eq!(body.line_at(0), Some(0));
+        assert_eq!(
+            body.line_at(2),
+            Some(0),
+            "the line break belongs to its line"
+        );
+        assert_eq!(body.line_at(3), Some(1));
+        assert_eq!(body.line_at(4), Some(1));
+        assert_eq!(body.line_at(99), Some(1), "past the end, the last line");
+        assert_eq!(
+            CodeBody::from_text("").line_at(0).is_some(),
+            !CodeBody::from_text("").is_empty()
+        );
+    }
 
     /// The loader's construction over the edited source, the splice's
     /// referee: `str::lines` ranges, every line a row.

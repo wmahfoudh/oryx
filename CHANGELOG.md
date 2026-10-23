@@ -4,6 +4,10 @@
 
 ### New features
 
+#### Editor
+
+- When you type in a code file or in the source of a markdown file, the syntax colors now follow each key. Before, they came about half a second after the last key.
+
 #### Linux
 
 - You can now update the AppImage in place with AppImageUpdate, AppImageLauncher or Gear Lever. Before, you downloaded each new version yourself.

@@ -440,11 +440,16 @@ pub fn pending(doc: &Document) -> Vec<PendingBlock> {
 /// at the seam at or before the exact frontier and converges against
 /// the seams past it, and past `after`, the burst's end (zero for none),
 /// when a later edit of the burst stands beyond the first of them.
+/// `cuts`, the lines of the last key, end a chunk so that a seam is
+/// filed there, on the one block of a code file or of the source view;
+/// a page's blocks take none.
 pub fn pending_from(
     doc: &Document,
     seams: &HashMap<usize, Vec<(usize, Seam)>>,
     after: usize,
+    cuts: &[usize],
 ) -> Vec<PendingBlock> {
+    let one_block = doc.blocks.len() == 1;
     pending(doc)
         .into_iter()
         .map(|mut block| {
@@ -467,6 +472,7 @@ pub fn pending_from(
                     start_line,
                     seam,
                     expected: table[from..].to_vec(),
+                    cuts: if one_block { cuts.to_vec() } else { Vec::new() },
                 }
             });
             block
@@ -1591,6 +1597,7 @@ mod tests {
             language.as_deref(),
             highlight::CHUNK_LINES,
             None,
+            || true,
             |c| {
                 highlight::record_seam(&mut table, c.start_line + c.spans.len(), &c.seam);
                 true
@@ -1621,7 +1628,7 @@ mod tests {
         );
         let seams = HashMap::from([(0, table)]);
         let first_expected = |after: usize, doc: &Document| {
-            let pending = pending_from(doc, &seams, after);
+            let pending = pending_from(doc, &seams, after, &[]);
             assert_eq!(pending.len(), 1, "one block still to color");
             let resume = pending[0].resume.clone().expect("a table gives a resume");
             (
@@ -1654,13 +1661,41 @@ mod tests {
         );
         set_exact(&mut doc, 0, 3000);
         assert!(
-            pending_from(&doc, &seams, 0).is_empty(),
+            pending_from(&doc, &seams, 0, &[]).is_empty(),
             "a complete block is not listed"
         );
         set_exact(&mut doc, 0, 100);
         assert!(
-            pending_from(&doc, &HashMap::new(), 0)[0].resume.is_none(),
+            pending_from(&doc, &HashMap::new(), 0, &[])[0]
+                .resume
+                .is_none(),
             "a block without a table sweeps from line 0"
+        );
+    }
+
+    /// The cuts a resume carries: the lines of the last key, for the
+    /// first block alone, since a burst is the one block of a code file
+    /// or of the source view.
+    #[test]
+    fn the_resume_cuts_at_the_lines_of_the_last_key() {
+        let text: String = (0..1500).map(|i| format!("let v{i} = {i};\n")).collect();
+        let mut doc = code_document(Some("rs"), &text);
+        let seams = HashMap::from([(0, table_of(&doc))]);
+        set_exact(&mut doc, 0, 600);
+        let pending = pending_from(&doc, &seams, 601, &[600, 601]);
+        assert_eq!(
+            pending[0].resume.as_ref().map(|r| r.cuts.clone()),
+            Some(vec![600, 601])
+        );
+        let doc =
+            crate::doc::markdown::parse("```rust\nlet a = 1;\n```\n\n```rust\nlet b = 2;\n```\n");
+        let seams = HashMap::from([(0, table_of(&doc)), (1, Vec::new())]);
+        let pending = pending_from(&doc, &seams, 0, &[0, 1]);
+        assert!(
+            pending
+                .iter()
+                .all(|p| p.resume.as_ref().is_none_or(|r| r.cuts.is_empty())),
+            "a page's blocks get no cuts"
         );
     }
 
@@ -1673,11 +1708,11 @@ mod tests {
             crate::doc::markdown::parse("```rust\nlet a = 1;\n```\n\n```rust\nlet b = 2;\n```\n");
         assert_eq!(doc.blocks.len(), 2);
         let seams = HashMap::from([(1, table_of(&doc))]);
-        let pending = pending_from(&doc, &seams, 0);
+        let pending = pending_from(&doc, &seams, 0, &[]);
         assert_eq!(pending.len(), 2, "both cold");
         assert!(pending[0].resume.is_none() && pending[1].resume.is_some());
         set_exact(&mut doc, 0, 1);
-        let pending = pending_from(&doc, &seams, 0);
+        let pending = pending_from(&doc, &seams, 0, &[]);
         assert_eq!(pending.len(), 1, "the first is complete");
         assert_eq!(pending[0].block, 1);
     }

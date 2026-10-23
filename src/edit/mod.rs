@@ -624,6 +624,7 @@ mod tests {
             language.as_deref(),
             chunk,
             resume.as_ref(),
+            || true,
             |c| {
                 arrivals.push(Arrival {
                     block: 0,
@@ -661,6 +662,7 @@ mod tests {
             start_line,
             seam,
             expected: table[at..].to_vec(),
+            cuts: Vec::new(),
         }
     }
 
