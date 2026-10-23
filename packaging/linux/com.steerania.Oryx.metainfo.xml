@@ -17,32 +17,6 @@
   <url type="homepage">https://github.com/wmahfoudh/oryx</url>
   <url type="bugtracker">https://github.com/wmahfoudh/oryx/issues</url>
   <url type="vcs-browser">https://github.com/wmahfoudh/oryx</url>
-  <screenshots>
-    <screenshot type="default">
-      <caption>A markdown document with the sidebar open</caption>
-      <image>https://raw.githubusercontent.com/wmahfoudh/oryx/v1.3.0/screenshots/flathub-hero.png</image>
-    </screenshot>
-    <screenshot>
-      <caption>Typeset TeX math</caption>
-      <image>https://raw.githubusercontent.com/wmahfoudh/oryx/v1.3.0/screenshots/flathub-math.png</image>
-    </screenshot>
-    <screenshot>
-      <caption>A source file with syntax colors</caption>
-      <image>https://raw.githubusercontent.com/wmahfoudh/oryx/v1.3.0/screenshots/flathub-code.png</image>
-    </screenshot>
-    <screenshot>
-      <caption>Search and replace with regular expressions</caption>
-      <image>https://raw.githubusercontent.com/wmahfoudh/oryx/v1.3.0/screenshots/flathub-regex.png</image>
-    </screenshot>
-    <screenshot>
-      <caption>An Arabic book, read right to left</caption>
-      <image>https://raw.githubusercontent.com/wmahfoudh/oryx/v1.3.0/screenshots/flathub-rtl-ar.png</image>
-    </screenshot>
-    <screenshot>
-      <caption>The theme editor</caption>
-      <image>https://raw.githubusercontent.com/wmahfoudh/oryx/v1.3.0/screenshots/flathub-themes-editor.png</image>
-    </screenshot>
-  </screenshots>
   <content_rating type="oars-1.1"/>
   <provides>
     <mediatype>text/markdown</mediatype>

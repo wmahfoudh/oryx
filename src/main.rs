@@ -110,7 +110,7 @@ fn usage() -> String {
 
 /// The `--version` line: the crate version, then the short commit the
 /// build script read from git. A build from a source archive (the AUR
-/// source package, a Flathub build) has no checkout and prints the
+/// source package, a distribution's build) has no checkout and prints the
 /// version alone.
 fn version_line(commit: Option<&str>) -> String {
     match commit {

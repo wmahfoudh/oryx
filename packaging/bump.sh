@@ -1,8 +1,7 @@
 #!/bin/sh
 # Opens a phase at a new version: the crate version and its lock, a
 # release line in the metainfo marked development (the release routine
-# sets its date and removes the mark), the metainfo's screenshot links
-# on the new tag, and the changelog heading. The version moves once per
+# sets its date and removes the mark), and the changelog heading. The version moves once per
 # phase, so a bump while the newest release line is still marked
 # development is refused, as is any version not above the crate's.
 #
@@ -43,10 +42,8 @@ today=$(date +%F)
 sed -i "0,/^version = \".*\"/s//version = \"$VERSION\"/" "$manifest"
 cargo update --workspace --offline --quiet --manifest-path "$manifest"
 
-# The metainfo: the new line above the newest, at its indent, and the
-# screenshot links on the tag the release will push.
+# The metainfo: the new line above the newest, at its indent.
 sed -i "0,/^\( *\)<release /s//\1<release version=\"$VERSION\" date=\"$today\" type=\"development\"\/>\n\1<release /" "$metainfo"
-sed -i "s|/wmahfoudh/oryx/v[0-9.]*/screenshots/|/wmahfoudh/oryx/v$VERSION/screenshots/|" "$metainfo"
 
 # The changelog: the heading on top, unless it is already there.
 grep -q "^## v$VERSION\$" "$changelog" || sed -i "0,/^## /s//## v$VERSION\n\n## /" "$changelog"

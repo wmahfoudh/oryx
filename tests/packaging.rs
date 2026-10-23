@@ -142,45 +142,6 @@ fn the_metainfo_names_the_app_id_its_entry_and_every_type() {
     assert!(xml.contains("<content_rating type=\"oars-1.1\""));
 }
 
-/// The screenshot links carry the tag of the release the metainfo ships
-/// in, never a branch: AppStream readers fetch them long after the branch
-/// has moved on, and Flathub refuses branch links outright. The bump step
-/// rewrites the tag; the files must exist in the tree.
-#[test]
-fn the_metainfo_screenshots_link_to_the_release_tag_and_exist() {
-    let xml = packaging("linux/com.steerania.Oryx.metainfo.xml");
-    let prefix = format!(
-        "https://raw.githubusercontent.com/wmahfoudh/oryx/v{}/screenshots/",
-        env!("CARGO_PKG_VERSION")
-    );
-    let names: Vec<&str> = xml
-        .split("<image>")
-        .skip(1)
-        .map(|rest| rest.split("</image>").next().unwrap())
-        .map(|url| {
-            url.strip_prefix(&prefix)
-                .unwrap_or_else(|| panic!("{url} is not under {prefix}"))
-        })
-        .collect();
-    assert_eq!(
-        names,
-        [
-            "flathub-hero.png",
-            "flathub-math.png",
-            "flathub-code.png",
-            "flathub-regex.png",
-            "flathub-rtl-ar.png",
-            "flathub-themes-editor.png",
-        ]
-    );
-    for name in names {
-        assert!(
-            repo().join("screenshots").join(name).is_file(),
-            "screenshots/{name} is missing"
-        );
-    }
-}
-
 #[test]
 fn the_metainfo_validates_when_the_tool_is_installed() {
     let path = repo().join("packaging/linux/com.steerania.Oryx.metainfo.xml");
@@ -1193,12 +1154,6 @@ fn bump_sh_moves_the_version_in_the_four_files_and_refuses_a_step_back() {
         lines[1].len() - lines[1].trim_start().len(),
         "same indent"
     );
-    assert_eq!(
-        xml.matches(&format!("/wmahfoudh/oryx/v{next}/screenshots/"))
-            .count(),
-        6
-    );
-    assert!(!xml.contains(&format!("/v{current}/screenshots/")));
     let changelog = std::fs::read_to_string(dir.join("CHANGELOG.md")).unwrap();
     assert!(
         changelog.starts_with(&format!("# Changelog\n\n## v{next}\n\n## v{current}\n")),
@@ -1523,79 +1478,6 @@ fn the_winget_version_template_names_the_default_locale() {
     assert_eq!(
         text,
         "# yaml-language-server: $schema=https://aka.ms/winget-manifest.version.1.12.0.schema.json\nPackageIdentifier: Steerania.Oryx\nPackageVersion: \"@VERSION@\"\nDefaultLocale: en-US\nManifestType: version\nManifestVersion: 1.12.0\n"
-    );
-}
-
-#[test]
-fn the_flathub_manifest_builds_the_tag_offline_into_app() {
-    let text = packaging("flathub/com.steerania.Oryx.yml");
-    for line in [
-        &format!("app-id: {APP_ID}\n"),
-        "runtime: org.freedesktop.Platform\n",
-        "runtime-version: '25.08'\n",
-        "sdk: org.freedesktop.Sdk\n",
-        "  - org.freedesktop.Sdk.Extension.rust-stable\n",
-        "command: oryx\n",
-        "  - --socket=wayland\n",
-        "  - --socket=fallback-x11\n",
-        "  - --share=ipc\n",
-        "  - --share=network\n",
-        "  - --filesystem=home\n",
-        "      - cargo --offline build --release --verbose\n",
-        "      - sh packaging/stage-linux.sh stage /app\n",
-        &format!(
-            "        url: https://github.com/wmahfoudh/oryx/archive/refs/tags/v{}.tar.gz\n",
-            last_stable_release()
-        ),
-        "      - cargo-sources.json\n",
-    ] {
-        assert!(text.contains(line), "{line:?} missing");
-    }
-}
-
-/// `cargo-sources.json` is regenerated from `Cargo.lock` by Flathub's
-/// generator, cloned beside the repository; a stale file would make the
-/// offline build miss a crate. Skipped when the generator or its
-/// Python modules are absent.
-#[test]
-fn the_flathub_cargo_sources_match_the_lock_file() {
-    let generator = repo()
-        .parent()
-        .unwrap()
-        .join("flatpak-builder-tools/cargo/flatpak-cargo-generator.py");
-    if !generator.is_file() {
-        eprintln!("flatpak-builder-tools is not cloned beside the repository, skipped");
-        return;
-    }
-    if Command::new("python3")
-        .args(["-c", "import aiohttp, toml"])
-        .output()
-        .map(|out| !out.status.success())
-        .unwrap_or(true)
-    {
-        eprintln!("python3 with aiohttp and toml is not installed, skipped");
-        return;
-    }
-    let out_path =
-        std::env::temp_dir().join(format!("oryx-cargo-sources-{}.json", std::process::id()));
-    let out = Command::new("python3")
-        .arg(&generator)
-        .arg(repo().join("Cargo.lock"))
-        .arg("-o")
-        .arg(&out_path)
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let fresh = std::fs::read_to_string(&out_path).unwrap();
-    let committed = packaging("flathub/cargo-sources.json");
-    std::fs::remove_file(&out_path).unwrap();
-    assert_eq!(
-        committed, fresh,
-        "packaging/flathub/cargo-sources.json is stale: regenerate it with make channels"
     );
 }
 

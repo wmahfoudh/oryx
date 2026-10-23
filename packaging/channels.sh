@@ -1,9 +1,8 @@
 #!/bin/sh
 # Rewrites the recipes for a published release: the two AUR PKGBUILDs
-# and their .SRCINFO, the winget manifests, and the Flathub manifest with
-# its cargo-sources.json. Run after the tag is pushed and the release
-# created with its files attached; running it twice for a version
-# changes nothing the second time.
+# and their .SRCINFO, and the winget manifests. Run after the tag is
+# pushed and the release created with its files attached; running it
+# twice for a version changes nothing the second time.
 #
 # Usage: channels.sh <version>
 #
@@ -34,9 +33,6 @@ refuse() {
 for tool in curl git sha256sum msiinfo makepkg python3; do
     command -v "$tool" >/dev/null 2>&1 || refuse "$tool is not installed"
 done
-generator="$root/../flatpak-builder-tools/cargo/flatpak-cargo-generator.py"
-[ -f "$generator" ] || refuse "flatpak-builder-tools is not cloned beside the repository ($generator)"
-python3 -c 'import aiohttp, toml' 2>/dev/null || refuse "python3 needs aiohttp and toml for the cargo generator"
 
 git -C "$root" ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1 \
     || refuse "tag $tag is not on GitHub"
@@ -141,12 +137,6 @@ PY
 else
     echo "channels.sh: winget schema check skipped, python3 has no jsonschema or yaml"
 fi
-
-# Flathub: the tag and its checksum, and the crate list for the offline
-# build regenerated from Cargo.lock.
-manifest="$here/flathub/com.steerania.Oryx.yml"
-sed -i "s|archive/refs/tags/v[0-9.]*\.tar\.gz|archive/refs/tags/$tag.tar.gz|; s|^        sha256: .*|        sha256: \"$tag_sha\"|" "$manifest"
-python3 "$generator" "$root/Cargo.lock" -o "$here/flathub/cargo-sources.json" >/dev/null
 
 echo "channels.sh: recipes written for $VERSION"
 echo "  tag tarball  $tag_sha"

@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 /// The application id on Linux: the desktop entry and icon file names,
 /// the `Icon` and `StartupWMClass` the entry declares, and the Wayland
 /// app_id (X11 class) the window sets, so every desktop matches window,
-/// entry and icon. Flathub exports only files named after it.
+/// entry and icon, the file names AppStream expects.
 pub const APP_ID: &str = "com.steerania.Oryx";
 
 /// The file names `--register` wrote before the app id, removed on the
