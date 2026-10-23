@@ -21,6 +21,14 @@
 # builds without the network and every build embeds the same runtime.
 # The tool's own AppStream check is skipped (-n): it only recognizes the
 # old .appdata.xml name, and tests/packaging.rs validates the metainfo.
+#
+# The image carries its update information (-u): the zsync file of the
+# latest release on GitHub, named after the image, so that the AppImage
+# tools (AppImageUpdate, AppImageLauncher, Gear Lever) update an
+# installed copy in place. appimagetool writes that file beside the
+# image with zsyncmake, and skips it in silence when the tool is
+# missing, so the tool is required and the file is checked: a release
+# page must carry both, or the update information points at nothing.
 set -e
 here="$(cd "$(dirname "$0")" && pwd)"
 STAGE=$1
@@ -29,7 +37,7 @@ if [ -z "$STAGE" ] || [ -z "$OUT" ]; then
     echo "usage: appimage.sh <staged usr dir> <output.AppImage>" >&2
     exit 1
 fi
-for tool in appimagetool patchelf; do
+for tool in appimagetool patchelf zsyncmake; do
     if ! command -v "$tool" >/dev/null 2>&1; then
         echo "appimage.sh: $tool is not installed" >&2
         exit 1
@@ -80,11 +88,22 @@ cp "$icon" "$appdir/$app.png"
 ln -s "$app.png" "$appdir/.DirIcon"
 
 runtime="${APPIMAGE_RUNTIME:-$HOME/.local/lib/appimagetool/runtime-x86_64}"
-rm -f "$OUT"
+updates="gh-releases-zsync|wmahfoudh|oryx|latest|Oryx-*-x86_64.AppImage.zsync"
+# appimagetool runs zsyncmake without an output path, so the zsync file
+# lands in the working directory under the image's name: the pack runs
+# in the folder of the image, with the other paths made absolute.
+outdir="$(cd "$(dirname "$OUT")" && pwd)"
+outname="$(basename "$OUT")"
+rm -f "$OUT" "$OUT.zsync"
 if [ -f "$runtime" ]; then
-    ARCH=x86_64 appimagetool -n --runtime-file "$runtime" "$appdir" "$OUT"
+    runtime="$(cd "$(dirname "$runtime")" && pwd)/$(basename "$runtime")"
+    (cd "$outdir" && ARCH=x86_64 appimagetool -n -u "$updates" --runtime-file "$runtime" "$appdir" "$outname")
 else
     echo "appimage.sh: no runtime at $runtime, appimagetool downloads one" >&2
-    ARCH=x86_64 appimagetool -n "$appdir" "$OUT"
+    (cd "$outdir" && ARCH=x86_64 appimagetool -n -u "$updates" "$appdir" "$outname")
 fi
-echo "$OUT: $(($(stat -c %s "$OUT") / 1024)) KB"
+if [ ! -f "$OUT.zsync" ]; then
+    echo "appimage.sh: appimagetool wrote no $OUT.zsync" >&2
+    exit 1
+fi
+echo "$OUT: $(($(stat -c %s "$OUT") / 1024)) KB, with $OUT.zsync"

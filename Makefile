@@ -21,6 +21,7 @@ release: audit
 	@command -v nfpm >/dev/null || { echo "nfpm is not installed: it builds the .deb and the .rpm"; exit 1; }
 	@command -v appimagetool >/dev/null || { echo "appimagetool is not installed: see the Tools section of internal/releasing.md"; exit 1; }
 	@command -v patchelf >/dev/null || { echo "patchelf is not installed: it gives the AppImage's binary the path of its bundled libraries"; exit 1; }
+	@command -v zsyncmake >/dev/null || { echo "zsync is not installed: zsyncmake writes the update file of the AppImage"; exit 1; }
 	sh packaging/build-linux.sh
 	cargo build --release --target x86_64-pc-windows-gnu
 	rm -rf release

@@ -780,6 +780,33 @@ fn path_with(bin: &Path) -> String {
     )
 }
 
+/// The update information the AppImage carries: the zsync file of the
+/// latest release on GitHub, named after the image, so that the AppImage
+/// tools update an installed copy in place (the AppImageSpec, its
+/// `gh-releases-zsync` transport).
+#[cfg(unix)]
+const APPIMAGE_UPDATE_INFORMATION: &str =
+    "gh-releases-zsync|wmahfoudh|oryx|latest|Oryx-*-x86_64.AppImage.zsync";
+
+#[cfg(unix)]
+#[test]
+fn appimage_sh_embeds_the_update_information_of_the_github_releases() {
+    let script = packaging("appimage.sh");
+    assert!(
+        script.contains(&format!("updates=\"{APPIMAGE_UPDATE_INFORMATION}\"\n")),
+        "the script names the update information"
+    );
+    assert_eq!(
+        script.matches("appimagetool -n -u \"$updates\" ").count(),
+        2,
+        "both appimagetool calls carry the update information"
+    );
+    assert!(
+        script.contains("zsyncmake"),
+        "the script needs zsyncmake, or the zsync file is silently skipped"
+    );
+}
+
 /// The three libraries of the X11 keyboard path that the AppImage
 /// bundles, by soname.
 #[cfg(unix)]
@@ -807,17 +834,29 @@ fn keyboard_library_stubs(dir: &Path) -> PathBuf {
 #[cfg(unix)]
 #[test]
 fn appimage_sh_packs_the_staged_tree_with_the_entry_and_the_icon_on_top() {
-    // appimagetool is itself an AppImage and needs FUSE to start, so
-    // it can be installed and still not run.
+    // appimagetool is itself an AppImage: without FUSE it starts only
+    // when told to extract itself first.
     for tool in ["appimagetool", "rsvg-convert"] {
         let runs = Command::new(tool)
             .arg("--version")
+            .env("APPIMAGE_EXTRACT_AND_RUN", "1")
             .output()
             .is_ok_and(|out| out.status.success());
         if !runs {
             eprintln!("{tool} is not installed or cannot run here, skipped");
             return;
         }
+    }
+    // zsyncmake writes the update file beside the image. It has no
+    // version switch and writes a file for any argument, so it is only
+    // looked up on the PATH.
+    let found = Command::new("sh")
+        .args(["-c", "command -v zsyncmake"])
+        .output()
+        .is_ok_and(|out| out.status.success());
+    if !found {
+        eprintln!("zsyncmake is not installed, skipped");
+        return;
     }
     let dir = std::env::temp_dir().join(format!("oryx-appimage-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -846,6 +885,7 @@ fn appimage_sh_packs_the_staged_tree_with_the_entry_and_the_icon_on_top() {
         .arg(&image)
         .env("PATH", path_with(&bin))
         .env("APPIMAGE_LIBS", &libs)
+        .env("APPIMAGE_EXTRACT_AND_RUN", "1")
         .output()
         .unwrap();
     assert!(
@@ -860,6 +900,23 @@ fn appimage_sh_packs_the_staged_tree_with_the_entry_and_the_icon_on_top() {
         let mode = std::fs::metadata(&image).unwrap().permissions().mode();
         assert_eq!(mode & 0o111, 0o111, "the image is executable");
     }
+    // The update information names the zsync file of the latest
+    // release on GitHub, and the file is written beside the image.
+    let out = Command::new(&image)
+        .arg("--appimage-updateinformation")
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        APPIMAGE_UPDATE_INFORMATION,
+        "the runtime reads the update information back"
+    );
+    let zsync = dir.join("Oryx-1.2.3-x86_64.AppImage.zsync");
+    let head = std::fs::read(&zsync).unwrap();
+    assert!(
+        head.starts_with(b"zsync: "),
+        "the zsync file beside the image starts with its format line"
+    );
     // The runtime unpacks the image without FUSE, into `squashfs-root`
     // under the working directory.
     let out = Command::new(&image)
@@ -946,9 +1003,10 @@ fn appimage_sh_lets_every_user_enter_the_top_folder_of_the_image() {
     stand_in(
         &bin,
         "appimagetool",
-        "for arg; do appdir=$out; out=$arg; done\nstat -c %a \"$appdir\" > \"$out\"\n",
+        "for arg; do appdir=$out; out=$arg; done\nstat -c %a \"$appdir\" > \"$out\"\n: > \"$out.zsync\"\n",
     );
     stand_in(&bin, "patchelf", "");
+    stand_in(&bin, "zsyncmake", "");
     let libs = keyboard_library_stubs(&dir);
     let image = dir.join("Oryx-1.2.3-x86_64.AppImage");
     let out = Command::new("sh")
@@ -1007,8 +1065,9 @@ fn appimage_sh_bundles_the_keyboard_libraries_and_sets_their_search_path() {
     stand_in(
         &bin,
         "appimagetool",
-        "for arg; do appdir=$out; out=$arg; done\ncp -r \"$appdir\" \"$out\"\n",
+        "for arg; do appdir=$out; out=$arg; done\ncp -r \"$appdir\" \"$out\"\n: > \"$out.zsync\"\n",
     );
+    stand_in(&bin, "zsyncmake", "");
     // The stand-in records each call as a line.
     let record = dir.join("patchelf.args");
     stand_in(
