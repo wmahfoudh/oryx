@@ -2,7 +2,7 @@
 # One compiler for every build of a release: the host, the Ubuntu root and
 # the Mac runner install this version by themselves. It moves at the
 # opening of a phase, on the maintainer's word.
-channel = "1.99.0"
+channel = "1.99.1"
 components = ["clippy", "rustfmt"]
 # The cross targets of `make check` and of the Windows build are not
 # named here: a checkout that never builds them would download them.
