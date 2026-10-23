@@ -1,5 +1,7 @@
 # Changelog
 
+## v1.3.0
+
 ## v1.2.2
 
 This is a maintenance release: mostly fixes, and a few additions. Keyboard shortcuts now work on Cyrillic, Greek and other non-Latin layouts, and on a Mac the Option key types its characters as usual. Right-to-left text works better in the editor, in the search bar and in the outline of a book. New in this release: a key to change the case of a selection, a highlight of the other occurrences of a selected phrase, and the alignment of table columns. Syntax colors no longer disappear after an undo or a quick edit. The search bar is fast again with a very long query: a few milliseconds per key instead of seconds. The help page no longer uses a full processor core, and the window is no longer transparent on KDE Plasma 6.8.
