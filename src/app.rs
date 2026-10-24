@@ -6886,8 +6886,10 @@ impl App {
         // them: the page is rebuilt from the current text, as a save
         // does, and the heading found again on it by its anchor, else
         // the region's start. The clamp holds the caret inside the text
-        // and on a character.
-        if self.edit_park.is_some() {
+        // and on a character. The help page keeps the park behind its
+        // stash and has an outline of its own: its entries resolve
+        // against the page on screen, below.
+        if self.edit_park.is_some() && self.help_stash.is_none() {
             let placed = self.edit_park.as_ref().and_then(|parked| {
                 entry_offset(&parked.document, block).map(|offset| parked.edits.place_of(offset))
             });

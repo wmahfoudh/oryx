@@ -17,6 +17,7 @@
 - In the markdown editor, a click on a heading in the Outline tab now lands on that heading after you edited the text above it. Before, the cursor landed where the heading was before the edit, and the next key could crash Oryx.
 - When you leave the markdown editor, the page now shows the text as you left it. Before, after an undo followed by a new edit, the page could show an older text, and a checkbox clicked on that page wrote into the wrong place of the file.
 - When you answer Discard to the save question and the step after it does not happen, for example when you close the new-file dialog, the text now comes back as it was last saved. Before, the discarded edits stayed on screen, and the next save could corrupt a file with Windows line endings.
+- On the help page, a click on a heading in the Outline tab now goes to that heading while a markdown file is being edited behind the page. Before, nothing happened.
 - The zip library, used for EPUB books, CBZ comics and zipped FB2 books, was updated to version 9. Three security advisories were published on the old version in October 2026. They are about extracting an archive to disk. Oryx never does that. No release was affected.
 
 ## v1.2.2
