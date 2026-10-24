@@ -168,9 +168,10 @@ impl Undo {
         self.save != Some(self.head)
     }
 
-    /// Where the stack stands. The stack is linear, so two moments
-    /// sharing a head share their bytes, whatever path of typing,
-    /// undoing and redoing ran between them.
+    /// Where the stack stands. Two moments sharing a head need not
+    /// share their bytes: a record after an undo reuses the number, and
+    /// typing that joins the open unit keeps it. The park compares the
+    /// text itself.
     pub fn head(&self) -> usize {
         self.head
     }
@@ -451,5 +452,25 @@ mod tests {
         assert!(undo.is_dirty());
         undo.mark_saved();
         assert!(!undo.is_dirty(), "only the next save cleans the title");
+    }
+
+    /// The head is no measure of the bytes: a record after an undo
+    /// reuses the number, and typing that joins the open unit keeps it.
+    /// The park compares the text itself (`leave_edit` in `app.rs`).
+    #[test]
+    fn a_record_after_an_undo_reuses_the_head() {
+        let t0 = Instant::now();
+        let mut led = ledger("Intro");
+        let mut undo = Undo::new();
+        type_at(&mut led, &mut undo, 5, "s", t0);
+        assert_eq!(undo.head(), 1);
+        let (splice, _) = undo.undo().expect("one unit to undo");
+        apply(&mut led, &splice);
+        type_at(&mut led, &mut undo, 5, "!!", t0 + ms(5000));
+        assert_eq!(undo.head(), 1, "the same head");
+        assert_eq!(led.current(), "Intro!!", "other bytes");
+        type_at(&mut led, &mut undo, 7, "?", t0 + ms(5100));
+        assert_eq!(undo.head(), 1, "typing that joins the unit keeps the head");
+        assert_eq!(led.current(), "Intro!!?");
     }
 }

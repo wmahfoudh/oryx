@@ -14,7 +14,7 @@ use oryx::edit::{
     self,
     autosave::{self, Verdict},
     caret::{self, Caret, CaretBox, Motion},
-    splice::{self, Ledger},
+    splice::{self, Ledger, Placed},
     undo::{Kind, Undo},
 };
 use oryx::export::{self, ExportPass, ExportSettings};
@@ -1146,9 +1146,11 @@ struct Parked {
     pass: Option<LayoutPass>,
     scroll_y: f32,
     layout_width: f32,
-    /// The undo head at the crossing; an equal head on the way out
-    /// means equal bytes, so the parked page is still the truth.
-    head: usize,
+    /// The edits since the page was rendered, over the page's own
+    /// text: the outline's offsets are the page's, and this ledger
+    /// places them in the current text. Whether the page is still the
+    /// buffer's render is read from the bytes themselves.
+    edits: Ledger,
     /// The look the parked layout was built under: a change of font,
     /// of size, of zoom or of direction while editing drops the layout
     /// and keeps the model, a theme change refills its colors
@@ -2269,14 +2271,13 @@ impl App {
         self.refresh_title();
         let text = Arc::clone(&self.document.source);
         if let Some(source) = edit::source_document(kind, &text) {
-            let head = self.undo.as_ref().map_or(0, Undo::head);
             let parked = Parked {
                 document: std::mem::replace(&mut self.document, source),
                 layout: self.layout.take(),
                 pass: self.pass.take(),
                 scroll_y: self.scroll_y,
                 layout_width: self.layout_width,
-                head,
+                edits: Ledger::new(Arc::clone(&text), Vec::new()),
                 cfg: self.cfg.clone(),
                 theme: self.theme.clone(),
             };
@@ -2340,6 +2341,24 @@ impl App {
         self.start_highlight(load::pending(&self.document));
     }
 
+    /// The heading of `block` of the parked page found in the current
+    /// text by its anchor, when its own region was replaced since the
+    /// park and the edits cannot place it: the text parsed as the page
+    /// it would render, on the window's thread, the cost of that rare
+    /// click. None when no heading has the anchor any more.
+    fn heading_again(&self, page: &Document, block: usize) -> Option<usize> {
+        let BlockKind::Heading { anchor, .. } = &page.blocks.get(block)?.kind else {
+            return None;
+        };
+        let kind = load::detect_with_text(self.path.as_deref()?, &self.document.source);
+        let current = edit::rendered_document(kind, &self.document.source);
+        current
+            .blocks
+            .iter()
+            .find(|b| matches!(&b.kind, BlockKind::Heading { anchor: a, .. } if a == anchor))
+            .map(|b| b.range.start)
+    }
+
     /// Puts the row holding the place's offset at its height in the
     /// editor: at the top the way an outline jump lands, in the middle
     /// for a jump to a line, or where a crossing found the line on the
@@ -2378,9 +2397,9 @@ impl App {
     }
 
     /// Rebuilds the page held behind the editor from the buffer, which
-    /// a save makes the file. The outline refreshes with it, and the
-    /// next return costs no parse, since the parked page is the
-    /// buffer's own render again.
+    /// a save makes the file, when its bytes moved. The outline
+    /// refreshes with it, and the next return costs no parse, since the
+    /// parked page is the buffer's own render again.
     fn refresh_parked_page(&mut self) {
         let Some(kind) = self
             .path
@@ -2389,19 +2408,18 @@ impl App {
         else {
             return;
         };
-        let head = self.undo.as_ref().map_or(0, Undo::head);
-        if self.edit_park.as_ref().is_none_or(|p| p.head == head) {
+        let Some(parked) = self.edit_park.as_mut() else {
+            return;
+        };
+        if parked.document.source == self.document.source {
             return;
         }
         let page = edit::rendered_document(kind, &self.document.source);
-        let outline = OutlineTree::build(&page);
-        if let Some(parked) = self.edit_park.as_mut() {
-            parked.document = page;
-            parked.head = head;
-            parked.layout = None;
-            parked.pass = None;
-        }
-        self.outline = outline;
+        self.outline = OutlineTree::build(&page);
+        parked.edits = Ledger::new(Arc::clone(&page.source), Vec::new());
+        parked.document = page;
+        parked.layout = None;
+        parked.pass = None;
     }
 
     /// Back to reading; the caret offset is remembered for this file so
@@ -2451,8 +2469,14 @@ impl App {
             self.resume_edit.remove(path);
         }
         if let Some(parked) = self.edit_park.take() {
-            let head = self.undo.as_ref().map_or(0, Undo::head);
-            if head == parked.head {
+            let unchanged = parked.document.source == self.document.source;
+            // Every edit of the editor goes through the park's ledger: a
+            // clean one means the bytes are the page's.
+            debug_assert!(
+                parked.edits.is_dirty() || unchanged,
+                "an edit reached the buffer past the park's ledger"
+            );
+            if unchanged {
                 // The held outline describes this very page; rebuilding
                 // it here would cost a parse of the whole page for nothing.
                 self.document = parked.document;
@@ -2822,6 +2846,58 @@ impl App {
         }
     }
 
+    /// The unsaved edits dropped: the text goes back to the ledger's
+    /// base, the file as last read or written, with that text's line
+    /// ending record, and the ledger and the history go with them.
+    /// Nothing to do without a ledger: the step that put the file
+    /// aside dropped it already.
+    fn discard_edits(&mut self) {
+        let Some(ledger) = self.ledger.take() else {
+            return;
+        };
+        self.undo = None;
+        if ledger.is_dirty() {
+            let (base, crlf) = ledger.into_base();
+            self.crlf = crlf;
+            self.restore_text(&base);
+        }
+        self.refresh_title();
+    }
+
+    /// The document built again from `text`, in whatever the reader is
+    /// looking at: the page, or the source view with its parked page
+    /// and the outline behind it, or a code file's own lines. The caret
+    /// stays where it was, held inside the text; the layout and the
+    /// colors start afresh.
+    fn restore_text(&mut self, text: &str) {
+        let Some(kind) = self
+            .path
+            .as_deref()
+            .map(|path| load::detect_with_text(path, text))
+        else {
+            return;
+        };
+        let page = edit::rendered_document(kind, text);
+        self.outline = OutlineTree::build(&page);
+        match (self.edit_park.as_mut(), edit::source_document(kind, text)) {
+            (Some(parked), Some(source)) => {
+                parked.edits = Ledger::new(Arc::clone(&page.source), Vec::new());
+                parked.document = page;
+                parked.layout = None;
+                parked.pass = None;
+                self.document = source;
+            }
+            _ => self.document = page,
+        }
+        if let Some(caret) = self.caret {
+            self.caret = Some(Caret::at(caret::clamp(&self.document, caret.offset)));
+        }
+        self.rehighlight_at = None;
+        self.drop_waiting_landings();
+        self.swapped_document(None, None);
+        self.request_redraw();
+    }
+
     /// A click on a rendered task checkbox, the one edit reading
     /// allows. The flip replaces one byte with one byte, so nothing on
     /// the page moves: the model flips in place and the band
@@ -2982,6 +3058,11 @@ impl App {
             .get(range.clone())
             .map_or(0, |cut| cut.matches('\n').count());
         let touched = ledger.edit(range.clone(), text);
+        // The outline's offsets are the parked page's: the park's ledger
+        // follows the edit so they can be placed in the current text.
+        if let Some(parked) = self.edit_park.as_mut() {
+            parked.edits.splice(range.clone(), text);
+        }
         let old_touched = touched.start..touched.start + removed + 1;
         let current = ledger.current();
         let settled =
@@ -3983,12 +4064,15 @@ impl App {
                     self.ask_next_leftover();
                 }
             }
+            // The edits go with the step the question held. A step that
+            // puts the file aside drops the ledger itself; one that comes
+            // back without, a cancelled dialog or a folder missing, finds
+            // the ledger, and the text goes back to the file's.
             confirm::Decision::Discard => {
-                self.ledger = None;
-                self.undo = None;
-                self.rehighlight_at = None;
-                self.refresh_title();
                 self.resolve_confirm(event_loop);
+                if !event_loop.exiting() {
+                    self.discard_edits();
+                }
             }
             confirm::Decision::Cancel => {
                 self.pending_step = None;
@@ -6797,13 +6881,20 @@ impl App {
     /// or unplaced one reveals and lands through the pending target.
     fn jump_to_heading(&mut self, block: usize) {
         // While the source is on screen the outline still describes the
-        // page parked behind it, so the entry resolves against that
-        // model and the caret lands on the heading's own line.
-        if self.edit_park.is_some() {
-            let offset = self
-                .edit_park
-                .as_ref()
-                .and_then(|parked| entry_offset(&parked.document, block));
+        // page parked behind it: the entry resolves against that model,
+        // the edits since the park place its offset in the current
+        // text, and the clamp holds the caret inside the text and on a
+        // character.
+        if let Some(parked) = self.edit_park.as_ref() {
+            let offset = entry_offset(&parked.document, block).map(|offset| {
+                let at = match parked.edits.place_of(offset) {
+                    Placed::Exact(at) => at,
+                    Placed::Replaced(start) => {
+                        self.heading_again(&parked.document, block).unwrap_or(start)
+                    }
+                };
+                caret::clamp(&self.document, at)
+            });
             if let Some(offset) = offset {
                 self.push_jump();
                 self.caret = Some(Caret::at(offset));

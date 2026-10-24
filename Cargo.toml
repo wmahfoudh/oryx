@@ -53,6 +53,7 @@ zip = { version = "9", default-features = false, features = ["deflate"] }
 [dev-dependencies]
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "rayon"] }
 lopdf = "0.44"
+proptest = { version = "1.12", default-features = false, features = ["std"] }
 
 [build-dependencies]
 ico = "0.5.0"

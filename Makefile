@@ -10,6 +10,11 @@ check:
 	cargo build --workspace
 	cargo test --workspace
 
+# The fuzzers, ignored under check, in the debug profile where the
+# assertions fire; PROPTEST_CASES=5000 for a deep run.
+fuzz:
+	cargo test --workspace fuzz_ -- --ignored
+
 audit:
 	@command -v cargo-audit >/dev/null || { echo "cargo-audit is not installed: cargo install cargo-audit"; exit 1; }
 	cargo audit

@@ -46,6 +46,16 @@ pub fn combine(source: &str, edits: &[(Range<usize>, String)]) -> Option<(Range<
     Some((region, text))
 }
 
+/// Where a baseline offset stands in the current text (`place_of`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Placed {
+    /// Outside every replaced range: the offset moved by the edits
+    /// before it.
+    Exact(usize),
+    /// Inside a replaced range, whose current start this is.
+    Replaced(usize),
+}
+
 pub struct Ledger {
     /// The normalized text fixed at edit entry; splice ranges index it.
     base: Arc<str>,
@@ -140,7 +150,13 @@ impl Ledger {
     pub fn edit(&mut self, range: Range<usize>, text: &str) -> Range<usize> {
         let start_line = self.newlines_before(range.start);
         let touched = start_line..start_line + text.matches('\n').count() + 1;
+        self.splice(range, text);
+        touched
+    }
 
+    /// The edit alone, without the line count: what a park's ledger
+    /// records at each key, where only the places matter.
+    pub fn splice(&mut self, range: Range<usize>, text: &str) {
         let (a, b) = (range.start, range.end);
         let (spans, deltas) = self.spans();
         // The splices the edit touches, boundaries inclusive so typing
@@ -171,7 +187,6 @@ impl Ledger {
         // newlines in the dominant ending instead of their own bytes.
         let keep = merged.text != self.base[merged.range.clone()];
         self.splices.splice(i0..j, keep.then_some(merged));
-        touched
     }
 
     /// The current text: the baseline with every splice applied.
@@ -202,6 +217,36 @@ impl Ledger {
             delta += s.text.len() as isize - s.range.len() as isize;
         }
         (base_offset as isize + delta) as usize
+    }
+
+    /// The current place of a baseline offset, for the outline of a
+    /// parked page: an edit at or before it moves it, exactly. An edit
+    /// around it replaced its region, whose current start is answered:
+    /// what stood at the offset may be gone, or stand inside the new
+    /// text, which the splices cannot tell once they merged. `to_current`
+    /// keeps an offset before text inserted at it; here the inserted
+    /// text goes before the place, since the place is a heading's and
+    /// the text was typed above it.
+    pub fn place_of(&self, base_offset: usize) -> Placed {
+        let mut delta = 0isize;
+        for s in &self.splices {
+            if base_offset >= s.range.end {
+                delta += s.text.len() as isize - s.range.len() as isize;
+            } else if base_offset >= s.range.start {
+                // At the start of a non-empty range too: what stood at the
+                // offset was replaced, and may stand inside the new text.
+                return Placed::Replaced((s.range.start as isize + delta) as usize);
+            } else {
+                break;
+            }
+        }
+        Placed::Exact((base_offset as isize + delta) as usize)
+    }
+
+    /// The text the edits began from and its line ending record, for a
+    /// discard: the file as last read or written.
+    pub fn into_base(self) -> (Arc<str>, Vec<u32>) {
+        (self.base, self.crlf)
     }
 
     /// Lines of the current text the splices touch, the save notice's
@@ -622,5 +667,90 @@ mod tests {
         );
         let mut led = ledger("aaa\nbbb\nccc\n");
         assert_eq!(led.edit(3..4, ""), 0..1, "a join dirties the joined line");
+    }
+
+    /// The ledger a park keeps over its page's text, the heading of the
+    /// hunt's claim 1: the line above it deleted, then the heading
+    /// clicked. An edit at or before the heading moves it, an edit
+    /// around it puts it at the edit's start, and a deletion undone
+    /// leaves no splice and places it exactly.
+    #[test]
+    fn a_park_ledger_places_a_heading_after_the_edits_since_the_park() {
+        let page = "# One\n\nSome text here.\n\n## End\n";
+        let heading = 27;
+        assert_eq!(&page[heading..heading + 3], "End");
+        let mut led = ledger(page);
+        led.splice(7..23, "");
+        assert_eq!(
+            led.place_of(heading),
+            Placed::Exact(11),
+            "the line above deleted"
+        );
+        assert_eq!(&led.current()[11..14], "End");
+        led.splice(0..0, "## Zero\n\n");
+        assert_eq!(
+            led.place_of(heading),
+            Placed::Exact(20),
+            "text inserted above"
+        );
+        led.splice(23..24, "");
+        assert_eq!(led.place_of(heading), Placed::Exact(20), "an edit after it");
+        let mut led = ledger(page);
+        led.splice(20..30, "x");
+        assert_eq!(
+            led.place_of(heading),
+            Placed::Replaced(20),
+            "inside a replaced range: its start, and no more is known"
+        );
+        let mut led = ledger(page);
+        led.splice(27..30, "Fin");
+        assert_eq!(
+            led.place_of(heading),
+            Placed::Replaced(27),
+            "the heading's own text replaced: not known to stand"
+        );
+        let mut led = ledger(page);
+        led.splice(27..27, "x");
+        assert_eq!(
+            led.place_of(heading),
+            Placed::Exact(28),
+            "typed at the heading: it moves"
+        );
+        let mut led = ledger(page);
+        led.splice(7..23, "");
+        led.splice(7..7, "Some text here.\n");
+        assert_eq!(
+            led.place_of(heading),
+            Placed::Exact(heading),
+            "a deletion undone"
+        );
+        assert!(!led.is_dirty(), "the undone edit leaves no splice");
+        // The region deleted with text typed into it first, then the
+        // deletion undone: one splice stands, the heading inside it.
+        let mut led = ledger(page);
+        led.splice(0..0, " ");
+        led.splice(1..31, "");
+        led.splice(1..1, &page[1..31].replace("One", "One "));
+        assert_eq!(led.place_of(heading), Placed::Replaced(0));
+    }
+
+    /// Discard goes back to the text the edits began from, with the
+    /// line ending record of that text: the file's at the open, the
+    /// saved one after a save.
+    #[test]
+    fn into_base_gives_the_text_and_the_record_the_edits_began_from() {
+        let mut led = Ledger::new(Arc::from("ab\ncd\n"), vec![2, 5]);
+        led.edit(0..0, "x");
+        led.edit(4..5, "");
+        let (base, crlf) = led.into_base();
+        assert_eq!(&*base, "ab\ncd\n");
+        assert_eq!(crlf, vec![2, 5]);
+        let mut led = Ledger::new(Arc::from("ab\ncd\n"), vec![2, 5]);
+        led.edit(0..0, "x\n");
+        led.commit();
+        led.edit(0..1, "");
+        let (base, crlf) = led.into_base();
+        assert_eq!(&*base, "x\nab\ncd\n", "after a save, the saved text");
+        assert_eq!(crlf, vec![1, 4, 7], "with the record the save wrote");
     }
 }
