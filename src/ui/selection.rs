@@ -10,6 +10,7 @@ use std::cmp::Ordering;
 use cosmic_text::{Attrs, Buffer, Family, LayoutGlyph, Metrics, Shaping, Style, Weight};
 
 use crate::doc::model::{BlockKind, Document, Span};
+use crate::edit::caret;
 use crate::layout::{metrics, LayoutDoc, TextRef, TextRun};
 use crate::style::fonts::FontStore;
 
@@ -497,36 +498,27 @@ pub fn word_at(doc: &Document, pos: ModelPos) -> Option<Selection> {
         flat.push_str(text);
     }
     let at = at?;
-    let next_c = flat[at..].chars().next();
-    let prev_c = flat[..at].chars().next_back();
-    let anchor = match (next_c, prev_c) {
-        (Some(n), Some(p)) if word_class(n) != 0 && word_class(p) == 0 => p,
-        (Some(n), _) => n,
-        (None, Some(p)) => p,
+    // The anchor's class: the character after the click, or the one
+    // before it when the one after starts no word and the one before is
+    // in one; an attaching character answers its owner's class.
+    let next = caret::class_at(&flat, at, word_class);
+    let prev = caret::class_before(&flat, at, word_class);
+    let (class, forward) = match (next, prev) {
+        (Some(n), Some(p)) if n != 0 && p == 0 => (p, false),
+        (Some(n), _) => (n, true),
+        (None, Some(p)) => (p, false),
         (None, None) => return None,
     };
-    let class = word_class(anchor);
-    let (mut start, mut end) = (at, at);
-    if class == 2 {
-        if next_c == Some(anchor) {
-            end += anchor.len_utf8();
-        } else {
-            start -= anchor.len_utf8();
-        }
+    let (start, end) = if class == 2 {
+        // A symbol stands alone, with the characters attached to it.
+        let cluster = caret::cluster(&flat, at, forward);
+        (cluster.start, cluster.end)
     } else {
-        while let Some(c) = flat[..start].chars().next_back() {
-            if word_class(c) != class {
-                break;
-            }
-            start -= c.len_utf8();
-        }
-        while let Some(c) = flat[end..].chars().next() {
-            if word_class(c) != class {
-                break;
-            }
-            end += c.len_utf8();
-        }
-    }
+        (
+            caret::class_run_start(&flat, at, &class, word_class),
+            caret::class_run_end(&flat, at, &class, word_class),
+        )
+    };
     let locate = |flat_pos: usize| {
         let mut idx = 0;
         for (i, base) in bases.iter().enumerate() {
@@ -1522,6 +1514,25 @@ mod tests {
         };
         let sel = word_at(&doc, pos).expect("a word under the cursor");
         assert_eq!(plain_text(&sel, &doc), "faster", "styling splits no word");
+    }
+
+    #[test]
+    fn a_double_click_takes_a_joined_emoji_whole() {
+        let doc = markdown::parse("see \u{1f469}\u{200d}\u{1f4bb} now");
+        let pos = ModelPos {
+            block: 0,
+            span: 0,
+            byte: 4,
+        };
+        let sel = word_at(&doc, pos).expect("the emoji under the cursor");
+        assert_eq!(plain_text(&sel, &doc), "\u{1f469}\u{200d}\u{1f4bb}");
+        let inside = ModelPos {
+            block: 0,
+            span: 0,
+            byte: 11,
+        };
+        let sel = word_at(&doc, inside).expect("from inside the sequence");
+        assert_eq!(plain_text(&sel, &doc), "\u{1f469}\u{200d}\u{1f4bb}");
     }
 
     #[test]

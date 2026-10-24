@@ -83,6 +83,175 @@ pub fn clamp(doc: &Document, offset: usize) -> usize {
     at
 }
 
+/// A character that joins the run of the character before it rather
+/// than starting one of its own: the zero width joiner and non-joiner,
+/// and the combining marks (an accent, a variation selector, a keycap).
+/// It takes the class of what it follows, so a joined emoji is one
+/// symbol run and a Persian word with a non-joiner one word run. After
+/// whitespace, or at the text's start, it stands on its own class.
+pub(crate) fn attaches(c: char) -> bool {
+    use unicode_properties::{GeneralCategoryGroup, UnicodeGeneralCategory};
+    matches!(c, '\u{200c}' | '\u{200d}') || c.general_category_group() == GeneralCategoryGroup::Mark
+}
+
+/// The character an attaching one standing at `at` belongs to: the
+/// last character before it that attaches to nothing, unless that is
+/// whitespace. None when it stands on its own.
+fn owner(text: &str, at: usize) -> Option<char> {
+    text[..at]
+        .chars()
+        .rev()
+        .find(|c| !attaches(*c))
+        .filter(|c| !c.is_whitespace())
+}
+
+/// The class of the character at `at`, an attaching one answering its
+/// owner's. None at the text's end.
+pub(crate) fn class_at<C>(text: &str, at: usize, class: impl Fn(char) -> C) -> Option<C> {
+    let c = text[at..].chars().next()?;
+    Some(if attaches(c) {
+        class(owner(text, at).unwrap_or(c))
+    } else {
+        class(c)
+    })
+}
+
+/// The class of the character before `at`, an attaching one answering
+/// its owner's. None at the text's start.
+pub(crate) fn class_before<C>(text: &str, at: usize, class: impl Fn(char) -> C) -> Option<C> {
+    let c = text[..at].chars().next_back()?;
+    Some(if attaches(c) {
+        class(owner(text, at - c.len_utf8()).unwrap_or(c))
+    } else {
+        class(c)
+    })
+}
+
+/// The end of the run of class `run` that goes on at `at`: the
+/// characters of that class, and the attaching ones, which belong to
+/// the character before them.
+pub(crate) fn class_run_end<C: PartialEq>(
+    text: &str,
+    at: usize,
+    run: &C,
+    class: impl Fn(char) -> C,
+) -> usize {
+    let mut pos = at;
+    let mut after_space = text[..at]
+        .chars()
+        .next_back()
+        .is_none_or(char::is_whitespace);
+    for c in text[at..].chars() {
+        let own = !attaches(c) || after_space;
+        if own && class(c) != *run {
+            break;
+        }
+        after_space = c.is_whitespace();
+        pos += c.len_utf8();
+    }
+    pos
+}
+
+/// The start of the run of class `run` that ends at `at`, the mirror
+/// of `class_run_end`: attaching characters met on the way back join the run
+/// with the character they belong to, or on their own class when that
+/// is whitespace or the text's start.
+pub(crate) fn class_run_start<C: PartialEq>(
+    text: &str,
+    at: usize,
+    run: &C,
+    class: impl Fn(char) -> C,
+) -> usize {
+    let mut pos = at;
+    let mut pending = 0;
+    let mut pending_first: Option<char> = None;
+    for c in text[..at].chars().rev() {
+        if attaches(c) {
+            pending += c.len_utf8();
+            pending_first = Some(c);
+            continue;
+        }
+        if pending > 0 {
+            let theirs = if c.is_whitespace() {
+                pending_first.map(&class)
+            } else {
+                Some(class(c))
+            };
+            if theirs.is_some_and(|k| k == *run) {
+                pos -= pending;
+                pending = 0;
+            } else {
+                return pos;
+            }
+        }
+        if class(c) != *run {
+            return pos;
+        }
+        pos -= c.len_utf8();
+    }
+    if pending_first.is_some_and(|c| class(c) == *run) {
+        pos -= pending;
+    }
+    pos
+}
+
+/// The symbol at `at`, or the one owning the attaching character at
+/// `at` (`forward`), or the one before `at` (not `forward`), with the
+/// characters attached to it, and through a zero width joiner the
+/// symbol joined after it, again and again: the unit a double click on
+/// a symbol selects, a joined emoji whole.
+pub(crate) fn cluster(text: &str, at: usize, forward: bool) -> std::ops::Range<usize> {
+    let owner_before = |at: usize| {
+        text[..at]
+            .char_indices()
+            .rev()
+            .find(|(_, c)| !attaches(*c))
+            .map_or(0, |(i, _)| i)
+    };
+    let mut start = if forward && !text[at..].chars().next().is_some_and(attaches) {
+        at
+    } else {
+        owner_before(at)
+    };
+    // Back through each joiner to the symbol it joins.
+    loop {
+        let attached: usize = text[..start]
+            .chars()
+            .rev()
+            .take_while(|c| attaches(*c))
+            .map(char::len_utf8)
+            .sum();
+        let joined = text[start - attached..start].contains('\u{200d}');
+        if attached > 0 && joined && start > attached {
+            start = owner_before(start - attached);
+        } else {
+            break;
+        }
+    }
+    let mut end = start;
+    let mut joined = true;
+    for c in text[start..].chars() {
+        if !attaches(c) && !joined {
+            break;
+        }
+        joined = c == '\u{200d}';
+        end += c.len_utf8();
+    }
+    start..end
+}
+
+/// The classes the word keys move by: a word character, whitespace,
+/// a symbol.
+fn word_kind(c: char) -> u8 {
+    if c.is_whitespace() {
+        1
+    } else if word_char(c) {
+        0
+    } else {
+        2
+    }
+}
+
 /// The next word boundary to the right: whitespace is skipped, then one
 /// run of word characters or one run of symbols, newlines crossed like
 /// any other whitespace.
@@ -94,17 +263,10 @@ pub fn word_right(text: &str, at: usize) -> usize {
         }
         pos += c.len_utf8();
     }
-    let Some(first) = text[pos..].chars().next() else {
-        return pos;
-    };
-    let class = word_char(first);
-    for c in text[pos..].chars() {
-        if c.is_whitespace() || word_char(c) != class {
-            break;
-        }
-        pos += c.len_utf8();
+    match class_at(text, pos, word_kind) {
+        Some(run) => class_run_end(text, pos, &run, word_kind),
+        None => pos,
     }
-    pos
 }
 
 /// The mirror boundary to the left.
@@ -116,17 +278,10 @@ pub fn word_left(text: &str, at: usize) -> usize {
         }
         pos -= c.len_utf8();
     }
-    let Some(last) = text[..pos].chars().next_back() else {
-        return pos;
-    };
-    let class = word_char(last);
-    for c in text[..pos].chars().rev() {
-        if c.is_whitespace() || word_char(c) != class {
-            break;
-        }
-        pos -= c.len_utf8();
+    match class_before(text, pos, word_kind) {
+        Some(run) => class_run_start(text, pos, &run, word_kind),
+        None => pos,
     }
-    pos
 }
 
 /// The caret's bar on the page, in document space.
@@ -1944,6 +2099,29 @@ mod tests {
         assert_eq!(word_right(text, 0), 13, "the Persian word is one hop");
         assert_eq!(word_left(text, 13), 0);
         assert_eq!(word_left(text, 9), 0, "from inside the second half");
+    }
+
+    /// A joined emoji is one hop: the joiner takes the class of the
+    /// emoji before it, as a combining mark takes its letter's. A
+    /// Persian word stays whole across its non-joiner; a keycap and an
+    /// emoji with its variation selector are one hop each.
+    #[test]
+    fn a_joined_emoji_is_one_hop_and_a_joined_word_stays_whole() {
+        let text = "x \u{1f469}\u{200d}\u{1f4bb}";
+        assert_eq!(word_left(text, 13), 2);
+        assert_eq!(word_right(text, 1), 13);
+        let family = "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467} y";
+        assert_eq!(word_right(family, 0), 18);
+        assert_eq!(word_left(family, 18), 0);
+        let persian = "\u{645}\u{6cc}\u{200c}\u{631}\u{648}\u{645} x";
+        assert_eq!(word_right(persian, 0), 13);
+        assert_eq!(word_left(persian, 13), 0);
+        let keycap = "a 1\u{fe0f}\u{20e3} b";
+        assert_eq!(word_right(keycap, 2), 9, "a keycap is one hop");
+        assert_eq!(word_left(keycap, 9), 2);
+        let heart = "\u{2764}\u{fe0f} z";
+        assert_eq!(word_right(heart, 0), 6, "an emoji with its selector");
+        assert_eq!(word_left(heart, 6), 0);
     }
 
     #[test]

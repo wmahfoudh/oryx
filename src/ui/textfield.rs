@@ -11,7 +11,9 @@ use std::time::Instant;
 
 use winit::keyboard::{Key, NamedKey};
 
-use crate::edit::caret::{word_char, word_left, word_right};
+use crate::edit::caret::{
+    class_at, class_before, class_run_end, class_run_start, word_char, word_left, word_right,
+};
 use crate::input::DOUBLE_CLICK;
 
 /// What a key did to the field.
@@ -246,30 +248,18 @@ impl TextField {
                 2
             }
         };
-        let after = self.text[index..].chars().next();
-        let before = self.text[..index].chars().next_back();
+        let after = class_at(&self.text, index, class);
+        let before = class_before(&self.text, index, class);
         let Some(kind) = after
-            .filter(|c| !c.is_whitespace())
-            .or(before.filter(|c| !c.is_whitespace()))
+            .filter(|k| *k != 0)
+            .or(before.filter(|k| *k != 0))
             .or(after)
             .or(before)
-            .map(class)
         else {
             return;
         };
-        let back: usize = self.text[..index]
-            .chars()
-            .rev()
-            .take_while(|c| class(*c) == kind)
-            .map(char::len_utf8)
-            .sum();
-        let ahead: usize = self.text[index..]
-            .chars()
-            .take_while(|c| class(*c) == kind)
-            .map(char::len_utf8)
-            .sum();
-        self.anchor = Some(index - back);
-        self.caret = index + ahead;
+        self.anchor = Some(class_run_start(&self.text, index, &kind, class));
+        self.caret = class_run_end(&self.text, index, &kind, class);
     }
 
     /// Every character boundary in order, the text's end last.
@@ -556,6 +546,19 @@ mod tests {
         assert_eq!(g.selected_text(), "hello big");
         g.key(&named(NamedKey::End), true, true);
         assert_eq!(g.selected_text(), " world", "the anchor stays");
+    }
+
+    #[test]
+    fn ctrl_backspace_removes_a_joined_emoji_whole() {
+        let mut f = field_at("x \u{1f469}\u{200d}\u{1f4bb}", 13);
+        assert_eq!(
+            f.key(&named(NamedKey::Backspace), true, false),
+            Edit::Changed
+        );
+        assert_eq!(f.text(), "x ", "no joiner left behind");
+        let mut g = field_at("\u{1f469}\u{200d}\u{1f4bb} x", 0);
+        assert_eq!(g.key(&named(NamedKey::Delete), true, false), Edit::Changed);
+        assert_eq!(g.text(), " x");
     }
 
     #[test]

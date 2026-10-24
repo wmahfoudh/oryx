@@ -22,6 +22,7 @@
 - `Ctrl+U` now reads formulas the way the page does: text between two dollar signs that the page shows as text changes case, a formula holding an inner one inside braces stays whole, and a dollar sign above a quote, a list or a heading pairs with none below it. Before, the key and the page disagreed on such inputs.
 - `Ctrl+U` now changes text between angle brackets that is not an HTML tag, such as `<Hello, World!>`. Before, it left it alone.
 - A selection dragged from the end of a paragraph into the next now highlights the other occurrences of its word. Before, it did not.
+- The word keys, Ctrl+Backspace, Ctrl+Delete and a double click now take a joined emoji such as 👩‍💻 whole, on the page and in the search field. Before, Ctrl+Backspace deleted one part of it and left an invisible joiner behind.
 - The zip library, used for EPUB books, CBZ comics and zipped FB2 books, was updated to version 9. Three security advisories were published on the old version in October 2026. They are about extracting an archive to disk. Oryx never does that. No release was affected.
 
 ## v1.2.2
