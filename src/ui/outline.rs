@@ -315,6 +315,26 @@ pub fn entry_offset(doc: &Document, block: usize) -> Option<usize> {
     doc.blocks.get(block).map(|b| b.range.start)
 }
 
+/// The anchor of the heading at `block`, or None when the block is
+/// not a heading: the name a heading keeps while its text stands,
+/// through a change of case, so that it can be found again on a page
+/// rebuilt after its region was edited.
+pub fn heading_anchor(doc: &Document, block: usize) -> Option<String> {
+    match &doc.blocks.get(block)?.kind {
+        BlockKind::Heading { anchor, .. } => Some(anchor.clone()),
+        _ => None,
+    }
+}
+
+/// The source offset of the heading with `anchor`, the first one when
+/// a title repeats, or None when no heading has it any more.
+pub fn heading_by_anchor(doc: &Document, anchor: &str) -> Option<usize> {
+    doc.blocks
+        .iter()
+        .find(|b| matches!(&b.kind, BlockKind::Heading { anchor: a, .. } if a == anchor))
+        .map(|b| b.range.start)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -322,6 +342,29 @@ mod tests {
 
     fn doc(source: &str) -> Document {
         markdown::parse(source)
+    }
+
+    /// A heading whose region was replaced since the park is found
+    /// again on the rebuilt page by its anchor, which its text keeps
+    /// through a change of case; a heading whose text changed is gone.
+    #[test]
+    fn a_heading_is_found_again_by_its_anchor_on_a_rebuilt_page() {
+        let before = doc("# One\n\nSome text here.\n\n## End\n");
+        let anchor = heading_anchor(&before, 2).expect("the second heading");
+        assert_eq!(anchor, "end");
+        assert_eq!(
+            heading_anchor(&before, 1),
+            None,
+            "a paragraph has no anchor"
+        );
+        let after = doc("# ONe\n\nSome text here.\n\n## ENd\n");
+        assert_eq!(
+            heading_by_anchor(&after, &anchor),
+            entry_offset(&after, 2),
+            "the same heading, its case changed"
+        );
+        let gone = doc("# One\n\nSome text here.\n\n## Fin\n");
+        assert_eq!(heading_by_anchor(&gone, &anchor), None);
     }
 
     #[test]

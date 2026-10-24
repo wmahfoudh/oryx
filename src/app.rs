@@ -45,7 +45,7 @@ use oryx::ui::help;
 use oryx::ui::history::{self, History};
 use oryx::ui::notice::{self, Notice};
 use oryx::ui::occurrences::{self, Occurrences};
-use oryx::ui::outline::{entry_offset, OutlineTree};
+use oryx::ui::outline::{entry_offset, heading_anchor, heading_by_anchor, OutlineTree};
 use oryx::ui::overlay::{Action, Overlay, OverlayResult};
 use oryx::ui::scrollbar;
 use oryx::ui::search::{self, BarHit, ReplaceRow, SearchState};
@@ -2341,24 +2341,6 @@ impl App {
         self.start_highlight(load::pending(&self.document));
     }
 
-    /// The heading of `block` of the parked page found in the current
-    /// text by its anchor, when its own region was replaced since the
-    /// park and the edits cannot place it: the text parsed as the page
-    /// it would render, on the window's thread, the cost of that rare
-    /// click. None when no heading has the anchor any more.
-    fn heading_again(&self, page: &Document, block: usize) -> Option<usize> {
-        let BlockKind::Heading { anchor, .. } = &page.blocks.get(block)?.kind else {
-            return None;
-        };
-        let kind = load::detect_with_text(self.path.as_deref()?, &self.document.source);
-        let current = edit::rendered_document(kind, &self.document.source);
-        current
-            .blocks
-            .iter()
-            .find(|b| matches!(&b.kind, BlockKind::Heading { anchor: a, .. } if a == anchor))
-            .map(|b| b.range.start)
-    }
-
     /// Puts the row holding the place's offset at its height in the
     /// editor: at the top the way an outline jump lands, in the middle
     /// for a jump to a line, or where a crossing found the line on the
@@ -2411,7 +2393,10 @@ impl App {
         let Some(parked) = self.edit_park.as_mut() else {
             return;
         };
-        if parked.document.source == self.document.source {
+        // A clean ledger of the edits since the park means the page's
+        // own bytes; a dirty one may still, after edits that cancelled,
+        // and the bytes then say.
+        if !parked.edits.is_dirty() || parked.document.source == self.document.source {
             return;
         }
         let page = edit::rendered_document(kind, &self.document.source);
@@ -2469,13 +2454,15 @@ impl App {
             self.resume_edit.remove(path);
         }
         if let Some(parked) = self.edit_park.take() {
-            let unchanged = parked.document.source == self.document.source;
             // Every edit of the editor goes through the park's ledger: a
-            // clean one means the bytes are the page's.
+            // clean one means the bytes are the page's, and the bytes are
+            // compared only behind a dirty one.
             debug_assert!(
-                parked.edits.is_dirty() || unchanged,
+                parked.edits.is_dirty() || parked.document.source == self.document.source,
                 "an edit reached the buffer past the park's ledger"
             );
+            let unchanged =
+                !parked.edits.is_dirty() || parked.document.source == self.document.source;
             if unchanged {
                 // The held outline describes this very page; rebuilding
                 // it here would cost a parse of the whole page for nothing.
@@ -2846,20 +2833,21 @@ impl App {
         }
     }
 
-    /// The unsaved edits dropped: the text goes back to the ledger's
-    /// base, the file as last read or written, with that text's line
-    /// ending record, and the ledger and the history go with them.
-    /// Nothing to do without a ledger: the step that put the file
-    /// aside dropped it already.
-    fn discard_edits(&mut self) {
-        let Some(ledger) = self.ledger.take() else {
-            return;
-        };
-        self.undo = None;
-        if ledger.is_dirty() {
-            let (base, crlf) = ledger.into_base();
-            self.crlf = crlf;
+    /// The unsaved edits of `ledger` dropped, the document still on
+    /// screen: the text goes back to the ledger's base, the file as
+    /// last read or written, when a byte differs. The line ending
+    /// record is the base's in every case, since the record of the
+    /// open does not follow the saves, and the next ledger is built
+    /// from it. The editor gets that ledger at once, so that it types.
+    fn discard_edits(&mut self, ledger: Ledger) {
+        let dirty = ledger.is_dirty();
+        let (base, crlf) = ledger.into_base();
+        self.crlf = crlf;
+        if dirty {
             self.restore_text(&base);
+        }
+        if self.mode == edit::Mode::Edit {
+            self.ensure_ledger();
         }
         self.refresh_title();
     }
@@ -4064,14 +4052,25 @@ impl App {
                     self.ask_next_leftover();
                 }
             }
-            // The edits go with the step the question held. A step that
-            // puts the file aside drops the ledger itself; one that comes
-            // back without, a cancelled dialog or a folder missing, finds
-            // the ledger, and the text goes back to the file's.
+            // The edits leave before the step the question held, so that
+            // nothing between the decision and the step's end saves them
+            // (the pause save runs in the same pass once the question is
+            // gone). A step that opened a file has a document of its own
+            // and a ledger of its own; a quit has no next frame. A step
+            // that came back without either, a cancelled dialog or a
+            // folder missing, left the document in place: the text then
+            // goes back to the file's.
             confirm::Decision::Discard => {
+                let edits = self.ledger.take();
+                self.undo = None;
+                self.rehighlight_at = None;
+                self.refresh_title();
+                let shown = Arc::clone(&self.document.source);
                 self.resolve_confirm(event_loop);
-                if !event_loop.exiting() {
-                    self.discard_edits();
+                if let Some(edits) = edits {
+                    if !event_loop.exiting() && Arc::ptr_eq(&shown, &self.document.source) {
+                        self.discard_edits(edits);
+                    }
                 }
             }
             confirm::Decision::Cancel => {
@@ -6882,20 +6881,34 @@ impl App {
     fn jump_to_heading(&mut self, block: usize) {
         // While the source is on screen the outline still describes the
         // page parked behind it: the entry resolves against that model,
-        // the edits since the park place its offset in the current
-        // text, and the clamp holds the caret inside the text and on a
-        // character.
-        if let Some(parked) = self.edit_park.as_ref() {
-            let offset = entry_offset(&parked.document, block).map(|offset| {
-                let at = match parked.edits.place_of(offset) {
-                    Placed::Exact(at) => at,
-                    Placed::Replaced(start) => {
-                        self.heading_again(&parked.document, block).unwrap_or(start)
-                    }
-                };
-                caret::clamp(&self.document, at)
+        // and the edits since the park place its offset in the current
+        // text. A heading whose own region was replaced is not placed by
+        // them: the page is rebuilt from the current text, as a save
+        // does, and the heading found again on it by its anchor, else
+        // the region's start. The clamp holds the caret inside the text
+        // and on a character.
+        if self.edit_park.is_some() {
+            let placed = self.edit_park.as_ref().and_then(|parked| {
+                entry_offset(&parked.document, block).map(|offset| parked.edits.place_of(offset))
             });
-            if let Some(offset) = offset {
+            let offset = match placed {
+                Some(Placed::Exact(at)) => Some(at),
+                Some(Placed::Replaced(start)) => {
+                    let anchor = self
+                        .edit_park
+                        .as_ref()
+                        .and_then(|parked| heading_anchor(&parked.document, block));
+                    self.refresh_parked_page();
+                    let found = anchor.and_then(|anchor| {
+                        self.edit_park
+                            .as_ref()
+                            .and_then(|parked| heading_by_anchor(&parked.document, &anchor))
+                    });
+                    Some(found.unwrap_or(start))
+                }
+                None => None,
+            };
+            if let Some(offset) = offset.map(|at| caret::clamp(&self.document, at)) {
                 self.push_jump();
                 self.caret = Some(Caret::at(offset));
                 self.seat_editor_on(Place::top(offset));
