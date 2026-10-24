@@ -18,6 +18,10 @@
 - When you leave the markdown editor, the page now shows the text as you left it. Before, after an undo followed by a new edit, the page could show an older text, and a checkbox clicked on that page wrote into the wrong place of the file.
 - When you answer Discard to the save question and the step after it does not happen, for example when you close the new-file dialog, the text now comes back as it was last saved. Before, the discarded edits stayed on screen, and the next save could corrupt a file with Windows line endings.
 - On the help page, a click on a heading in the Outline tab now goes to that heading while a markdown file is being edited behind the page. Before, nothing happened.
+- `Ctrl+U` now leaves alone a display formula written on its own lines, and the inline code, link addresses and tags between two prices such as `$5` and `$6`. Before, it changed their letters.
+- `Ctrl+U` now reads formulas the way the page does: text between two dollar signs that the page shows as text changes case, a formula holding an inner one inside braces stays whole, and a dollar sign above a quote, a list or a heading pairs with none below it. Before, the key and the page disagreed on such inputs.
+- `Ctrl+U` now changes text between angle brackets that is not an HTML tag, such as `<Hello, World!>`. Before, it left it alone.
+- A selection dragged from the end of a paragraph into the next now highlights the other occurrences of its word. Before, it did not.
 - The zip library, used for EPUB books, CBZ comics and zipped FB2 books, was updated to version 9. Three security advisories were published on the old version in October 2026. They are about extracting an archive to disk. Oryx never does that. No release was affected.
 
 ## v1.2.2

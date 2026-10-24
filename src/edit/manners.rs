@@ -1442,20 +1442,44 @@ enum CaseForm {
 
 const CASE_CYCLE: [CaseForm; 3] = [CaseForm::Lower, CaseForm::Title, CaseForm::Upper];
 
-/// The stretches of a text between its blank lines, each with the line
-/// breaks it holds.
+/// The stretches of a text the parser reads as one paragraph, each
+/// with the line breaks it holds: between blank lines, and cut before
+/// a line that opens a block of its own, which the parser lets
+/// interrupt a paragraph (`starts_block`), so that a `$` above such a
+/// line pairs with none below it. A quote's own lines, each with its
+/// marker, stay one paragraph.
 fn paragraphs(text: &str) -> Vec<std::ops::Range<usize>> {
     let mut out = Vec::new();
     let mut start = None;
     let mut at = 0;
+    // What the paragraph began as: a block quote's, which its unquoted
+    // lines continue lazily until one opens a block; an item of a list,
+    // where the next item with any number begins a block; indented
+    // code, which ends at the first line indented less.
+    let (mut in_quote, mut in_list, mut in_code) = (false, false, false);
     for line in text.split_inclusive('\n') {
-        match (line.trim().is_empty(), start) {
-            (true, Some(s)) => {
+        let body = line.trim_start_matches([' ', '\t']);
+        let indent = line.len() - body.len();
+        let blank = body.trim().is_empty();
+        let quoted = body.starts_with('>');
+        if let Some(s) = start {
+            let lazy = in_quote && !quoted;
+            if blank
+                || starts_block(indent, body, lazy)
+                || (quoted && !in_quote)
+                || (lazy && (is_item(line) || marker_alone(body)))
+                || (in_list && is_item(line))
+                || (in_code && !indented_code(line))
+            {
                 out.push(s..at);
                 start = None;
             }
-            (false, None) => start = Some(at),
-            _ => {}
+        }
+        if !blank && start.is_none() {
+            start = Some(at);
+            in_quote = quoted;
+            in_list = is_item(line);
+            in_code = indented_code(line);
         }
         at += line.len();
     }
@@ -1463,6 +1487,95 @@ fn paragraphs(text: &str) -> Vec<std::ops::Range<usize>> {
         out.push(s..text.len());
     }
     out
+}
+
+/// Whether a line is a list item with text: a bullet, or a number of
+/// up to nine digits with `.` or `)`, then whitespace and text, indented
+/// three spaces at most.
+fn is_item(line: &str) -> bool {
+    let indent = line.len() - line.trim_start_matches(' ').len();
+    let l = &line[indent..];
+    let digits = l.len() - l.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    let marker = if digits == 0 {
+        usize::from(l.starts_with(['-', '*', '+']))
+    } else if (1..=9).contains(&digits) && l[digits..].starts_with(['.', ')']) {
+        digits + 1
+    } else {
+        0
+    };
+    indent <= 3
+        && marker > 0
+        && l[marker..].starts_with([' ', '\t'])
+        && !l[marker..].trim().is_empty()
+}
+
+/// Whether a line is a list marker and nothing else: a bullet, or a
+/// number with `.` or `)`. After a block quote's line, the parser ends
+/// the quote at such a line and opens an empty item; after a plain
+/// paragraph's line it reads the marker as the paragraph's text.
+fn marker_alone(body: &str) -> bool {
+    let l = body.trim_end();
+    let digits = l.len() - l.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    matches!(l, "*" | "+" | "-")
+        || ((1..=9).contains(&digits) && l.len() == digits + 1 && l.ends_with(['.', ')']))
+}
+
+/// Whether a line is indented as code: four spaces or a tab, with text
+/// after them. The page shows such a block verbatim.
+fn indented_code(line: &str) -> bool {
+    (line.starts_with("    ") || line.starts_with('\t')) && !line.trim().is_empty()
+}
+
+/// Whether a line opens a block that interrupts a paragraph, or
+/// underlines one into a heading, as the parser reads it: a heading, a
+/// fence, a thematic break, a setext underline of `=` or `-`, or a
+/// list item with text (a bullet, or `1.` and `1)`), indented three
+/// spaces at most. `body` is the line past its indent of `indent`
+/// bytes. An unquoted line of a block quote's paragraph (`lazy`) that
+/// is `=` or two `-` is the quote's own text, not an underline, as the
+/// parser reads it; the quote itself is read by `paragraphs`. The
+/// first byte settles most lines at once: a press on two hundred
+/// thousand rows reads each line once.
+fn starts_block(indent: usize, body: &str, lazy: bool) -> bool {
+    let Some(first) = body.bytes().next() else {
+        return false;
+    };
+    let l = body.trim_end();
+    if indent > 3
+        || !matches!(
+            first,
+            b'#' | b'`' | b'~' | b'*' | b'-' | b'_' | b'+' | b'1' | b'='
+        )
+    {
+        return false;
+    }
+    let item_after =
+        |marker: usize| l[marker..].starts_with([' ', '\t']) && !l[marker..].trim().is_empty();
+    match first {
+        b'#' => {
+            let signs = l.len() - l.trim_start_matches('#').len();
+            signs <= 6 && (l.len() == signs || l[signs..].starts_with([' ', '\t']))
+        }
+        b'`' => l.starts_with("```"),
+        b'~' => l.starts_with("~~~"),
+        b'=' => !lazy && l.bytes().all(|b| b == b'='),
+        b'1' => (l.starts_with("1.") || l.starts_with("1)")) && item_after(2),
+        b'+' => item_after(1),
+        _ => {
+            // `*`, `-` or `_`: a thematic break of three or more, a
+            // setext underline of `-`, or a bullet with text.
+            let (mut count, mut same) = (0, true);
+            for b in l.bytes() {
+                if b == first {
+                    count += 1;
+                } else if b != b' ' && b != b'\t' {
+                    same = false;
+                    break;
+                }
+            }
+            (same && (count >= 3 || (first == b'-' && !lazy))) || (first != b'_' && item_after(1))
+        }
+    }
 }
 
 /// The stretch from the start of the paragraph that holds a range's
@@ -1490,35 +1603,39 @@ fn paragraphs_around(source: &str, range: &std::ops::Range<usize>) -> std::ops::
     start..end
 }
 
-/// The ranges of a markdown text that keep their letters under the case
-/// key: inline code with its backticks, the address of a link with its
-/// parentheses, an autolink or an HTML tag with its angle brackets, the
-/// address of a reference definition, and a formula with its dollar
-/// signs. Inline code closes with a run of backticks of the same length
-/// in the same paragraph, as the markdown rules say, so a lone backtick
-/// is text, and an escaped backtick outside code is text too. An
-/// address runs to the parenthesis that balances its own, on its line;
-/// an autolink holds no whitespace; a tag opens with a letter or a
-/// slash and runs to the `>` on its line, its attributes inside. A
-/// formula is what the markdown parser reads as one: `$` not followed
-/// by whitespace to the next `$`, which must not follow whitespace or
-/// precede a digit (a price), or `$$` to the next `$$`, on the
-/// paragraph; an escaped dollar sign is text, and so is a `$` whose
-/// closer is missing, the search going on from the `$` that could not
-/// close, which may open. A press costs about the text's length: a
-/// length of backtick run found unclosed, or a kind of dollar sign
-/// with none left on the paragraph, is not searched again in its
-/// paragraph, each `$` is visited once, the next `>` is searched once
-/// per region, and an autolink candidate is refused on its first
-/// whitespace.
+/// The ranges of `text` the case key keeps as they are: the pieces the
+/// page shows as something other than its text. An indented code
+/// block is kept whole. Inline code runs to a closing run of as many
+/// backticks on its paragraph; a link's address is what the parser
+/// reads after a `](` whose `]` closes a `[` (`address_end`); a
+/// reference definition's address; an autolink holds no whitespace; a
+/// tag is what CommonMark reads as one (`html_tag_len`). A formula is
+/// what the page shows as one: the parser's pairing (`formula_end`),
+/// then the page's currency rule, by which a paired formula whose
+/// closer precedes a digit is text. An escaped dollar sign is text. A
+/// press costs about the text's length: a length of backtick run found
+/// unclosed is not searched again in its paragraph, each `$` is visited
+/// once (the signs between an opener found to be text and the next `$`
+/// that can open are stepped over, each examined by the scan), the next
+/// `>` of an autolink candidate is searched once per region, and a tag
+/// candidate is refused at its first byte off the grammar.
 fn kept_pieces(text: &str) -> Vec<std::ops::Range<usize>> {
     let mut kept = Vec::new();
     for para in paragraphs(text) {
+        if indented_code(&text[para.clone()]) {
+            kept.push(para);
+            continue;
+        }
         let mut unclosed: Vec<usize> = Vec::new();
-        let mut dollar_unclosed = [false, false];
+        // The `$` signs before this offset were examined by a scan and
+        // cannot open: stepped over.
+        let mut skip_dollars_until = para.start;
         // The next `>` from a position, remembered until the scan passes
         // it: None once no `>` stands before the paragraph's end.
         let mut next_gt: Option<Option<usize>> = None;
+        // The `[` open before the position: a `](` whose `]` closes
+        // none is text, not a link's address.
+        let mut brackets = 0usize;
         let mut line_start = true;
         let mut i = para.start;
         while i < para.end {
@@ -1561,38 +1678,69 @@ fn kept_pieces(text: &str) -> Vec<std::ops::Range<usize>> {
                     }
                 }
             } else if c == '$' {
+                if i < skip_dollars_until {
+                    i += 1;
+                    continue;
+                }
                 let display = rest.starts_with("$$");
                 let signs = if display { 2 } else { 1 };
-                let opens = rest[signs..]
-                    .chars()
-                    .next()
-                    .is_some_and(|next| !next.is_ascii_whitespace());
-                if !opens || dollar_unclosed[usize::from(display)] {
-                    i += signs;
-                } else {
-                    match formula_end(&rest[signs..], display) {
-                        Formula::Closed(len) => {
-                            kept.push(i..i + signs + len);
-                            i += signs + len;
+                // A `$` opens when no whitespace follows it; a `$$`
+                // always, its first sign being followed by the second.
+                let opens = display
+                    || rest[1..]
+                        .chars()
+                        .next()
+                        .is_some_and(|next| !next.is_ascii_whitespace());
+                if !opens {
+                    i += 1;
+                    continue;
+                }
+                match formula_end(&rest[signs..], display) {
+                    Formula::Closed(len) => {
+                        let end = i + signs + len;
+                        // The page's currency rule: a formula whose
+                        // closer precedes a digit is the text typed.
+                        if !text.as_bytes().get(end).is_some_and(u8::is_ascii_digit) {
+                            kept.push(i..end);
                         }
-                        // The scan goes on from the `$` that could not
-                        // close: it may open a formula of its own.
-                        Formula::Opener(at) => i += signs + at,
-                        Formula::None => {
-                            dollar_unclosed[usize::from(display)] = true;
-                            i += signs;
-                        }
+                        i = end;
+                    }
+                    // A `$$` found to be text leaves its second sign to
+                    // open an inline formula of its own, as the parser
+                    // tries it next; a `$` found to be text is stepped
+                    // over with every `$` before the one that can open.
+                    Formula::Text { .. } if display => i += 1,
+                    Formula::Text { resume } => {
+                        skip_dollars_until = resume.map_or(para.end, |at| i + 1 + at);
+                        i += 1;
                     }
                 }
+            } else if c == '[' {
+                brackets += 1;
+                i += 1;
             } else if let Some(after) = rest.strip_prefix("](") {
-                match address_end(after) {
+                match address_end(after).filter(|_| brackets > 0) {
                     Some(len) => {
                         kept.push(i..i + 2 + len);
                         i += 2 + len;
+                        brackets -= 1;
                     }
-                    None => i += 2,
+                    // No link: the `]` still closes its `[`, as the
+                    // parser drops the bracket it could not pair.
+                    None => {
+                        brackets = brackets.saturating_sub(1);
+                        i += 1;
+                    }
                 }
+            } else if c == ']' {
+                brackets = brackets.saturating_sub(1);
+                i += 1;
             } else if c == '<' {
+                if let Some(len) = html_tag_len(rest) {
+                    kept.push(i..i + len);
+                    i += len;
+                    continue;
+                }
                 let gt = match next_gt {
                     Some(Some(at)) if at > i => Some(at),
                     Some(None) => None,
@@ -1602,8 +1750,10 @@ fn kept_pieces(text: &str) -> Vec<std::ops::Range<usize>> {
                         found
                     }
                 };
-                let inner = gt.map(|at| &text[i + 1..at]);
-                match inner.filter(|inner| autolink_inner(inner) || tag_inner(inner)) {
+                match gt
+                    .map(|at| &text[i + 1..at])
+                    .filter(|inner| autolink_inner(inner))
+                {
                     Some(inner) => {
                         let len = 1 + inner.len() + 1;
                         kept.push(i..i + len);
@@ -1624,57 +1774,81 @@ enum Formula {
     /// A formula: the length from after the opener to the end of its
     /// closer.
     Closed(usize),
-    /// The opener is text, and the `$` at this offset could not close
-    /// it but may open a formula of its own: the scan goes on from it.
-    Opener(usize),
-    /// The opener is text, and no `$` of its kind is left on the
-    /// paragraph.
-    None,
+    /// The opener is text. `resume` is the offset of the first later `$`
+    /// that can open a formula of its own, where the scan goes on; None
+    /// when no later `$` of the paragraph can open.
+    Text { resume: Option<usize> },
 }
 
 /// Where the formula opened by a `$` or a `$$` ends, as the markdown
 /// parser reads it (pulldown-cmark 0.13.4, `src/firstpass.rs` and
-/// `src/parse.rs`): for an inline formula, a `$` closes when it does
-/// not follow whitespace and no digit follows it, which the page reads
-/// as a price; a `$` that cannot close ends the search from this
-/// opener, which is then text, and may open a formula of its own; a
-/// `$` that can neither close nor open is text and the search goes on
-/// past it. For a display formula, the next `$$` closes, a lone `$`
-/// inside being text. None when no `$` of the kind is left on the
-/// paragraph.
+/// `src/parse.rs`, its spec tests 10 and 21): braces are counted from
+/// the opener, and only a `$` at the opener's level can pair with it.
+/// An inline formula closes at the first such `$` whose previous
+/// character is not whitespace; one that cannot close makes the opener
+/// text, since a formula cannot hold a `$`. A display formula closes at
+/// the first `$$` at its level, and a lone `$` there makes the opener
+/// text. A `}` below the opener's level makes it text too. A `$` at
+/// the start of a line, past the quote markers, has no character
+/// before it and cannot close. Once the opener is text, the first `$`
+/// after it that can open, at any level, an inner one included, is
+/// where the scan resumes.
 fn formula_end(after: &str, display: bool) -> Formula {
+    let mut depth = 0i32;
+    let mut text = false;
+    let mut first_open: Option<usize> = None;
     let mut previous: Option<char> = None;
+    // A line's quote markers and the blanks among them are not its
+    // text: a `$` right after them has no character before it.
+    let mut in_prefix = false;
     let mut chars = after.char_indices();
     while let Some((i, c)) = chars.next() {
+        if in_prefix && matches!(c, '>' | ' ' | '\t') {
+            previous = None;
+            continue;
+        }
+        in_prefix = false;
         match c {
+            '\n' => {
+                previous = None;
+                in_prefix = true;
+                continue;
+            }
             '\\' => {
                 previous = chars.next().map(|(_, escaped)| escaped);
                 continue;
             }
-            '$' if display => {
-                if after[i + 1..].starts_with('$') {
-                    return Formula::Closed(i + 2);
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth < 0 {
+                    text = true;
                 }
             }
             '$' => {
-                let closes = previous.is_some_and(|p| !p.is_ascii_whitespace());
-                let price = after.as_bytes().get(i + 1).is_some_and(u8::is_ascii_digit);
-                if closes && !price {
-                    return Formula::Closed(i + 1);
+                let next = after[i + 1..].chars().next();
+                if !text && depth == 0 {
+                    if display {
+                        if next == Some('$') {
+                            return Formula::Closed(i + 2);
+                        }
+                    } else if previous.is_some_and(|p| !p.is_ascii_whitespace()) {
+                        return Formula::Closed(i + 1);
+                    }
+                    text = true;
                 }
-                let opens = after[i + 1..]
-                    .chars()
-                    .next()
-                    .is_some_and(|next| !next.is_ascii_whitespace());
-                if opens {
-                    return Formula::Opener(i);
+                if first_open.is_none() && next.is_some_and(|n| !n.is_ascii_whitespace()) {
+                    first_open = Some(i);
                 }
             }
             _ => {}
         }
+        if text && first_open.is_some() {
+            return Formula::Text { resume: first_open };
+        }
         previous = Some(c);
     }
-    Formula::None
+    Formula::Text { resume: first_open }
 }
 
 /// The offset in `after` of a run of exactly `ticks` backticks, the
@@ -1693,28 +1867,68 @@ fn closing_ticks(after: &str, ticks: usize) -> Option<usize> {
 }
 
 /// The length of a link's address from after its `](` to its closing
-/// parenthesis, the parentheses inside it balanced, on its line. None
-/// when the line ends first.
+/// parenthesis, as the parser reads it: a destination between angle
+/// brackets, or one without whitespace and with its parentheses
+/// balanced; then an optional title in quotes or parentheses after
+/// whitespace; then the closing parenthesis. Whitespace, with one line
+/// break at most, may stand before and after the destination. None
+/// when the shape is not a link's, which the page then shows as text.
 fn address_end(after: &str) -> Option<usize> {
-    let mut depth = 1;
-    let mut chars = after.char_indices();
-    while let Some((i, c)) = chars.next() {
-        match c {
-            '\n' => return None,
-            '\\' => {
-                chars.next();
+    let b = after.as_bytes();
+    let space = |at: &mut usize| {
+        let mut breaks = 0;
+        while let Some(&c) = b.get(*at) {
+            match c {
+                b' ' | b'\t' => {}
+                b'\n' if breaks == 0 => breaks += 1,
+                _ => break,
             }
-            '(' => depth += 1,
-            ')' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(i + 1);
-                }
+            *at += 1;
+        }
+    };
+    let mut at = 0;
+    space(&mut at);
+    if b.get(at) == Some(&b'<') {
+        let close = after[at + 1..].find(['>', '<', '\n'])?;
+        if b[at + 1 + close] != b'>' {
+            return None;
+        }
+        at += close + 2;
+    } else {
+        let mut depth = 0u32;
+        while let Some(&c) = b.get(at) {
+            match c {
+                b'\\' => at += 1,
+                b'(' => depth += 1,
+                b')' if depth == 0 => break,
+                b')' => depth -= 1,
+                b' ' | b'\t' | b'\n' => break,
+                c if c < 0x20 => return None,
+                _ => {}
             }
-            _ => {}
+            at += 1;
+        }
+        if depth != 0 {
+            return None;
         }
     }
-    None
+    let dest_end = at;
+    space(&mut at);
+    let close = match b.get(at) {
+        Some(b'"') if at > dest_end => Some('"'),
+        Some(b'\'') if at > dest_end => Some('\''),
+        Some(b'(') if at > dest_end => Some(')'),
+        _ => None,
+    };
+    if let Some(close) = close {
+        let end = after[at + 1..].find([close, '\n'])?;
+        if after.as_bytes()[at + 1 + end] != close as u8 {
+            return None;
+        }
+        at += end + 2;
+        space(&mut at);
+    }
+    (b.get(at) == Some(&b')')).then_some(at + 1)
 }
 
 /// Whether the text between a `<` and the next `>` is an autolink: an
@@ -1742,12 +1956,106 @@ fn autolink_inner(inner: &str) -> bool {
     scheme || inner.contains('@')
 }
 
-/// Whether the text between a `<` and the next `>` is an HTML tag: a
-/// name of letters after the `<`, or after a slash for a closing tag,
-/// then its attributes, on one line and holding no `<`.
-fn tag_inner(inner: &str) -> bool {
-    let name = inner.strip_prefix('/').unwrap_or(inner);
-    name.starts_with(|c: char| c.is_ascii_alphabetic()) && !inner.contains(['<', '\n'])
+/// The length of the raw HTML that CommonMark reads at the start of
+/// `rest`, which begins with `<`, on its line: an open tag (a name of
+/// a letter then letters, digits and hyphens; attributes, each after
+/// whitespace, a name of a letter, `_` or `:` then letters, digits,
+/// `_`, `.`, `:` and `-`, with an optional `=` and a value, bare or
+/// quoted; optional whitespace and `/`; then `>`), a closing tag, a
+/// comment, a processing instruction, a declaration or a CDATA section.
+/// None for anything else between angle brackets, which the page shows
+/// as text. The scan stops at the first byte off the grammar, so a
+/// `<` that starts no tag costs a byte or two.
+fn html_tag_len(rest: &str) -> Option<usize> {
+    if !rest
+        .as_bytes()
+        .get(1)
+        .is_some_and(|b| b.is_ascii_alphabetic() || matches!(b, b'/' | b'!' | b'?'))
+    {
+        return None;
+    }
+    let line = &rest[..rest.find('\n').unwrap_or(rest.len())];
+    let b = line.as_bytes();
+    let delimited = |open: &str, close: &str| {
+        line.strip_prefix(open)
+            .and_then(|inner| inner.find(close))
+            .map(|k| open.len() + k + close.len())
+    };
+    if let Some(len) = delimited("<!--", "-->")
+        .or_else(|| delimited("<?", "?>"))
+        .or_else(|| delimited("<![CDATA[", "]]>"))
+    {
+        return Some(len);
+    }
+    if line.starts_with("<!") && b.get(2).is_some_and(u8::is_ascii_alphabetic) {
+        return line.find('>').map(|k| k + 1);
+    }
+    let space = |at: usize| b.get(at).is_some_and(|c| *c == b' ' || *c == b'\t');
+    let closing = line.starts_with("</");
+    let mut at = if closing { 2 } else { 1 };
+    if !b.get(at).is_some_and(u8::is_ascii_alphabetic) {
+        return None;
+    }
+    at += 1;
+    while b
+        .get(at)
+        .is_some_and(|c| c.is_ascii_alphanumeric() || *c == b'-')
+    {
+        at += 1;
+    }
+    if closing {
+        while space(at) {
+            at += 1;
+        }
+        return (b.get(at) == Some(&b'>')).then_some(at + 1);
+    }
+    loop {
+        let before_space = at;
+        while space(at) {
+            at += 1;
+        }
+        match b.get(at) {
+            Some(b'>') => return Some(at + 1),
+            Some(b'/') => return (b.get(at + 1) == Some(&b'>')).then_some(at + 2),
+            Some(c)
+                if at > before_space && (c.is_ascii_alphabetic() || *c == b'_' || *c == b':') =>
+            {
+                at += 1;
+                while b
+                    .get(at)
+                    .is_some_and(|c| c.is_ascii_alphanumeric() || b"_.:-".contains(c))
+                {
+                    at += 1;
+                }
+                let mut probe = at;
+                while space(probe) {
+                    probe += 1;
+                }
+                if b.get(probe) != Some(&b'=') {
+                    continue;
+                }
+                probe += 1;
+                while space(probe) {
+                    probe += 1;
+                }
+                let bare = |c: &u8| !b" \t\"'=<>`".contains(c);
+                match b.get(probe) {
+                    Some(&q) if q == b'"' || q == b'\'' => {
+                        let close = line[probe + 1..].find(q as char)?;
+                        at = probe + 1 + close + 1;
+                    }
+                    Some(c) if bare(c) => {
+                        while b.get(probe).is_some_and(bare) {
+                            probe += 1;
+                        }
+                        at = probe;
+                    }
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        }
+    }
 }
 
 /// The address of a reference definition at the start of a line,
@@ -1813,7 +2121,10 @@ fn in_case(pieces: &[(&str, bool)], form: CaseForm) -> String {
     for (piece, kept) in pieces {
         if *kept {
             out.push_str(piece);
-            word_start = piece.starts_with('<') && piece.ends_with('>');
+            // A tag is not on the page, and a kept block ends with its
+            // line: the text after either starts a word.
+            word_start = (piece.starts_with('<') && piece.ends_with('>'))
+                || piece.ends_with(char::is_whitespace);
             continue;
         }
         match form {
@@ -3348,9 +3659,219 @@ mod tests {
         assert_eq!(case_of("see $x and $y$ now"), "See $X And $y$ Now");
         assert_eq!(
             case_of("one $x then $ and y$ end"),
-            "One $x then $ and y$ End"
+            "One $X Then $ And Y$ End",
+            "a $ that cannot close makes the opener text, as the parser reads it"
         );
         assert_eq!(case_of("none $x and $y and z"), "None $X And $Y And Z");
+    }
+
+    /// The hunt's claim 8: a display formula in its usual form, on its
+    /// own lines, opens with a line break after its signs, as the
+    /// parser reads it, and with a space after them too. A lone `$`
+    /// inside makes the opener text (the parser's spec test 10).
+    #[test]
+    fn a_display_formula_opens_with_whitespace_after_its_signs() {
+        assert_eq!(case_of("see $$\nE=mc^2\n$$ now"), "See $$\nE=mc^2\n$$ Now");
+        assert_eq!(case_of("see $$ x $$ now"), "See $$ x $$ Now");
+        assert_eq!(case_of("a $$ b $ c $$ d"), "A $$ B $ C $$ D");
+    }
+
+    /// The hunt's claim 9: an opener that is text hides nothing up to
+    /// the next `$`: a code span, an address or a tag between two
+    /// prices is kept, and the dollar signs between, each unable to
+    /// open, are stepped over.
+    #[test]
+    fn the_text_between_two_prices_is_visited() {
+        assert_eq!(
+            case_of("costs $5 or `foo bar` or $6 ok"),
+            "Costs $5 Or `foo bar` Or $6 Ok"
+        );
+        assert_eq!(
+            case_of("pay $5 at [the shop](http://shop.example) or $6"),
+            "Pay $5 At [The Shop](http://shop.example) Or $6"
+        );
+        assert_eq!(
+            case_of("pay $5 <b>now</b> or $6"),
+            "Pay $5 <b>Now</b> Or $6"
+        );
+    }
+
+    /// The inline rules are the parser's (pulldown-cmark 0.13.4, its
+    /// spec tests 10 and 21): a `$` at the opener's brace level that
+    /// cannot close makes the opener text, so what the page shows as
+    /// text changes; braces hold an inner `$`; a `}` below the opener's
+    /// level ends it; a formula the parser pairs whose closer precedes
+    /// a digit is the page's currency text, the scan going on after its
+    /// closer.
+    #[test]
+    fn the_inline_rules_follow_the_parser() {
+        assert_eq!(case_of("$x $ x$"), "$X $ X$", "the parser's spec test 10");
+        assert_eq!(
+            case_of("see $\\text{Hello $x$ there!}$ now"),
+            "See $\\text{Hello $x$ there!}$ Now",
+            "the parser's spec test 21"
+        );
+        assert_eq!(
+            case_of("see $$\n\\text{Hello $x^2$}\n$$ now"),
+            "See $$\n\\text{Hello $x^2$}\n$$ Now"
+        );
+        assert_eq!(
+            case_of("$a } b$ c"),
+            "$A } B$ C",
+            "a brace below the opener's level"
+        );
+        assert_eq!(
+            case_of("from $5-$10 to x$ here"),
+            "From $5-$10 To X$ Here",
+            "the currency text, then a $ that cannot open"
+        );
+        assert_eq!(
+            case_of("a $x {$y$} z$ b"),
+            "A $x {$y$} z$ B",
+            "braces inside a formula"
+        );
+        assert_eq!(
+            case_of("a $x {$y$} z b"),
+            "A $X {$y$} Z B",
+            "the inner pair stands when the outer does not close"
+        );
+    }
+
+    /// A tag is what CommonMark reads as one: a name, attributes, a
+    /// closing tag, a comment. Text between angle brackets that is none
+    /// of these is text on the page, and its words change.
+    #[test]
+    fn text_between_angle_brackets_is_kept_only_as_a_tag() {
+        assert_eq!(
+            case_of("say <hello, world!> now"),
+            "Say <Hello, World!> Now"
+        );
+        assert_eq!(case_of("say <hello> now"), "Say <hello> Now");
+        assert_eq!(
+            case_of("a <span class=\"x\" data-k=v> b"),
+            "A <span class=\"x\" data-k=v> B"
+        );
+        assert_eq!(case_of("a <br/> b"), "A <br/> B");
+        assert_eq!(case_of("a </div > b"), "A </div > B");
+        assert_eq!(case_of("a <!-- a note --> b"), "A <!-- a note --> B");
+        assert_eq!(case_of("a <3 b"), "A <3 B");
+        assert_eq!(
+            case_of("a <x y=\"z w> b"),
+            "A <X Y=\"z W> B",
+            "an unterminated value is no tag"
+        );
+    }
+
+    /// The key cuts its paragraphs where the parser cuts its blocks: a
+    /// line that starts a block quote, a heading, a list item, a fence
+    /// or a thematic break ends the paragraph before it, so a `$` above
+    /// such a line pairs with none below it. A quote's own lines stay
+    /// one paragraph.
+    #[test]
+    fn a_paragraph_ends_where_a_block_begins() {
+        assert_eq!(case_of("$0\n>a$<"), "$0\n>A$<");
+        assert_eq!(case_of("x $a\n- b$ c"), "X $A\n- B$ C");
+        assert_eq!(case_of("x $a\n# b$ c"), "X $A\n# B$ C");
+        assert_eq!(case_of("x $a\n---\nb$ c"), "X $A\n---\nB$ C");
+        assert_eq!(
+            case_of("> $a\n> b$ c"),
+            "> $a\n> b$ C",
+            "a quote's lines are one paragraph"
+        );
+        assert_eq!(
+            case_of("- $a\n  b$ c"),
+            "- $a\n  b$ C",
+            "an item's indented continuation"
+        );
+    }
+
+    /// A link's address is the parser's: after a `](` whose `]` closes
+    /// a `[`, a destination without whitespace or between angle
+    /// brackets, an optional title; anything else is text and changes.
+    #[test]
+    fn a_link_address_has_the_parser_s_shape() {
+        assert_eq!(case_of("a](b c)"), "A](b C)", "no bracket before it");
+        assert_eq!(case_of("[]](a)"), "[]](A)", "the bracket closed before it");
+        assert_eq!(case_of("[[a]](b)"), "[[A]](b)", "nested brackets");
+        assert_eq!(
+            case_of("[a](b c)"),
+            "[A](b C)",
+            "a space in the destination"
+        );
+        assert_eq!(
+            case_of("[a](b\n) c"),
+            "[A](b\n) C",
+            "a line break before the parenthesis"
+        );
+        assert_eq!(
+            case_of("[a](\n b) c"),
+            "[A](\n b) C",
+            "whitespace before the destination"
+        );
+        assert_eq!(case_of("[a]() b"), "[A]() B", "an empty destination");
+        assert_eq!(
+            case_of("-[](](a b)"),
+            "-[](](A B)",
+            "a ]( that is no link closes its bracket"
+        );
+        assert_eq!(case_of("[a](b \"t x\")"), "[A](b \"t x\")", "a title");
+        assert_eq!(
+            case_of("[a](<b c>)"),
+            "[A](<b c>)",
+            "a destination in brackets"
+        );
+        assert_eq!(case_of("![alt](p.png)"), "![Alt](p.png)");
+    }
+
+    /// The key cuts its paragraphs where the parser cuts its blocks,
+    /// once more: a list's next item, whatever its number, begins a
+    /// block, a numbered line after a paragraph's line does not (it is
+    /// read as the paragraph's), and an indented code block is kept
+    /// whole.
+    #[test]
+    fn a_list_s_next_item_and_an_indented_block_are_read_as_the_page_reads_them() {
+        assert_eq!(case_of("1. $a\n2. b$ c"), "1. $A\n2. B$ C");
+        assert_eq!(case_of("x $a\n2. b$ c"), "X $a\n2. b$ C", "a lazy line");
+        assert_eq!(
+            case_of("x\n\n    code here\n\ntext"),
+            "X\n\n    code here\n\nText"
+        );
+        assert_eq!(
+            case_of("    code\ntext"),
+            "    code\nText",
+            "the block ends before the line"
+        );
+        assert_eq!(
+            case_of("x $a\n*\nb$ c"),
+            "X $a\n*\nb$ C",
+            "a bare marker after a paragraph's line is its text"
+        );
+        assert_eq!(
+            case_of("> $a\n*\nb$ c"),
+            "> $A\n*\nB$ C",
+            "after a quote's line it ends the quote"
+        );
+        assert_eq!(
+            case_of(">$a\n>$[ b"),
+            ">$A\n>$[ B",
+            "a $ past the quote marker has nothing before it"
+        );
+        assert_eq!(
+            case_of("> $a\n=\nb$ c"),
+            "> $a\n=\nb$ C",
+            "a line of = after a quote's line is the quote's text"
+        );
+        assert_eq!(case_of("> $a\n--\nb$ c"), "> $a\n--\nb$ C");
+        assert_eq!(
+            case_of("> $a\n2. b$ c"),
+            "> $A\n2. B$ C",
+            "any numbered item ends the quote"
+        );
+        assert_eq!(
+            case_of("> x\n$a\n> b$ c"),
+            "> X\n$a\n> b$ C",
+            "a quoted line after a lazy one is the same paragraph"
+        );
     }
 
     /// A press on a table of two hundred thousand rows holding a `<`

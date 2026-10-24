@@ -4,9 +4,9 @@
 //! keyboard, wherever it appears. The set is found once per selection,
 //! when it has settled, and lives exactly as long as that selection.
 
-use crate::doc::model::Document;
+use crate::doc::model::{BlockKind, Document};
 use crate::ui::search;
-use crate::ui::selection::{self, Selection};
+use crate::ui::selection::{self, ModelPos, Selection};
 
 /// How a selection's occurrences are matched: a double-clicked word
 /// whole, as `search::word_matches` finds it; a selected text as it is,
@@ -49,15 +49,55 @@ pub fn lights(text: &str) -> bool {
 }
 
 /// Whether a selection may light, read on its positions before its
-/// text is built: inside one block, since a selection across blocks
-/// holds a line break, and within one span not longer in bytes than
+/// text is built. A selection across blocks holds a line break, unless
+/// its text lies in one of them: dragged from a block's end into the
+/// next, or from a block to the next one's start, the break is at an
+/// end and trimmed away, so the reach is read on the block that holds
+/// the text. Within a block: one span, or not longer in bytes than
 /// four times the character limit, which no text of that many
 /// characters fits. The text of a selection of the whole page cost
 /// 69 ms on an 8 MB page, built before the limit was read.
-pub fn within_reach(selection: &Selection) -> bool {
-    let (start, end) = (selection.start, selection.end);
+pub fn within_reach(doc: &Document, selection: &Selection) -> bool {
+    let (mut start, mut end) = selection.ordered();
+    if start.block + 1 == end.block && at_block_end(doc, start) {
+        start = ModelPos {
+            block: end.block,
+            span: 0,
+            byte: 0,
+        };
+    }
+    if start.block + 1 == end.block && end.span == 0 && end.byte == 0 {
+        if let Some(last) = block_end(doc, start.block) {
+            end = last;
+        }
+    }
     start.block == end.block
         && (start.span != end.span || start.byte.abs_diff(end.byte) <= 4 * LONGEST)
+}
+
+/// The position after the last character of a block's text, for the
+/// kinds that hold spans. None for the others.
+fn block_end(doc: &Document, block: usize) -> Option<ModelPos> {
+    let spans = match &doc.blocks.get(block)?.kind {
+        BlockKind::Paragraph { spans }
+        | BlockKind::Heading { spans, .. }
+        | BlockKind::ListItem { spans, .. }
+        | BlockKind::FootnoteDef { spans, .. }
+        | BlockKind::Summary { spans, .. } => spans,
+        _ => return None,
+    };
+    let last = spans.last()?;
+    Some(ModelPos {
+        block,
+        span: spans.len() - 1,
+        byte: last.text(&doc.source).len(),
+    })
+}
+
+/// Whether no text of its block follows the position.
+fn at_block_end(doc: &Document, pos: ModelPos) -> bool {
+    block_end(doc, pos.block)
+        .is_some_and(|end| pos.span > end.span || (pos.span == end.span && pos.byte >= end.byte))
 }
 
 /// The other occurrences of a selection: a double-clicked word, whole,
@@ -67,7 +107,7 @@ pub fn within_reach(selection: &Selection) -> bool {
 /// selection stands. A selection beyond reach on its positions is
 /// refused before its text is built, which costs the blocks it spans.
 pub fn find(doc: &Document, selection: Selection, matched: Match) -> Option<Occurrences> {
-    if !within_reach(&selection) {
+    if !within_reach(doc, &selection) {
         return None;
     }
     let text = selection::plain_text(&selection, doc);
@@ -127,35 +167,67 @@ mod tests {
     /// text of the character limit can be.
     #[test]
     fn a_selection_across_blocks_or_over_the_limit_is_refused_on_its_positions() {
+        let doc = markdown::parse("alpha beta\n\ngamma delta");
         let at = |block, span, byte| ModelPos { block, span, byte };
         let across = Selection {
             start: at(0, 0, 0),
             end: at(1, 0, 3),
         };
-        assert!(!within_reach(&across), "across two blocks");
+        assert!(
+            !within_reach(&doc, &across),
+            "across two blocks, text in both"
+        );
         let long = Selection {
             start: at(0, 0, 0),
             end: at(0, 0, 4 * LONGEST + 1),
         };
-        assert!(!within_reach(&long), "over the limit in one span");
+        assert!(!within_reach(&doc, &long), "over the limit in one span");
         let upward = Selection {
             start: at(0, 0, 4 * LONGEST + 1),
             end: at(0, 0, 0),
         };
-        assert!(!within_reach(&upward), "the same, dragged upward");
+        assert!(!within_reach(&doc, &upward), "the same, dragged upward");
         let short = Selection {
             start: at(0, 0, 0),
             end: at(0, 0, 5),
         };
-        assert!(within_reach(&short));
+        assert!(within_reach(&doc, &short));
         let spans = Selection {
             start: at(0, 0, 0),
             end: at(0, 2, 5),
         };
         assert!(
-            within_reach(&spans),
+            within_reach(&doc, &spans),
             "across spans of one block: the text decides"
         );
+    }
+
+    /// A selection across two blocks whose text lies in one of them
+    /// lights: dragged from a paragraph's end into the next, its text
+    /// is the next block's, trimmed of the break, and the reach is read
+    /// there (the hunt's claim 31).
+    #[test]
+    fn a_selection_from_a_block_end_into_the_next_lights_on_its_text() {
+        let doc = markdown::parse("The panel opens.\n\npanel, another panel.");
+        let at = |block, span, byte| ModelPos { block, span, byte };
+        let from_end = Selection {
+            start: at(0, 0, 16),
+            end: at(1, 0, 5),
+        };
+        assert_eq!(selection::plain_text(&from_end, &doc).trim(), "panel");
+        assert!(within_reach(&doc, &from_end));
+        let lit = find(&doc, from_end, Match::Text).expect("lit on the next block's word");
+        assert_eq!(lit.matches.len(), 2, "the two other panels");
+        let to_start = Selection {
+            start: at(0, 0, 4),
+            end: at(1, 0, 0),
+        };
+        assert!(within_reach(&doc, &to_start), "into the next block's start");
+        let both = Selection {
+            start: at(0, 0, 4),
+            end: at(1, 0, 5),
+        };
+        assert!(!within_reach(&doc, &both), "text in both blocks");
     }
 
     #[test]
