@@ -412,7 +412,7 @@ pub fn run(
         caret_seat: None,
         blink_visible: true,
         blink_flip: Instant::now(),
-        caret_was_live: false,
+        caret_was: None,
         drawn_once: false,
         focused: true,
         pause_save: autosave::Pause::default(),
@@ -1296,13 +1296,46 @@ fn disk_state(path: &Path) -> std::io::Result<Option<DiskState>> {
     }
 }
 
-/// Whether the editor's caret is live: in the editor, while the window
-/// has the focus and the keys go to the text, the way a native text box
-/// behaves. A dialog or a field that has the keys hides the caret, so a
-/// caret on screen shows where the next key lands. Only a live caret
-/// is painted and blinks.
-fn caret_live(editing: bool, focused: bool, keys_to_text: bool) -> bool {
-    editing && focused && keys_to_text
+/// What has the keys, in the order the routing of `window_event` asks:
+/// the question, a dialog, Go to line, the search bar, then the text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyOwner {
+    /// The unsaved changes or recovery question, answered by letters.
+    Question,
+    /// A dialog; `field` while one of its text fields is open.
+    Dialog {
+        field: bool,
+    },
+    GoTo,
+    Search,
+    /// The editor, or the page in reading mode.
+    Text,
+}
+
+/// Where the live caret stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CaretAt {
+    Text,
+    Field,
+}
+
+/// Where the caret is live: in the text field that has the keys, or in
+/// the editor's text, the way a native text box behaves. No caret is
+/// live while the window is in the background, in reading mode, or
+/// while the keys go to a list or a question. Only the live caret is
+/// painted and blinks, so a caret on screen shows where the next key
+/// lands.
+fn live_caret(owner: KeyOwner, editing: bool, focused: bool) -> Option<CaretAt> {
+    if !focused {
+        return None;
+    }
+    match owner {
+        KeyOwner::Question | KeyOwner::Dialog { field: false } => None,
+        KeyOwner::Dialog { field: true } | KeyOwner::GoTo | KeyOwner::Search => {
+            Some(CaretAt::Field)
+        }
+        KeyOwner::Text => editing.then_some(CaretAt::Text),
+    }
 }
 
 /// The loop's next wake, rebuilt at every pass: each timer still
@@ -1841,10 +1874,10 @@ struct App {
     /// every caret action restarts the visible half.
     blink_visible: bool,
     blink_flip: Instant,
-    /// Whether the caret was live at the previous frame. The blink stands
-    /// still while the caret is hidden, so a caret that comes back
-    /// restarts on the visible half.
-    caret_was_live: bool,
+    /// Where the caret was live at the previous frame. The blink stands
+    /// still while no caret is live, so a caret that comes back, or that
+    /// moves between the text and a field, restarts on the visible half.
+    caret_was: Option<CaretAt>,
     /// False until the first frame is drawn.
     drawn_once: bool,
     /// Whether the window has the keyboard focus. In the background the
@@ -2533,35 +2566,52 @@ impl App {
         self.blink_flip = Instant::now() + CARET_BLINK;
     }
 
-    /// Whether the keys go to the text: no question, dialog, go to line
-    /// field or search bar has them. These are the four that take the
-    /// keys before the editor in the routing of `window_event`.
-    fn keys_to_text(&self) -> bool {
-        self.confirm.is_none()
-            && self.overlay.is_none()
-            && self.goto.is_none()
-            && self.search.is_none()
+    /// What has the keys: the four that take them before the editor in
+    /// the routing of `window_event`, in its order, then the text.
+    fn key_owner(&self) -> KeyOwner {
+        if self.confirm.is_some() {
+            KeyOwner::Question
+        } else if let Some(overlay) = self.overlay.as_ref() {
+            KeyOwner::Dialog {
+                field: overlay.field_has_keys(),
+            }
+        } else if self.goto.is_some() {
+            KeyOwner::GoTo
+        } else if self.search.is_some() {
+            KeyOwner::Search
+        } else {
+            KeyOwner::Text
+        }
     }
 
-    fn caret_is_live(&self) -> bool {
-        caret_live(
+    fn caret_now(&self) -> Option<CaretAt> {
+        live_caret(
+            self.key_owner(),
             self.mode == edit::Mode::Edit,
             self.focused,
-            self.keys_to_text(),
         )
     }
 
-    /// Whether the caret is live for this frame. A caret that comes back
-    /// (a dialog closed, the window focused again, the editor opened)
-    /// starts on the visible half, since its blink stood still while it
-    /// was hidden.
-    fn follow_caret(&mut self) -> bool {
-        let live = self.caret_is_live();
-        let was = std::mem::replace(&mut self.caret_was_live, live);
-        if live && !was {
+    /// Where the caret is live for this frame. A caret that comes back
+    /// (a dialog closed, the window focused again, the editor opened) or
+    /// moves between the text and a field starts on the visible half,
+    /// since the blink stood still or belonged to the other caret.
+    fn follow_caret(&mut self, owner: KeyOwner) -> Option<CaretAt> {
+        let live = live_caret(owner, self.mode == edit::Mode::Edit, self.focused);
+        let was = std::mem::replace(&mut self.caret_was, live);
+        if live.is_some() && live != was {
             self.wake_caret();
         }
         live
+    }
+
+    /// A key or a press while a field has the keys shows its caret at
+    /// once, the way a caret action in the text does.
+    fn wake_field_caret(&mut self) {
+        if self.caret_now() == Some(CaretAt::Field) {
+            self.wake_caret();
+            self.request_redraw();
+        }
     }
 
     fn show_notice(&mut self, text: &str) {
@@ -6001,6 +6051,7 @@ impl App {
                 }
             }
         }
+        self.wake_field_caret();
     }
 
     /// The matching release.
@@ -8716,7 +8767,11 @@ impl App {
         // check rides them without ever waking the loop itself.
         self.check_disk();
         self.watch_count();
-        let live_caret = self.follow_caret();
+        let owner = self.key_owner();
+        let live = self.follow_caret(owner);
+        // A field paints its caret on the blink's lit half while it has
+        // the keys; the owner says which of the bars and the dialog it is.
+        let field_lit = live == Some(CaretAt::Field) && self.blink_visible;
         let inset = self.inset() as u32;
         let Some(size) = self.gfx.as_ref().map(|g| g.window.inner_size()) else {
             return;
@@ -8992,7 +9047,7 @@ impl App {
                 }
             }
         }
-        if live_caret && self.blink_visible {
+        if live == Some(CaretAt::Text) && self.blink_visible {
             if let Some(c) = self.caret {
                 if let Some(b) = c.geometry(lay, &self.document, &mut self.fonts) {
                     draw_caret(
@@ -9065,6 +9120,7 @@ impl App {
                     &self.theme,
                     state,
                     size.width as f32 / self.scale,
+                    field_lit && owner == KeyOwner::Search,
                 );
                 painter.composite(&mut buffer, size.width);
                 *stale = painter.dirty();
@@ -9088,6 +9144,7 @@ impl App {
                     &self.theme,
                     state,
                     size.width as f32 / self.scale,
+                    field_lit && owner == KeyOwner::GoTo,
                 );
                 painter.composite(&mut buffer, size.width);
                 *stale = painter.dirty();
@@ -9215,7 +9272,11 @@ impl App {
             }
             if let Some((canvas, stale)) = self.overlay_canvas.as_mut() {
                 let mut painter = Painter::new(canvas, &mut self.fonts, stale.take(), self.scale);
-                overlay.draw(&mut painter, &self.theme);
+                overlay.draw(
+                    &mut painter,
+                    &self.theme,
+                    field_lit && matches!(owner, KeyOwner::Dialog { .. }),
+                );
                 painter.composite(&mut buffer, size.width);
                 *stale = painter.dirty();
             }
@@ -9279,7 +9340,12 @@ impl ApplicationHandler for App {
                 wake.by(at);
             }
         }
-        if self.caret.is_some() && self.caret_is_live() {
+        let blinking = match self.caret_now() {
+            Some(CaretAt::Text) => self.caret.is_some(),
+            Some(CaretAt::Field) => true,
+            None => false,
+        };
+        if blinking {
             let now = Instant::now();
             if now >= self.blink_flip {
                 self.blink_visible = !self.blink_visible;
@@ -9635,6 +9701,7 @@ impl ApplicationHandler for App {
                     Some(cmd) => self.run_command(cmd, event_loop),
                     None => {}
                 }
+                self.wake_field_caret();
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 self.fling = None;
@@ -11284,28 +11351,46 @@ mod tests {
         }
     }
 
-    /// The caret is live only where the next key lands: in the editor,
-    /// with the window's focus, and no dialog or field holding the keys.
+    /// The live caret is where the next key lands: in the text field
+    /// that has the keys, or in the editor's text, and nowhere while the
+    /// window is in the background or the keys go to a list or a
+    /// question.
     #[test]
-    fn the_caret_is_live_only_where_the_keys_go() {
-        // (editing, focused, keys to the text, live)
-        let table = [
-            (true, true, true, true),
-            (true, true, false, false),
-            (true, false, true, false),
-            (true, false, false, false),
-            (false, true, true, false),
-            (false, true, false, false),
-            (false, false, true, false),
-            (false, false, false, false),
+    fn the_live_caret_is_where_the_keys_go() {
+        use super::{live_caret, CaretAt, KeyOwner};
+        let owners = [
+            (KeyOwner::Question, None),
+            (KeyOwner::Dialog { field: false }, None),
+            (KeyOwner::Dialog { field: true }, Some(CaretAt::Field)),
+            (KeyOwner::GoTo, Some(CaretAt::Field)),
+            (KeyOwner::Search, Some(CaretAt::Field)),
         ];
-        for (editing, focused, keys_to_text, live) in table {
-            assert_eq!(
-                super::caret_live(editing, focused, keys_to_text),
-                live,
-                "editing {editing}, focused {focused}, keys to the text {keys_to_text}"
-            );
+        for editing in [true, false] {
+            for (owner, at) in owners {
+                assert_eq!(
+                    live_caret(owner, editing, true),
+                    at,
+                    "{owner:?}, editing {editing}"
+                );
+                assert_eq!(
+                    live_caret(owner, editing, false),
+                    None,
+                    "{owner:?}, editing {editing}, the window in the background"
+                );
+            }
         }
+        assert_eq!(live_caret(KeyOwner::Text, true, true), Some(CaretAt::Text));
+        assert_eq!(
+            live_caret(KeyOwner::Text, true, false),
+            None,
+            "the editor in the background"
+        );
+        assert_eq!(live_caret(KeyOwner::Text, false, true), None, "reading");
+        assert_eq!(
+            live_caret(KeyOwner::Text, false, false),
+            None,
+            "reading in the background"
+        );
     }
 
     /// The disk check's verdict on the open file: a file missing once

@@ -322,7 +322,11 @@ fn checker(u: f32, v: f32, w: f32, h: f32) -> u8 {
 }
 
 impl Overlay for ThemeEditor {
-    fn draw(&mut self, painter: &mut Painter, app_theme: &Theme) {
+    fn field_has_keys(&self) -> bool {
+        self.hex_entry.is_some()
+    }
+
+    fn draw(&mut self, painter: &mut Painter, app_theme: &Theme, caret_lit: bool) {
         let (w, h) = (painter.width(), painter.height());
         let ui = &app_theme.ui;
         let panel_w = PANEL_W.min(w - 40.0);
@@ -612,16 +616,18 @@ impl Overlay for ThemeEditor {
                     400,
                     ui.overlay_fg,
                 );
-                let caret = field.caret_offset(&positions);
+                if caret_lit {
+                    let caret = field.caret_offset(&positions);
+                    painter.fill(
+                        text_x + caret + 1.0,
+                        hex.1 + 5.0,
+                        1.5,
+                        16.0,
+                        0.0,
+                        ui.overlay_fg,
+                    );
+                }
                 offsets = positions;
-                painter.fill(
-                    text_x + caret + 1.0,
-                    hex.1 + 5.0,
-                    1.5,
-                    16.0,
-                    0.0,
-                    ui.overlay_fg,
-                );
             }
             None => {
                 painter.text(
@@ -824,6 +830,18 @@ mod tests {
                 "({r},{g},{b}) round-tripped to ({r2},{g2},{b2})"
             );
         }
+    }
+
+    /// The color field has the keys from Enter to Escape, so its caret
+    /// blinks; the list of roles alone has no caret.
+    #[test]
+    fn the_color_field_has_the_keys_while_it_is_open() {
+        let mut editor = ThemeEditor::new(Path::new("themes/nord.toml")).expect("nord loads");
+        assert!(!editor.field_has_keys(), "the list of roles");
+        editor.key(&Key::Named(NamedKey::Enter), false, false);
+        assert!(editor.field_has_keys(), "the color field open");
+        editor.key(&Key::Named(NamedKey::Escape), false, false);
+        assert!(!editor.field_has_keys(), "the color field closed");
     }
 
     #[test]

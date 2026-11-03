@@ -82,7 +82,7 @@ impl ExportProgress {
 }
 
 impl Overlay for ExportProgress {
-    fn draw(&mut self, painter: &mut Painter, theme: &Theme) {
+    fn draw(&mut self, painter: &mut Painter, theme: &Theme, _caret_lit: bool) {
         let (w, h) = (painter.width(), painter.height());
         let ui = &theme.ui;
         let (title, detail) = self.lines();
@@ -386,7 +386,7 @@ const LIST_ROW_H: f32 = 26.0;
 const LIST_MAX: usize = 12;
 
 impl Overlay for ExportDialog {
-    fn draw(&mut self, painter: &mut Painter, theme: &Theme) {
+    fn draw(&mut self, painter: &mut Painter, theme: &Theme, _caret_lit: bool) {
         let (w, h) = (painter.width(), painter.height());
         let ui = &theme.ui;
         let panel_h = DIALOG_HEADER_H + self.rows.len() as f32 * DIALOG_ROW_H + DIALOG_PAD;

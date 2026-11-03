@@ -350,7 +350,11 @@ impl ThemeBrowser {
 }
 
 impl Overlay for ThemeBrowser {
-    fn draw(&mut self, painter: &mut Painter, theme: &Theme) {
+    fn field_has_keys(&self) -> bool {
+        self.renaming.is_some()
+    }
+
+    fn draw(&mut self, painter: &mut Painter, theme: &Theme, caret_lit: bool) {
         let mut rename_box: Option<RenameBox> = None;
         let (w, h) = (painter.width(), painter.height());
         let panel_w = PANEL_W.min(w - 40.0);
@@ -485,15 +489,17 @@ impl Overlay for ThemeBrowser {
                         400,
                         theme.ui.overlay_fg,
                     );
-                    let caret = field.caret_offset(&positions);
-                    painter.fill(
-                        self.geometry.name_x + caret + 1.5,
-                        ry + 7.0,
-                        1.5,
-                        17.0,
-                        0.0,
-                        theme.ui.overlay_fg,
-                    );
+                    if caret_lit {
+                        let caret = field.caret_offset(&positions);
+                        painter.fill(
+                            self.geometry.name_x + caret + 1.5,
+                            ry + 7.0,
+                            1.5,
+                            17.0,
+                            0.0,
+                            theme.ui.overlay_fg,
+                        );
+                    }
                     rename_box = Some((
                         positions,
                         (self.geometry.name_x - 5.0, ry + 2.0, field_w, ROW_H - 8.0),
@@ -802,12 +808,14 @@ mod tests {
         browser.draw(
             &mut Painter::new(&mut aligned, &mut fonts, None, 1.0),
             &theme,
+            true,
         );
         let mut spilling = Pixmap::new(w, h).unwrap();
         browser.scroll = 0.0;
         browser.draw(
             &mut Painter::new(&mut spilling, &mut fonts, None, 1.0),
             &theme,
+            true,
         );
         let (_, py, _, ph) = browser.geometry.panel;
         let overflow = ROW_H - browser.geometry.list_h % ROW_H;
@@ -825,6 +833,25 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The rename field has the keys from its opening to its close, so
+    /// its caret blinks; the list alone has no caret.
+    #[test]
+    fn the_rename_field_has_the_keys_while_it_is_open() {
+        let dir = temp_dir("rename-keys");
+        std::fs::write(
+            dir.join("mine.toml"),
+            "[surface]\nbackground = \"#282a36\"\n",
+        )
+        .unwrap();
+        let mut browser = ThemeBrowser::new(vec![dir.clone()], "mine");
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(!browser.field_has_keys(), "the list alone");
+        browser.start_rename(0, "mine".to_string());
+        assert!(browser.field_has_keys(), "the rename field open");
+        browser.key(&Key::Named(NamedKey::Escape), false, false);
+        assert!(!browser.field_has_keys(), "the rename field closed");
     }
 
     /// Forty themes in a folder, the browser open on one of them.
@@ -845,7 +872,7 @@ mod tests {
     fn drawn(browser: &mut ThemeBrowser, fonts: &mut FontStore, w: u32, h: u32) -> Pixmap {
         let mut pixmap = Pixmap::new(w, h).unwrap();
         let mut painter = Painter::new(&mut pixmap, fonts, None, 1.0);
-        browser.draw(&mut painter, &Theme::default_dark());
+        browser.draw(&mut painter, &Theme::default_dark(), true);
         pixmap
     }
 

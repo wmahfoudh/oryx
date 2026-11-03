@@ -233,7 +233,9 @@ pub const SCRIM: Rgba = Rgba {
 
 pub trait Overlay {
     /// Paints the overlay; geometry may be cached for hit testing.
-    fn draw(&mut self, painter: &mut Painter, theme: &Theme);
+    /// `caret_lit` is the blink's lit half while a text field of the
+    /// overlay has the keys: the field paints its caret only then.
+    fn draw(&mut self, painter: &mut Painter, theme: &Theme, caret_lit: bool);
     fn key(&mut self, key: &Key, ctrl: bool, shift: bool) -> OverlayResult;
     /// Left click at window coordinates.
     fn click(&mut self, x: f32, y: f32) -> OverlayResult;
@@ -246,6 +248,11 @@ pub trait Overlay {
     /// Mouse wheel, positive scrolling down.
     fn scroll(&mut self, _lines: f32) -> OverlayResult {
         OverlayResult::Open
+    }
+    /// Whether one of the overlay's text fields is open and has the
+    /// keys, so the app runs the blink for its caret.
+    fn field_has_keys(&self) -> bool {
+        false
     }
 }
 

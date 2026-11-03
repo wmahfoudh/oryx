@@ -130,8 +130,15 @@ impl SearchState {
 
 /// The floating pill over the document's top-right corner: query on the
 /// left, match counter on the right, in the theme's overlay colors. The
-/// fields' views are refreshed for the mouse.
-pub fn draw_bar(painter: &mut Painter, theme: &Theme, state: &mut SearchState, width: f32) {
+/// fields' views are refreshed for the mouse. `caret_lit` is the blink's
+/// lit half while the bar has the keys.
+pub fn draw_bar(
+    painter: &mut Painter,
+    theme: &Theme,
+    state: &mut SearchState,
+    width: f32,
+    caret_lit: bool,
+) {
     let ui = &theme.ui;
     let x = (width - BAR_WIDTH - MARGIN).max(MARGIN);
     let y = MARGIN;
@@ -222,6 +229,7 @@ pub fn draw_bar(painter: &mut Painter, theme: &Theme, state: &mut SearchState, w
         avail,
         "find",
         !state.replace_focused(),
+        caret_lit,
         state.query_view.window.start,
     );
 
@@ -256,6 +264,7 @@ pub fn draw_bar(painter: &mut Painter, theme: &Theme, state: &mut SearchState, w
             BAR_WIDTH - 2.0 * PAD - hint_w - 12.0,
             "replace",
             row.focused,
+            caret_lit,
             state.replace_view.window.start,
         );
     }
@@ -290,8 +299,9 @@ pub fn bar_hit(width: f32, replace_row: bool, px: f32, py: f32) -> Option<BarHit
 }
 
 /// One field row: windowed text with the caret kept visible, the
-/// placeholder when empty, selection and caret drawn only on the field
-/// the keyboard feeds. Answers where the text stands, for the mouse.
+/// placeholder when empty, the selection drawn only on the field the
+/// keyboard feeds, and its caret only on the blink's lit half
+/// (`caret_lit`). Answers where the text stands, for the mouse.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_field(
     painter: &mut Painter,
@@ -302,6 +312,7 @@ pub(crate) fn draw_field(
     avail: f32,
     placeholder: &str,
     focused: bool,
+    caret_lit: bool,
     previous_start: usize,
 ) -> FieldView {
     let ui = &theme.ui;
@@ -357,7 +368,7 @@ pub(crate) fn draw_field(
             ui.overlay_fg,
         );
     }
-    if focused {
+    if focused && caret_lit {
         let caret_x = left + x_of(field.caret()) + 1.0;
         painter.line(caret_x, top + 1.0, caret_x, top + 19.0, 1.0, ui.overlay_fg);
     }
@@ -914,6 +925,49 @@ mod tests {
     use crate::ui::selection::ModelPos;
     use tiny_skia::Pixmap;
 
+    /// The field that has the keys paints its caret on the lit half of
+    /// the blink only: the dark half, and a field without the keys, leave
+    /// the pixels of the text alone, and the lit half differs from them
+    /// by the caret's column only.
+    #[test]
+    fn a_field_paints_its_caret_on_the_lit_half_only() {
+        let field = TextField::new("abc".to_string());
+        let mut fonts = FontStore::new();
+        let theme = Theme::default_dark();
+        let mut drawn = |focused: bool, caret_lit: bool| {
+            let mut pixmap = Pixmap::new(200, 40).unwrap();
+            let mut painter = Painter::new(&mut pixmap, &mut fonts, None, 1.0);
+            draw_field(
+                &mut painter,
+                &theme,
+                &field,
+                10.0,
+                10.0,
+                160.0,
+                "",
+                focused,
+                caret_lit,
+                0,
+            );
+            drop(painter);
+            pixmap
+        };
+        let lit = drawn(true, true);
+        let dark = drawn(true, false);
+        let unfocused = drawn(false, true);
+        let columns: Vec<u32> = (0..200)
+            .filter(|&x| (0..40).any(|y| lit.pixel(x, y) != dark.pixel(x, y)))
+            .collect();
+        assert!(
+            !columns.is_empty() && columns.len() <= 3,
+            "the caret alone differs: {columns:?}"
+        );
+        assert!(
+            dark.data() == unfocused.data(),
+            "a field without the keys paints no caret"
+        );
+    }
+
     /// A query longer than the pill, the caret at its start: the drawn
     /// window stops short of the text's end, and the boundaries beyond
     /// it keep growing, so a click right of the pill reaches them.
@@ -926,7 +980,18 @@ mod tests {
         let mut fonts = FontStore::new();
         let mut painter = Painter::new(&mut pixmap, &mut fonts, None, 1.0);
         let theme = Theme::default_dark();
-        let view = draw_field(&mut painter, &theme, &field, 0.0, 0.0, 120.0, "", true, 0);
+        let view = draw_field(
+            &mut painter,
+            &theme,
+            &field,
+            0.0,
+            0.0,
+            120.0,
+            "",
+            true,
+            true,
+            0,
+        );
         assert_eq!(view.offsets.len(), 61);
         assert!(
             view.offsets.windows(2).all(|w| w[0] < w[1]),
@@ -948,7 +1013,18 @@ mod tests {
         let mut fonts = FontStore::new();
         let mut painter = Painter::new(&mut pixmap, &mut fonts, None, 1.0);
         let theme = Theme::default_dark();
-        let view = draw_field(&mut painter, &theme, &field, 0.0, 0.0, 120.0, "", true, 0);
+        let view = draw_field(
+            &mut painter,
+            &theme,
+            &field,
+            0.0,
+            0.0,
+            120.0,
+            "",
+            true,
+            true,
+            0,
+        );
         let (window, cut) = window_fit(&mut painter, query, 0, 120.0, 0);
         assert!(!cut && window.start == 0 && window.end < query.len());
         let boundaries: Vec<usize> = field.boundaries().collect();
@@ -990,7 +1066,18 @@ mod tests {
         let theme = Theme::default_dark();
         painter.measure("warm", CODE_FAMILY, QUERY_SIZE, 400);
         let started = std::time::Instant::now();
-        let view = draw_field(&mut painter, &theme, &field, 0.0, 0.0, 300.0, "", true, 0);
+        let view = draw_field(
+            &mut painter,
+            &theme,
+            &field,
+            0.0,
+            0.0,
+            300.0,
+            "",
+            true,
+            true,
+            0,
+        );
         let took = started.elapsed();
         assert!(view.offsets.windows(2).all(|w| w[0] < w[1]));
         assert!(took.as_secs_f32() < 2.0, "one frame took {took:?}");
@@ -1017,6 +1104,7 @@ mod tests {
                 0.0,
                 120.0,
                 "",
+                true,
                 true,
                 previous,
             )
@@ -1078,6 +1166,7 @@ mod tests {
                 0.0,
                 120.0,
                 "",
+                true,
                 true,
                 previous,
             )
@@ -1161,7 +1250,18 @@ mod tests {
         let mut fonts = FontStore::new();
         let mut painter = Painter::new(&mut pixmap, &mut fonts, None, 1.0);
         let theme = Theme::default_dark();
-        let view = draw_field(&mut painter, &theme, &field, 0.0, 0.0, 120.0, "", true, 0);
+        let view = draw_field(
+            &mut painter,
+            &theme,
+            &field,
+            0.0,
+            0.0,
+            120.0,
+            "",
+            true,
+            true,
+            0,
+        );
         let (window, cut) = window_fit(&mut painter, &query, 0, 120.0, 0);
         assert!(!cut && window.start == 0 && window.end < query.len());
         let boundaries: Vec<usize> = field.boundaries().collect();
@@ -1198,7 +1298,18 @@ mod tests {
         let query = format!("{}abc مقدمة def ghi", "abcdefghij".repeat(3));
         let mut field = TextField::new(query.clone());
         field.set_caret(0);
-        let view = draw_field(&mut painter, &theme, &field, 0.0, 0.0, 120.0, "", true, 0);
+        let view = draw_field(
+            &mut painter,
+            &theme,
+            &field,
+            0.0,
+            0.0,
+            120.0,
+            "",
+            true,
+            true,
+            0,
+        );
         let (window, _) = window_fit(&mut painter, &query, 0, 120.0, 0);
         assert!(
             window.end < 30,
@@ -1214,7 +1325,18 @@ mod tests {
         // The side before the window: the caret at the end.
         let query = format!("abc مقدمة def {}", "abcdefghij".repeat(4));
         let field = TextField::new(query.clone());
-        let view = draw_field(&mut painter, &theme, &field, 0.0, 0.0, 120.0, "", true, 0);
+        let view = draw_field(
+            &mut painter,
+            &theme,
+            &field,
+            0.0,
+            0.0,
+            120.0,
+            "",
+            true,
+            true,
+            0,
+        );
         let (window, _) = window_fit(&mut painter, &query, query.len(), 120.0, 0);
         assert!(
             window.start > 20,

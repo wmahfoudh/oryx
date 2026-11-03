@@ -284,7 +284,7 @@ impl Settings {
 }
 
 impl Overlay for Settings {
-    fn draw(&mut self, painter: &mut Painter, theme: &Theme) {
+    fn draw(&mut self, painter: &mut Painter, theme: &Theme, _caret_lit: bool) {
         let (w, h) = (painter.width(), painter.height());
         let ui = &theme.ui;
         let panel_w = PANEL_W.min(w - 40.0);

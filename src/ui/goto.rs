@@ -144,8 +144,15 @@ pub fn bar_hit(width: f32, px: f32, py: f32) -> bool {
 
 /// The floating pill over the document's top-right corner, where the
 /// search bar stands: the field on the left, the file's line count on
-/// the right.
-pub fn draw_bar(painter: &mut Painter, theme: &Theme, state: &mut GotoState, width: f32) {
+/// the right. `caret_lit` is the blink's lit half while the field has
+/// the keys.
+pub fn draw_bar(
+    painter: &mut Painter,
+    theme: &Theme,
+    state: &mut GotoState,
+    width: f32,
+    caret_lit: bool,
+) {
     let ui = &theme.ui;
     let (x, y, w, h) = bar_rect(width);
     for (grow, alpha) in [(6.0, 16), (3.0, 28)] {
@@ -187,6 +194,7 @@ pub fn draw_bar(painter: &mut Painter, theme: &Theme, state: &mut GotoState, wid
         avail,
         "line:column",
         true,
+        caret_lit,
         state.view.window.start,
     );
 }

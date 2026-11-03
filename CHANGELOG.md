@@ -24,6 +24,7 @@
 - A selection dragged from the end of a paragraph into the next now highlights the other occurrences of its word. Before, it did not.
 - The word keys, Ctrl+Backspace, Ctrl+Delete and a double click now take a joined emoji such as 👩‍💻 whole, on the page and in the search field. Before, Ctrl+Backspace deleted one part of it and left an invisible joiner behind.
 - When the search bar or a dialog is open, the cursor in the text is now hidden. Before, it kept blinking, for example after Replace All. What you typed then went into the search field.
+- When you type in the search bar, Go to line, or the name or color field of a theme, the cursor now blinks, as it does in the text. Before, it stood still.
 - The zip library, used for EPUB books, CBZ comics and zipped FB2 books, was updated to version 9. Three security advisories were published on the old version in October 2026. They are about extracting an archive to disk. Oryx never does that. No release was affected.
 
 ## v1.2.2
