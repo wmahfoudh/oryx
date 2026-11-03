@@ -908,6 +908,18 @@ mod tests {
         ));
     }
 
+    /// A return before a line break, which an edit can make out of a
+    /// lone return, stays in its line for the loader as for the splice,
+    /// so an edit on the next line splices the rows the reparse builds.
+    #[test]
+    fn a_return_before_a_line_break_keeps_the_splice_in_step() {
+        let kind = FileKind::Code("rust");
+        let mut fast = load::code_document(Some("rust"), "ab\r\nef\ngh\n");
+        let mut slow = load::code_document(Some("rust"), "ab\r\nef\ngh\n");
+        edit_both(&mut fast, &mut slow, kind, 4..4, "X");
+        assert_docs_match(&fast, &slow);
+    }
+
     /// Drives one edit through both pipes: the in-place splice on `fast`
     /// and the full reparse on `slow`, which is the splice's referee.
     fn edit_both(

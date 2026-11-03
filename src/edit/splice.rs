@@ -25,10 +25,40 @@ pub struct Splice {
     pub text: String,
 }
 
-/// Combines ordered, non-overlapping per-match edits into one region
-/// splice: the covering range and its replacement text, built in one
-/// pass over the source. `None` for no edits, or for edits out of order
-/// or overlapping, which a caller treats as a refused burst.
+/// An edit as the ledger and the history replay it: the range of the
+/// current text and its new text, the form the page takes, and for a
+/// unit of several pieces (Replace All) those pieces, ordered and apart,
+/// which the ledger takes as edits of their own so that the text between
+/// them stays the baseline's. No pieces is a single edit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Replay {
+    pub range: Range<usize>,
+    pub text: String,
+    pub pieces: Vec<(Range<usize>, String)>,
+}
+
+impl Replay {
+    /// A single edit: `range` of the current text replaced by `text`.
+    pub fn single(range: Range<usize>, text: &str) -> Replay {
+        Replay {
+            range,
+            text: text.to_string(),
+            pieces: Vec::new(),
+        }
+    }
+}
+
+/// The baseline offset of a current offset that no splice covers, with
+/// `shift` the length the splices before it added.
+fn base_of(current: usize, shift: isize) -> usize {
+    (current as isize - shift) as usize
+}
+
+/// Combines ordered, non-overlapping per-match edits into one region:
+/// the covering range and its replacement text, built in one pass over
+/// the source, the form the page and the history take. `None` for no
+/// edits, or for edits out of order or overlapping, which a caller
+/// treats as a refused burst.
 pub fn combine(source: &str, edits: &[(Range<usize>, String)]) -> Option<(Range<usize>, String)> {
     let first = edits.first()?;
     let last = edits.last()?;
@@ -152,6 +182,109 @@ impl Ledger {
         let touched = start_line..start_line + text.matches('\n').count() + 1;
         self.splice(range, text);
         touched
+    }
+
+    /// Replaces several ranges of the current text at once, each an edit
+    /// of its own: `pieces` ordered and apart, in current coordinates;
+    /// `range` and `text` the same edit seen whole, which give the lines
+    /// touched, as `edit` returns them. The bytes between the pieces stay
+    /// the baseline's, so their line endings are written back as they
+    /// were. A piece merges with the pieces and the splices it touches, as
+    /// one edit at a time would, in one pass over both lists.
+    pub fn edit_each(
+        &mut self,
+        range: Range<usize>,
+        text: &str,
+        pieces: &[(Range<usize>, String)],
+    ) -> Range<usize> {
+        if pieces.is_empty() {
+            return self.edit(range, text);
+        }
+        debug_assert!(
+            pieces.windows(2).all(|w| w[0].0.end <= w[1].0.start),
+            "the pieces are ordered and apart"
+        );
+        debug_assert!(
+            pieces[0].0.start == range.start && pieces[pieces.len() - 1].0.end == range.end,
+            "the range covers the pieces"
+        );
+        let start_line = self.newlines_before(range.start);
+        let touched = start_line..start_line + text.matches('\n').count() + 1;
+        let (spans, deltas) = self.spans();
+        let mut standing = std::mem::take(&mut self.splices).into_iter();
+        let mut merged = Vec::with_capacity(spans.len() + pieces.len());
+        let (mut k, mut p) = (0, 0);
+        while p < pieces.len() {
+            let first = pieces[p].0.start;
+            // The splices ending before the piece stay as they are.
+            while k < spans.len() && spans[k].end < first {
+                merged.extend(standing.next());
+                k += 1;
+            }
+            // The group: the piece, the splices and the pieces it touches,
+            // and those touching them in turn, boundaries included.
+            let (k0, p0) = (k, p);
+            let mut end = pieces[p].0.end;
+            p += 1;
+            loop {
+                if k < spans.len() && spans[k].start <= end {
+                    end = end.max(spans[k].end);
+                    k += 1;
+                } else if p < pieces.len() && pieces[p].0.start <= end {
+                    end = end.max(pieces[p].0.end);
+                    p += 1;
+                } else {
+                    break;
+                }
+            }
+            let start = if k > k0 {
+                first.min(spans[k0].start)
+            } else {
+                first
+            };
+            // The group's current text, the splices' own and the
+            // baseline between them, then the pieces applied to it.
+            let mut current = String::new();
+            let mut at = start;
+            for (i, splice) in standing.by_ref().take(k - k0).enumerate() {
+                let (span, shift) = (&spans[k0 + i], deltas[k0 + i]);
+                current.push_str(&self.base[base_of(at, shift)..base_of(span.start, shift)]);
+                current.push_str(&splice.text);
+                at = span.end;
+            }
+            current.push_str(&self.base[base_of(at, deltas[k])..base_of(end, deltas[k])]);
+            let mut new = String::with_capacity(current.len());
+            let mut at = start;
+            for (piece, replacement) in &pieces[p0..p] {
+                new.push_str(&current[at - start..piece.start - start]);
+                new.push_str(replacement);
+                at = piece.end;
+            }
+            new.push_str(&current[at - start..]);
+            let base = base_of(start, deltas[k0])..base_of(end, deltas[k]);
+            // As in `splice`: a group back to the baseline is no edit.
+            if new != self.base[base.clone()] {
+                merged.push(Splice {
+                    range: base,
+                    text: new,
+                });
+            }
+        }
+        merged.extend(standing);
+        debug_assert!(
+            merged
+                .windows(2)
+                .all(|w| w[0].range.end <= w[1].range.start),
+            "the splices stay ordered and do not overlap"
+        );
+        self.splices = merged;
+        touched
+    }
+
+    /// Applies an edit of the history: its pieces when it has some, or
+    /// its one range. Returns the lines touched, as `edit` does.
+    pub fn replay(&mut self, step: &Replay) -> Range<usize> {
+        self.edit_each(step.range.clone(), &step.text, &step.pieces)
     }
 
     /// The edit alone, without the line count: what a park's ledger
@@ -378,6 +511,55 @@ mod tests {
 
     fn ledger(base: &str) -> Ledger {
         Ledger::new(Arc::from(base), Vec::new())
+    }
+
+    /// Replace All in a file of mixed endings: each match is its own
+    /// edit, so the line between the two matches keeps its own ending,
+    /// and the save notice counts the lines with a match only.
+    #[test]
+    fn replace_all_keeps_the_endings_between_its_matches() {
+        // `x1\r\nmid\nx2\r\n`, normalized with its two returns on record.
+        let mut led = Ledger::new(Arc::from("x1\nmid\nx2\n"), vec![2, 9]);
+        let pieces = vec![(0..1, "y".to_string()), (7..8, "y".to_string())];
+        led.edit_each(0..8, "y1\nmid\ny", &pieces);
+        assert_eq!(led.current(), "y1\nmid\ny2\n");
+        assert_eq!(led.emit(), b"y1\r\nmid\ny2\r\n");
+        assert_eq!(led.splice_count(), 2);
+        assert_eq!(led.touched_lines(), 2);
+    }
+
+    /// The pieces merge with the splices they touch and with each other,
+    /// as one edit at a time would, and a piece that brings the text back
+    /// to the baseline leaves no entry.
+    #[test]
+    fn the_pieces_merge_as_single_edits_would() {
+        let pieces = |list: &[(Range<usize>, &str)]| -> Vec<(Range<usize>, String)> {
+            list.iter()
+                .map(|(range, text)| (range.clone(), text.to_string()))
+                .collect()
+        };
+        // Apart from a standing splice: four entries.
+        let mut led = ledger("aa bb aa\ncc aa\n");
+        led.edit(3..5, "BB");
+        led.edit_each(
+            0..14,
+            "x BB x\ncc x",
+            &pieces(&[(0..2, "x"), (6..8, "x"), (12..14, "x")]),
+        );
+        assert_eq!(led.current(), "x BB x\ncc x\n");
+        assert_eq!(led.splice_count(), 4);
+        // Touching a standing splice on both sides: one entry.
+        let mut led = ledger("abc");
+        led.edit(1..2, "X");
+        led.edit_each(0..3, "1X3", &pieces(&[(0..1, "1"), (2..3, "3")]));
+        assert_eq!(led.current(), "1X3");
+        assert_eq!(led.splice_count(), 1);
+        // Back to the baseline: no entry.
+        let mut led = ledger("abc");
+        led.edit(1..2, "X");
+        led.edit_each(1..2, "b", &pieces(&[(1..2, "b")]));
+        assert_eq!(led.current(), "abc");
+        assert!(!led.is_dirty());
     }
 
     #[test]

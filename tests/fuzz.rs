@@ -4,11 +4,13 @@
 //! A failing case is shrunk by proptest and printed with its seed, and
 //! is then kept as a plain test beside the code it caught.
 
+use oryx::doc::load::FileKind;
 use oryx::doc::markdown;
 use oryx::doc::model::{BlockKind, Document, Span};
 use oryx::edit::manners::case_edit;
-use oryx::edit::splice::{Ledger, Placed, Splice};
+use oryx::edit::splice::{combine, Ledger, Placed, Replay};
 use oryx::edit::undo::{Kind, Undo};
+use oryx::edit::{rendered_document, splice_document};
 use oryx::ui::search;
 use proptest::prelude::*;
 use proptest::test_runner::TestCaseError;
@@ -23,13 +25,30 @@ const MARK: char = '\u{a7}';
 /// mapped onto a character boundary when the step applies.
 #[derive(Debug, Clone)]
 enum Step {
-    Insert { at: u16, text: String, rest: bool },
-    Delete { at: u16, to: u16, rest: bool },
+    Insert {
+        at: u16,
+        text: String,
+        rest: bool,
+    },
+    Delete {
+        at: u16,
+        to: u16,
+        rest: bool,
+    },
     Undo,
     Redo,
     Park,
     Save,
+    /// Replace All: every occurrence of a needle of `NEEDLES`, left to
+    /// right, replaced by `with`.
+    ReplaceAll {
+        needle: usize,
+        with: String,
+    },
 }
+
+/// What Replace All looks for: letters, a line break, and both.
+const NEEDLES: &[&str] = &["a", "b", "\n", "a\n", "ab"];
 
 fn step() -> impl Strategy<Value = Step> {
     prop_oneof![
@@ -41,6 +60,8 @@ fn step() -> impl Strategy<Value = Step> {
         1 => Just(Step::Redo),
         1 => Just(Step::Park),
         1 => Just(Step::Save),
+        1 => (0..NEEDLES.len(), "[a-z\n]{0,3}")
+            .prop_map(|(needle, with)| Step::ReplaceAll { needle, with }),
     ]
 }
 
@@ -79,16 +100,38 @@ struct Session {
     park: Option<Park>,
     model: String,
     saved: String,
+    /// The ending of each line break of the model that no edit wrote:
+    /// `Some(true)` a return before it, `Some(false)` none, `None` for a
+    /// line break an edit wrote, whose ending is the file's usual one.
+    endings: Vec<Option<bool>>,
     now: Instant,
 }
 
 impl Session {
-    fn apply(&mut self, splice: &Splice) {
-        self.led.edit(splice.range.clone(), &splice.text);
+    fn apply(&mut self, step: &Replay) {
+        self.led.replay(step);
         if let Some(park) = self.park.as_mut() {
-            park.ledger.splice(splice.range.clone(), &splice.text);
+            park.ledger.splice(step.range.clone(), &step.text);
         }
-        self.model.replace_range(splice.range.clone(), &splice.text);
+        if step.pieces.is_empty() {
+            self.replace(step.range.clone(), &step.text);
+        } else {
+            for (range, text) in step.pieces.iter().rev() {
+                self.replace(range.clone(), text);
+            }
+        }
+    }
+
+    /// One replacement in the model and its record of endings: the line
+    /// breaks it removes leave the record, and the ones it writes join it
+    /// as edited.
+    fn replace(&mut self, range: std::ops::Range<usize>, text: &str) {
+        let at = self.model[..range.start].matches('\n').count();
+        let removed = self.model[range.clone()].matches('\n').count();
+        let written = text.matches('\n').count();
+        self.endings
+            .splice(at..at + removed, std::iter::repeat_n(None, written));
+        self.model.replace_range(range, text);
     }
 
     fn edit(&mut self, range: std::ops::Range<usize>, text: &str, kind: Kind, rest: bool) {
@@ -97,9 +140,10 @@ impl Session {
         }
         let replaced = self.model[range.clone()].to_string();
         let caret = (range.end, range.start + text.len());
-        self.apply(&Splice {
+        self.apply(&Replay {
             range: range.clone(),
             text: text.to_string(),
+            pieces: Vec::new(),
         });
         self.undo
             .record(range, text, &replaced, caret, kind, self.now);
@@ -125,18 +169,37 @@ impl Session {
                 self.edit(a..b, "", kind, *rest);
             }
             Step::Undo => {
-                if let Some((splice, _)) = self.undo.undo() {
-                    self.apply(&splice);
+                if let Some((step, _)) = self.undo.undo() {
+                    self.apply(&step);
                 }
             }
             Step::Redo => {
-                if let Some((splice, _)) = self.undo.redo() {
-                    self.apply(&splice);
+                if let Some((step, _)) = self.undo.redo() {
+                    self.apply(&step);
                 }
+            }
+            Step::ReplaceAll { needle, with } => {
+                let needle = NEEDLES[*needle];
+                let edits: Vec<(std::ops::Range<usize>, String)> = self
+                    .model
+                    .match_indices(needle)
+                    .map(|(at, _)| (at..at + needle.len(), with.clone()))
+                    .collect();
+                let Some((range, text)) = combine(&self.model, &edits) else {
+                    return;
+                };
+                let before = self.model.clone();
+                self.apply(&Replay {
+                    range,
+                    text,
+                    pieces: edits.clone(),
+                });
+                self.undo.record_each(&before, &edits, (0, 0), self.now);
             }
             Step::Park => self.park = Some(Park::at(&self.model)),
             Step::Save => {
-                self.led.commit();
+                let written = self.led.commit();
+                self.endings = endings_of(&written).into_iter().map(Some).collect();
                 self.undo.mark_saved();
                 self.saved = self.model.clone();
                 // The app rebuilds the parked page at a save when the
@@ -150,7 +213,20 @@ impl Session {
 
     fn check(&self) -> Result<(), TestCaseError> {
         prop_assert_eq!(&self.led.current(), &self.model, "the ledger's text");
-        let emitted = String::from_utf8(self.led.emit()).expect("utf-8 out");
+        let bytes = self.led.emit();
+        let written = endings_of(&bytes);
+        prop_assert_eq!(written.len(), self.endings.len(), "a line break each");
+        for (index, (written, kept)) in written.iter().zip(&self.endings).enumerate() {
+            if let Some(kept) = kept {
+                prop_assert_eq!(
+                    written,
+                    kept,
+                    "line break {} keeps its ending, no edit wrote it",
+                    index
+                );
+            }
+        }
+        let emitted = String::from_utf8(bytes).expect("utf-8 out");
         let normalized = emitted.replace("\r\n", "\n");
         prop_assert_eq!(&normalized, &self.model, "the emitted bytes");
         prop_assert!(!normalized.contains('\r'), "no lone return");
@@ -182,6 +258,17 @@ impl Session {
     }
 }
 
+/// For each line break of the written bytes, whether a return stands
+/// before it.
+fn endings_of(bytes: &[u8]) -> Vec<bool> {
+    bytes
+        .iter()
+        .enumerate()
+        .filter(|&(_, &byte)| byte == b'\n')
+        .map(|(at, _)| at > 0 && bytes[at - 1] == b'\r')
+        .collect()
+}
+
 fn run(a: &str, b: &str, endings: &[bool], steps: &[Step]) -> Result<(), TestCaseError> {
     let base = format!("{a}{MARK}{b}");
     let crlf: Vec<u32> = base
@@ -195,6 +282,11 @@ fn run(a: &str, b: &str, endings: &[bool], steps: &[Step]) -> Result<(), TestCas
         undo: Undo::new(),
         park: None,
         model: base.clone(),
+        endings: base
+            .match_indices('\n')
+            .enumerate()
+            .map(|(index, _)| Some(endings.get(index).copied().unwrap_or(false)))
+            .collect(),
         saved: base,
         now: Instant::now(),
     };
@@ -206,7 +298,8 @@ fn run(a: &str, b: &str, endings: &[bool], steps: &[Step]) -> Result<(), TestCas
 }
 
 /// The editor's ledger, undo stack and park: random typing, deletions,
-/// undos, redos, crossings and saves against a plain string.
+/// Replace All, undos, redos, crossings and saves against a plain string,
+/// in a file of mixed endings whose untouched lines keep theirs.
 #[test]
 #[ignore]
 fn fuzz_ledger() {
@@ -447,5 +540,61 @@ fn fuzz_search() {
         pattern in prop::sample::select(PATTERNS),
     )| {
         check_search(&paragraphs, pattern)?;
+    });
+}
+
+/// One edit of a code file's line table against a fresh build: the
+/// table spliced in place must hold the rows the loader builds from the
+/// edited text.
+fn check_lines(text: &str, at: u16, to: u16, insert: &str) -> Result<(), TestCaseError> {
+    let kind = FileKind::Code("rust");
+    let a = boundary(text, at);
+    let b = boundary(text, to).max(a);
+    let mut current = text.to_string();
+    current.replace_range(a..b, insert);
+    let start_line = text[..a].matches('\n').count();
+    let touched = start_line..start_line + insert.matches('\n').count() + 1;
+    let mut spliced = rendered_document(kind, text);
+    prop_assert!(
+        splice_document(&mut spliced, &current, a..b, touched).is_some(),
+        "a code file takes the splice"
+    );
+    let fresh = rendered_document(kind, &current);
+    let rows = |doc: &Document| -> Vec<String> {
+        match &doc.blocks[0].kind {
+            BlockKind::CodeBlock { lines, .. } => {
+                lines.iter(&doc.source).map(str::to_string).collect()
+            }
+            _ => Vec::new(),
+        }
+    };
+    prop_assert_eq!(
+        rows(&spliced),
+        rows(&fresh),
+        "{:?} after {:?} at {}..{}",
+        text,
+        insert,
+        a,
+        b
+    );
+    Ok(())
+}
+
+/// A code file's line table: random texts of letters, returns and line
+/// breaks, one edit spliced in place against a fresh build.
+#[test]
+#[ignore]
+fn fuzz_lines() {
+    let config = ProptestConfig {
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    };
+    proptest!(config, |(
+        text in "[ab\r\n]{0,30}",
+        at in any::<u16>(),
+        to in any::<u16>(),
+        insert in "[ab\r\n]{0,4}",
+    )| {
+        check_lines(&text, at, to, &insert)?;
     });
 }

@@ -26,6 +26,8 @@
 - When the search bar or a dialog is open, the cursor in the text is now hidden. Before, it kept blinking, for example after Replace All. What you typed then went into the search field.
 - When you type in the search bar, Go to line, or the name or color field of a theme, the cursor now blinks, as it does in the text. Before, it stood still.
 - When you search a page with a regular expression such as `[\s\S]+`, each paragraph now matches on its own. Before, only the last paragraph matched. On a long page, Oryx froze.
+- When you use Replace All in a file with both Windows and Unix line endings, the lines between the matches now keep their own ending. Before, they took the file's usual ending, and the save notice counted them as changed.
+- In a markdown file with a stray carriage return, the editor no longer shows an extra blank row. Before, it could appear after you deleted the text between the carriage return and the end of its line, then edited the next line.
 - The zip library, used for EPUB books, CBZ comics and zipped FB2 books, was updated to version 9. Three security advisories were published on the old version in October 2026. They are about extracting an archive to disk. Oryx never does that. No release was affected.
 
 ## v1.2.2

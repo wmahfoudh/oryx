@@ -14,7 +14,7 @@ use oryx::edit::{
     self,
     autosave::{self, Verdict},
     caret::{self, Caret, CaretBox, Motion},
-    splice::{self, Ledger, Placed},
+    splice::{self, Ledger, Placed, Replay},
     undo::{Kind, Undo},
 };
 use oryx::export::{self, ExportPass, ExportSettings};
@@ -2890,7 +2890,7 @@ impl App {
             .unwrap_or_default()
             .to_string();
         let caret_before = self.caret.map_or(range.start, |c| c.offset);
-        if !self.apply_edit(range.clone(), text) {
+        if !self.apply_edit(&Replay::single(range.clone(), text)) {
             return;
         }
         if let Some(hist) = self.undo.as_mut() {
@@ -3027,31 +3027,31 @@ impl App {
     /// editor; deeper text units are legal too and pay the rendered
     /// rebuild.
     fn undo_edit(&mut self) {
-        let Some((splice, caret)) = self.undo.as_mut().and_then(Undo::undo) else {
+        let Some((step, caret)) = self.undo.as_mut().and_then(Undo::undo) else {
             return;
         };
         match self.mode {
             edit::Mode::Edit => {
-                if self.apply_edit(splice.range, &splice.text) {
+                if self.apply_edit(&step) {
                     self.seat_caret_after_edit(caret);
                 }
             }
-            edit::Mode::Read => self.apply_read_edit(splice.range, &splice.text, caret),
+            edit::Mode::Read => self.apply_read_edit(&step, caret),
         }
     }
 
     /// A read-mode undo or redo applied: the ledger replays the
-    /// splice, the rendered page rebuilds from the buffer, and the
+    /// edit, the rendered page rebuilds from the buffer, and the
     /// view stays put unless the restored edit is off screen, where
     /// its block seats through the pending target.
-    fn apply_read_edit(&mut self, range: std::ops::Range<usize>, text: &str, caret: usize) {
+    fn apply_read_edit(&mut self, step: &Replay, caret: usize) {
         let Some(path) = self.path.clone() else {
             return;
         };
         let Some(ledger) = self.ledger.as_mut() else {
             return;
         };
-        ledger.edit(range, text);
+        ledger.replay(step);
         let current = ledger.current();
         let visible = self
             .layout
@@ -3085,16 +3085,16 @@ impl App {
     /// Steps the history one unit forward and reapplies its splice.
     /// Inert outside edit mode.
     fn redo_edit(&mut self) {
-        let Some((splice, caret)) = self.undo.as_mut().and_then(Undo::redo) else {
+        let Some((step, caret)) = self.undo.as_mut().and_then(Undo::redo) else {
             return;
         };
         match self.mode {
             edit::Mode::Edit => {
-                if self.apply_edit(splice.range, &splice.text) {
+                if self.apply_edit(&step) {
                     self.seat_caret_after_edit(caret);
                 }
             }
-            edit::Mode::Read => self.apply_read_edit(splice.range, &splice.text, caret),
+            edit::Mode::Read => self.apply_read_edit(&step, caret),
         }
     }
 
@@ -3119,8 +3119,11 @@ impl App {
     /// re-color by the worker when the key changed the state after
     /// them. The full reparse and relayout survive as the fallback: a
     /// pass still measuring, or a splice the model declines, where the
-    /// worker colors the touched lines too. False when no ledger stands.
-    fn apply_edit(&mut self, range: std::ops::Range<usize>, text: &str) -> bool {
+    /// worker colors the touched lines too. An edit of several pieces
+    /// (Replace All) reaches the ledger as its pieces and the page as the
+    /// one range that covers them. False when no ledger stands.
+    fn apply_edit(&mut self, step: &Replay) -> bool {
+        let (range, text) = (step.range.clone(), step.text.as_str());
         let Some(path) = self.path.clone() else {
             return false;
         };
@@ -3133,7 +3136,7 @@ impl App {
             .source
             .get(range.clone())
             .map_or(0, |cut| cut.matches('\n').count());
-        let touched = ledger.edit(range.clone(), text);
+        let touched = ledger.replay(step);
         // The outline's offsets are the parked page's: the park's ledger
         // follows the edit so they can be placed in the current text.
         if let Some(parked) = self.edit_park.as_mut() {
@@ -4669,7 +4672,7 @@ impl App {
         let caret_after = map(caret_before);
         let anchor_after = anchor_before.map(map);
         let replaced = source[start..end].to_string();
-        if !self.apply_edit(start..end, &text) {
+        if !self.apply_edit(&Replay::single(start..end, &text)) {
             return;
         }
         if let Some(hist) = self.undo.as_mut() {
@@ -5310,10 +5313,24 @@ impl App {
         edits: Vec<(std::ops::Range<usize>, String)>,
     ) -> Option<usize> {
         let count = edits.len();
-        let (region, text) = splice::combine(&self.document.source, &edits)?;
+        let source = self.document.source.clone();
+        let (range, text) = splice::combine(&source, &edits)?;
         self.selection = None;
-        let after = region.start + text.len();
-        self.type_edit(region, &text, Kind::Structural);
+        let after = range.start + text.len();
+        let caret_before = self.caret.map_or(range.start, |c| c.offset);
+        // Each match is an edit of its own for the ledger and the
+        // history, so the lines between the matches keep their bytes.
+        let step = Replay {
+            range,
+            text,
+            pieces: edits,
+        };
+        if self.apply_edit(&step) {
+            if let Some(hist) = self.undo.as_mut() {
+                hist.record_each(&source, &step.pieces, (caret_before, after), Instant::now());
+            }
+            self.seat_caret_after_edit(after);
+        }
         if let Some(state) = self.search.as_mut() {
             state.seek = Some(after);
             state.doc_intent = true;
@@ -5330,8 +5347,9 @@ impl App {
         }
     }
 
-    /// Replaces every match in one region splice, one undo unit and one
-    /// relayout, and reports the count in the corner notice.
+    /// Replaces every match, each an edit of its own for the ledger, in
+    /// one undo unit and one relayout, and reports the count in the
+    /// corner notice.
     fn replace_all(&mut self) {
         if let Some(edits) = self.replacement_edits(true) {
             if let Some(count) = self.apply_replacements(edits) {

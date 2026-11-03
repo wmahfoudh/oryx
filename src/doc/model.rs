@@ -771,16 +771,22 @@ mod tests {
     }
 
     /// The loader's construction over the edited source, the splice's
-    /// referee: `str::lines` ranges, every line a row.
+    /// referee: the text between line breaks, every line a row, and no
+    /// row after a final line break.
     fn fresh(source: &str) -> Vec<Range<u32>> {
-        let base = source.as_ptr() as usize;
-        source
-            .lines()
+        let mut at = 0;
+        let mut lines: Vec<Range<u32>> = source
+            .split('\n')
             .map(|line| {
-                let start = (line.as_ptr() as usize - base) as u32;
-                start..start + line.len() as u32
+                let range = at..at + line.len() as u32;
+                at = range.end + 1;
+                range
             })
-            .collect()
+            .collect();
+        if source.is_empty() || source.ends_with('\n') {
+            lines.pop();
+        }
+        lines
     }
 
     fn body(source: &str) -> CodeBody {

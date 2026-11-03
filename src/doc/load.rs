@@ -586,14 +586,24 @@ pub fn recognized_extensions() -> Vec<&'static str> {
     .collect()
 }
 
+/// The rows of a code file: the text between line breaks, split at `\n`
+/// alone, as `CodeBody::splice` reads them, so a return before a line
+/// break stays in its row as a lone return does. The empty piece after
+/// a final line break is no row.
 fn source_lines(text: &str) -> Vec<Range<u32>> {
-    let base = text.as_ptr() as usize;
-    text.lines()
+    let mut at = 0;
+    let mut lines: Vec<Range<u32>> = text
+        .split('\n')
         .map(|line| {
-            let start = (line.as_ptr() as usize - base) as u32;
-            start..start + line.len() as u32
+            let range = at..at + line.len() as u32;
+            at = range.end + 1;
+            range
         })
-        .collect()
+        .collect();
+    if text.is_empty() || text.ends_with('\n') {
+        lines.pop();
+    }
+    lines
 }
 
 /// The whole file as a single code block; the budget pass highlights it.
@@ -877,6 +887,24 @@ pub fn kind_is_plain(kind: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// A code file's rows split at the line breaks alone: a return before
+    /// a line break is a character of its line, as a lone return is.
+    #[test]
+    fn a_return_before_a_line_break_stays_in_its_row() {
+        use crate::doc::model::BlockKind;
+        let doc = super::code_document(Some("rust"), "ab\r\nef\ngh\n");
+        let BlockKind::CodeBlock { lines, .. } = &doc.blocks[0].kind else {
+            panic!("a code file is one block");
+        };
+        let rows: Vec<&str> = lines.iter(&doc.source).collect();
+        assert_eq!(rows, vec!["ab\r", "ef", "gh"]);
+        let doc = super::code_document(None, "");
+        let BlockKind::CodeBlock { lines, .. } = &doc.blocks[0].kind else {
+            panic!("a code file is one block");
+        };
+        assert!(lines.is_empty(), "an empty file has no row");
+    }
+
     #[test]
     fn a_piped_text_is_named_by_what_it_is() {
         use super::{detect, piped_name, FileKind};

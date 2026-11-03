@@ -5,8 +5,9 @@
 //! unit, broken by a second of rest, a caret jump, or a structural
 //! operation, which is always a unit of its own; saving also closes the
 //! open unit, so the save point never sits inside one. Undo hands back
-//! the inverse splice and the caret to restore, redo the forward splice
-//! and the caret after it; the caller applies them to the ledger.
+//! the inverse edit and the caret to restore, redo the forward edit and
+//! the caret after it; the caller applies them to the ledger. A unit of
+//! several pieces (Replace All) replays as its pieces.
 //!
 //! The save point is a stack position. The document is dirty whenever
 //! the head stands elsewhere, which stays correct through undo past the
@@ -16,7 +17,7 @@
 use std::ops::Range;
 use std::time::{Duration, Instant};
 
-use super::splice::Splice;
+use super::splice::{combine, Replay, Splice};
 
 /// The rest that closes an open typing unit.
 const REST: Duration = Duration::from_secs(1);
@@ -32,12 +33,23 @@ pub enum Kind {
 
 /// One undoable edit. `forward` speaks the text as it stood before the
 /// unit applied; `replaced` is what its range held, so the inverse is
-/// derivable and both directions replay as ordinary ledger edits.
+/// derivable and both directions replay as ordinary ledger edits. A unit
+/// of several pieces keeps them, so that both directions replay them and
+/// the text between them stays the baseline's.
 struct Unit {
     forward: Splice,
     replaced: String,
+    pieces: Vec<Piece>,
     caret: (usize, usize),
     kind: Kind,
+}
+
+/// One piece of a unit: its range in the text before the unit, its new
+/// text, and the text it replaced.
+struct Piece {
+    range: Range<usize>,
+    text: String,
+    replaced: String,
 }
 
 pub struct Undo {
@@ -125,6 +137,7 @@ impl Undo {
                 text: text.to_string(),
             },
             replaced: replaced.to_string(),
+            pieces: Vec::new(),
             caret,
             kind,
         });
@@ -133,15 +146,27 @@ impl Undo {
 
     /// Steps back one unit: the inverse splice to apply and the caret
     /// to restore. None when the stack is spent.
-    pub fn undo(&mut self) -> Option<(Splice, usize)> {
+    pub fn undo(&mut self) -> Option<(Replay, usize)> {
         self.last = None;
         self.head = self.head.checked_sub(1)?;
         let unit = &self.units[self.head];
         let start = unit.forward.range.start;
+        // Each piece stands where the pieces before it moved it.
+        let mut shift = 0isize;
+        let pieces = unit
+            .pieces
+            .iter()
+            .map(|piece| {
+                let at = (piece.range.start as isize + shift) as usize;
+                shift += piece.text.len() as isize - piece.range.len() as isize;
+                (at..at + piece.text.len(), piece.replaced.clone())
+            })
+            .collect();
         Some((
-            Splice {
+            Replay {
                 range: start..start + unit.forward.text.len(),
                 text: unit.replaced.clone(),
+                pieces,
             },
             unit.caret.0,
         ))
@@ -149,11 +174,50 @@ impl Undo {
 
     /// Steps forward one unit: the forward splice to reapply and the
     /// caret after it. None at the head.
-    pub fn redo(&mut self) -> Option<(Splice, usize)> {
+    pub fn redo(&mut self) -> Option<(Replay, usize)> {
         self.last = None;
         let unit = self.units.get(self.head)?;
         self.head += 1;
-        Some((unit.forward.clone(), unit.caret.1))
+        Some((
+            Replay {
+                range: unit.forward.range.clone(),
+                text: unit.forward.text.clone(),
+                pieces: unit
+                    .pieces
+                    .iter()
+                    .map(|piece| (piece.range.clone(), piece.text.clone()))
+                    .collect(),
+            },
+            unit.caret.1,
+        ))
+    }
+
+    /// Records a unit of several pieces applied at once (Replace All):
+    /// `edits` ordered and apart in `source`, the text before them. The
+    /// unit stands alone, and replays as its pieces beside the one range
+    /// that covers them.
+    pub fn record_each(
+        &mut self,
+        source: &str,
+        edits: &[(Range<usize>, String)],
+        caret: (usize, usize),
+        now: Instant,
+    ) {
+        let Some((range, text)) = combine(source, edits) else {
+            return;
+        };
+        let replaced = source[range.clone()].to_string();
+        self.record(range, &text, &replaced, caret, Kind::Structural, now);
+        if let Some(unit) = self.units.last_mut() {
+            unit.pieces = edits
+                .iter()
+                .map(|(range, text)| Piece {
+                    range: range.clone(),
+                    text: text.clone(),
+                    replaced: source[range.clone()].to_string(),
+                })
+                .collect();
+        }
     }
 
     /// Marks the head as the saved state and closes the open unit, so
@@ -232,8 +296,8 @@ mod tests {
         );
     }
 
-    fn apply(led: &mut Ledger, splice: &Splice) {
-        led.edit(splice.range.clone(), &splice.text);
+    fn apply(led: &mut Ledger, step: &Replay) {
+        led.replay(step);
     }
 
     #[test]
@@ -472,5 +536,35 @@ mod tests {
         type_at(&mut led, &mut undo, 7, "?", t0 + ms(5100));
         assert_eq!(undo.head(), 1, "typing that joins the unit keeps the head");
         assert_eq!(led.current(), "Intro!!?");
+    }
+
+    /// A unit of several pieces (Replace All) undoes and redoes as those
+    /// pieces: the inverse pieces stand in the text after the unit, the
+    /// forward ones in the text before it, and the line between the two
+    /// matches keeps its ending through both.
+    #[test]
+    fn a_unit_of_pieces_replays_as_its_pieces() {
+        let source = "x1\nmid\nx2\n";
+        let mut led = Ledger::new(Arc::from(source), vec![2, 9]);
+        let mut undo = Undo::new();
+        let edits = vec![(0..1, "yy".to_string()), (7..8, "yy".to_string())];
+        let (range, text) = crate::edit::splice::combine(source, &edits).expect("ordered");
+        led.edit_each(range, &text, &edits);
+        undo.record_each(source, &edits, (0, 0), Instant::now());
+        let (inverse, _) = undo.undo().expect("the unit");
+        assert_eq!(
+            inverse.pieces,
+            vec![(0..2, "x".to_string()), (8..10, "x".to_string())]
+        );
+        apply(&mut led, &inverse);
+        assert_eq!(led.current(), source);
+        assert!(
+            !led.is_dirty(),
+            "the inverse pieces bring the baseline back"
+        );
+        let (forward, _) = undo.redo().expect("the unit again");
+        assert_eq!(forward.pieces, edits);
+        apply(&mut led, &forward);
+        assert_eq!(led.emit(), b"yy1\r\nmid\nyy2\r\n");
     }
 }
