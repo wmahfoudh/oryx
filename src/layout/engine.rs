@@ -4877,10 +4877,10 @@ pub fn math_display(tex: &str) -> String {
 }
 
 /// Splits a TeX literal into script segments: `^` and `_` bind the next
-/// character, an escaped character or a braced group, as in TeX, and a
-/// backslash escapes the character after it, so the `_` of `x\_1` is a
-/// character. Anything unmatched stays literal. Each segment's text
-/// goes through `tex_symbols`.
+/// character, a control sequence (`\pi`, `\%`) or a braced group, as in
+/// TeX, and a backslash escapes the character after it, so the `_` of
+/// `x\_1` is a character. Anything unmatched stays literal. Each
+/// segment's text goes through `tex_symbols`.
 fn math_scripts(tex: &str) -> Vec<(String, Script)> {
     fn flush(normal: &mut String, out: &mut Vec<(String, Script)>) {
         if !normal.is_empty() {
@@ -4915,12 +4915,23 @@ fn math_scripts(tex: &str) -> Vec<(String, Script)> {
                         continue;
                     }
                 }
-                Some('\\') if i + 2 < chars.len() => {
-                    flush(&mut normal, &mut out);
-                    let escaped: String = chars[i + 1..i + 3].iter().collect();
-                    out.push((tex_symbols(&escaped), script));
-                    i += 3;
-                    continue;
+                Some('\\') => {
+                    // A control sequence is one token, as in TeX: the
+                    // backslash with its letters (`\pi`, `\infty`), or
+                    // with the one character after it (`\%`). A
+                    // backslash that ends the text binds nothing.
+                    let letters = chars[i + 2..]
+                        .iter()
+                        .take_while(|ch| ch.is_ascii_alphabetic())
+                        .count();
+                    let end = if letters > 0 { i + 2 + letters } else { i + 3 };
+                    if end <= chars.len() {
+                        flush(&mut normal, &mut out);
+                        let word: String = chars[i + 1..end].iter().collect();
+                        out.push((tex_symbols(&word), script));
+                        i = end;
+                        continue;
+                    }
                 }
                 Some(&arg) => {
                     flush(&mut normal, &mut out);
@@ -7290,6 +7301,53 @@ mod tests {
                 seg("i=1", Script::Sub),
                 seg("n", Script::Sup)
             ]
+        );
+    }
+
+    /// A control word as a bare script's argument (`e^\pi`,
+    /// `\int_0^\infty`) is the whole word, as in TeX, where a control
+    /// sequence is one token (claim 10 of the hunt of Task 328). Before,
+    /// the script took two characters and cut the word after its first
+    /// letter.
+    #[test]
+    fn a_control_word_as_a_script_is_taken_whole() {
+        assert_eq!(
+            math_scripts(r"x^\alpha"),
+            [seg("x", Script::Normal), seg("\u{03B1}", Script::Sup)]
+        );
+        assert_eq!(math_display(r"e^\pi"), "e\u{03C0}");
+        assert_eq!(
+            math_scripts(r"\int_0^\infty e^{-x}"),
+            [
+                seg("\u{222B}", Script::Normal),
+                seg("0", Script::Sub),
+                seg("\u{221E}", Script::Sup),
+                seg(" e", Script::Normal),
+                seg("-x", Script::Sup)
+            ]
+        );
+        assert_eq!(
+            math_scripts(r"e^\pi r"),
+            [
+                seg("e", Script::Normal),
+                seg("\u{03C0}", Script::Sup),
+                seg(" r", Script::Normal)
+            ],
+            "the word ends at the first character that is not a letter"
+        );
+        assert_eq!(
+            math_scripts(r"x^\foo+1"),
+            [
+                seg("x", Script::Normal),
+                seg(r"\foo", Script::Sup),
+                seg("+1", Script::Normal)
+            ],
+            "an unknown word stays literal, whole"
+        );
+        assert_eq!(
+            math_scripts(r"a^\"),
+            [seg(r"a^\", Script::Normal)],
+            "a backslash with nothing after it stays literal"
         );
     }
 

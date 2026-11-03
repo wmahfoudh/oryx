@@ -39,6 +39,7 @@
 - After F1 and back while a big file is still being colored, the lines on screen are now colored at once. Before, they stayed plain until the coloring reached them.
 - A named pipe in a folder the sidebar shows no longer freezes Oryx. Before, the window stopped answering until a program wrote to the pipe.
 - The sidebar no longer lists a link to a file that is gone. Before, a click on it did nothing.
+- A formula in a table cell now shows a command written as a superscript or a subscript, such as `e^\pi`, as its symbol. Before, the cell showed `e` with a raised `\p`, then `i`. The copied text and the search text read the same way.
 - The zip library, used for EPUB books, CBZ comics and zipped FB2 books, was updated to version 9. Three security advisories were published on the old version in October 2026. They are about extracting an archive to disk. Oryx never does that. No release was affected.
 
 ## v1.2.2

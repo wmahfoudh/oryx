@@ -557,6 +557,18 @@ fn the_copy_of_a_display_formula_reads_its_escaped_characters() {
     assert_eq!(plain.texts("p"), ["15% # x_1".to_string()]);
 }
 
+/// The plain reading of a display formula takes a control word as a
+/// script whole (claim 10 of the hunt of Task 328).
+#[test]
+fn the_copy_of_a_display_formula_reads_a_control_word_as_its_script() {
+    let doc = markdown::parse("$$\n\\int_0^\\infty e^\\pi\n$$\n");
+    let plain = html_of(&doc);
+    assert_eq!(
+        plain.texts("p"),
+        ["\u{222B}0\u{221E} e\u{03C0}".to_string()]
+    );
+}
+
 #[test]
 fn a_cut_selection_slices_only_the_end_blocks() {
     let doc = markdown::parse("first paragraph\n\nmiddle one\n\nlast paragraph\n");

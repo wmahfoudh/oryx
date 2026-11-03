@@ -720,6 +720,16 @@ fn a_formula_in_a_cell_shows_its_escaped_characters() {
     find_text(&l, &doc, "x_1");
 }
 
+/// A control word as a script's argument shows its symbol, whole, in a
+/// cell (claim 10 of the hunt of Task 328). Before, the script took two
+/// characters: `e` with a raised `\p`, then `i`.
+#[test]
+fn a_formula_in_a_cell_shows_a_control_word_as_its_script() {
+    let (doc, l) = lay2("| a |\n|---|\n| $e^\\pi$ and $90^\\circ$ |\n", 800.0);
+    find_text(&l, &doc, "\u{03C0}");
+    find_text(&l, &doc, "\u{2218}");
+}
+
 #[test]
 fn table_columns_follow_their_alignment_marks() {
     let (doc, l) = lay2(
