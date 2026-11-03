@@ -412,6 +412,7 @@ pub fn run(
         caret_seat: None,
         blink_visible: true,
         blink_flip: Instant::now(),
+        caret_was_live: false,
         drawn_once: false,
         focused: true,
         pause_save: autosave::Pause::default(),
@@ -1295,11 +1296,13 @@ fn disk_state(path: &Path) -> std::io::Result<Option<DiskState>> {
     }
 }
 
-/// Whether the editor's caret is painted: in the editor, on the lit
-/// half of its blink, and only while the window has the focus, the way
-/// a native text box behaves.
-fn caret_shown(editing: bool, blink_lit: bool, focused: bool) -> bool {
-    editing && blink_lit && focused
+/// Whether the editor's caret is live: in the editor, while the window
+/// has the focus and the keys go to the text, the way a native text box
+/// behaves. A dialog or a field that has the keys hides the caret, so a
+/// caret on screen shows where the next key lands. Only a live caret
+/// is painted and blinks.
+fn caret_live(editing: bool, focused: bool, keys_to_text: bool) -> bool {
+    editing && focused && keys_to_text
 }
 
 /// The loop's next wake, rebuilt at every pass: each timer still
@@ -1838,6 +1841,10 @@ struct App {
     /// every caret action restarts the visible half.
     blink_visible: bool,
     blink_flip: Instant,
+    /// Whether the caret was live at the previous frame. The blink stands
+    /// still while the caret is hidden, so a caret that comes back
+    /// restarts on the visible half.
+    caret_was_live: bool,
     /// False until the first frame is drawn.
     drawn_once: bool,
     /// Whether the window has the keyboard focus. In the background the
@@ -2524,6 +2531,37 @@ impl App {
     fn wake_caret(&mut self) {
         self.blink_visible = true;
         self.blink_flip = Instant::now() + CARET_BLINK;
+    }
+
+    /// Whether the keys go to the text: no question, dialog, go to line
+    /// field or search bar has them. These are the four that take the
+    /// keys before the editor in the routing of `window_event`.
+    fn keys_to_text(&self) -> bool {
+        self.confirm.is_none()
+            && self.overlay.is_none()
+            && self.goto.is_none()
+            && self.search.is_none()
+    }
+
+    fn caret_is_live(&self) -> bool {
+        caret_live(
+            self.mode == edit::Mode::Edit,
+            self.focused,
+            self.keys_to_text(),
+        )
+    }
+
+    /// Whether the caret is live for this frame. A caret that comes back
+    /// (a dialog closed, the window focused again, the editor opened)
+    /// starts on the visible half, since its blink stood still while it
+    /// was hidden.
+    fn follow_caret(&mut self) -> bool {
+        let live = self.caret_is_live();
+        let was = std::mem::replace(&mut self.caret_was_live, live);
+        if live && !was {
+            self.wake_caret();
+        }
+        live
     }
 
     fn show_notice(&mut self, text: &str) {
@@ -8678,6 +8716,7 @@ impl App {
         // check rides them without ever waking the loop itself.
         self.check_disk();
         self.watch_count();
+        let live_caret = self.follow_caret();
         let inset = self.inset() as u32;
         let Some(size) = self.gfx.as_ref().map(|g| g.window.inner_size()) else {
             return;
@@ -8953,11 +8992,7 @@ impl App {
                 }
             }
         }
-        if caret_shown(
-            self.mode == edit::Mode::Edit,
-            self.blink_visible,
-            self.focused,
-        ) {
+        if live_caret && self.blink_visible {
             if let Some(c) = self.caret {
                 if let Some(b) = c.geometry(lay, &self.document, &mut self.fonts) {
                     draw_caret(
@@ -9244,7 +9279,7 @@ impl ApplicationHandler for App {
                 wake.by(at);
             }
         }
-        if self.mode == edit::Mode::Edit && self.caret.is_some() && self.focused {
+        if self.caret.is_some() && self.caret_is_live() {
             let now = Instant::now();
             if now >= self.blink_flip {
                 self.blink_visible = !self.blink_visible;
@@ -11249,14 +11284,28 @@ mod tests {
         }
     }
 
-    /// The caret shows on the lit half of its blink in the editor, and
-    /// never while the window is in the background.
+    /// The caret is live only where the next key lands: in the editor,
+    /// with the window's focus, and no dialog or field holding the keys.
     #[test]
-    fn the_caret_hides_while_the_window_is_in_the_background() {
-        assert!(super::caret_shown(true, true, true));
-        assert!(!super::caret_shown(true, true, false), "no focus");
-        assert!(!super::caret_shown(true, false, true), "the dark half");
-        assert!(!super::caret_shown(false, true, true), "reading");
+    fn the_caret_is_live_only_where_the_keys_go() {
+        // (editing, focused, keys to the text, live)
+        let table = [
+            (true, true, true, true),
+            (true, true, false, false),
+            (true, false, true, false),
+            (true, false, false, false),
+            (false, true, true, false),
+            (false, true, false, false),
+            (false, false, true, false),
+            (false, false, false, false),
+        ];
+        for (editing, focused, keys_to_text, live) in table {
+            assert_eq!(
+                super::caret_live(editing, focused, keys_to_text),
+                live,
+                "editing {editing}, focused {focused}, keys to the text {keys_to_text}"
+            );
+        }
     }
 
     /// The disk check's verdict on the open file: a file missing once
