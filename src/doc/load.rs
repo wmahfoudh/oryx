@@ -6,7 +6,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::doc::model::{Block, BlockKind, CodeBody, Document, Span};
-use crate::style::highlight::{self, Arrival, PendingBlock, Seam};
+use crate::style::highlight::{self, PendingBlock};
+use crate::style::seams::Table;
 use std::collections::HashMap;
 
 /// Sync highlighting budget at open; whatever remains goes to the
@@ -422,7 +423,8 @@ pub fn pending(doc: &Document) -> Vec<PendingBlock> {
         else {
             continue;
         };
-        if *exact < lines.len() {
+        // A block with no grammar has no colors to compute.
+        if language.is_some() && *exact < lines.len() {
             pending.push(PendingBlock {
                 block: index,
                 language: language.clone(),
@@ -438,15 +440,12 @@ pub fn pending(doc: &Document) -> Vec<PendingBlock> {
 /// Every code block whose highlight prefix is incomplete, each with a
 /// resume from its stored seam table when it has one: the sweep starts
 /// at the seam at or before the exact frontier and converges against
-/// the seams past it, and past `after`, the burst's end (zero for none),
-/// when a later edit of the burst stands beyond the first of them.
-/// `cuts`, the lines of the last key, end a chunk so that a seam is
-/// filed there, on the one block of a code file or of the source view;
-/// a page's blocks take none.
+/// the seams past it (`seams::Table::resume`). `cuts`, the lines of the
+/// last key, end a chunk so that a seam is filed there, on the one block
+/// of a code file or of the source view; a page's blocks take none.
 pub fn pending_from(
     doc: &Document,
-    seams: &HashMap<usize, Vec<(usize, Seam)>>,
-    after: usize,
+    seams: &HashMap<usize, Table>,
     cuts: &[usize],
 ) -> Vec<PendingBlock> {
     let one_block = doc.blocks.len() == 1;
@@ -457,24 +456,9 @@ pub fn pending_from(
                 BlockKind::CodeBlock { exact, .. } => *exact,
                 _ => 0,
             };
-            block.resume = seams.get(&block.block).map(|table| {
-                let at = table.partition_point(|(line, _)| *line <= exact);
-                let (start_line, seam) = match at.checked_sub(1).and_then(|i| table.get(i)) {
-                    Some((line, seam)) => (*line, Some(seam.clone())),
-                    None => (0, None),
-                };
-                // A seam between the frontier and the burst's end stands
-                // on lines a later edit of the burst changed: the sweep
-                // colors them again and converges past them.
-                let past = exact.max(after.saturating_sub(1));
-                let from = table.partition_point(|(line, _)| *line <= past);
-                highlight::Resume {
-                    start_line,
-                    seam,
-                    expected: table[from..].to_vec(),
-                    cuts: if one_block { cuts.to_vec() } else { Vec::new() },
-                }
-            });
+            block.resume = seams
+                .get(&block.block)
+                .map(|table| table.resume(exact, if one_block { cuts } else { &[] }));
             block
         })
         .collect()
@@ -495,6 +479,12 @@ fn apply_budget(doc: &mut Document, deadline: Option<Instant>) -> Vec<PendingBlo
         else {
             continue;
         };
+        // A block with no grammar carries no colors, and its frontier is
+        // its line count: nothing walks it and nothing resumes it.
+        if language.is_none() {
+            *exact = lines.len();
+            continue;
+        }
         *highlights = highlight::spans_until(&source, lines, language.as_deref(), deadline);
         *exact = highlights.len();
         if *exact < lines.len() {
@@ -508,50 +498,6 @@ fn apply_budget(doc: &mut Document, deadline: Option<Instant>) -> Vec<PendingBlo
         }
     }
     pending
-}
-
-/// Copies one arrived chunk into its block's highlight prefix, growing
-/// the prefix when the chunk extends it. Out-of-range chunks and
-/// non-code blocks are ignored; arrivals are trusted only as far as the
-/// current document reaches.
-pub fn fold(doc: &mut Document, arrival: &Arrival) {
-    let Some(block) = doc.blocks.get_mut(arrival.block) else {
-        return;
-    };
-    let BlockKind::CodeBlock {
-        lines,
-        highlights,
-        exact,
-        ..
-    } = &mut block.kind
-    else {
-        return;
-    };
-    let end = (arrival.start_line + arrival.spans.len()).min(lines.len());
-    if highlights.len() < end {
-        highlights.resize(end, Vec::new());
-    }
-    // A guess that lands after the exact sweep colored a line, with
-    // colors from a cold start, leaves that line alone.
-    let first = if arrival.speculative { *exact } else { 0 };
-    for (offset, spans) in arrival.spans.iter().enumerate() {
-        let line = arrival.start_line + offset;
-        if first <= line && line < end {
-            highlights[line] = spans.clone();
-        }
-    }
-    // The exact frontier only ever advances contiguously, and a
-    // converged stop vouches for the lines up to the stored table's
-    // reach, which the earlier sweep colored: the block's end when that
-    // sweep completed, less when a keystroke cut it short.
-    if !arrival.speculative {
-        if arrival.start_line <= *exact {
-            *exact = (*exact).max(end).min(lines.len());
-        }
-        if arrival.converged {
-            *exact = (*exact).max(arrival.reach).min(lines.len());
-        }
-    }
 }
 
 /// `text` with every return before a line break removed, the way the
@@ -613,11 +559,15 @@ fn source_lines(text: &str) -> Vec<Range<u32>> {
 /// an Enter at the end of the file opens a row the page can scroll to;
 /// the final newline ends the last row and opens none.
 pub(crate) fn code_document(token: Option<&str>, text: &str) -> Document {
+    let lines = CodeBody::verbatim(source_lines(text));
+    // A block with no grammar carries no colors: its frontier is its
+    // line count from the start.
+    let exact = if token.is_none() { lines.len() } else { 0 };
     let mut block = Block::plain(BlockKind::CodeBlock {
         language: token.map(str::to_string),
-        lines: CodeBody::verbatim(source_lines(text)),
+        lines,
         highlights: Vec::new(),
-        exact: 0,
+        exact,
     });
     block.range = 0..text.len();
     Document {
@@ -633,11 +583,13 @@ pub(crate) fn code_document(token: Option<&str>, text: &str) -> Document {
 /// highlighting. Every line is a row, trailing blank lines included,
 /// so editing sees exactly the lines the file has.
 pub(crate) fn text_document(text: &str) -> Document {
+    let lines = CodeBody::verbatim(source_lines(text));
+    let exact = lines.len();
     let mut block = Block::plain(BlockKind::CodeBlock {
         language: None,
-        lines: CodeBody::verbatim(source_lines(text)),
+        lines,
         highlights: Vec::new(),
-        exact: 0,
+        exact,
     });
     block.range = 0..text.len();
     Document {
@@ -957,6 +909,7 @@ mod tests {
 
     use super::*;
     use crate::doc::model::BlockKind;
+    use crate::style::highlight::Arrival;
     use std::path::PathBuf;
 
     fn detect_ext(name: &str) -> FileKind {
@@ -1492,7 +1445,8 @@ mod tests {
             };
             highlight::spans(&opened.document.source, lines, Some("rust"))
         };
-        fold(
+        let mut table = Table::default();
+        table.fold(
             &mut opened.document,
             &Arrival {
                 block: 0,
@@ -1502,13 +1456,14 @@ mod tests {
                 converged: false,
                 reach: 0,
                 speculative: false,
+                slow: Vec::new(),
             },
         );
         let BlockKind::CodeBlock { highlights, .. } = &opened.document.blocks[0].kind else {
             panic!()
         };
         assert_eq!(highlights.len(), 2);
-        fold(
+        table.fold(
             &mut opened.document,
             &Arrival {
                 block: 0,
@@ -1518,6 +1473,7 @@ mod tests {
                 converged: false,
                 reach: 0,
                 speculative: false,
+                slow: Vec::new(),
             },
         );
         let BlockKind::CodeBlock { highlights, .. } = &opened.document.blocks[0].kind else {
@@ -1543,28 +1499,30 @@ mod tests {
             // The table of a complete sweep reaches the block's end.
             reach: if converged { 1200 } else { 0 },
             speculative,
+            slow: Vec::new(),
         };
-        fold(&mut doc, &arrival(0, 512, false, false));
+        let mut table = Table::default();
+        table.fold(&mut doc, &arrival(0, 512, false, false));
         assert_eq!(
             exact_of(&doc),
             512,
             "a contiguous fold advances the frontier"
         );
-        fold(&mut doc, &arrival(1100, 100, false, true));
+        table.fold(&mut doc, &arrival(1100, 100, false, true));
         assert_eq!(exact_of(&doc), 512, "a speculative fold never advances it");
         assert!(
             !pending(&doc).is_empty(),
             "the block still wants its wash though its rows reach the end"
         );
-        fold(&mut doc, &arrival(600, 100, false, false));
+        table.fold(&mut doc, &arrival(600, 100, false, false));
         assert_eq!(exact_of(&doc), 512, "a gapped fold does not advance it");
-        fold(&mut doc, &arrival(512, 188, false, false));
+        table.fold(&mut doc, &arrival(512, 188, false, false));
         assert_eq!(
             exact_of(&doc),
             700,
             "the sweep advances through delivered rows"
         );
-        fold(&mut doc, &arrival(700, 100, true, false));
+        table.fold(&mut doc, &arrival(700, 100, true, false));
         assert_eq!(
             exact_of(&doc),
             1200,
@@ -1593,15 +1551,22 @@ mod tests {
             converged,
             reach,
             speculative: false,
+            slow: Vec::new(),
         };
-        fold(&mut doc, &arrival(0, 512, true, 1536));
+        let mut table = Table::default();
+        // The rows the earlier sweep colored up to its kill, which the
+        // stop vouches for.
+        if let BlockKind::CodeBlock { highlights, .. } = &mut doc.blocks[0].kind {
+            highlights.resize(1536, Vec::new());
+        }
+        table.fold(&mut doc, &arrival(0, 512, true, 1536));
         assert_eq!(
             exact_of(&doc),
             1536,
             "the stop vouches up to the table's reach"
         );
         assert!(!pending(&doc).is_empty(), "the tail still wants its wash");
-        fold(&mut doc, &arrival(1536, 512, false, 0));
+        table.fold(&mut doc, &arrival(1536, 512, false, 0));
         assert_eq!(
             exact_of(&doc),
             2048,
@@ -1611,23 +1576,24 @@ mod tests {
 
     /// The seam table of a complete sweep of a document's first block,
     /// as the worker files it.
-    fn table_of(doc: &Document) -> Vec<(usize, Seam)> {
+    fn table_of(doc: &Document) -> Table {
         let BlockKind::CodeBlock {
             language, lines, ..
         } = &doc.blocks[0].kind
         else {
             unreachable!()
         };
-        let mut table = Vec::new();
+        let mut table = Table::default();
         highlight::spans_chunked(
             &doc.source,
             lines,
             language.as_deref(),
             highlight::CHUNK_LINES,
+            std::time::Duration::MAX,
             None,
             || true,
             |c| {
-                highlight::record_seam(&mut table, c.start_line + c.spans.len(), &c.seam);
+                table.fold_chunk(c.start_line, c.start_line + c.spans.len(), &c.seam, &c.slow);
                 true
             },
         );
@@ -1642,61 +1608,47 @@ mod tests {
 
     /// The resume of a block still to color, from its stored table:
     /// the sweep starts at the seam at or before the frontier and
-    /// converges against the seams past it, and past the burst's end
-    /// when a later edit of the burst stands beyond the first of them,
-    /// so the lines between the edits are colored again.
+    /// converges against the seams past it.
     #[test]
-    fn a_resume_converges_only_past_the_burst_s_end() {
+    fn a_resume_starts_before_the_frontier_and_converges_past_it() {
         let text: String = (0..3000).map(|i| format!("let v{i} = {i};\n")).collect();
         let mut doc = code_document(Some("rs"), &text);
         let table = table_of(&doc);
         assert_eq!(
-            table.iter().map(|s| s.0).collect::<Vec<_>>(),
+            table.seams().iter().map(|s| s.line).collect::<Vec<_>>(),
             [512, 1024, 1536, 2048, 2560, 3000]
         );
         let seams = HashMap::from([(0, table)]);
-        let first_expected = |after: usize, doc: &Document| {
-            let pending = pending_from(doc, &seams, after, &[]);
+        let first_expected = |doc: &Document| {
+            let pending = pending_from(doc, &seams, &[]);
             assert_eq!(pending.len(), 1, "one block still to color");
             let resume = pending[0].resume.clone().expect("a table gives a resume");
             (
                 resume.start_line,
                 resume.seam.is_some(),
-                resume.expected.first().map(|s| s.0),
+                resume.expected.first().map(|s| s.line),
             )
         };
         set_exact(&mut doc, 0, 100);
         assert_eq!(
-            first_expected(0, &doc),
+            first_expected(&doc),
             (0, false, Some(512)),
-            "no burst: from line 0, the first seam past the frontier"
-        );
-        assert_eq!(
-            first_expected(1200, &doc),
-            (0, false, Some(1536)),
-            "a burst to line 1200: the first seam at or past it"
-        );
-        assert_eq!(
-            first_expected(1024, &doc),
-            (0, false, Some(1024)),
-            "a burst ending on a seam's line keeps that seam"
+            "no seam before the frontier: from line 0, the first seam past it"
         );
         set_exact(&mut doc, 0, 600);
         assert_eq!(
-            first_expected(0, &doc),
+            first_expected(&doc),
             (512, true, Some(1024)),
             "a frontier past a seam starts from that seam"
         );
         set_exact(&mut doc, 0, 3000);
         assert!(
-            pending_from(&doc, &seams, 0, &[]).is_empty(),
+            pending_from(&doc, &seams, &[]).is_empty(),
             "a complete block is not listed"
         );
         set_exact(&mut doc, 0, 100);
         assert!(
-            pending_from(&doc, &HashMap::new(), 0, &[])[0]
-                .resume
-                .is_none(),
+            pending_from(&doc, &HashMap::new(), &[])[0].resume.is_none(),
             "a block without a table sweeps from line 0"
         );
     }
@@ -1710,15 +1662,15 @@ mod tests {
         let mut doc = code_document(Some("rs"), &text);
         let seams = HashMap::from([(0, table_of(&doc))]);
         set_exact(&mut doc, 0, 600);
-        let pending = pending_from(&doc, &seams, 601, &[600, 601]);
+        let pending = pending_from(&doc, &seams, &[600, 601]);
         assert_eq!(
             pending[0].resume.as_ref().map(|r| r.cuts.clone()),
             Some(vec![600, 601])
         );
         let doc =
             crate::doc::markdown::parse("```rust\nlet a = 1;\n```\n\n```rust\nlet b = 2;\n```\n");
-        let seams = HashMap::from([(0, table_of(&doc)), (1, Vec::new())]);
-        let pending = pending_from(&doc, &seams, 0, &[0, 1]);
+        let seams = HashMap::from([(0, table_of(&doc)), (1, Table::default())]);
+        let pending = pending_from(&doc, &seams, &[0, 1]);
         assert!(
             pending
                 .iter()
@@ -1736,11 +1688,11 @@ mod tests {
             crate::doc::markdown::parse("```rust\nlet a = 1;\n```\n\n```rust\nlet b = 2;\n```\n");
         assert_eq!(doc.blocks.len(), 2);
         let seams = HashMap::from([(1, table_of(&doc))]);
-        let pending = pending_from(&doc, &seams, 0, &[]);
+        let pending = pending_from(&doc, &seams, &[]);
         assert_eq!(pending.len(), 2, "both cold");
         assert!(pending[0].resume.is_none() && pending[1].resume.is_some());
         set_exact(&mut doc, 0, 1);
-        let pending = pending_from(&doc, &seams, 0, &[]);
+        let pending = pending_from(&doc, &seams, &[]);
         assert_eq!(pending.len(), 1, "the first is complete");
         assert_eq!(pending[0].block, 1);
     }
@@ -1767,11 +1719,13 @@ mod tests {
             converged: false,
             reach: 0,
             speculative,
+            slow: Vec::new(),
         };
+        let mut table = Table::default();
         // The exact sweep colored the first 512 lines; a guess asked
         // before it reached them lands after it, for lines 500 to 600.
-        fold(&mut doc, &arrival(0, 512, &exact, false));
-        fold(&mut doc, &arrival(500, 100, &guessed, true));
+        table.fold(&mut doc, &arrival(0, 512, &exact, false));
+        table.fold(&mut doc, &arrival(500, 100, &guessed, true));
         assert_eq!(colors(&doc, 505), exact, "an exact line keeps its colors");
         assert_eq!(colors(&doc, 550), guessed, "a cold line takes the guess");
     }

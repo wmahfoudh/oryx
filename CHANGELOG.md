@@ -31,6 +31,12 @@
 - When you indent lines, or make them a list, a quote, a heading, a task list or a comment, in a file with both Windows and Unix line endings, each line now keeps its own ending. Before, the lines took the file's usual ending.
 - When you scroll with the search bar open, the matches that come into view are now highlighted at once, down to the end of the page. Before, they were highlighted late, and the last paragraphs could stay plain.
 - When a search match is taller than the screen, such as `[\s\S]+` in the editor, the part on screen is now highlighted wherever you scroll. Before, the match lost its highlight when you scrolled down.
+- When you open a comment in a big code file and type above it before the colors below have caught up, the lines below are now colored to the end of the file. Before, the lines the coloring had not reached kept their old colors. The same held for two keys typed in the same instant, one below the other.
+- A key typed on a line far below the colored lines of a big code file, right after the file opened or after a zoom, no longer crashes Oryx.
+- Typing in a plain text file no longer runs the syntax coloring on each key. Before, each key could cost a few milliseconds for nothing.
+- A key on a long markdown line with several code spans or links no longer freezes the editor while that line is parsed. The line is now colored in the background. Before, each key on such a line could cost 50 ms.
+- When the colors below a key are recomputed right after the cursor moved to a far line, they now land at once. Before, they could wait up to half a second.
+- After F1 and back while a big file is still being colored, the lines on screen are now colored at once. Before, they stayed plain until the coloring reached them.
 - The zip library, used for EPUB books, CBZ comics and zipped FB2 books, was updated to version 9. Three security advisories were published on the old version in October 2026. They are about extracting an archive to disk. Oryx never does that. No release was affected.
 
 ## v1.2.2

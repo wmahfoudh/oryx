@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use crate::style::highlight::SyntaxRole;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Document {
     pub blocks: Vec<Block>,
     /// The text the document was parsed from; block and span ranges index
@@ -406,6 +406,27 @@ impl CodeBody {
 
     fn owned_text(&self) -> Option<&str> {
         self.owned.as_ref().map(|owned| &*owned.text)
+    }
+
+    /// The lines of `range` as a body of their own, line 0 the range's
+    /// first: what a job off the window's thread carries when it reads
+    /// a few lines of a big file, in place of the whole line table.
+    pub fn window(&self, range: Range<usize>) -> CodeBody {
+        let range = range.start.min(self.lines.len())..range.end.min(self.lines.len());
+        let owned = self.owned.as_ref().map(|owned| {
+            Box::new(OwnedBody {
+                text: owned.text.clone(),
+                source_lines: if owned.source_lines.is_empty() {
+                    Vec::new()
+                } else {
+                    owned.source_lines[range.clone()].to_vec()
+                },
+            })
+        });
+        CodeBody {
+            owned,
+            lines: self.lines[range].to_vec(),
+        }
     }
 
     pub fn len(&self) -> usize {

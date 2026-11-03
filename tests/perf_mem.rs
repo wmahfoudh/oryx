@@ -216,7 +216,7 @@ fn memory_measured() {
 #[ignore = "measurement only"]
 fn seam_table_measured() {
     use oryx::doc::model::BlockKind;
-    use oryx::style::highlight::{self, Seam, CHUNK_LINES};
+    use oryx::style::highlight::{self, CHUNK_LINES};
     let source = large_gen::generate_code(8 * 1024 * 1024);
     let (_, _, doc) = measure_open(&source, "rs");
     let (language, lines) = match &doc.blocks[0].kind {
@@ -234,32 +234,34 @@ fn seam_table_measured() {
         &lines,
         language.as_deref(),
         CHUNK_LINES,
+        std::time::Duration::MAX,
         None,
         || true,
         |_| true,
     );
     alloc_track::set_enabled(true);
     let base = alloc_track::live();
-    let mut table: Vec<(usize, Seam)> = Vec::new();
+    let mut table = oryx::style::seams::Table::default();
     highlight::spans_chunked(
         &doc.source,
         &lines,
         language.as_deref(),
         CHUNK_LINES,
+        std::time::Duration::MAX,
         None,
         || true,
         |c| {
-            highlight::record_seam(&mut table, c.start_line + c.spans.len(), &c.seam);
+            table.fold_chunk(c.start_line, c.start_line + c.spans.len(), &c.seam, &c.slow);
             true
         },
     );
     let held = alloc_track::live() - base;
     println!(
         "mem seam table 8MB code: {} seams over {} lines, {:.2}MB held ({} bytes each)",
-        table.len(),
+        table.seams().len(),
         lines.len(),
         mb(held),
-        held / table.len().max(1) as isize,
+        held / table.seams().len().max(1) as isize,
     );
     alloc_track::set_enabled(false);
 }

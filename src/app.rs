@@ -37,6 +37,7 @@ use oryx::platform::save;
 use oryx::platform::wayland_drop;
 use oryx::style::fonts::FontStore;
 use oryx::style::highlight::{self, Highlighter, PendingBlock};
+use oryx::style::seams::Table;
 use oryx::style::theme::{self, Rgba, Theme};
 use oryx::ui::confirm;
 use oryx::ui::export::{ExportDialog, ExportProgress};
@@ -83,12 +84,6 @@ const CARET_BLINK: Duration = Duration::from_millis(530);
 /// the editors read in that task start the rest at once. A named figure,
 /// raised if the field shows instability.
 const REHIGHLIGHT_REST: Duration = Duration::from_millis(0);
-
-/// How long a key may spend coloring its lines on the window's thread:
-/// the walk from the nearest trusted seam to the end of the touched
-/// lines, one line at least. One line of grammar is 0.1 to 0.5 ms, 3.3 ms
-/// on the worst line measured (Task 327). A named figure, as the rest.
-const KEY_COLOR_BUDGET: Duration = Duration::from_millis(4);
 
 /// How far above the caret's line a trusted seam may be before the
 /// worker is asked for one at the caret's line, so that the first key
@@ -385,8 +380,6 @@ pub fn run(
         key_lines: 0..0,
         flush_first: false,
         caret_seam_for: None,
-        burst_end: 0,
-        resumed: false,
         seams: HashMap::new(),
         spec_band: None,
         guessed: HashMap::new(),
@@ -1015,20 +1008,23 @@ fn kept_layout(
 /// guesses colored) asks for nothing either, or two cold blocks near
 /// the view alternate without end (issue #9). A band covered in part is
 /// asked whole, as after a jump to the end and a scroll back up.
-/// Nothing while a re-coloring is owed or a resumed sweep runs
-/// (`resting`): the lines below a keystroke keep the colors they had,
-/// shifted by the edit, until the sweep corrects them. A cold guess
-/// there would flash its colors below the caret for a frame or two,
-/// and one landing past the seam the sweep converges on would stand in
-/// place of the exact colors.
+/// Nothing while a re-coloring is owed (`owed`): the lines below a
+/// keystroke keep the colors they had, shifted by the edit, until the
+/// sweep corrects them, and a cold guess there would flash its colors
+/// below the caret for a frame or two. Nothing over a block with a seam
+/// past its frontier: a sweep resumed against the table could converge
+/// there and vouch for the guess's lines in place of the exact colors.
+/// A first coloring leaves no seam past the frontier, so its band is
+/// guessed, after F1 and back as at an open.
 fn speculation_target(
     doc: &Document,
     visible: &[(usize, std::ops::Range<usize>)],
     in_flight: bool,
     guessed: &HashMap<usize, Vec<std::ops::Range<usize>>>,
-    resting: bool,
+    owed: bool,
+    seams: &HashMap<usize, Table>,
 ) -> Option<(usize, std::ops::Range<usize>)> {
-    if in_flight || resting {
+    if in_flight || owed {
         return None;
     }
     for (block, lines) in visible {
@@ -1039,6 +1035,12 @@ fn speculation_target(
             continue;
         };
         if language.is_none() || *exact >= lines.end {
+            continue;
+        }
+        if seams
+            .get(block)
+            .is_some_and(|table| table.past_frontier(*exact))
+        {
             continue;
         }
         let band = (*exact).max(lines.start)..lines.end;
@@ -1069,47 +1071,14 @@ fn note_guess(ranges: &mut Vec<std::ops::Range<usize>>, landed: std::ops::Range<
     ranges.push(merged);
 }
 
-/// The frontier after a key, from the frontier before it (`exact0`),
-/// the touched lines before and after the edit, the line the walk
-/// reached, and whether the state at the end of the touched lines is
-/// the one stored there before the key. The lines before the edit stay
-/// verified and the walk's lines join them; when the end state is
-/// unchanged and the frontier stood past the touched lines, the lines
-/// below are verified as before, moved by the edit.
-fn frontier_after_key(
-    exact0: usize,
-    old: &std::ops::Range<usize>,
-    new: &std::ops::Range<usize>,
-    reached: usize,
-    end_matched: bool,
-) -> usize {
-    let mut exact = exact0.min(new.start).max(reached);
-    if end_matched && exact0 >= old.end && reached >= new.end {
-        exact = exact.max(highlight::shift_line(exact0, old, new));
-    }
-    exact
-}
-
-/// Where the worker computes a caret seam from: the nearest trusted
-/// seam, at or before the caret's line, when it is farther than `reach`
-/// lines above the caret, a fresh start at line 0 when there is none;
-/// nothing when a seam is within reach, or when the caret is past the
-/// frontier, where the exact sweep has not been.
-fn caret_seam_ask(
-    table: &[(usize, highlight::Seam)],
-    exact: usize,
-    caret_line: usize,
-    reach: usize,
-) -> Option<(usize, Option<highlight::Seam>)> {
-    if caret_line > exact {
-        return None;
-    }
-    let at = table.partition_point(|(line, _)| *line <= caret_line);
-    let (start, seam) = match at.checked_sub(1).and_then(|i| table.get(i)) {
-        Some((line, seam)) => (*line, Some(seam.clone())),
-        None => (0, None),
-    };
-    (caret_line - start > reach).then_some((start, seam))
+/// Whether the first chunk of a resumed sweep has landed: an exact
+/// chunk whose rows reach the end of the key's lines. The chunks above
+/// it, from a walk that fell short, and a caret seam landing first do
+/// not count, so the immediate flush waits for the key's lines.
+fn first_flush_due(arrivals: &[highlight::Arrival], key_lines: &std::ops::Range<usize>) -> bool {
+    arrivals.iter().any(|a| {
+        !a.speculative && !a.spans.is_empty() && a.start_line + a.spans.len() >= key_lines.end
+    })
 }
 
 /// The rendered page set aside while its source is edited. A return
@@ -1165,10 +1134,8 @@ struct Stash {
     /// A parse was still streaming at the swap, so the model is
     /// partial; the return reopens from disk instead of restoring it.
     reopen: bool,
-    /// The document's seam table and the burst's end, for the return to
-    /// resume from.
-    seams: HashMap<usize, Vec<(usize, highlight::Seam)>>,
-    burst_end: usize,
+    /// The document's seam tables, for the return to resume from.
+    seams: HashMap<usize, Table>,
 }
 
 /// The help document, parsed from the generated page.
@@ -1760,17 +1727,10 @@ struct App {
     /// The caret's line a seam was asked for, so that one ask is in
     /// flight; cleared when it lands and at every kill.
     caret_seam_for: Option<usize>,
-    /// The highest line an edit touched that no exact sweep has reached
-    /// since, shifted by each edit as a seam is; zero for none. The
-    /// resumed sweep converges only at a seam at or past it.
-    burst_end: usize,
-    /// A sweep resumed by the rest timer is running: no guess until it
-    /// is done, or a converged stop would vouch for the guess's lines.
-    resumed: bool,
     /// The live generation's seam table per block, from the exact
-    /// sweep's arrivals: the (line, state) pairs a later sweep can
-    /// resume from and converge against.
-    seams: HashMap<usize, Vec<(usize, highlight::Seam)>>,
+    /// sweep's arrivals and the keys' walks: what a later sweep resumes
+    /// from and converges against (`seams::Table`).
+    seams: HashMap<usize, Table>,
     /// The guess in flight, cleared when its arrival lands; nothing
     /// else is asked meanwhile, or the new guess would drop it.
     spec_band: Option<(usize, std::ops::Range<usize>)>,
@@ -3102,6 +3062,13 @@ impl App {
             return false;
         };
         let exact0 = self.frontier(0);
+        let grammar = matches!(
+            self.document.blocks.first().map(|b| &b.kind),
+            Some(BlockKind::CodeBlock {
+                language: Some(_),
+                ..
+            })
+        );
         let Some(ledger) = self.ledger.as_mut() else {
             return false;
         };
@@ -3127,23 +3094,8 @@ impl App {
             .flatten();
         let owed = match spliced {
             Some((old_lines, new_lines)) => {
-                // The state after the old touched lines, read before the
-                // shift drops it: the walk's end state is compared with
-                // it, and an equal state leaves the lines below as they
-                // are.
-                let end_before = self.seams.get(&0).and_then(|table| {
-                    table
-                        .binary_search_by_key(&old_lines.end, |(line, _)| *line)
-                        .ok()
-                        .map(|at| table[at].1.clone())
-                });
-                if let Some(table) = self.seams.get_mut(&0) {
-                    highlight::shift_seams(table, old_lines.clone(), new_lines.clone());
-                }
-                self.burst_end = highlight::shift_line(self.burst_end, &old_lines, &new_lines)
-                    .max(new_lines.end);
                 self.key_lines = new_lines.clone();
-                let owed = self.color_on_key(exact0, &old_lines, &new_lines, end_before);
+                let owed = self.color_on_key(exact0, &old_lines, &new_lines);
                 // The model spliced; the layout follows in place, or a
                 // restart re-measures the already-correct model.
                 let lay = self.layout.as_mut().expect("settled layout");
@@ -3170,12 +3122,11 @@ impl App {
                 owed
             }
             None => {
-                if let Some(table) = self.seams.get_mut(&0) {
-                    highlight::shift_seams(table, old_touched.clone(), touched.clone());
-                }
+                self.seams
+                    .entry(0)
+                    .or_default()
+                    .shift(&old_touched, &touched);
                 self.key_lines = touched.clone();
-                self.burst_end =
-                    highlight::shift_line(self.burst_end, &old_touched, &touched).max(touched.end);
                 self.document = edit::reparse(
                     load::detect(&path),
                     &current,
@@ -3184,7 +3135,7 @@ impl App {
                     touched,
                 );
                 self.restart_layout();
-                true
+                grammar
             }
         };
         // The outline belongs to the rendered page. While a park
@@ -3198,11 +3149,10 @@ impl App {
         // never fold against shifted lines; the worker's resume needs
         // the shifted seam table, so only the worker cancels. The lines
         // below are owed a re-coloring unless the walk found the state
-        // after the touched lines unchanged. Prose has no colors to
-        // correct.
+        // after the touched lines unchanged. A block with no grammar
+        // owes nothing.
         self.cancel_highlight();
-        self.rehighlight_at =
-            (owed && !self.document.plain_file).then(|| Instant::now() + REHIGHLIGHT_REST);
+        self.rehighlight_at = owed.then(|| Instant::now() + REHIGHLIGHT_REST);
         self.selection = None;
         self.sel_anchor = None;
         self.count_after_edit();
@@ -4156,22 +4106,19 @@ impl App {
     }
 
     /// Colors the lines of a key on the window's thread (Task 327): the
-    /// walk from the nearest trusted seam, at or before the frontier,
-    /// toward the end of the touched lines, within `KEY_COLOR_BUDGET`.
-    /// Its spans go into the block before the layout shapes the touched
-    /// lines, so the colors are in the frame of the key, and its states
-    /// are filed as seams: before the first touched line, and where the
-    /// walk stopped, which the next key's walk continues from. The
-    /// frontier follows (`frontier_after_key`). Answers whether the
-    /// lines below are owed a re-coloring by the worker: not when the
-    /// walk reached the end of the touched lines and found the state
-    /// there unchanged.
+    /// table's walk from the nearest trusted seam, at or before the
+    /// frontier, toward the end of the touched lines, within
+    /// `KEY_COLOR_BUDGET` (`seams::Table::on_key`). Its spans go into
+    /// the block before the layout shapes the touched lines, so the
+    /// colors are in the frame of the key. Answers whether the lines
+    /// below are owed a re-coloring by the worker: not when the walk
+    /// reached the end of the touched lines and found the state there
+    /// unchanged, and never for a block with no grammar.
     fn color_on_key(
         &mut self,
         exact0: usize,
         old: &std::ops::Range<usize>,
         new: &std::ops::Range<usize>,
-        end_before: Option<highlight::Seam>,
     ) -> bool {
         let source = Arc::clone(&self.document.source);
         let Some(BlockKind::CodeBlock {
@@ -4181,74 +4128,41 @@ impl App {
             exact,
         }) = self.document.blocks.first_mut().map(|b| &mut b.kind)
         else {
-            return true;
+            return false;
         };
-        let table = self.seams.entry(0).or_default();
-        let at = table.partition_point(|(line, _)| *line <= *exact);
-        let (start, seam) = match at.checked_sub(1).and_then(|i| table.get(i)) {
-            Some((line, seam)) => (*line, Some(seam.clone())),
-            None => (0, None),
-        };
-        let walked = highlight::walk(
+        self.seams.entry(0).or_default().on_key(
             &source,
             lines,
             language.as_deref(),
-            start,
-            seam,
-            new.start,
-            new.end,
-            KEY_COLOR_BUDGET,
-        );
-        if highlights.len() < walked.reached {
-            highlights.resize(walked.reached, Vec::new());
-        }
-        for (offset, spans) in walked.spans.into_iter().enumerate() {
-            highlights[start + offset] = spans;
-        }
-        if let Some(at_mark) = walked.at_mark.as_ref() {
-            highlight::record_seam(table, new.start, at_mark);
-        }
-        highlight::record_seam(table, walked.reached, &walked.seam);
-        let end_matched = walked.reached == new.end && end_before.as_ref() == Some(&walked.seam);
-        *exact = frontier_after_key(exact0, old, new, walked.reached, end_matched);
-        if *exact >= self.burst_end {
-            self.burst_end = 0;
-        }
-        *exact < lines.len()
+            highlights,
+            exact,
+            exact0,
+            old,
+            new,
+            highlight::KEY_COLOR_BUDGET,
+            || true,
+        )
     }
 
     /// Restarts the highlight worker over the lines below a key, the
-    /// rest timer's due action. The seams between the frontier and the
-    /// burst's end are dropped first, stale since an edit of the burst
-    /// changed their lines. The sweep resumes from the nearest stored
-    /// seam at or before the exact frontier, the end of the key's lines
-    /// when its walk reached it, and converges against the shifted
-    /// table past the burst's last touched line, cutting a chunk at the
-    /// key's lines so that seams stand there for the next key: typing
-    /// anywhere re-colors about one chunk, not the block, and a burst
-    /// of edits far apart re-colors the lines between them.
+    /// rest timer's due action. The sweep resumes from the nearest
+    /// stored seam at or before the exact frontier, the end of the key's
+    /// lines when its walk reached it, and converges against the seams
+    /// past the frontier, cutting a chunk at the key's lines so that
+    /// seams stand there for the next key: typing anywhere re-colors
+    /// about one chunk, not the block.
     fn rehighlight_edited(&mut self) {
-        if self.document.plain_file {
-            return;
-        }
-        let exact = self.frontier(0);
-        let past = exact.max(self.burst_end.saturating_sub(1));
-        if let Some(table) = self.seams.get_mut(&0) {
-            highlight::drop_stale_seams(table, exact, past);
-        }
-        let cuts = [self.key_lines.start, self.key_lines.end, self.burst_end];
-        let pending = load::pending_from(&self.document, &self.seams, self.burst_end, &cuts);
+        let cuts = [self.key_lines.start, self.key_lines.end];
+        let pending = load::pending_from(&self.document, &self.seams, &cuts);
         if pending.is_empty() {
             return;
         }
         // The resumed sweep converges against the stored table, which
         // therefore survives the start; its arrivals upsert their own
         // lines. A guess still in flight is dropped by the start, and
-        // none is asked until the sweep is done: a guess landing on
-        // lines a converged stop then vouches for would stand in place
-        // of the exact colors.
+        // none is asked while a seam stands past the frontier
+        // (`speculation_target`).
         self.spec_band = None;
-        self.resumed = true;
         self.flush_first = true;
         let waker = self.waker.clone();
         self.highlighter.start(pending, move || waker());
@@ -6227,10 +6141,8 @@ impl App {
     /// their first line, so the seam table rebuilds from its arrivals.
     fn start_highlight(&mut self, pending: Vec<PendingBlock>) {
         self.seams.clear();
-        self.burst_end = 0;
         self.key_lines = 0..0;
         self.caret_seam_for = None;
-        self.resumed = false;
         self.spec_band = None;
         self.guessed.clear();
         let waker = self.waker.clone();
@@ -6243,7 +6155,6 @@ impl App {
     /// generation recorded. Stale arrivals drop at the drain, so the
     /// table only ever learns from the live generation.
     fn cancel_highlight(&mut self) {
-        self.resumed = false;
         self.spec_band = None;
         self.caret_seam_for = None;
         self.guessed.clear();
@@ -6254,10 +6165,14 @@ impl App {
     /// Asks the worker for the state before the caret's line when no
     /// trusted seam stands within the walk's reach above it, so that
     /// the first key on a line far from a seam is colored in its frame
-    /// as any other (Task 327, rule 6). One ask at a time, on the one
-    /// block of a code file or of the source view, in the editor.
+    /// as any other (Task 327, rule 6). One ask is in flight; the next
+    /// is made when it lands, for the caret's line of that moment, so a
+    /// held arrow key starts one walk at a time and not one per line.
+    /// The job carries the window of lines it reads, not the block's
+    /// whole table. On the one block of a code file or of the source
+    /// view, in the editor.
     fn ask_caret_seam(&mut self) {
-        if self.mode != edit::Mode::Edit || self.document.plain_file {
+        if self.mode != edit::Mode::Edit || self.caret_seam_for.is_some() {
             return;
         }
         let Some(caret) = self.caret else {
@@ -6278,11 +6193,12 @@ impl App {
         let Some(line) = lines.line_at(caret.offset) else {
             return;
         };
-        if language.is_none() || self.caret_seam_for == Some(line) {
+        if language.is_none() {
             return;
         }
-        let table = self.seams.get(&0).map_or(&[][..], |table| table.as_slice());
-        let Some((start_line, seam)) = caret_seam_ask(table, *exact, line, CARET_SEAM_REACH) else {
+        let empty = Table::default();
+        let table = self.seams.get(&0).unwrap_or(&empty);
+        let Some((start_line, seam)) = table.caret_ask(*exact, line, CARET_SEAM_REACH) else {
             return;
         };
         self.caret_seam_for = Some(line);
@@ -6290,7 +6206,7 @@ impl App {
             block: 0,
             language: language.clone(),
             source: Arc::clone(&self.document.source),
-            lines: lines.clone(),
+            lines: lines.window(start_line..line),
             start_line,
             seam,
             line,
@@ -6318,17 +6234,13 @@ impl App {
             &self.document,
             self.scroll_y - view_h..self.scroll_y + 2.0 * view_h,
         );
-        // A resumed sweep whose last fold still saw the worker running
-        // leaves the flag set: it is read here, so it is cleared here.
-        if self.resumed && !self.highlighter.is_running() {
-            self.resumed = false;
-        }
         let Some((block, band)) = speculation_target(
             &self.document,
             &visible,
             self.spec_band.is_some(),
             &self.guessed,
-            self.rehighlight_at.is_some() || self.resumed,
+            self.rehighlight_at.is_some(),
+            &self.seams,
         ) else {
             return;
         };
@@ -6503,41 +6415,28 @@ impl App {
             return;
         }
         for arrival in &arrivals {
-            // A caret seam: a state and no spans, filed for the next key
-            // on that line and nothing else, when the line is still at
-            // or before the frontier, where the ask found it.
-            if arrival.spans.is_empty() && !arrival.speculative {
-                if let Some(seam) = &arrival.seam {
-                    if arrival.start_line <= self.frontier(arrival.block) {
-                        let table = self.seams.entry(arrival.block).or_default();
-                        highlight::record_seam(table, arrival.start_line, seam);
-                    }
-                }
-                if self.caret_seam_for == Some(arrival.start_line) {
-                    self.caret_seam_for = None;
-                }
-                continue;
+            // The table folds the arrival: a chunk's rows and seams, a
+            // caret seam (a state and no spans), or a guess's rows. The
+            // caret ask that landed is done, whatever the table made of
+            // it, and the next may be made.
+            if arrival.spans.is_empty()
+                && !arrival.speculative
+                && self.caret_seam_for == Some(arrival.start_line)
+            {
+                self.caret_seam_for = None;
             }
-            load::fold(&mut self.document, arrival);
-            let line = arrival.start_line + arrival.spans.len();
-            // The exact sweep's seams feed the table a later sweep
-            // resumes from; speculative arrivals never do. A landed
-            // guess is remembered instead, so it is not asked again.
-            match (&arrival.seam, arrival.speculative) {
-                (Some(seam), false) => {
-                    let table = self.seams.entry(arrival.block).or_default();
-                    highlight::record_seam(table, line, seam);
-                }
-                (_, true) => {
-                    // The guess in flight landed: the next cold block
-                    // may be asked.
-                    self.spec_band = None;
-                    note_guess(
-                        self.guessed.entry(arrival.block).or_default(),
-                        arrival.start_line..line,
-                    );
-                }
-                (None, false) => {}
+            self.seams
+                .entry(arrival.block)
+                .or_default()
+                .fold(&mut self.document, arrival);
+            if arrival.speculative {
+                // The guess in flight landed: the next cold block may be
+                // asked, and this band is not asked again.
+                self.spec_band = None;
+                note_guess(
+                    self.guessed.entry(arrival.block).or_default(),
+                    arrival.start_line..arrival.start_line + arrival.spans.len(),
+                );
             }
         }
         if let Some((anchor, ends)) = carried {
@@ -6551,25 +6450,19 @@ impl App {
                 .iter()
                 .map(|a| (a.block, a.start_line..a.start_line + a.spans.len())),
         );
-        // The burst's end is behind the frontier once the exact sweep
-        // has colored the lines up to it; a resumed sweep that ended
-        // lets the guesses in again.
-        if self.frontier(0) >= self.burst_end {
-            self.burst_end = 0;
-        }
-        if !self.highlighter.is_running() {
-            self.resumed = false;
-        }
         // Recolors land in waves: the model folds immediately, but the
         // run vector rebuilds at most once per wave, so a trickling
         // wash-in pays a handful of ranged rebuilds, not hundreds. The
-        // first chunk of a resumed sweep lands at once: the lines below
-        // a key wait one chunk, not a wave.
-        if self.flush_first
-            || self.last_recolor.elapsed() >= RECOLOR_WAVE
-            || !self.highlighter.is_running()
-        {
-            self.flush_first = false;
+        // first chunk of a resumed sweep lands at once, when it reaches
+        // the end of the key's lines: the lines below a key wait one
+        // chunk, not a wave, and a caret seam landing first does not
+        // spend the flush.
+        let due = self.flush_first && first_flush_due(&arrivals, &self.key_lines);
+        let running = self.highlighter.is_running();
+        if due || !running || self.last_recolor.elapsed() >= RECOLOR_WAVE {
+            if due || !running {
+                self.flush_first = false;
+            }
             self.flush_recolor();
         }
     }
@@ -7669,11 +7562,10 @@ impl App {
             self.parser.cancel();
             self.parse_pending = false;
         }
-        // The document's seam table and the burst it still owes a
-        // re-coloring for go with it, so that the return resumes from
-        // them instead of sweeping the file again from line 0.
+        // The document's seam tables go with it, so that the return
+        // resumes from them instead of sweeping the file again from
+        // line 0.
         let seams = std::mem::take(&mut self.seams);
-        let burst_end = self.burst_end;
         self.start_highlight(Vec::new());
         self.rehighlight_at = None;
         self.close_search();
@@ -7707,7 +7599,6 @@ impl App {
             theme: self.theme.clone(),
             reopen,
             seams,
-            burst_end,
         }));
         self.document = markdown_help();
         // The page's code blocks get the exact sweep a file gets at
@@ -7808,20 +7699,17 @@ impl App {
         self.pending_band_for = None;
         self.close_search();
         // Recolors still owed name the help page's blocks, not this
-        // document's. Its seam table comes back with it, and the blocks
-        // still to color resume from it: a key after the help page
-        // re-colors from the edit, not the file from line 0.
+        // document's. Its seam tables come back with it, and the blocks
+        // still to color resume from them: a key after the help page
+        // re-colors from the edit, not the file from line 0. The band in
+        // view is guessed again while no seam stands past the frontier,
+        // as a first coloring leaves it; a table a sweep could converge
+        // on holds the guess (`speculation_target`).
         self.pending_recolor.clear();
         self.seams = stash.seams;
-        self.burst_end = stash.burst_end;
         self.spec_band = None;
         self.guessed.clear();
-        let pending = load::pending_from(&self.document, &self.seams, self.burst_end, &[]);
-        // A sweep resumed from the table converges against it, so no
-        // guess is asked while it runs, as after the timer's firing: a
-        // guess landing first would be vouched for by the converged
-        // stop.
-        self.resumed = !pending.is_empty();
+        let pending = load::pending_from(&self.document, &self.seams, &[]);
         let waker = self.waker.clone();
         self.highlighter.start(pending, move || waker());
         if self.mode == edit::Mode::Edit {
@@ -9972,100 +9860,19 @@ mod tests {
         map
     }
 
-    /// The frontier after a key: the lines the walk verified join the
-    /// lines before the edit; when the state after the touched lines is
-    /// unchanged and the frontier stood past them, the lines below are
-    /// verified as before, moved by the edit.
-    #[test]
-    fn the_frontier_after_a_key_follows_the_walk_and_the_end_state() {
-        use super::frontier_after_key as after;
-        assert_eq!(
-            after(1000, &(600..601), &(600..601), 601, true),
-            1000,
-            "a colored block, a key on a line, the end state unchanged"
-        );
-        assert_eq!(
-            after(1000, &(600..601), &(600..603), 603, true),
-            1002,
-            "two lines inserted: the frontier moves by the delta"
-        );
-        assert_eq!(
-            after(1000, &(600..601), &(600..601), 601, false),
-            601,
-            "the end state changed: verified up to the walk"
-        );
-        assert_eq!(
-            after(1000, &(600..601), &(600..601), 590, true),
-            600,
-            "the walk fell short: the lines before the edit stay verified"
-        );
-        assert_eq!(
-            after(300, &(600..601), &(600..601), 340, true),
-            340,
-            "a burst open above: the walk's reach, no restoration"
-        );
-        assert_eq!(
-            after(600, &(600..601), &(600..601), 601, true),
-            601,
-            "the frontier inside the touched lines before the key: no restoration"
-        );
-    }
-
-    /// Where a caret seam is asked from: the nearest trusted seam when
-    /// it is farther than the walk's reach from the caret's line, a
-    /// fresh start when there is none, nothing when a seam is near or
-    /// the caret is past the frontier.
-    #[test]
-    fn the_caret_seam_is_asked_only_far_from_a_trusted_seam() {
-        use super::caret_seam_ask as ask;
-        let body = oryx::doc::model::CodeBody::from_text(
-            &(0..20)
-                .map(|i| format!("let x{i} = {i};\n"))
-                .collect::<String>(),
-        );
-        let mut table = Vec::new();
-        oryx::style::highlight::spans_chunked(
-            "",
-            &body,
-            Some("rust"),
-            4,
-            None,
-            || true,
-            |c| {
-                table.push((c.start_line + c.spans.len(), c.seam));
-                true
-            },
-        );
-        assert_eq!(
-            table.iter().map(|s| s.0).collect::<Vec<_>>(),
-            [4, 8, 12, 16, 20]
-        );
-        let shape = |got: Option<(usize, Option<oryx::style::highlight::Seam>)>| {
-            got.map(|(line, seam)| (line, seam.is_some()))
-        };
-        assert_eq!(shape(ask(&table, 20, 9, 8)), None, "a seam one line above");
-        assert_eq!(shape(ask(&table, 20, 8, 2)), None, "a seam at the line");
-        assert_eq!(
-            shape(ask(&table, 20, 19, 2)),
-            Some((16, true)),
-            "three lines from the nearest seam, two of reach"
-        );
-        assert_eq!(
-            shape(ask(&table, 20, 3, 2)),
-            Some((0, false)),
-            "no seam before: a fresh start at line 0"
-        );
-        assert_eq!(shape(ask(&table, 20, 3, 8)), None, "line 0 within reach");
-        assert_eq!(shape(ask(&table, 10, 19, 2)), None, "past the frontier");
-        assert_eq!(shape(ask(&[], 20, 19, 2)), Some((0, false)), "no table");
-    }
-
     #[test]
     fn the_guess_takes_the_first_cold_block_near_the_view() {
         let doc = two_cold_blocks();
         let visible = [(0, 0..1), (1, 0..1)];
         assert_eq!(
-            super::speculation_target(&doc, &visible, false, &Guessed::new(), false),
+            super::speculation_target(
+                &doc,
+                &visible,
+                false,
+                &Guessed::new(),
+                false,
+                &std::collections::HashMap::new()
+            ),
             Some((0, 0..1))
         );
     }
@@ -10077,7 +9884,14 @@ mod tests {
         // The first block's guess is out: the second waits for it, or
         // the second would drop the first before it lands.
         assert_eq!(
-            super::speculation_target(&doc, &visible, true, &Guessed::new(), false),
+            super::speculation_target(
+                &doc,
+                &visible,
+                true,
+                &Guessed::new(),
+                false,
+                &std::collections::HashMap::new()
+            ),
             None
         );
     }
@@ -10091,8 +9905,111 @@ mod tests {
         let doc = one_cold_block();
         let visible = [(0, 0..10)];
         assert_eq!(
-            super::speculation_target(&doc, &visible, false, &Guessed::new(), true),
+            super::speculation_target(
+                &doc,
+                &visible,
+                false,
+                &Guessed::new(),
+                true,
+                &std::collections::HashMap::new()
+            ),
             None
+        );
+    }
+
+    /// A guess is asked while no seam stands past the frontier, as a
+    /// first coloring leaves the table, after F1 and back as at an
+    /// open; a seam past the frontier, which a resumed sweep could
+    /// converge on and vouch for the guess's lines, holds it (claim 32
+    /// of the hunt of Task 328).
+    #[test]
+    fn the_guess_waits_only_while_a_seam_stands_past_the_frontier() {
+        use oryx::style::seams::Table;
+        let mut doc = one_cold_block();
+        if let super::BlockKind::CodeBlock { exact, .. } = &mut doc.blocks[0].kind {
+            *exact = 5;
+        }
+        let visible = [(0, 0..10)];
+        let (lines, language) = match &doc.blocks[0].kind {
+            super::BlockKind::CodeBlock {
+                lines, language, ..
+            } => (lines.clone(), language.clone()),
+            _ => unreachable!(),
+        };
+        let table_cut_at = |at: usize| {
+            let mut table = Table::default();
+            oryx::style::highlight::spans_chunked(
+                &doc.source,
+                &lines,
+                language.as_deref(),
+                1,
+                std::time::Duration::MAX,
+                None,
+                || true,
+                |c| {
+                    let end = c.start_line + c.spans.len();
+                    table.fold_chunk(c.start_line, end, &c.seam, &c.slow);
+                    end < at
+                },
+            );
+            table
+        };
+        let seams = std::collections::HashMap::from([(0, table_cut_at(5))]);
+        assert_eq!(
+            super::speculation_target(&doc, &visible, false, &Guessed::new(), false, &seams),
+            Some((0, 5..10)),
+            "a first coloring's table, nothing past the frontier: asked"
+        );
+        let seams = std::collections::HashMap::from([(0, table_cut_at(8))]);
+        assert_eq!(
+            super::speculation_target(&doc, &visible, false, &Guessed::new(), false, &seams),
+            None,
+            "a seam past the frontier: the sweep could converge on it"
+        );
+    }
+
+    /// The first chunk of a resumed sweep is flushed at once when it
+    /// reaches the end of the key's lines; a caret seam, a chunk above
+    /// the key from a walk that fell short, and a guess do not spend
+    /// the flush (claim 25 of the hunt of Task 328).
+    #[test]
+    fn the_first_flush_waits_for_the_chunk_that_reaches_the_key_s_lines() {
+        use super::first_flush_due;
+        use oryx::style::highlight::Arrival;
+        let arrival = |start: usize, n: usize, speculative: bool| Arrival {
+            block: 0,
+            start_line: start,
+            spans: vec![Vec::new(); n],
+            seam: None,
+            converged: false,
+            reach: 0,
+            speculative,
+            slow: Vec::new(),
+        };
+        let key = 600..601;
+        assert!(
+            !first_flush_due(&[arrival(600, 0, false)], &key),
+            "a caret seam"
+        );
+        assert!(
+            !first_flush_due(&[arrival(100, 400, false)], &key),
+            "a chunk above the key"
+        );
+        assert!(
+            !first_flush_due(&[arrival(500, 200, true)], &key),
+            "a guess"
+        );
+        assert!(
+            first_flush_due(&[arrival(500, 101, false)], &key),
+            "a chunk ending at the key's end"
+        );
+        assert!(
+            first_flush_due(&[arrival(100, 400, false), arrival(500, 200, false)], &key),
+            "the chunk that reaches it, with the ones above"
+        );
+        assert!(
+            first_flush_due(&[arrival(601, 50, false)], &key),
+            "a chunk from the key's end"
         );
     }
 
@@ -10122,7 +10039,14 @@ mod tests {
         let visible = [(0, 0..1), (1, 0..1)];
         let landed = landed(&[(0, 0..1)]);
         assert_eq!(
-            super::speculation_target(&doc, &visible, false, &landed, false),
+            super::speculation_target(
+                &doc,
+                &visible,
+                false,
+                &landed,
+                false,
+                &std::collections::HashMap::new()
+            ),
             Some((1, 0..1))
         );
     }
@@ -10135,7 +10059,14 @@ mod tests {
         // Both landed: nothing to ask. Issue #9 asked for the first
         // again, without end.
         assert_eq!(
-            super::speculation_target(&doc, &visible, false, &landed, false),
+            super::speculation_target(
+                &doc,
+                &visible,
+                false,
+                &landed,
+                false,
+                &std::collections::HashMap::new()
+            ),
             None
         );
     }
@@ -10147,17 +10078,38 @@ mod tests {
         let landed = landed(&[(0, 6..10)]);
         // A scroll back up shows lines the guess never colored.
         assert_eq!(
-            super::speculation_target(&doc, &[(0, 0..4)], false, &landed, false),
+            super::speculation_target(
+                &doc,
+                &[(0, 0..4)],
+                false,
+                &landed,
+                false,
+                &std::collections::HashMap::new()
+            ),
             Some((0, 0..4))
         );
         // A band inside the landed guess asks for nothing.
         assert_eq!(
-            super::speculation_target(&doc, &[(0, 7..10)], false, &landed, false),
+            super::speculation_target(
+                &doc,
+                &[(0, 7..10)],
+                false,
+                &landed,
+                false,
+                &std::collections::HashMap::new()
+            ),
             None
         );
         // A band the guess covers in part is asked whole.
         assert_eq!(
-            super::speculation_target(&doc, &[(0, 3..8)], false, &landed, false),
+            super::speculation_target(
+                &doc,
+                &[(0, 3..8)],
+                false,
+                &landed,
+                false,
+                &std::collections::HashMap::new()
+            ),
             Some((0, 3..8))
         );
     }
@@ -10192,7 +10144,14 @@ mod tests {
         }
         let visible = [(0, 0..1), (1, 0..1)];
         assert_eq!(
-            super::speculation_target(&doc, &visible, false, &Guessed::new(), false),
+            super::speculation_target(
+                &doc,
+                &visible,
+                false,
+                &Guessed::new(),
+                false,
+                &std::collections::HashMap::new()
+            ),
             None
         );
     }

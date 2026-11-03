@@ -480,7 +480,8 @@ fn wash_guess_measured() {
 fn wash_edit_measured() {
     use oryx::doc::model::BlockKind;
     use oryx::edit::{self, splice::Ledger};
-    use oryx::style::highlight::{self, Seam, CHUNK_LINES};
+    use oryx::style::highlight::{self, CHUNK_LINES};
+    use oryx::style::seams::Table;
     let source = large_gen::generate_code(8 * 1024 * 1024);
     let (_, _, mut doc) = measure_open(&source, "rs");
     let (language, lines) = match &doc.blocks[0].kind {
@@ -489,17 +490,18 @@ fn wash_edit_measured() {
         } => (language.clone(), lines.clone()),
         _ => panic!("a code file is one code block"),
     };
-    let mut table: Vec<(usize, Seam)> = Vec::new();
+    let mut table = Table::default();
     let started = Instant::now();
     highlight::spans_chunked(
         &doc.source,
         &lines,
         language.as_deref(),
         CHUNK_LINES,
+        std::time::Duration::MAX,
         None,
         || true,
         |c| {
-            table.push((c.start_line + c.spans.len(), c.seam));
+            table.fold_chunk(c.start_line, c.start_line + c.spans.len(), &c.seam, &c.slow);
             true
         },
     );
@@ -507,7 +509,7 @@ fn wash_edit_measured() {
     println!(
         "wash edit 8MB: full sweep {full_ms}ms over {} lines, {} seams",
         lines.len(),
-        table.len()
+        table.seams().len()
     );
     let len = doc.source.len();
     for (name, pos) in [("top", 100), ("middle", len / 2), ("bottom", len - 2)] {
@@ -518,24 +520,14 @@ fn wash_edit_measured() {
         let started = Instant::now();
         let (old_eff, new_eff) = edit::splice_document(&mut doc, &current, pos..pos, touched)
             .expect("the fixture edit stays on the fast path");
-        highlight::shift_seams(&mut table, old_eff, new_eff.clone());
+        table.shift(&old_eff, &new_eff);
         // The splice reshaped the block's lines; the sweep reads them
         // as the app would, never the pre-edit clone.
         let lines = match &doc.blocks[0].kind {
             BlockKind::CodeBlock { lines, .. } => lines.clone(),
             _ => unreachable!(),
         };
-        let at = table.partition_point(|(line, _)| *line <= new_eff.start);
-        let (start_line, seam) = match at.checked_sub(1).and_then(|i| table.get(i)) {
-            Some((line, seam)) => (*line, Some(seam.clone())),
-            None => (0, None),
-        };
-        let resume = highlight::Resume {
-            start_line,
-            seam,
-            expected: table[at..].to_vec(),
-            cuts: Vec::new(),
-        };
+        let resume = table.resume(new_eff.start, &[]);
         let mut delivered = 0usize;
         let mut converged = false;
         let complete = highlight::spans_chunked(
@@ -543,6 +535,7 @@ fn wash_edit_measured() {
             &lines,
             language.as_deref(),
             CHUNK_LINES,
+            std::time::Duration::MAX,
             Some(&resume),
             || true,
             |c| {
@@ -1272,6 +1265,7 @@ fn line_cost_measured() {
             &lines,
             language.as_deref(),
             1,
+            std::time::Duration::MAX,
             None,
             || true,
             |_| {

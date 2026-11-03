@@ -790,11 +790,14 @@ impl Builder {
                         self.emit(BlockKind::MathBlock { tex: text });
                     } else {
                         let lines = self.code_body(&text);
+                        // A block with no grammar carries no colors: its
+                        // frontier is its line count from the start.
+                        let exact = if language.is_none() { lines.len() } else { 0 };
                         self.emit(BlockKind::CodeBlock {
                             language,
                             lines,
                             highlights: Vec::new(),
-                            exact: 0,
+                            exact,
                         });
                     }
                 }
@@ -1612,11 +1615,17 @@ impl Builder {
         if body.trim().is_empty() {
             return;
         }
+        let lines = CodeBody::from_text(body);
+        let exact = if pre.language.is_none() {
+            lines.len()
+        } else {
+            0
+        };
         self.emit(BlockKind::CodeBlock {
             language: pre.language,
-            lines: CodeBody::from_text(body),
+            lines,
             highlights: Vec::new(),
-            exact: 0,
+            exact,
         });
     }
 

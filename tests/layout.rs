@@ -66,7 +66,7 @@ fn highlight_all(doc: &mut Document) {
             continue;
         };
         let spans = highlight::spans(&source, lines, language.as_deref());
-        load::fold(
+        oryx::style::seams::Table::default().fold(
             doc,
             &Arrival {
                 block: i,
@@ -76,6 +76,7 @@ fn highlight_all(doc: &mut Document) {
                 converged: false,
                 reach: 0,
                 speculative: false,
+                slow: Vec::new(),
             },
         );
     }
@@ -230,7 +231,7 @@ fn unhighlighted_tail_renders_in_foreground() {
         panic!("expected code block")
     };
     let spans = highlight::spans(&source, lines, language.as_deref());
-    load::fold(
+    oryx::style::seams::Table::default().fold(
         &mut doc,
         &Arrival {
             block: 0,
@@ -240,6 +241,7 @@ fn unhighlighted_tail_renders_in_foreground() {
             converged: false,
             reach: 0,
             speculative: false,
+            slow: Vec::new(),
         },
     );
     let l = lay_doc(&doc, 800.0, &mut fonts());

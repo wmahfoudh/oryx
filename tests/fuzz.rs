@@ -644,3 +644,459 @@ fn fuzz_lines() {
         check_lines(&text, at, to, &insert)?;
     });
 }
+
+/// One step on the coloring of a code block, as the app drives it.
+#[derive(Debug, Clone)]
+enum Color {
+    /// A key: `text` typed at a place, its walk cut after `walk` lines,
+    /// as a budget running out cuts it, or run to the end of the touched
+    /// lines.
+    Key {
+        at: u16,
+        text: String,
+        walk: Option<u8>,
+    },
+    /// The worker's resume from the frontier, `chunk` lines a chunk,
+    /// killed after a few chunks or run to the end.
+    Sweep { chunk: u8, deliver: Option<u8> },
+    /// A caret seam asked for the line at a place, landed.
+    Caret { at: u16 },
+    /// A guess over `len` lines from a place, landed.
+    Guess { at: u16, len: u8 },
+    /// A line marked slow by hand, as a parse over the budget marks it.
+    Slow { at: u16 },
+    /// A key on the fallback arm: the document reparsed whole, the table
+    /// shifted, no walk.
+    Fallback { at: u16, text: String },
+}
+
+fn color_step() -> impl Strategy<Value = Color> {
+    prop_oneof![
+        4 => (any::<u16>(), "[a*/\" \n]{1,3}", prop::option::of(0..6u8))
+            .prop_map(|(at, text, walk)| Color::Key { at, text, walk }),
+        3 => (1..6u8, prop::option::of(0..4u8))
+            .prop_map(|(chunk, deliver)| Color::Sweep { chunk, deliver }),
+        1 => any::<u16>().prop_map(|at| Color::Caret { at }),
+        1 => (any::<u16>(), 1..8u8).prop_map(|(at, len)| Color::Guess { at, len }),
+        1 => any::<u16>().prop_map(|at| Color::Slow { at }),
+        1 => (any::<u16>(), "[a*/\" \n]{1,3}")
+            .prop_map(|(at, text)| Color::Fallback { at, text }),
+    ]
+}
+
+const COLOR_KIND: FileKind = FileKind::Code("rust");
+
+/// The coloring of one code file driven step by step: the document,
+/// its seam table and the ledger, the way the app holds them.
+struct Coloring {
+    doc: Document,
+    table: oryx::style::seams::Table,
+    led: Ledger,
+    key_lines: std::ops::Range<usize>,
+}
+
+fn arrival_of(c: oryx::style::highlight::Chunk) -> oryx::style::highlight::Arrival {
+    oryx::style::highlight::Arrival {
+        block: 0,
+        start_line: c.start_line,
+        spans: c.spans,
+        seam: Some(c.seam),
+        converged: c.converged,
+        reach: c.reach,
+        speculative: false,
+        slow: c.slow,
+    }
+}
+
+fn code_parts(
+    doc: &Document,
+) -> (
+    &oryx::doc::model::CodeBody,
+    &Vec<oryx::style::highlight::LineSpans>,
+    usize,
+) {
+    match &doc.blocks[0].kind {
+        BlockKind::CodeBlock {
+            lines,
+            highlights,
+            exact,
+            ..
+        } => (lines, highlights, *exact),
+        _ => panic!("a code file is one code block"),
+    }
+}
+
+/// The full parse of the block: the spans of every line, and the state
+/// before each line and after the last.
+fn oracle(
+    doc: &Document,
+) -> (
+    Vec<oryx::style::highlight::LineSpans>,
+    Vec<oryx::style::highlight::Seam>,
+) {
+    use oryx::style::highlight::{spans_chunked, walk};
+    let (lines, _, _) = code_parts(doc);
+    let mut rows = Vec::new();
+    let initial = walk(
+        &doc.source,
+        lines,
+        Some("rust"),
+        0,
+        None,
+        0,
+        0,
+        Duration::MAX,
+        &[],
+        || true,
+    )
+    .seam;
+    let mut states = vec![initial];
+    spans_chunked(
+        &doc.source,
+        lines,
+        Some("rust"),
+        1,
+        Duration::MAX,
+        None,
+        || true,
+        |c| {
+            rows.extend(c.spans);
+            states.push(c.seam);
+            true
+        },
+    );
+    (rows, states)
+}
+
+/// The worker's sweep in miniature: the resume from the frontier,
+/// chunks folded in order, killed after `deliver` chunks when given.
+fn sweep_into(
+    doc: &mut Document,
+    table: &mut oryx::style::seams::Table,
+    chunk: usize,
+    cuts: &[usize],
+    deliver: Option<usize>,
+) {
+    let (lines, _, exact) = code_parts(doc);
+    let lines = lines.clone();
+    let resume = table.resume(exact, cuts);
+    let source = Arc::clone(&doc.source);
+    let mut chunks = Vec::new();
+    oryx::style::highlight::spans_chunked(
+        &source,
+        &lines,
+        Some("rust"),
+        chunk,
+        Duration::MAX,
+        Some(&resume),
+        || true,
+        |c| {
+            chunks.push(c);
+            deliver.is_none_or(|n| chunks.len() <= n)
+        },
+    );
+    for c in chunks {
+        table.fold(doc, &arrival_of(c));
+    }
+}
+
+impl Coloring {
+    fn new(text: &str) -> Coloring {
+        let doc = rendered_document(COLOR_KIND, text);
+        let led = Ledger::new(Arc::clone(&doc.source), Vec::new());
+        Coloring {
+            doc,
+            table: oryx::style::seams::Table::default(),
+            led,
+            key_lines: 0..0,
+        }
+    }
+
+    /// The line of a place, the last line past the end.
+    fn line_at(&self, at: u16) -> usize {
+        let (lines, _, _) = code_parts(&self.doc);
+        let offset = boundary(&self.doc.source, at);
+        lines
+            .line_at(offset)
+            .unwrap_or(0)
+            .min(lines.len().saturating_sub(1))
+    }
+
+    fn step(&mut self, step: &Color) -> Result<(), TestCaseError> {
+        match step {
+            Color::Key { at, text, walk } => {
+                let at = boundary(&self.doc.source, *at);
+                let exact0 = code_parts(&self.doc).2;
+                let touched = self.led.edit(at..at, text);
+                let current = self.led.current();
+                let spliced = splice_document(&mut self.doc, &current, at..at, touched);
+                let Some((old, new)) = spliced else {
+                    prop_assert!(false, "a code file takes the splice");
+                    unreachable!()
+                };
+                self.key_lines = new.clone();
+                let source = Arc::clone(&self.doc.source);
+                let mut left = walk.map(|n| n as usize);
+                let BlockKind::CodeBlock {
+                    language,
+                    lines,
+                    highlights,
+                    exact,
+                } = &mut self.doc.blocks[0].kind
+                else {
+                    unreachable!()
+                };
+                self.table.on_key(
+                    &source,
+                    lines,
+                    language.as_deref(),
+                    highlights,
+                    exact,
+                    exact0,
+                    &old,
+                    &new,
+                    Duration::MAX,
+                    || match left.as_mut() {
+                        Some(0) => false,
+                        Some(n) => {
+                            *n -= 1;
+                            true
+                        }
+                        None => true,
+                    },
+                );
+            }
+            Color::Sweep { chunk, deliver } => {
+                let cuts = [self.key_lines.start, self.key_lines.end];
+                sweep_into(
+                    &mut self.doc,
+                    &mut self.table,
+                    *chunk as usize,
+                    &cuts,
+                    deliver.map(|n| n as usize),
+                );
+            }
+            Color::Caret { at } => {
+                let line = self.line_at(*at);
+                let (lines, _, exact) = code_parts(&self.doc);
+                let Some((start, seam)) = self.table.caret_ask(exact, line, 2) else {
+                    return Ok(());
+                };
+                let walked = oryx::style::highlight::walk(
+                    &self.doc.source,
+                    lines,
+                    Some("rust"),
+                    start,
+                    seam,
+                    line,
+                    line,
+                    Duration::MAX,
+                    &[],
+                    || true,
+                );
+                let arrival = oryx::style::highlight::Arrival {
+                    block: 0,
+                    start_line: line,
+                    spans: Vec::new(),
+                    seam: Some(walked.seam),
+                    converged: false,
+                    reach: 0,
+                    speculative: false,
+                    slow: Vec::new(),
+                };
+                self.table.fold(&mut self.doc, &arrival);
+            }
+            Color::Guess { at, len } => {
+                let (lines, _, exact) = code_parts(&self.doc);
+                // As the app: no guess while a seam stands past the
+                // frontier, where a converged stop would vouch for it.
+                if self.table.past_frontier(exact) {
+                    return Ok(());
+                }
+                let start = self.line_at(*at);
+                let end = (start + *len as usize).min(lines.len());
+                if start >= end {
+                    return Ok(());
+                }
+                let spans = oryx::style::highlight::spans_band(
+                    &self.doc.source,
+                    lines,
+                    Some("rust"),
+                    start..end,
+                );
+                let arrival = oryx::style::highlight::Arrival {
+                    block: 0,
+                    start_line: start,
+                    spans,
+                    seam: None,
+                    converged: false,
+                    reach: 0,
+                    speculative: true,
+                    slow: Vec::new(),
+                };
+                self.table.fold(&mut self.doc, &arrival);
+            }
+            Color::Slow { at } => {
+                let line = self.line_at(*at);
+                if line < code_parts(&self.doc).0.len() {
+                    self.table.mark_slow(line);
+                }
+            }
+            Color::Fallback { at, text } => {
+                let at = boundary(&self.doc.source, *at);
+                let touched = self.led.edit(at..at, text);
+                let current = self.led.current();
+                let old_touched = touched.start..touched.start + 1;
+                self.doc = oryx::edit::reparse(
+                    COLOR_KIND,
+                    &current,
+                    &self.doc,
+                    old_touched.clone(),
+                    touched.clone(),
+                );
+                self.table.shift(&old_touched, &touched);
+                self.key_lines = touched;
+            }
+        }
+        Ok(())
+    }
+
+    /// The invariants against the full parse: the rows and the seams at
+    /// or before the frontier are the full parse's; a chained seam
+    /// whose state is the full parse's has its rows and its next seam
+    /// equal to the full parse's; the seams stand within the rows.
+    fn check(&self, what: &str) -> Result<(), TestCaseError> {
+        let (lines, highlights, exact) = code_parts(&self.doc);
+        let (rows, states) = oracle(&self.doc);
+        prop_assert!(
+            exact <= highlights.len() && highlights.len() <= lines.len(),
+            "{}: the frontier {} within the rows {} within the lines {}",
+            what,
+            exact,
+            highlights.len(),
+            lines.len()
+        );
+        for i in 0..exact {
+            prop_assert!(
+                highlights[i] == rows[i],
+                "{}: row {} before the frontier {}: {:?} against {:?}",
+                what,
+                i,
+                exact,
+                highlights[i],
+                rows[i]
+            );
+        }
+        let seams = self.table.seams();
+        for (i, f) in seams.iter().enumerate() {
+            prop_assert!(
+                f.line <= highlights.len(),
+                "{}: the seam at {} within the rows",
+                what,
+                f.line
+            );
+            if f.line <= exact {
+                prop_assert!(
+                    f.seam == states[f.line],
+                    "{}: the seam at {} before the frontier {} holds the full parse's state",
+                    what,
+                    f.line,
+                    exact
+                );
+            }
+            if !f.chained || f.seam != states[f.line] {
+                continue;
+            }
+            let next = seams.get(i + 1);
+            let end = next.map_or(lines.len(), |n| n.line);
+            for l in f.line..end {
+                prop_assert!(
+                    highlights[l] == rows[l],
+                    "{}: the chained seam at {} whose state holds vouches for row {}",
+                    what,
+                    f.line,
+                    l
+                );
+            }
+            if let Some(n) = next {
+                prop_assert!(
+                    n.seam == states[n.line],
+                    "{}: the chained seam at {} whose state holds vouches for the seam at {}",
+                    what,
+                    f.line,
+                    n.line
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+/// A resume run to its end from the state as it stands leaves every
+/// row and every seam equal to the full parse's.
+fn settle(
+    mut doc: Document,
+    mut table: oryx::style::seams::Table,
+    what: &str,
+) -> Result<(), TestCaseError> {
+    sweep_into(&mut doc, &mut table, 7, &[], None);
+    let (rows, states) = oracle(&doc);
+    let (lines, highlights, exact) = code_parts(&doc);
+    prop_assert!(
+        exact == lines.len(),
+        "{}: the frontier reaches the end after the resume ({} of {})",
+        what,
+        exact,
+        lines.len()
+    );
+    let wrong: Vec<usize> = (0..lines.len())
+        .filter(|i| highlights[*i] != rows[*i])
+        .collect();
+    prop_assert!(
+        wrong.is_empty(),
+        "{}: rows wrong after the resume: {:?}",
+        what,
+        wrong
+    );
+    for f in table.seams() {
+        prop_assert!(
+            f.seam == states[f.line],
+            "{}: the seam at {} after the resume holds the full parse's state",
+            what,
+            f.line
+        );
+    }
+    Ok(())
+}
+
+fn run_coloring(text: &str, steps: &[Color]) -> Result<(), TestCaseError> {
+    let mut c = Coloring::new(text);
+    c.check("at the open")?;
+    for (i, step) in steps.iter().enumerate() {
+        c.step(step)?;
+        let what = format!("after step {i}, {step:?}");
+        c.check(&what)?;
+        settle(c.doc.clone(), c.table.clone(), &what)?;
+    }
+    Ok(())
+}
+
+/// The coloring of a code block against a full parse: random texts of
+/// Rust lines, comments and strings among them, and random keys, walks
+/// cut short, sweeps killed early, caret seams, guesses, slow marks and
+/// fallback reparses, the invariants of the seam table checked after
+/// each step and a resume run to the end from each state.
+#[test]
+#[ignore]
+fn fuzz_seams() {
+    let config = ProptestConfig {
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    };
+    proptest!(config, |(
+        text in "((let a = 1;|/\\*|\\*/|\" x|fn f\\(\\) \\{|\\}|)\n){3,16}",
+        steps in prop::collection::vec(color_step(), 1..8),
+    )| {
+        run_coloring(&text, &steps)?;
+    });
+}

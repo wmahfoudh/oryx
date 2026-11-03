@@ -1297,11 +1297,18 @@ impl Walker {
             lines.pop();
         }
         let block_end = lines.last().map(|l| l.end as usize).unwrap_or(block_start);
+        // A block with no grammar carries no colors: its frontier is its
+        // line count from the start.
+        let exact = if pre.language.is_none() {
+            lines.len()
+        } else {
+            0
+        };
         let kind = BlockKind::CodeBlock {
             language: pre.language,
             lines: CodeBody::verbatim(lines),
             highlights: Vec::new(),
-            exact: 0,
+            exact,
         };
         self.emit_placed(kind, block_start..block_end);
     }
