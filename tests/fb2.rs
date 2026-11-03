@@ -329,6 +329,64 @@ fn an_fb2_zip_unwraps() {
     assert!(plain_text(&doc).contains("Wrapped text."));
 }
 
+/// A stored zip of one entry under the name given.
+fn zipped(name: &str, inner: &[u8]) -> Vec<u8> {
+    use std::io::Write;
+    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    let stored =
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    zip.start_file(name, stored).unwrap();
+    zip.write_all(inner).unwrap();
+    zip.finish().unwrap().into_inner()
+}
+
+/// The first place the pattern occurs in the bytes.
+fn find(bytes: &[u8], pattern: &[u8]) -> Option<usize> {
+    bytes.windows(pattern.len()).position(|w| w == pattern)
+}
+
+/// The inner name of a zipped FB2 made on a Russian Windows is Cyrillic
+/// in CP866, with no UTF-8 flag. zip 9 keys its entries by the raw name
+/// bytes, so the entry is read by the index the scan found, not by the
+/// name it decoded (claim 11 of the hunt of Task 328). The name is
+/// written in place of an ASCII stand-in of the same length, in the
+/// local header and in the central directory.
+#[test]
+fn an_fb2_zip_with_a_name_in_a_legacy_encoding_opens() {
+    let inner = book(
+        "<body><section><title><p>One</p></title><p>Legacy name.</p></section></body>",
+        "",
+    );
+    let mut bytes = zipped("kniga.fb2", &inner);
+    let legacy = [0x8A, 0xAD, 0xA8, 0xA3, 0xA0, b'.', b'f', b'b', b'2'];
+    while let Some(at) = find(&bytes, b"kniga.fb2") {
+        bytes[at..at + 9].copy_from_slice(&legacy);
+    }
+    let doc = fb2::open_book(bytes).unwrap().document;
+    assert_eq!(doc.title.as_deref(), Some("Test Book"));
+    assert!(plain_text(&doc).contains("Legacy name."));
+}
+
+/// A zip whose header declares a size far past its bytes is read by its
+/// bytes (claim 29 of the hunt of Task 328): the buffer grows with the
+/// read, and nothing is sized from the header. The lie stays under the
+/// reader's ceiling of 1 GB, so that the read is reached.
+#[test]
+fn an_fb2_zip_whose_header_lies_about_the_size_is_read_by_its_bytes() {
+    let inner = book(
+        "<body><section><title><p>One</p></title><p>Sized by the bytes.</p></section></body>",
+        "",
+    );
+    let mut bytes = zipped("book.fb2", &inner);
+    let lie = (900u32 << 20).to_le_bytes();
+    let local = find(&bytes, b"PK\x03\x04").unwrap();
+    let central = find(&bytes, b"PK\x01\x02").unwrap();
+    bytes[local + 22..local + 26].copy_from_slice(&lie);
+    bytes[central + 24..central + 28].copy_from_slice(&lie);
+    let doc = fb2::open_book(bytes).unwrap().document;
+    assert!(plain_text(&doc).contains("Sized by the bytes."));
+}
+
 #[test]
 fn refusals_speak_plainly() {
     let malformed = fb2::open_book(b"<FictionBook><body>".to_vec()).unwrap_err();

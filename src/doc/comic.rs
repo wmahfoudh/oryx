@@ -58,8 +58,14 @@ impl Job {
     }
 }
 
-/// Whether an entry name reads as a page image.
+/// Whether an entry name reads as a page image. The Finder's resource
+/// forks, under `__MACOSX/` and named `._` plus the page's name, are not
+/// pages: a comic zipped on a Mac carries one beside each page.
 fn is_page(name: &str) -> bool {
+    let file = name.rsplit(['/', '\\']).next().unwrap_or(name);
+    if name.starts_with("__MACOSX/") || name.starts_with("__MACOSX\\") || file.starts_with("._") {
+        return false;
+    }
     let lower = name.to_ascii_lowercase();
     ["jpg", "jpeg", "png", "gif", "webp"].iter().any(|ext| {
         lower
@@ -162,7 +168,8 @@ fn zip_pages(bytes: Vec<u8>) -> anyhow::Result<Vec<BookSource>> {
     for (index, _) in &entries {
         let mut entry = zip.by_index_raw(*index).map_err(|_| Refusal::NotComic)?;
         let method = entry.compression();
-        let mut raw = Vec::with_capacity(entry.compressed_size() as usize);
+        // The buffer grows with the read; the header's size is not trusted.
+        let mut raw = Vec::new();
         entry.read_to_end(&mut raw).map_err(|_| Refusal::NotComic)?;
         pages.push(match method {
             zip::CompressionMethod::Stored => BookSource::Raster(raw),
@@ -282,8 +289,23 @@ pub fn open_book(bytes: Vec<u8>, name: &str) -> anyhow::Result<Book> {
 
 #[cfg(test)]
 mod tests {
-    use super::natural_cmp;
+    use super::{is_page, natural_cmp};
     use std::cmp::Ordering;
+
+    /// The Finder's resource forks beside each page, under `__MACOSX/`
+    /// and named `._` plus the page's name, are not pages (claim 17 of
+    /// the hunt of Task 328). The rule reads the name alone, so the RAR
+    /// path shares it.
+    #[test]
+    fn a_mac_resource_fork_is_not_a_page() {
+        assert!(is_page("Comic/001.png"));
+        assert!(is_page("cover.JPG"));
+        assert!(!is_page("__MACOSX/Comic/._001.png"));
+        assert!(!is_page("__MACOSX/._cover.jpg"));
+        assert!(!is_page("Comic/._001.png"));
+        assert!(!is_page("._cover.jpg"));
+        assert!(!is_page("Comic\\._001.png"), "a path with backslashes");
+    }
 
     #[test]
     fn natural_order_reads_like_a_person() {

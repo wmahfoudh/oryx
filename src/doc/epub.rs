@@ -57,10 +57,11 @@ impl Archive {
         Ok(archive)
     }
 
-    /// The entry's bytes, or None when no entry has that name.
+    /// The entry's bytes, or None when no entry has that name. The buffer
+    /// grows with the read; the header's size is not trusted.
     pub fn read(&mut self, path: &str) -> Option<Vec<u8>> {
         let mut file = self.zip.by_name(path).ok()?;
-        let mut bytes = Vec::with_capacity(file.size() as usize);
+        let mut bytes = Vec::new();
         file.read_to_end(&mut bytes).ok()?;
         Some(bytes)
     }

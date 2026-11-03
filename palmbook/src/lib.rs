@@ -349,6 +349,12 @@ impl<'a> Book<'a> {
                 if self.huff_count == 0 {
                     return Err(Error::Corrupt("no huffman tables"));
                 }
+                // The count comes from the header: it is checked against
+                // the records before anything is sized by it.
+                let tables_end = self.huff_record.checked_add(self.huff_count);
+                if !tables_end.is_some_and(|end| end <= self.pdb.len() - self.start) {
+                    return Err(Error::Corrupt("more huffman tables than records"));
+                }
                 let huff = self.record(self.huff_record)?;
                 let mut cdics = Vec::with_capacity(self.huff_count - 1);
                 for index in 1..self.huff_count {
@@ -358,7 +364,9 @@ impl<'a> Book<'a> {
             }
             _ => None,
         };
-        let mut out = Vec::with_capacity(self.text_length);
+        // The buffer grows with the text; the declared length is not
+        // trusted for its size, only for the cut at the end.
+        let mut out = Vec::new();
         for index in 1..=self.record_count {
             let record = self.record(index)?;
             let cut = record.len() - trailing_size(record, self.extra_flags).min(record.len());

@@ -133,12 +133,63 @@ fn a_huffcdic_book_round_trips() {
 }
 
 /// Rewrites the declared text length inside record 0.
-fn patch_text_length(mut bytes: Vec<u8>, length: u32) -> Vec<u8> {
+fn patch_text_length(bytes: Vec<u8>, length: u32) -> Vec<u8> {
+    patch_record0(bytes, 4, length)
+}
+
+/// Rewrites a four-byte field of record 0.
+fn patch_record0(mut bytes: Vec<u8>, at: usize, value: u32) -> Vec<u8> {
     let pdb = Pdb::open(&bytes).unwrap();
     let record0 = pdb.record(0).unwrap();
     let start = record0.as_ptr() as usize - bytes.as_ptr() as usize;
-    bytes[start + 4..start + 8].copy_from_slice(&length.to_be_bytes());
+    bytes[start + at..start + at + 4].copy_from_slice(&value.to_be_bytes());
     bytes
+}
+
+/// A phrase table whose phrases refer to each other is stopped by the
+/// depth limit at once, as corrupt. Kept as a guard of that limit
+/// (claim 29 of the hunt of Task 328, read; the table was green on the
+/// code of the day).
+#[test]
+fn a_phrase_table_that_refers_to_itself_is_corrupt() {
+    let phrases: Vec<(&[u8], bool)> = vec![(b"a", true), (&[1, 1], false)];
+    let mut builder = writer::book("aaaaaaaa");
+    builder.compression = writer::COMPRESSION_HUFFCDIC;
+    builder.text = vec![1];
+    builder.huff_records = writer::huff_records(&phrases);
+    let built = patch_text_length(builder.build(), 8);
+    let book = Book::open(&built).unwrap();
+    assert!(book.rawml().is_err(), "a runaway table is an error");
+}
+
+/// A header declaring more Huffman tables than the book has records is
+/// corrupt, and says so before anything is sized by the count. Before,
+/// a vector of that count was asked for first.
+#[test]
+fn a_book_declaring_more_huffman_tables_than_it_has_is_corrupt() {
+    let phrases: Vec<(&[u8], bool)> = vec![(b"Hello", true)];
+    let mut builder = writer::book("Hello");
+    builder.compression = writer::COMPRESSION_HUFFCDIC;
+    builder.text = vec![0];
+    builder.huff_records = writer::huff_records(&phrases);
+    let built = patch_record0(builder.build(), 116, u32::MAX);
+    let book = Book::open(&built).unwrap();
+    assert!(
+        book.rawml().is_err(),
+        "a count past the records is an error"
+    );
+}
+
+/// A header declaring a text far longer than the book is read by its
+/// records: the buffer grows with the text and is cut at the declared
+/// length as before. Before, a buffer of the declared size was asked for
+/// first.
+#[test]
+fn a_book_declaring_a_huge_text_length_reads_its_text() {
+    let text = "A short book.";
+    let built = patch_text_length(writer::book(text).build(), u32::MAX);
+    let book = Book::open(&built).unwrap();
+    assert_eq!(book.rawml().unwrap(), text.as_bytes());
 }
 
 #[test]

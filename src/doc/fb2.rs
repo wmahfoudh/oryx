@@ -239,7 +239,7 @@ fn unwrap_zip(bytes: Vec<u8>) -> anyhow::Result<Vec<u8>> {
         return Ok(bytes);
     }
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).map_err(|_| Refusal::NotFb2)?;
-    let mut name = None;
+    let mut found = None;
     for index in 0..zip.len() {
         let Ok(entry) = zip.by_index_raw(index) else {
             continue;
@@ -252,13 +252,17 @@ fn unwrap_zip(bytes: Vec<u8>) -> anyhow::Result<Vec<u8>> {
             if entry.size() > CEILING {
                 return Err(Refusal::TooLarge.into());
             }
-            name = Some(entry_name.into_owned());
+            found = Some(index);
             break;
         }
     }
-    let name = name.ok_or(Refusal::NotFb2)?;
-    let mut file = zip.by_name(&name).map_err(|_| Refusal::NotFb2)?;
-    let mut inner = Vec::with_capacity(file.size() as usize);
+    // The entry is read by its index: zip keys its names by their raw
+    // bytes, and a name in a legacy encoding (Cyrillic in CP866, from a
+    // Russian Windows) comes back decoded as CP437, which finds nothing.
+    // The buffer grows with the read; the header's size is not trusted.
+    let index = found.ok_or(Refusal::NotFb2)?;
+    let mut file = zip.by_index(index).map_err(|_| Refusal::NotFb2)?;
+    let mut inner = Vec::new();
     file.read_to_end(&mut inner).map_err(|_| Refusal::NotFb2)?;
     Ok(inner)
 }

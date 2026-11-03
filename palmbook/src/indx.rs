@@ -67,6 +67,14 @@ impl Index {
             if data.get(idxt_at..idxt_at + 4) != Some(b"IDXT") {
                 return Err(Error::Corrupt("no IDXT where the header points"));
             }
+            // The count comes from the record: its table of offsets must
+            // fit in the record before anything is sized by it.
+            let table_end = count
+                .checked_mul(2)
+                .and_then(|n| n.checked_add(idxt_at + 4));
+            if !table_end.is_some_and(|end| end <= data.len()) {
+                return Err(Error::Corrupt("more index entries than the IDXT holds"));
+            }
             let mut offsets = Vec::with_capacity(count + 1);
             for index in 0..count {
                 offsets.push(be16(data, idxt_at + 4 + index * 2)? as usize);

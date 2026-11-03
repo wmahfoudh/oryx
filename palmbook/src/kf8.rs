@@ -154,6 +154,12 @@ fn read_flows(book: &Book, fdst: u32, count: u32, rawml: Vec<u8>) -> Result<Vec<
         return Err(Error::Corrupt("no FDST magic"));
     }
     let sections = crate::be32(record, 8)? as usize;
+    // The count comes from the record: its table of starts and ends must
+    // fit in the record before anything is sized by it.
+    let table_end = sections.checked_mul(8).and_then(|n| n.checked_add(12));
+    if !table_end.is_some_and(|end| end <= record.len()) {
+        return Err(Error::Corrupt("more flow sections than the FDST holds"));
+    }
     let mut flows = Vec::with_capacity(sections);
     for index in 0..sections {
         let start = crate::be32(record, 12 + index * 8)? as usize;

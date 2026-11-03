@@ -229,6 +229,31 @@ fn generated_cbr(pages: &[(String, Vec<u8>)]) -> Vec<u8> {
     rar_writer::rar4(&files, 0)
 }
 
+/// A comic zipped by the Mac's Finder carries a `__MACOSX/._name` entry
+/// beside each page, its resource fork. Those entries are not pages
+/// (claim 17 of the hunt of Task 328). Before, they showed as blank
+/// pages, first.
+#[test]
+fn a_comic_zipped_on_a_mac_skips_its_resource_forks() {
+    let mut pages = Vec::new();
+    for n in 1..=2u8 {
+        let img = image::RgbImage::from_pixel(60, 80, image::Rgb([200, 40 * n, 90]));
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+        pages.push((format!("Comic/{n:03}.png"), bytes.into_inner()));
+    }
+    for n in 1..=2u8 {
+        pages.push((
+            format!("__MACOSX/Comic/._{n:03}.png"),
+            vec![0x00, 0x05, 0x16, 0x07, 0x00, 0x02, 0x00, 0x00],
+        ));
+    }
+    let bytes = generated_cbz(&pages);
+    let (_doc, _toc, job) = comic::open_prefix(bytes, "Mac").unwrap();
+    let sources = job.map(|mut job| job.take_sources()).unwrap_or_default();
+    assert_eq!(sources.len(), 2, "the two pages, no resource fork");
+}
+
 /// The product promise holds for comics: a real-sized book opens whole
 /// inside the startup budget, from either container.
 #[test]

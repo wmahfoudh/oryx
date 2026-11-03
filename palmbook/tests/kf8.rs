@@ -195,6 +195,57 @@ fn a_contradicting_table_errors_instead_of_mis_stitching() {
     }
 }
 
+/// The byte offset of a record inside the file.
+fn offset_of(bytes: &[u8], record: &[u8]) -> usize {
+    record.as_ptr() as usize - bytes.as_ptr() as usize
+}
+
+/// An FDST record declaring more sections than it holds is corrupt, and
+/// says so before anything is sized by the count (claim 29 of the hunt
+/// of Task 328). Before, a vector of that count was asked for first.
+#[test]
+fn an_fdst_declaring_more_sections_than_it_holds_is_corrupt() {
+    let mut bytes = two_part_book().build();
+    let at = {
+        let book = Book::open(&bytes).unwrap();
+        let fdst = book.kf8_header().unwrap().fdst as usize;
+        offset_of(&bytes, book.record(fdst).unwrap())
+    };
+    bytes[at + 8..at + 12].copy_from_slice(&u32::MAX.to_be_bytes());
+    let book = Book::open(&bytes).unwrap();
+    assert!(
+        kf8::read(&book).is_err(),
+        "a count past the record is an error"
+    );
+}
+
+/// An index record declaring more entries than it holds is corrupt the
+/// same way.
+#[test]
+fn an_index_declaring_more_entries_than_it_holds_is_corrupt() {
+    let mut bytes = two_part_book().build();
+    let at = {
+        let pdb = palmbook::Pdb::open(&bytes).unwrap();
+        (0..pdb.len())
+            .map(|index| pdb.record(index).unwrap())
+            .find(|record| {
+                record.starts_with(b"INDX") && record.len() > 28 && {
+                    let idxt = u32::from_be_bytes([record[20], record[21], record[22], record[23]])
+                        as usize;
+                    record.get(idxt..idxt + 4) == Some(b"IDXT".as_slice())
+                }
+            })
+            .map(|record| offset_of(&bytes, record))
+            .expect("an index data record")
+    };
+    bytes[at + 24..at + 28].copy_from_slice(&u32::MAX.to_be_bytes());
+    let book = Book::open(&bytes).unwrap();
+    assert!(
+        kf8::read(&book).is_err(),
+        "a count past the record is an error"
+    );
+}
+
 /// Probe for real KF8 books; run with
 /// PALMBOOK_FILE=<path> cargo test --release --test kf8 kf8_field_probe -- --ignored --nocapture
 #[test]
