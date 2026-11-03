@@ -716,9 +716,10 @@ pub fn rects_window(
     rects_for(sel, lay, doc, fonts, cache, head.chain(tail))
 }
 
-/// The rectangles of the matches whose top lies between `lo` and `hi`,
-/// each with its match's index, what the search and the lit
-/// occurrences paint. Bounding the geometry to a window around the view
+/// The rectangles of the matches that reach between `lo` and `hi`, each
+/// with its match's index, what the search and the lit occurrences
+/// paint. A match taller than the band, the whole of a source view, is
+/// kept by any of its lines, wherever its top stands. Bounding the geometry to a window around the view
 /// keeps thousands of matches cheap, and one shaped buffer per run
 /// serves every match the run holds.
 pub fn window_rects(
@@ -733,9 +734,10 @@ pub fn window_rects(
     let near = &matches[held.clone()];
     let mut rects = Vec::new();
     let mut shaped = ShapeCache::default();
-    let tops = match_tops(lay, doc, near);
+    let spans = match_spans(lay, doc, near);
     for (offset, m) in near.iter().enumerate() {
-        if tops[offset] < lo || tops[offset] > hi {
+        let (top, bottom) = spans[offset];
+        if bottom < lo || top > hi {
             continue;
         }
         for rect in rects_window(m, lay, doc, fonts, &mut shaped, lo, hi) {
@@ -777,13 +779,21 @@ pub fn held_matches(
     from..to
 }
 
-/// The y position and size of the first placed run overlapping each
-/// match: one walk over the runs with a binary search into the sorted
-/// matches. A match with no placed run answers with its recorded block
-/// top from the layout's table, so a windowed layout still positions
-/// every match; `f32::MAX` only where nothing was ever placed.
+/// The top of each match, the first value of `match_spans`.
 pub fn match_tops(lay: &LayoutDoc, doc: &Document, matches: &[Selection]) -> Vec<f32> {
-    let mut tops = vec![f32::MAX; matches.len()];
+    match_spans(lay, doc, matches)
+        .into_iter()
+        .map(|(top, _)| top)
+        .collect()
+}
+
+/// The height each match covers: the y of the first and of the last
+/// placed run it overlaps, in one walk over the runs with a binary
+/// search into the sorted matches. A match with no placed run answers
+/// with its recorded block top for both, so a windowed layout still
+/// positions every match; `f32::MAX` only where nothing was ever placed.
+pub fn match_spans(lay: &LayoutDoc, doc: &Document, matches: &[Selection]) -> Vec<(f32, f32)> {
+    let mut spans = vec![(f32::MAX, f32::MIN); matches.len()];
     for (index, run) in lay.runs.iter().enumerate() {
         let Some((iv_start, mut iv_end)) = run_interval(run) else {
             continue;
@@ -798,19 +808,18 @@ pub fn match_tops(lay: &LayoutDoc, doc: &Document, matches: &[Selection]) -> Vec
                 break;
             }
             if b > iv_start {
-                tops[i] = tops[i].min(run.y);
+                spans[i] = (spans[i].0.min(run.y), spans[i].1.max(run.y));
             }
         }
     }
-    for (top, m) in tops.iter_mut().zip(matches) {
-        if *top == f32::MAX {
+    for (span, m) in spans.iter_mut().zip(matches) {
+        if span.0 == f32::MAX {
             let pos = m.ordered().0;
-            if let Some(y) = lay.approx_top(pos.block, pos.span) {
-                *top = y;
-            }
+            let y = lay.approx_top(pos.block, pos.span).unwrap_or(f32::MAX);
+            *span = (y, y);
         }
     }
-    tops
+    spans
 }
 
 /// Where the current match sits: the topmost overlapping run's y and
@@ -2201,13 +2210,14 @@ mod tests {
             "{held:?} of {} matches",
             matches.len()
         );
-        // The referee: every match's top looked up, then the same filter.
+        // The referee: every match's span looked up, then the same filter.
         let (lo, hi) = (scroll - 1200.0, scroll + 1800.0);
-        let tops = match_tops(&l, &doc, &matches);
+        let spans = match_spans(&l, &doc, &matches);
         let mut shaped = ShapeCache::default();
         let mut all = Vec::new();
         for (index, m) in matches.iter().enumerate() {
-            if tops[index] < lo || tops[index] > hi {
+            let (top, bottom) = spans[index];
+            if bottom < lo || top > hi {
                 continue;
             }
             for rect in rects_window(m, &l, &doc, &mut fonts, &mut shaped, lo, hi) {
@@ -2216,6 +2226,46 @@ mod tests {
         }
         assert!(!all.is_empty(), "the screen held has boxes");
         assert_eq!(window_rects(&l, &doc, &mut fonts, &matches, lo, hi), all);
+    }
+
+    /// A match taller than the band around the view, the whole of a
+    /// code file here, keeps its boxes on the screen wherever its top
+    /// stands: scrolled down step by step, the layout still holds lines
+    /// far above the view, where the match begins.
+    #[test]
+    fn a_match_taller_than_the_band_keeps_its_boxes_on_screen() {
+        let text: String = (0..600)
+            .map(|n| format!("line {n} of the file\n"))
+            .collect();
+        let doc = crate::doc::load::code_document(None, &text);
+        let theme = Theme::default_dark();
+        let cfg = ViewConfig::default();
+        let mut fonts = FontStore::new();
+        let mut media = MediaCache::offline(PathBuf::from("."));
+        let (mut l, mut pass) = crate::layout::layout_begin(&doc, &cfg, 1000.0);
+        pass.retain_around(0.0, 600.0);
+        crate::layout::layout_more(
+            &doc, &theme, &mut fonts, &mut media, &cfg, &mut l, &mut pass, None,
+        );
+        let mut scroll = 0.0;
+        while scroll < l.height / 2.0 {
+            scroll += 300.0;
+            crate::layout::window_to(
+                &doc, &theme, &mut fonts, &mut media, &cfg, &mut l, None, scroll, 600.0, false,
+            );
+            l.index_more();
+        }
+        let matches = crate::ui::search::regex_matches(&doc, r"[\s\S]+").expect("valid");
+        assert_eq!(matches.len(), 1, "the whole file is one match");
+        let (lo, hi) = (scroll - 1200.0, scroll + 1800.0);
+        let rects = window_rects(&l, &doc, &mut fonts, &matches, lo, hi);
+        assert!(
+            rects
+                .iter()
+                .any(|(_, (_, y, _, h))| *y < scroll + 600.0 && *y + *h > scroll),
+            "a box on the screen at {scroll}: {} boxes",
+            rects.len()
+        );
     }
 
     #[test]
