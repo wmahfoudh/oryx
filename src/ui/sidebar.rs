@@ -303,8 +303,8 @@ fn stamp(dir: &Path) -> Option<SystemTime> {
 }
 
 /// Whether a directory entry belongs in the tree. Directories always do,
-/// and a file does when Oryx can display it, which for an extension the
-/// table does not name means reading the first bytes.
+/// and a regular file does when Oryx can display it, which for an
+/// extension the table does not name means reading the first bytes.
 fn recognized(path: &Path, is_dir: bool) -> bool {
     if is_dir {
         return true;
@@ -335,8 +335,11 @@ impl Filter<'_> {
 }
 
 /// The recognized entries of one directory, directories first, both
-/// groups alphabetical and case-insensitive. A symbolic link counts as
-/// what it points at, so a linked folder lists among the folders. A
+/// groups alphabetical and case-insensitive. Only directories and
+/// regular files are listed: a named pipe would block the sniff, or a
+/// click, until a writer comes, and a device or a socket is no document.
+/// A symbolic link counts as what it points at, so a linked folder lists
+/// among the folders, and a link whose target is gone is left out. A
 /// directory that cannot be read yields its notice row instead. Dot
 /// entries pass through the filter.
 fn scan(dir: &Path, depth: usize, filter: Filter<'_>) -> Vec<Entry> {
@@ -351,7 +354,15 @@ fn scan(dir: &Path, depth: usize, filter: Filter<'_>) -> Vec<Entry> {
                 return None;
             }
             let kind = e.file_type().ok()?;
-            let is_dir = kind.is_dir() || (kind.is_symlink() && e.path().is_dir());
+            let (is_dir, is_file) = if kind.is_symlink() {
+                let target = std::fs::metadata(e.path()).ok()?;
+                (target.is_dir(), target.is_file())
+            } else {
+                (kind.is_dir(), kind.is_file())
+            };
+            if !is_dir && !is_file {
+                return None;
+            }
             recognized(&e.path(), is_dir).then(|| Entry {
                 hidden: name.starts_with('.'),
                 path: e.path(),
@@ -1978,6 +1989,49 @@ mod tests {
             "the parent row climbs the real path"
         );
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A named pipe is never listed, whatever its name: the scan would
+    /// open an extensionless one to sniff it and block the window's
+    /// thread until a writer comes (claim 4 of the hunt of Task 328),
+    /// and a click on one with a known extension would block the same
+    /// way. A failed test releases the blocked scan by opening the pipe
+    /// for writing.
+    #[cfg(unix)]
+    #[test]
+    fn a_named_pipe_is_not_listed_whatever_its_name() {
+        let dir = temp_tree("pipe");
+        for name in ["pipe", "pipe.md"] {
+            let made = std::process::Command::new("mkfifo")
+                .arg(dir.join(name))
+                .status()
+                .unwrap();
+            assert!(made.success(), "mkfifo {name}");
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let root = dir.clone();
+        std::thread::spawn(move || tx.send(names(&Sidebar::new(&root))));
+        let listed = rx.recv_timeout(std::time::Duration::from_secs(2));
+        if listed.is_err() {
+            let _ = std::fs::OpenOptions::new()
+                .write(true)
+                .open(dir.join("pipe"));
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+        let listed = listed.expect("the scan blocked on the pipe");
+        assert!(!listed.iter().any(|n| n.starts_with("pipe")), "{listed:?}");
+    }
+
+    /// A link whose target is gone is not listed: Oryx cannot display
+    /// it, and a click on it could only fail.
+    #[cfg(unix)]
+    #[test]
+    fn a_broken_link_is_not_listed() {
+        let dir = temp_tree("broken-link");
+        std::os::unix::fs::symlink(dir.join("gone.md"), dir.join("ghost.md")).unwrap();
+        let listed = names(&Sidebar::new(&dir));
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(!listed.iter().any(|n| n == "ghost.md"), "{listed:?}");
     }
 
     #[test]

@@ -156,11 +156,17 @@ fn refusal(bytes: &[u8]) -> Option<&'static str> {
     (unreadable * 10 > head.len() * 3).then_some("is not UTF-8 text")
 }
 
-/// Whether a file on disk holds text, read from its first bytes. A file
-/// that cannot be read is not displayable either, so it answers false.
+/// Whether a file on disk holds text, read from its first bytes. Only a
+/// regular file is opened, a link read as its target: a named pipe with
+/// no writer would block the open until a writer comes, on the window's
+/// thread, and a device or a socket is no document. A file that cannot
+/// be read is not displayable either, so it answers false.
 pub fn is_text_file(path: &Path) -> bool {
     use std::io::Read;
     if detect(path) == FileKind::Undisplayable {
+        return false;
+    }
+    if !std::fs::metadata(path).is_ok_and(|meta| meta.is_file()) {
         return false;
     }
     let Ok(mut file) = std::fs::File::open(path) else {
@@ -941,6 +947,37 @@ mod tests {
         };
         assert!(err.to_string().contains("PDF"), "{err}");
         std::fs::remove_file(&path).ok();
+    }
+
+    /// A named pipe with no writer blocks whoever opens it to read until
+    /// a writer comes, and the sidebar's scan opened one on the window's
+    /// thread (claim 4 of the hunt of Task 328). The sniff reads the
+    /// file's type first and never opens such a file. A failed test
+    /// releases the blocked thread by opening the pipe for writing.
+    #[cfg(unix)]
+    #[test]
+    fn a_named_pipe_is_not_a_text_file() {
+        let dir = std::env::temp_dir().join(format!("oryx-pipe-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pipe = dir.join("pipe");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&pipe)
+            .status()
+            .unwrap();
+        assert!(made.success(), "mkfifo");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let asked = pipe.clone();
+        std::thread::spawn(move || tx.send(is_text_file(&asked)));
+        let answer = rx.recv_timeout(std::time::Duration::from_secs(2));
+        if answer.is_err() {
+            let _ = std::fs::OpenOptions::new().write(true).open(&pipe);
+        }
+        std::fs::remove_file(&pipe).ok();
+        assert_eq!(
+            answer.ok(),
+            Some(false),
+            "the sniff blocked on the pipe, or read it as text"
+        );
     }
 
     #[test]
