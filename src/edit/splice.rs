@@ -48,6 +48,51 @@ impl Replay {
     }
 }
 
+/// A rewrite of whole lines as pieces inside the lines, the form a line
+/// command reaches the ledger in: for each line that changed, the part
+/// between what its old and new forms share at the start and at the
+/// end. No piece holds a line break, so each line keeps its ending. `at`
+/// is where `old` stands in the current text. `None` when the rewrite
+/// changes the number of lines, which no line command does.
+pub fn line_pieces(old: &str, new: &str, at: usize) -> Option<Vec<(Range<usize>, String)>> {
+    if old.matches('\n').count() != new.matches('\n').count() {
+        return None;
+    }
+    let mut pieces = Vec::new();
+    let mut start = at;
+    for (was, now) in old.split('\n').zip(new.split('\n')) {
+        if was != now {
+            let head = shared_head(was, now);
+            let tail = shared_tail(&was[head..], &now[head..]);
+            pieces.push((
+                start + head..start + was.len() - tail,
+                now[head..now.len() - tail].to_string(),
+            ));
+        }
+        start += was.len() + 1;
+    }
+    Some(pieces)
+}
+
+/// The bytes two texts share at their start, in whole characters.
+fn shared_head(a: &str, b: &str) -> usize {
+    a.chars()
+        .zip(b.chars())
+        .take_while(|(x, y)| x == y)
+        .map(|(x, _)| x.len_utf8())
+        .sum()
+}
+
+/// The bytes two texts share at their end, in whole characters.
+fn shared_tail(a: &str, b: &str) -> usize {
+    a.chars()
+        .rev()
+        .zip(b.chars().rev())
+        .take_while(|(x, y)| x == y)
+        .map(|(x, _)| x.len_utf8())
+        .sum()
+}
+
 /// The baseline offset of a current offset that no splice covers, with
 /// `shift` the length the splices before it added.
 fn base_of(current: usize, shift: isize) -> usize {
@@ -526,6 +571,41 @@ mod tests {
         assert_eq!(led.emit(), b"y1\r\nmid\ny2\r\n");
         assert_eq!(led.splice_count(), 2);
         assert_eq!(led.touched_lines(), 2);
+    }
+
+    /// A line command's rewrite as pieces inside the lines: a prefix, a
+    /// mark taken off, a line wrapped in marks, a box flipped, characters of
+    /// several bytes and a right-to-left line. No piece holds a line
+    /// break, and an unchanged line has none; a rewrite that changes the
+    /// number of lines has no line pieces.
+    #[test]
+    fn the_line_pieces_hold_the_changes_inside_the_lines() {
+        let owned = |list: &[(Range<usize>, &str)]| -> Vec<(Range<usize>, String)> {
+            list.iter()
+                .map(|(range, text)| (range.clone(), text.to_string()))
+                .collect()
+        };
+        assert_eq!(
+            line_pieces("a\nb\nc", "- a\n- b\n- c", 10),
+            Some(owned(&[(10..10, "- "), (12..12, "- "), (14..14, "- ")]))
+        );
+        assert_eq!(
+            line_pieces("> a\n\n> b", "a\n\nb", 0),
+            Some(owned(&[(0..2, ""), (5..7, "")]))
+        );
+        assert_eq!(
+            line_pieces("x\ny", "/* x */\n/* y */", 0),
+            Some(owned(&[(0..1, "/* x */"), (2..3, "/* y */")]))
+        );
+        assert_eq!(
+            line_pieces("- [ ] a\n- [x] b", "- [x] a\n- [ ] b", 0),
+            Some(owned(&[(3..4, "x"), (11..12, " ")]))
+        );
+        assert_eq!(
+            line_pieces("été\nשלום", "  été\n- שלום", 0),
+            Some(owned(&[(0..0, "  "), (6..6, "- ")]))
+        );
+        assert_eq!(line_pieces("a\nb", "a\nb\nc", 0), None);
     }
 
     /// The pieces merge with the splices they touch and with each other,

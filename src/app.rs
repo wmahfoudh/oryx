@@ -4389,8 +4389,8 @@ impl App {
     }
 
     /// The line burst behind press_tab: the lines the selection
-    /// touches, or the caret's line alone, re-indented as one splice
-    /// and one undo unit. In markdown an indent that would stop list
+    /// touches, or the caret's line alone, re-indented in one undo unit
+    /// (`rewrite_lines`). In markdown an indent that would stop list
     /// items being list items is refused with the reason.
     fn indent_lines(&mut self, outdent: bool) {
         if !outdent && self.markdown_source() {
@@ -4650,7 +4650,7 @@ impl App {
     }
 
     /// Rewrites the lines the selection touches, or the caret's line
-    /// alone, as one splice and one undo unit. `rewrite` answers the
+    /// alone, in one undo unit, each changed line an edit of its own. `rewrite` answers the
     /// new region and, per line, the byte column where the line
     /// changed and the delta. Caret and selection ride the per-line
     /// deltas rather than the splice's own seat, by `ride_rewrite`'s
@@ -4660,7 +4660,7 @@ impl App {
         let caret_before = self.caret.map_or(0, |c| c.offset);
         let anchor_before = self.selection_anchor_offset();
         let (start, end) = self.line_span();
-        let source = &self.document.source;
+        let source = self.document.source.clone();
         let (text, edits) = rewrite(&source[start..end]);
         if text == source[start..end] {
             return;
@@ -4671,17 +4671,28 @@ impl App {
         };
         let caret_after = map(caret_before);
         let anchor_after = anchor_before.map(map);
-        let replaced = source[start..end].to_string();
-        if !self.apply_edit(&Replay::single(start..end, &text)) {
+        // Each changed line is an edit of its own for the ledger and the
+        // history, so no edit holds a line break, and each line keeps
+        // the ending it has in the file.
+        let pieces = splice::line_pieces(&source[start..end], &text, start);
+        debug_assert!(pieces.is_some(), "a line command keeps the number of lines");
+        let pieces = pieces.unwrap_or_else(|| vec![(start..end, text.clone())]);
+        let Some((range, joined)) = splice::combine(&source, &pieces) else {
+            return;
+        };
+        let step = Replay {
+            range,
+            text: joined,
+            pieces,
+        };
+        if !self.apply_edit(&step) {
             return;
         }
         if let Some(hist) = self.undo.as_mut() {
-            hist.record(
-                start..end,
-                &text,
-                &replaced,
+            hist.record_each(
+                &source,
+                &step.pieces,
                 (caret_before, caret_after),
-                Kind::Structural,
                 Instant::now(),
             );
         }

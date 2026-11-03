@@ -8,7 +8,7 @@ use oryx::doc::load::FileKind;
 use oryx::doc::markdown;
 use oryx::doc::model::{BlockKind, Document, Span};
 use oryx::edit::manners::case_edit;
-use oryx::edit::splice::{combine, Ledger, Placed, Replay};
+use oryx::edit::splice::{combine, line_pieces, Ledger, Placed, Replay};
 use oryx::edit::undo::{Kind, Undo};
 use oryx::edit::{rendered_document, splice_document};
 use oryx::ui::search;
@@ -45,6 +45,12 @@ enum Step {
         needle: usize,
         with: String,
     },
+    /// A line command over the whole lines between two places: a mark
+    /// set before each line, the line breaks untouched.
+    Lines {
+        at: u16,
+        to: u16,
+    },
 }
 
 /// What Replace All looks for: letters, a line break, and both.
@@ -62,6 +68,7 @@ fn step() -> impl Strategy<Value = Step> {
         1 => Just(Step::Save),
         1 => (0..NEEDLES.len(), "[a-z\n]{0,3}")
             .prop_map(|(needle, with)| Step::ReplaceAll { needle, with }),
+        1 => (any::<u16>(), any::<u16>()).prop_map(|(at, to)| Step::Lines { at, to }),
     ]
 }
 
@@ -195,6 +202,45 @@ impl Session {
                     pieces: edits.clone(),
                 });
                 self.undo.record_each(&before, &edits, (0, 0), self.now);
+            }
+            Step::Lines { at, to } => {
+                let a = boundary(&self.model, *at);
+                let b = boundary(&self.model, *to).max(a);
+                let start = self.model[..a].rfind('\n').map_or(0, |i| i + 1);
+                let end = self.model[b..]
+                    .find('\n')
+                    .map_or(self.model.len(), |i| b + i);
+                let old = self.model[start..end].to_string();
+                let new = old
+                    .split('\n')
+                    .map(|line| format!("> {line}"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let Some(pieces) = line_pieces(&old, &new, start) else {
+                    return;
+                };
+                let Some((range, text)) = combine(&self.model, &pieces) else {
+                    return;
+                };
+                let before = self.model.clone();
+                let step = Replay {
+                    range,
+                    text,
+                    pieces: pieces.clone(),
+                };
+                self.led.replay(&step);
+                if let Some(park) = self.park.as_mut() {
+                    park.ledger.splice(step.range.clone(), &step.text);
+                }
+                // The model sets the marks on its own, at each line's
+                // start, so a piece that took a line break shows.
+                let starts: Vec<usize> = std::iter::once(start)
+                    .chain(old.match_indices('\n').map(|(i, _)| start + i + 1))
+                    .collect();
+                for at in starts.into_iter().rev() {
+                    self.replace(at..at, "> ");
+                }
+                self.undo.record_each(&before, &pieces, (0, 0), self.now);
             }
             Step::Park => self.park = Some(Park::at(&self.model)),
             Step::Save => {
