@@ -143,10 +143,16 @@ impl Table {
     /// state after the edit matches, which a resumed sweep checks where
     /// it converges: a walk that reaches the region's end files the
     /// state there anew, and one that falls short, before a slow line,
-    /// leaves the sweep that seam to converge on. The slow marks move
-    /// the same way.
+    /// leaves the sweep that seam to converge on. When the edit leaves
+    /// nothing of the region, the last lines deleted to the end of the
+    /// text, the seam at its end drops too: it holds the deleted
+    /// text's end state, and the region's end is now the frontier,
+    /// where the next walk would trust it. The slow marks move the same
+    /// way, the first line's dropping with the region when nothing of
+    /// it is left.
     pub fn shift(&mut self, old: &Range<usize>, new: &Range<usize>) {
         let delta = new.end as isize - old.end as isize;
+        let gone = new.is_empty();
         match self.before(old.start) {
             Some(at) => self.seams[at].chained = false,
             None => self.head = false,
@@ -154,7 +160,7 @@ impl Table {
         self.seams.retain_mut(|f| {
             if f.line <= old.start {
                 true
-            } else if f.line < old.end {
+            } else if f.line < old.end || (gone && f.line == old.end) {
                 false
             } else {
                 f.line = (f.line as isize + delta) as usize;
@@ -162,9 +168,9 @@ impl Table {
             }
         });
         self.slow.retain_mut(|line| {
-            if *line <= old.start {
+            if *line < old.start || (*line == old.start && !gone) {
                 true
-            } else if *line < old.end {
+            } else if *line < old.end || (gone && *line == old.end) {
                 false
             } else {
                 *line = (*line as isize + delta) as usize;
@@ -723,6 +729,59 @@ mod tests {
             lines_of(&table)
         );
         assert_eq!(parts(&doc).2, &full(&doc), "every row right");
+    }
+
+    /// Finding 1 of the read of `0174a42`: the last lines deleted to the
+    /// end of the text leave an empty edited range, and the seam after
+    /// them must drop, not land on the line where the next walk starts
+    /// with the deleted text's state. The slow marks of the deleted
+    /// lines drop with it.
+    #[test]
+    fn deleting_the_last_lines_drops_the_seam_after_them() {
+        let mut doc = rust_doc("fn a() {}\n");
+        let mut table = Table::default();
+        sweep(&mut doc, &mut table, 8, None, None);
+        let end = doc.source.len();
+        key(&mut doc, &mut table, end, 0, "/* note", || true);
+        table.mark_slow(1);
+        assert_eq!(parts(&doc).0.len(), 2);
+        key(&mut doc, &mut table, end, 7, "", || true);
+        let (lines, highlights, exact) = (parts(&doc).0, parts(&doc).2, parts(&doc).3);
+        assert_eq!(lines.len(), 1);
+        assert!(
+            table.seams().iter().all(|f| f.line <= 1),
+            "no seam past the end: {:?}",
+            lines_of(&table)
+        );
+        assert!(table.slow().is_empty(), "the deleted line's mark is gone");
+        assert_eq!(exact.min(highlights.len()), highlights.len());
+        let end = doc.source.len();
+        key(&mut doc, &mut table, end, 0, "fn x() {}", || true);
+        let want = full(&doc);
+        let (_, _, highlights, exact) = parts(&doc);
+        assert_eq!(exact, 2);
+        assert_eq!(
+            highlights[1], want[1],
+            "the new line is colored from the state before it, not the deleted comment's"
+        );
+        settle(
+            &mut doc,
+            &mut table,
+            8,
+            "after the deletion of the last lines",
+        );
+        let mut doc = rust_doc("fn a() {}\nlet b = 1;\n");
+        let mut table = Table::default();
+        sweep(&mut doc, &mut table, 1, None, None);
+        let all = doc.source.len();
+        key(&mut doc, &mut table, 0, all, "", || true);
+        assert!(
+            table.seams().iter().all(|f| f.line == 0),
+            "select all, delete: at most the fresh start at line 0 stands: {:?}",
+            lines_of(&table)
+        );
+        key(&mut doc, &mut table, 0, 0, "/* c", || true);
+        settle(&mut doc, &mut table, 1, "after select all and delete");
     }
 
     /// A caret seam lands between two seams with the flag of the one

@@ -251,6 +251,32 @@ fn cover_row(spans: &mut Vec<(std::ops::Range<usize>, SyntaxRole)>, text: &str) 
     }
 }
 
+/// The line ranges an edit touched, as the line tables count them: the
+/// ledger's ranges count the row after a final line break, which the
+/// tables do not have, so an edit that reaches the end of the old lines
+/// touches the new lines to their end, and the lines deleted to the end
+/// of the text leave an empty new range. Both arms of a key shift the
+/// seam table by these ranges.
+pub fn effective_lines(
+    old_len: usize,
+    new_len: usize,
+    old_touched: &std::ops::Range<usize>,
+    new_touched: &std::ops::Range<usize>,
+) -> (std::ops::Range<usize>, std::ops::Range<usize>) {
+    let reaches_end = old_touched.end >= old_len;
+    let old_eff = old_touched.start.min(old_len)..if reaches_end {
+        old_len
+    } else {
+        old_touched.end
+    };
+    let new_eff = if reaches_end {
+        old_eff.start..new_len
+    } else {
+        new_touched.clone()
+    };
+    (old_eff, new_eff)
+}
+
 /// Applies one edit to a code or text document in place, the keystroke
 /// fast path: the source swaps to `current`, the touched line entries
 /// rebuild through `CodeBody::splice`, the touched highlight rows
@@ -291,12 +317,7 @@ pub fn splice_document(
         return None;
     };
     let old_len = lines.len();
-    let old_eff_end = if old_touched.end >= old_len {
-        old_len
-    } else {
-        old_touched.end
-    };
-    let old_eff = old_touched.start.min(old_len)..old_eff_end;
+    let (old_eff, _) = effective_lines(old_len, old_len, &old_touched, &new_touched);
     // The touched rows' spans lifted into region coordinates before the
     // line vector splices the old geometry away. The region starts at
     // the first touched line, whose start the edit cannot move.
@@ -337,11 +358,7 @@ pub fn splice_document(
         return None;
     }
     let new_len = lines.len();
-    let new_eff = if old_touched.end >= old_len {
-        old_eff.start..new_len
-    } else {
-        new_touched
-    };
+    let (_, new_eff) = effective_lines(old_len, new_len, &old_touched, &new_touched);
     // Rows splice only as far as the computed prefix reaches; rows the
     // worker never colored stay absent and draw whole.
     if highlights.len() > old_eff.start {
@@ -937,6 +954,34 @@ mod tests {
                 "row {i} fits its line: {row:?} on {len} bytes"
             );
         }
+    }
+
+    /// Finding 2 of the read of `0174a42`: the fallback arm shifted the
+    /// seam table by the ledger's ranges, which count the row after a
+    /// final line break; the seam at the end then stood one line past
+    /// the file. Both arms take the ranges the line tables count.
+    #[test]
+    fn the_touched_lines_are_clamped_to_the_line_tables() {
+        assert_eq!(
+            effective_lines(3, 2, &(2..3), &(2..3)),
+            (2..3, 2..2),
+            "the last line's text deleted, the file ending with a line break: nothing of it left"
+        );
+        assert_eq!(
+            effective_lines(10, 10, &(4..5), &(4..5)),
+            (4..5, 4..5),
+            "a key inside the lines"
+        );
+        assert_eq!(
+            effective_lines(5, 7, &(4..5), &(4..7)),
+            (4..5, 4..7),
+            "lines added at the end"
+        );
+        assert_eq!(
+            effective_lines(5, 5, &(5..6), &(5..6)),
+            (5..5, 5..5),
+            "a key on the row after the final line break, before it opens a line"
+        );
     }
 
     /// A block with no grammar carries no colors and its frontier is its

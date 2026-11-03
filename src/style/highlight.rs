@@ -1229,21 +1229,22 @@ mod tests {
         for blocks in [4usize, 16, 64] {
             let mut h = Highlighter::new();
             let second = pending_blocks(blocks, 600);
-            let expected: usize = second
-                .iter()
-                .map(|p| p.lines.len().div_ceil(CHUNK_LINES))
-                .sum();
+            // Counted in lines, not chunks: under load a slow line closes
+            // its chunk early.
+            let expected: usize = second.iter().map(|p| p.lines.len()).sum();
             h.start(pending_blocks(blocks, 600), || {});
             h.start(second, || {});
+            let lines_of =
+                |arrivals: Vec<Arrival>| arrivals.iter().map(|a| a.spans.len()).sum::<usize>();
             let mut got = 0usize;
             for _ in 0..20_000 {
-                got += h.drain().len();
+                got += lines_of(h.drain());
                 if got >= expected || !h.is_running() {
                     break;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(1));
             }
-            got += h.drain().len();
+            got += lines_of(h.drain());
             assert_eq!(
                 got, expected,
                 "{blocks} blocks: the flag dropped before the live worker finished"
@@ -1815,10 +1816,20 @@ mod tests {
                 .expect("worker wake");
             got.extend(h.drain());
         }
-        assert_eq!(got.len(), 1);
-        assert_eq!(got[0].start_line, 512);
-        assert!(!got[0].speculative);
-        assert_eq!(got[0].seam, Some(seams[1].seam.clone()));
+        // Under load a line of the debug build can take longer than the
+        // budget and close its chunk early: the chunks are contiguous
+        // from the resume's line, and the last converges at the table's
+        // next seam.
+        assert!(got.iter().all(|a| !a.speculative));
+        let mut next = 512;
+        for a in &got {
+            assert_eq!(a.start_line, next, "contiguous chunks");
+            next += a.spans.len();
+        }
+        let last = got.last().expect("a converged chunk");
+        assert!(last.converged);
+        assert_eq!(next, 1024, "converged at the table's next seam");
+        assert_eq!(last.seam, Some(seams[1].seam.clone()));
         for _ in 0..20_000 {
             if !h.is_running() {
                 break;

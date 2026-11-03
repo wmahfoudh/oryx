@@ -648,11 +648,13 @@ fn fuzz_lines() {
 /// One step on the coloring of a code block, as the app drives it.
 #[derive(Debug, Clone)]
 enum Color {
-    /// A key: `text` typed at a place, its walk cut after `walk` lines,
-    /// as a budget running out cuts it, or run to the end of the touched
+    /// A key: `del` bytes replaced by `text` at a place, the end of the
+    /// text when none is given, its walk cut after `walk` lines, as a
+    /// budget running out cuts it, or run to the end of the touched
     /// lines.
     Key {
-        at: u16,
+        at: Option<u16>,
+        del: u8,
         text: String,
         walk: Option<u8>,
     },
@@ -667,21 +669,37 @@ enum Color {
     Slow { at: u16 },
     /// A key on the fallback arm: the document reparsed whole, the table
     /// shifted, no walk.
-    Fallback { at: u16, text: String },
+    Fallback {
+        at: Option<u16>,
+        del: u8,
+        text: String,
+    },
 }
 
 fn color_step() -> impl Strategy<Value = Color> {
     prop_oneof![
-        4 => (any::<u16>(), "[a*/\" \n]{1,3}", prop::option::of(0..6u8))
-            .prop_map(|(at, text, walk)| Color::Key { at, text, walk }),
+        4 => (prop::option::of(any::<u16>()), 0..8u8, "[a*/\" \n]{0,3}", prop::option::of(0..6u8))
+            .prop_map(|(at, del, text, walk)| Color::Key { at, del, text, walk }),
         3 => (1..6u8, prop::option::of(0..4u8))
             .prop_map(|(chunk, deliver)| Color::Sweep { chunk, deliver }),
         1 => any::<u16>().prop_map(|at| Color::Caret { at }),
         1 => (any::<u16>(), 1..8u8).prop_map(|(at, len)| Color::Guess { at, len }),
         1 => any::<u16>().prop_map(|at| Color::Slow { at }),
-        1 => (any::<u16>(), "[a*/\" \n]{1,3}")
-            .prop_map(|(at, text)| Color::Fallback { at, text }),
+        1 => (prop::option::of(any::<u16>()), 0..8u8, "[a*/\" \n]{0,3}")
+            .prop_map(|(at, del, text)| Color::Fallback { at, del, text }),
     ]
+}
+
+/// The bytes a key replaces: from a place, the end of the text when
+/// none is given, over `del` bytes, cut to the text and to a character
+/// boundary.
+fn edit_span(text: &str, at: Option<u16>, del: u8) -> std::ops::Range<usize> {
+    let a = at.map_or(text.len(), |at| boundary(text, at));
+    let mut b = (a + del as usize).min(text.len());
+    while !text.is_char_boundary(b) {
+        b += 1;
+    }
+    a..b
 }
 
 const COLOR_KIND: FileKind = FileKind::Code("rust");
@@ -824,12 +842,20 @@ impl Coloring {
 
     fn step(&mut self, step: &Color) -> Result<(), TestCaseError> {
         match step {
-            Color::Key { at, text, walk } => {
-                let at = boundary(&self.doc.source, *at);
+            Color::Key {
+                at,
+                del,
+                text,
+                walk,
+            } => {
+                let span = edit_span(&self.doc.source, *at, *del);
+                if span.is_empty() && text.is_empty() {
+                    return Ok(());
+                }
                 let exact0 = code_parts(&self.doc).2;
-                let touched = self.led.edit(at..at, text);
+                let touched = self.led.edit(span.clone(), text);
                 let current = self.led.current();
-                let spliced = splice_document(&mut self.doc, &current, at..at, touched);
+                let spliced = splice_document(&mut self.doc, &current, span, touched);
                 let Some((old, new)) = spliced else {
                     prop_assert!(false, "a code file takes the splice");
                     unreachable!()
@@ -942,11 +968,16 @@ impl Coloring {
                     self.table.mark_slow(line);
                 }
             }
-            Color::Fallback { at, text } => {
-                let at = boundary(&self.doc.source, *at);
-                let touched = self.led.edit(at..at, text);
+            Color::Fallback { at, del, text } => {
+                let span = edit_span(&self.doc.source, *at, *del);
+                if span.is_empty() && text.is_empty() {
+                    return Ok(());
+                }
+                let removed = self.doc.source[span.clone()].matches('\n').count();
+                let old_len = code_parts(&self.doc).0.len();
+                let touched = self.led.edit(span, text);
                 let current = self.led.current();
-                let old_touched = touched.start..touched.start + 1;
+                let old_touched = touched.start..touched.start + removed + 1;
                 self.doc = oryx::edit::reparse(
                     COLOR_KIND,
                     &current,
@@ -954,8 +985,11 @@ impl Coloring {
                     old_touched.clone(),
                     touched.clone(),
                 );
-                self.table.shift(&old_touched, &touched);
-                self.key_lines = touched;
+                let new_len = code_parts(&self.doc).0.len();
+                let (old_eff, new_eff) =
+                    oryx::edit::effective_lines(old_len, new_len, &old_touched, &touched);
+                self.table.shift(&old_eff, &new_eff);
+                self.key_lines = new_eff;
             }
         }
         Ok(())
@@ -1082,8 +1116,9 @@ fn run_coloring(text: &str, steps: &[Color]) -> Result<(), TestCaseError> {
 }
 
 /// The coloring of a code block against a full parse: random texts of
-/// Rust lines, comments and strings among them, and random keys, walks
-/// cut short, sweeps killed early, caret seams, guesses, slow marks and
+/// Rust lines, comments and strings among them, and random keys, among
+/// them deletions and edits at the very end of the text, walks cut
+/// short, sweeps killed early, caret seams, guesses, slow marks and
 /// fallback reparses, the invariants of the seam table checked after
 /// each step and a resume run to the end from each state.
 #[test]

@@ -1071,6 +1071,15 @@ fn note_guess(ranges: &mut Vec<std::ops::Range<usize>>, landed: std::ops::Range<
     ranges.push(merged);
 }
 
+/// The line count of a document's first block, zero without a code
+/// block.
+fn line_count(doc: &Document) -> usize {
+    match doc.blocks.first().map(|b| &b.kind) {
+        Some(BlockKind::CodeBlock { lines, .. }) => lines.len(),
+        _ => 0,
+    }
+}
+
 /// Whether the first chunk of a resumed sweep has landed: an exact
 /// chunk whose rows reach the end of the key's lines. The chunks above
 /// it, from a walk that fell short, and a caret seam landing first do
@@ -3122,18 +3131,26 @@ impl App {
                 owed
             }
             None => {
-                self.seams
-                    .entry(0)
-                    .or_default()
-                    .shift(&old_touched, &touched);
-                self.key_lines = touched.clone();
+                let old_len = line_count(&self.document);
                 self.document = edit::reparse(
                     load::detect(&path),
                     &current,
                     &self.document,
-                    old_touched,
-                    touched,
+                    old_touched.clone(),
+                    touched.clone(),
                 );
+                // The ledger's ranges count the row after a final line
+                // break, which the line table does not have: the seam
+                // table shifts by the lines the tables count, as the
+                // splice arm does.
+                let (old_eff, new_eff) = edit::effective_lines(
+                    old_len,
+                    line_count(&self.document),
+                    &old_touched,
+                    &touched,
+                );
+                self.seams.entry(0).or_default().shift(&old_eff, &new_eff);
+                self.key_lines = new_eff;
                 self.restart_layout();
                 grammar
             }
