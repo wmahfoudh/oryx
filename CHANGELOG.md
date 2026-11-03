@@ -28,6 +28,7 @@
 - When you search a page with a regular expression such as `[\s\S]+`, each paragraph now matches on its own. Before, only the last paragraph matched. On a long page, Oryx froze.
 - When you use Replace All in a file with both Windows and Unix line endings, the lines between the matches now keep their own ending. Before, they took the file's usual ending, and the save notice counted them as changed.
 - When you indent lines, or make them a list, a quote, a heading, a task list or a comment, in a file with both Windows and Unix line endings, each line now keeps its own ending. Before, the lines took the file's usual ending.
+- When you scroll with the search bar open, the matches that come into view are now highlighted at once, down to the end of the page. Before, they were highlighted late, and the last paragraphs could stay plain.
 - In a markdown file with a stray carriage return, the editor no longer shows an extra blank row. Before, it could appear after you deleted the text between the carriage return and the end of its line, then edited the next line.
 - The zip library, used for EPUB books, CBZ comics and zipped FB2 books, was updated to version 9. Three security advisories were published on the old version in October 2026. They are about extracting an archive to disk. Oryx never does that. No release was affected.
 

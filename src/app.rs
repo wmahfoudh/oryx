@@ -49,7 +49,7 @@ use oryx::ui::outline::{entry_offset, heading_anchor, heading_by_anchor, Outline
 use oryx::ui::overlay::{Action, Overlay, OverlayResult};
 use oryx::ui::scrollbar;
 use oryx::ui::search::{self, BarHit, ReplaceRow, SearchState};
-use oryx::ui::selection::{self, ModelPos, Selection};
+use oryx::ui::selection::{self, window_rects, ModelPos, Selection};
 use oryx::ui::settings::{self, Settings};
 use oryx::ui::sidebar::{self, Sidebar};
 use oryx::ui::textfield::{Edit, TextField};
@@ -670,32 +670,6 @@ fn draw_strip(
         let src = row * strip.width as usize;
         frame[dst..dst + shown].copy_from_slice(&strip.pixels[src..src + shown]);
     }
-}
-
-/// The rectangles of the matches whose top lies between `lo` and `hi`,
-/// each with its match's index. Bounding the geometry to a window around
-/// the view keeps thousands of matches cheap, and one shaped buffer per
-/// run serves every match the run holds.
-fn window_rects(
-    lay: &LayoutDoc,
-    doc: &Document,
-    fonts: &mut FontStore,
-    matches: &[Selection],
-    lo: f32,
-    hi: f32,
-) -> Vec<(usize, (f32, f32, f32, f32))> {
-    let mut rects = Vec::new();
-    let mut shaped = selection::ShapeCache::default();
-    let tops = selection::match_tops(lay, doc, matches);
-    for (index, m) in matches.iter().enumerate() {
-        if tops[index] < lo || tops[index] > hi {
-            continue;
-        }
-        for rect in selection::rects_window(m, lay, doc, fonts, &mut shaped, lo, hi) {
-            rects.push((index, rect));
-        }
-    }
-    rects
 }
 
 /// A place in the source the view shows once the layout reaches it.
@@ -8836,9 +8810,10 @@ impl App {
         // The materialized window slides to the scroll position before
         // anything reads geometry: the full band when settled, only the
         // viewport under a live gesture.
+        let mut slid = false;
         if let Some(lay) = self.layout.as_mut() {
             self.scroll_y = scroll::clamp(self.scroll_y, lay.height, size.height as f32);
-            window_to(
+            slid = window_to(
                 &self.document,
                 &self.theme,
                 &mut self.fonts,
@@ -8873,9 +8848,9 @@ impl App {
             self.caret_snap = !self.settle_caret(size.height as f32);
         }
         // A search step that scrolled re-slides the window so this
-        // frame paints the landing, not a cold viewport; the match
-        // rects recompute over what just materialized.
-        if self.scroll_y != before_search {
+        // frame paints the landing, not a cold viewport.
+        let stepped = self.scroll_y != before_search;
+        if stepped {
             if let Some(lay) = self.layout.as_mut() {
                 window_to(
                     &self.document,
@@ -8891,12 +8866,16 @@ impl App {
                 );
                 lay.index_more();
             }
-            self.refresh_search_rects();
         }
+        // The match rects exist only for the blocks the layout holds when
+        // they are built, so they are rebuilt when the window slid (with
+        // the search open only the viewport is filled, and each slide
+        // brings blocks that had none), after a search step, and when the
+        // view left the band they were built over.
         let drifted = self.search.as_ref().is_some_and(|state| {
             !state.stale && (self.scroll_y - state.rects_scroll).abs() > self.viewport_h()
         });
-        if drifted {
+        if slid || stepped || drifted {
             self.refresh_search_rects();
         }
         self.sync_occurrences();

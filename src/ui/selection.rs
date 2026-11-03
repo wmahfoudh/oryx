@@ -716,6 +716,67 @@ pub fn rects_window(
     rects_for(sel, lay, doc, fonts, cache, head.chain(tail))
 }
 
+/// The rectangles of the matches whose top lies between `lo` and `hi`,
+/// each with its match's index, what the search and the lit
+/// occurrences paint. Bounding the geometry to a window around the view
+/// keeps thousands of matches cheap, and one shaped buffer per run
+/// serves every match the run holds.
+pub fn window_rects(
+    lay: &LayoutDoc,
+    doc: &Document,
+    fonts: &mut FontStore,
+    matches: &[Selection],
+    lo: f32,
+    hi: f32,
+) -> Vec<(usize, (f32, f32, f32, f32))> {
+    let held = held_matches(lay, doc, matches);
+    let near = &matches[held.clone()];
+    let mut rects = Vec::new();
+    let mut shaped = ShapeCache::default();
+    let tops = match_tops(lay, doc, near);
+    for (offset, m) in near.iter().enumerate() {
+        if tops[offset] < lo || tops[offset] > hi {
+            continue;
+        }
+        for rect in rects_window(m, lay, doc, fonts, &mut shaped, lo, hi) {
+            rects.push((held.start + offset, rect));
+        }
+    }
+    rects
+}
+
+/// The matches the layout's placed runs can give a rectangle: those
+/// overlapping the model positions the runs cover, both ends included,
+/// so a match of line breaks beside a run's end is in. The others have
+/// no run to be drawn on, and a rebuild skips them before it looks up
+/// their tops. `matches` is in document order and its matches do not
+/// overlap, so their ends are in order too.
+pub fn held_matches(
+    lay: &LayoutDoc,
+    doc: &Document,
+    matches: &[Selection],
+) -> std::ops::Range<usize> {
+    let mut held: Option<(ModelPos, ModelPos)> = None;
+    for (index, run) in lay.runs.iter().enumerate() {
+        let Some((start, mut end)) = run_interval(run) else {
+            continue;
+        };
+        end.byte = end
+            .byte
+            .saturating_add(run_tail(lay, doc, index, run).len());
+        held = Some(match held {
+            None => (start, end),
+            Some((first, last)) => (first.min(start), last.max(end)),
+        });
+    }
+    let Some((first, last)) = held else {
+        return 0..0;
+    };
+    let from = matches.partition_point(|m| m.ordered().1 < first);
+    let to = matches.partition_point(|m| m.ordered().0 <= last).max(from);
+    from..to
+}
+
 /// The y position and size of the first placed run overlapping each
 /// match: one walk over the runs with a binary search into the sorted
 /// matches. A match with no placed run answers with its recorded block
@@ -2108,6 +2169,53 @@ mod tests {
             "the box runs over the three trailing spaces: {w} against {}",
             run.width + 3.0 * space_w
         );
+    }
+
+    /// On a page the layout holds one screen of, a rebuild of the boxes
+    /// looks at the matches of the held paragraphs alone, a few of the
+    /// page's, and finds the boxes it finds from every match.
+    #[test]
+    fn the_boxes_come_from_the_held_matches_alone() {
+        let page: String = (0..400)
+            .map(|n| format!("Paragraph {n} with lorem and more lorem.\n\n"))
+            .collect();
+        let doc = markdown::parse(page.as_str());
+        let theme = Theme::default_dark();
+        let cfg = ViewConfig::default();
+        let mut fonts = FontStore::new();
+        let mut media = MediaCache::offline(PathBuf::from("."));
+        let (mut l, mut pass) = crate::layout::layout_begin(&doc, &cfg, 1000.0);
+        pass.retain_around(0.0, 600.0);
+        crate::layout::layout_more(
+            &doc, &theme, &mut fonts, &mut media, &cfg, &mut l, &mut pass, None,
+        );
+        let scroll = l.height / 2.0;
+        crate::layout::window_to(
+            &doc, &theme, &mut fonts, &mut media, &cfg, &mut l, None, scroll, 600.0, false,
+        );
+        l.index_more();
+        let matches = crate::ui::search::matches(&doc, "lorem");
+        let held = held_matches(&l, &doc, &matches);
+        assert!(
+            !held.is_empty() && held.len() * 10 < matches.len(),
+            "{held:?} of {} matches",
+            matches.len()
+        );
+        // The referee: every match's top looked up, then the same filter.
+        let (lo, hi) = (scroll - 1200.0, scroll + 1800.0);
+        let tops = match_tops(&l, &doc, &matches);
+        let mut shaped = ShapeCache::default();
+        let mut all = Vec::new();
+        for (index, m) in matches.iter().enumerate() {
+            if tops[index] < lo || tops[index] > hi {
+                continue;
+            }
+            for rect in rects_window(m, &l, &doc, &mut fonts, &mut shaped, lo, hi) {
+                all.push((index, rect));
+            }
+        }
+        assert!(!all.is_empty(), "the screen held has boxes");
+        assert_eq!(window_rects(&l, &doc, &mut fonts, &matches, lo, hi), all);
     }
 
     #[test]
