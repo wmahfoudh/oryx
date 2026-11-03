@@ -578,6 +578,9 @@ struct Seg {
 struct Haystack {
     text: String,
     segs: Vec<Seg>,
+    /// Where each block separator stands in `text`, in order: the
+    /// regex walks the text between two of them as one block.
+    seps: Vec<usize>,
 }
 
 impl Haystack {
@@ -585,6 +588,7 @@ impl Haystack {
         let mut hay = Haystack {
             text: String::new(),
             segs: Vec::new(),
+            seps: Vec::new(),
         };
         for index in 0..doc.blocks.len() {
             let mut opened = false;
@@ -613,16 +617,31 @@ impl Haystack {
 
     /// Plants the block boundary ahead of a block's first character:
     /// newline, separator, newline, so `^` and `$` treat every block as
-    /// its own line while the separator keeps any match from crossing.
+    /// its own line, and the regex walk stops each block at its
+    /// separator.
     fn open(&mut self, opened: &mut bool) {
         if !*opened {
             if !self.text.is_empty() {
                 self.text.push('\n');
+                self.seps.push(self.text.len());
                 self.text.push(BLOCK_SEP);
                 self.text.push('\n');
             }
             *opened = true;
         }
+    }
+
+    /// The stretch of `text` each block takes, from just past the
+    /// separator before it to the separator after it, in order.
+    fn blocks(&self) -> impl Iterator<Item = Range<usize>> + '_ {
+        let starts =
+            std::iter::once(0).chain(self.seps.iter().map(|&at| at + BLOCK_SEP.len_utf8()));
+        let ends = self
+            .seps
+            .iter()
+            .copied()
+            .chain(std::iter::once(self.text.len()));
+        starts.zip(ends).map(|(start, end)| start..end)
     }
 
     fn push_inert(&mut self, opened: &mut bool, text: &str) {
@@ -740,29 +759,48 @@ pub fn text_matches(doc: &Document, text: &str) -> Vec<Selection> {
 /// not compile or exceeds the engine's backtracking limit, which the bar
 /// reports as an invalid pattern. `^` and `$` match at line starts and
 /// ends. Case follows smart case read from the pattern's literal
-/// characters. A match covering the block separator converts to no
-/// selection, so matches still never cross blocks.
+/// characters. Each block is searched on its own (`walk_blocks`), so a
+/// match never crosses blocks.
 pub fn regex_matches(doc: &Document, pattern: &str) -> Option<Vec<Selection>> {
     if pattern.is_empty() {
         return Some(Vec::new());
     }
     let regex = compile(pattern)?;
     let hay = Haystack::build(doc);
+    let found = walk_blocks(&hay, |text, pos| {
+        let found = regex.find_from_pos(text, pos).ok()?;
+        Some(found.map(|m| (m.start()..m.end(), ())))
+    })?;
+    Some(found.into_iter().map(|(selection, ())| selection).collect())
+}
+
+/// The regex walk over a page, one block at a time: the pattern runs on
+/// the text up to the block's separator, so no match reaches into the
+/// next block and the page is read once. The text before the block
+/// stays in view for a lookbehind. `find` answers the first match from
+/// a position, beside what the caller keeps of it, or `None` when the
+/// engine fails. A match that converts to no selection (an empty one,
+/// or the line breaks beside a separator alone) resumes one character
+/// on, so the real matches it covered are still found.
+fn walk_blocks<T>(
+    hay: &Haystack,
+    mut find: impl FnMut(&str, usize) -> Option<Option<(Range<usize>, T)>>,
+) -> Option<Vec<(Selection, T)>> {
     let mut out = Vec::new();
-    let mut pos = 0;
-    while pos <= hay.text.len() {
-        let Some(found) = regex.find_from_pos(&hay.text, pos).ok()? else {
-            break;
-        };
-        match hay.selection(found.start()..found.end()) {
-            Some(selection) => {
-                out.push(selection);
-                pos = found.end();
+    for block in hay.blocks() {
+        let text = &hay.text[..block.end];
+        let mut pos = block.start;
+        while pos <= block.end {
+            let Some((found, kept)) = find(text, pos)? else {
+                break;
+            };
+            match hay.selection(found.clone()) {
+                Some(selection) => {
+                    out.push((selection, kept));
+                    pos = found.end;
+                }
+                None => pos = next_boundary(text, found.start),
             }
-            // A zero-width or boundary-covering candidate: resume just
-            // inside it, so a greedy match crossing a block cannot hide
-            // the real matches it covered.
-            None => pos = next_boundary(&hay.text, found.start()),
         }
     }
     Some(out)
@@ -780,7 +818,8 @@ fn next_boundary(text: &str, at: usize) -> usize {
 /// Every regex match beside its expanded replacement: `$1`, `$0` and
 /// `${name}` read the match's own captures and `$$` is a literal dollar.
 /// The selections equal `regex_matches` for the same pattern, index for
-/// index, and `None` reports the same failures.
+/// index, since both take the walk of `walk_blocks`, and `None` reports
+/// the same failures.
 pub fn regex_replacements(
     doc: &Document,
     pattern: &str,
@@ -793,24 +832,16 @@ pub fn regex_replacements(
     let hay = Haystack::build(doc);
     let template = unescape_template(template);
     let expander = fancy_regex::Expander::default();
-    let mut out = Vec::new();
-    // The walk mirrors `regex_matches` exactly, discard recovery
-    // included, which is what keeps the pairs aligned with the matches.
-    let mut pos = 0;
-    while pos <= hay.text.len() {
-        let Some(captures) = regex.captures_from_pos(&hay.text, pos).ok()? else {
-            break;
-        };
-        let found = captures.get(0).expect("a match always captures group 0");
-        match hay.selection(found.start()..found.end()) {
-            Some(selection) => {
-                out.push((selection, expander.expansion(&template, &captures)));
-                pos = found.end();
-            }
-            None => pos = next_boundary(&hay.text, found.start()),
-        }
-    }
-    Some(out)
+    walk_blocks(&hay, |text, pos| {
+        let captures = regex.captures_from_pos(text, pos).ok()?;
+        Some(captures.map(|captures| {
+            let found = captures.get(0).expect("a match always captures group 0");
+            (
+                found.start()..found.end(),
+                expander.expansion(&template, &captures),
+            )
+        }))
+    })
 }
 
 /// The replacement with its escapes read, the way VS Code's replace box
@@ -1513,6 +1544,46 @@ mod tests {
                     byte: 10
                 },
             }]
+        );
+    }
+
+    /// A regex runs on each block on its own: a pattern that would run
+    /// through the whole page matches each paragraph whole, and the
+    /// replacements pair with the same selections.
+    #[test]
+    fn a_regex_matches_each_block_on_its_own() {
+        let doc = markdown::parse("alpha one.\n\nbeta two.\n\ngamma three.\n");
+        let found = regex_matches(&doc, r"[\s\S]+").expect("valid pattern");
+        let spans: Vec<(usize, usize, usize)> = found
+            .iter()
+            .map(|s| (s.start.block, s.start.byte, s.end.byte))
+            .collect();
+        assert_eq!(spans, vec![(0, 0, 10), (1, 0, 9), (2, 0, 12)]);
+        let paired: Vec<Selection> = regex_replacements(&doc, r"[\s\S]+", "x")
+            .expect("valid pattern")
+            .into_iter()
+            .map(|(selection, _)| selection)
+            .collect();
+        assert_eq!(paired, found);
+    }
+
+    /// The walk is one pass over the page: a pattern that would run
+    /// through every paragraph costs one match per paragraph, not a scan
+    /// to the end of the page from each of its characters.
+    #[test]
+    fn a_regex_over_many_blocks_costs_one_pass() {
+        const PARAGRAPHS: usize = 500;
+        let page: String = (0..PARAGRAPHS)
+            .map(|n| format!("Paragraph number {n} of a long page of text.\n\n"))
+            .collect();
+        let doc = markdown::parse(page.as_str());
+        let started = std::time::Instant::now();
+        let found = regex_matches(&doc, r"[\s\S]+").expect("valid pattern");
+        let took = started.elapsed();
+        assert!(
+            found.len() == PARAGRAPHS && took < std::time::Duration::from_secs(1),
+            "{} matches in {took:?}",
+            found.len()
         );
     }
 

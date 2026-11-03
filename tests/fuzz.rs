@@ -9,6 +9,7 @@ use oryx::doc::model::{BlockKind, Document, Span};
 use oryx::edit::manners::case_edit;
 use oryx::edit::splice::{Ledger, Placed, Splice};
 use oryx::edit::undo::{Kind, Undo};
+use oryx::ui::search;
 use proptest::prelude::*;
 use proptest::test_runner::TestCaseError;
 use std::sync::Arc;
@@ -368,5 +369,83 @@ fn fuzz_case() {
     };
     proptest!(config, |(text in "[a-z $\\n{}`\\[\\]()<>!/=\"0-9.*-]{0,60}")| {
         check_case(&text)?;
+    });
+}
+
+/// The patterns of the search fuzzer: greedy runs that would cross the
+/// blocks, anchors, word boundaries, and patterns that match empty.
+const PATTERNS: &[&str] = &[
+    r"[\s\S]+",
+    r"(?s).+",
+    r"\D+",
+    r"[^q]+",
+    r"\w+",
+    r"[a-z]+ [a-z]+",
+    r"a.",
+    r"^\w",
+    r"\w$",
+    r"b*",
+    r"e\b",
+    r"\bc",
+    r"\s+",
+    r".",
+];
+
+/// One page of paragraphs against the model: the pattern run on each
+/// paragraph's own text. The search finds the same non-empty matches,
+/// block by block, and the replace walk the same selections.
+fn check_search(paragraphs: &[String], pattern: &str) -> Result<(), TestCaseError> {
+    let page = paragraphs.join("\n\n") + "\n";
+    let doc = markdown::parse(page.as_str());
+    let model = fancy_regex::Regex::new(&format!("(?m){pattern}")).expect("a valid pattern");
+    let mut expected = Vec::new();
+    for (block, text) in paragraphs.iter().enumerate() {
+        for found in model.find_iter(text) {
+            let found = found.expect("no backtracking limit on these patterns");
+            if !found.as_str().is_empty() {
+                expected.push((block, found.start(), found.end()));
+            }
+        }
+    }
+    let matches = search::regex_matches(&doc, pattern).expect("a valid pattern");
+    let mut got = Vec::new();
+    for selection in &matches {
+        prop_assert_eq!(
+            selection.start.block,
+            selection.end.block,
+            "a match crossed a block"
+        );
+        prop_assert_eq!(selection.start.span, 0);
+        prop_assert_eq!(selection.end.span, 0);
+        got.push((
+            selection.start.block,
+            selection.start.byte,
+            selection.end.byte,
+        ));
+    }
+    prop_assert_eq!(&got, &expected, "pattern {:?} on {:?}", pattern, page);
+    let paired: Vec<_> = search::regex_replacements(&doc, pattern, "x")
+        .expect("a valid pattern")
+        .into_iter()
+        .map(|(selection, _)| selection)
+        .collect();
+    prop_assert_eq!(paired, matches, "the replace walk left the search's");
+    Ok(())
+}
+
+/// The regex search against a plain model: pages of paragraphs of
+/// lowercase words, and a pattern from `PATTERNS`.
+#[test]
+#[ignore]
+fn fuzz_search() {
+    let config = ProptestConfig {
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    };
+    proptest!(config, |(
+        paragraphs in prop::collection::vec("[a-e]{1,4}( [a-e]{1,4}){0,5}", 1..12),
+        pattern in prop::sample::select(PATTERNS),
+    )| {
+        check_search(&paragraphs, pattern)?;
     });
 }
