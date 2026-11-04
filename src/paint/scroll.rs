@@ -98,14 +98,25 @@ impl EdgeScroll {
         self.edge.is_some()
     }
 
-    /// A tick: the step in pixels toward the edge, the speed times the
-    /// time since the last tick, negative upward. None while idle.
+    /// The next tick while the scroll runs, `EDGE_SCROLL_TICK` after the
+    /// last: the loop's wake.
+    pub fn due(&self) -> Option<Instant> {
+        self.edge.and(self.last).map(|last| last + EDGE_SCROLL_TICK)
+    }
+
+    /// A pass of the loop: the step in pixels toward the edge when the
+    /// tick is due, the speed times the time since the last tick,
+    /// negative upward. None while idle, and before the tick is due: the
+    /// frame a tick asks for brings a pass of its own, which must not
+    /// tick again at once, or the loop spins at the frame's pace.
     pub fn tick(&mut self, now: Instant, row_h: f32, view_h: f32) -> Option<f32> {
         let (edge, past) = self.edge?;
-        let elapsed = self.last.map_or(0.0, |last| {
-            now.saturating_duration_since(last).as_secs_f32()
-        });
+        let last = self.last?;
+        if now < last + EDGE_SCROLL_TICK {
+            return None;
+        }
         self.last = Some(now);
+        let elapsed = now.duration_since(last).as_secs_f32();
         let step = edge_speed(past / row_h, view_h / row_h) * elapsed * row_h;
         Some(match edge {
             Edge::Top => -step,
@@ -1200,6 +1211,36 @@ mod tests {
         edge.stop();
         assert!(!edge.running());
         assert_eq!(edge.tick(t0 + ms(200), 24.0, 600.0), None);
+    }
+
+    /// A pass of the loop before the tick is due steps nothing and names
+    /// the tick's time for the wake; a frame the tick asks for must not
+    /// run the next tick at once. At the tick, the step counts the whole
+    /// 16 ms, and the next tick is due 16 ms later.
+    #[test]
+    fn a_pass_before_the_tick_is_due_steps_nothing() {
+        let t0 = Instant::now();
+        let ms = Duration::from_millis;
+        let mut edge = EdgeScroll::default();
+        assert_eq!(edge.due(), None, "idle: no tick due");
+        edge.moved(599.0, 600.0, t0);
+        assert_eq!(edge.due(), Some(t0 + EDGE_SCROLL_TICK));
+        assert_eq!(edge.tick(t0 + ms(5), 24.0, 600.0), None, "5 ms: not due");
+        assert_eq!(
+            edge.due(),
+            Some(t0 + EDGE_SCROLL_TICK),
+            "the deadline stands"
+        );
+        let step = edge
+            .tick(t0 + EDGE_SCROLL_TICK, 24.0, 600.0)
+            .expect("due: a step");
+        assert!(
+            (step - 11.52).abs() < 0.01,
+            "{step}: 30 rows a second for 16 ms"
+        );
+        assert_eq!(edge.due(), Some(t0 + EDGE_SCROLL_TICK + EDGE_SCROLL_TICK));
+        edge.stop();
+        assert_eq!(edge.due(), None);
     }
 
     /// The selection's end is placed on a row of the view: the pointer's

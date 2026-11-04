@@ -6149,21 +6149,23 @@ impl App {
     }
 
     /// Advances the edge scroll of a selection drag held at or past the
-    /// view's edge, and keeps the loop ticking while it runs: the view
-    /// steps toward the edge and the selection's end follows onto the
-    /// edge row. The drag's end stops it.
+    /// view's edge, and keeps the loop waking while it runs: at each tick
+    /// the view steps toward the edge and the selection's end follows
+    /// onto the edge row. A pass between two ticks, the frame's own,
+    /// arms the wake and steps nothing. The drag's end stops it.
     fn step_edge_scroll(&mut self, wake: &mut Wake) {
         if !self.selecting() {
             self.edge_scroll.stop();
             return;
         }
         let now = Instant::now();
-        let Some(step) = self.edge_scroll.tick(now, self.row_h(), self.viewport_h()) else {
-            return;
-        };
-        self.scroll_by(step);
-        self.extend_selection();
-        wake.by(now + scroll::EDGE_SCROLL_TICK);
+        if let Some(step) = self.edge_scroll.tick(now, self.row_h(), self.viewport_h()) {
+            self.scroll_by(step);
+            self.extend_selection();
+        }
+        if let Some(due) = self.edge_scroll.due() {
+            wake.by(due);
+        }
     }
 
     /// Hands pending highlight work to the worker. An empty list still

@@ -1157,11 +1157,12 @@ fn edge_step() -> impl Strategy<Value = EdgeStep> {
 }
 
 /// The edge scroll against a plain model: a view of `view_h` pixels on
-/// a document of `doc_h`, the pointer moving, ticks and the drag's end.
-/// The view moves only while the drag is live and the pointer is at or
-/// past an edge, toward that edge, by the speed of the pixels past it
-/// times the time since the last tick or the arrival at the edge, and
-/// it stays within the document.
+/// a document of `doc_h`, the pointer moving, passes of the loop and
+/// the drag's end. The view moves only while the drag is live and the
+/// pointer is at or past an edge, at a pass 16 ms or more after the
+/// last tick or the arrival at the edge, toward that edge, by the speed
+/// of the pixels past it times that time, and it stays within the
+/// document.
 fn check_edge_scroll(view_h: f32, doc_h: f32, steps: &[EdgeStep]) -> Result<(), TestCaseError> {
     let row_h = 24.0;
     let mut now = Instant::now();
@@ -1184,7 +1185,12 @@ fn check_edge_scroll(view_h: f32, doc_h: f32, steps: &[EdgeStep]) -> Result<(), 
                     prop_assert_eq!(got, None, "idle, no step");
                     continue;
                 };
-                let elapsed = since.map_or(0.0, |s| (now - s).as_secs_f32());
+                let clock = since.expect("the model's clock runs with its edge");
+                if now < clock + scroll::EDGE_SCROLL_TICK {
+                    prop_assert_eq!(got, None, "not due, no step");
+                    continue;
+                }
+                let elapsed = (now - clock).as_secs_f32();
                 since = Some(now);
                 let rows = scroll::edge_speed(past / row_h, view_h / row_h) * elapsed;
                 let expected = match side {
