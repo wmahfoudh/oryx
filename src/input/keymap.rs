@@ -1431,8 +1431,10 @@ mod tests {
 
     /// The list and quote keys act on the editor's lines. Under the
     /// search bar, Go to line or a dialog's field they are no chord, so
-    /// on a Mac Option types its character into the field: an en dash
-    /// for Option+-, where the chord typed nothing before.
+    /// on a Mac Option types its character: an en dash for Option+-
+    /// into the search field, where the chord typed nothing before. Go
+    /// to line takes digits only, and a dialog's field typed the
+    /// character already, Alt or not.
     #[test]
     fn under_a_field_the_option_list_keys_type_on_a_mac() {
         let keys = [
@@ -1460,7 +1462,7 @@ mod tests {
             }
             assert!(
                 alt_typing(&chr(typed), false, true, false, true),
-                "{typed} is typed into the field"
+                "{typed} is typing, for the search field"
             );
         }
         let none = PhysicalKey::Unidentified(NativeKeyCode::Unidentified);
