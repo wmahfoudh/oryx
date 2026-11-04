@@ -133,6 +133,7 @@ With text selected, typing a bracket, a quote, `*`, `_` or a backtick wraps the 
 | Triple click | Select the paragraph, the line of code or the table cell |
 | `Shift` + click | Extend the selection to the click |
 | Drag over several words on one line | Select them and highlight every other place the text appears |
+| Drag past the top or the bottom of the window | Scroll the page and keep selecting while you hold the button |
 | Click on a task box | Tick or untick it, without entering the editor |
 | Middle click on a file in the sidebar | Open it in a second window |
 | `Ctrl` + mouse wheel | Zoom |
