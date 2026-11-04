@@ -20,7 +20,7 @@ use oryx::edit::{
 use oryx::export::{self, ExportPass, ExportSettings};
 use oryx::input::{
     self,
-    keymap::{self, Command},
+    keymap::{self, Command, KeyOwner},
     touch,
 };
 use oryx::layout::{
@@ -1244,22 +1244,6 @@ fn disk_state(path: &Path) -> std::io::Result<Option<DiskState>> {
         }
         Err(err) => Err(err),
     }
-}
-
-/// What has the keys, in the order the routing of `window_event` asks:
-/// the question, a dialog, Go to line, the search bar, then the text.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum KeyOwner {
-    /// The unsaved changes or recovery question, answered by letters.
-    Question,
-    /// A dialog; `field` while one of its text fields is open.
-    Dialog {
-        field: bool,
-    },
-    GoTo,
-    Search,
-    /// The editor, or the page in reading mode.
-    Text,
 }
 
 /// Where the live caret stands.
@@ -9510,16 +9494,21 @@ impl ApplicationHandler for App {
                 let ctrl = chord_key(self.modifiers);
                 let shift = self.modifiers.shift_key();
                 let alt = self.modifiers.alt_key();
-                let resolved = keymap::command(keymap::Press {
-                    typed: &logical_key,
-                    keycap: &keycap,
-                    code: physical_key,
-                    ctrl,
-                    shift,
-                    alt,
-                });
+                let resolved = keymap::command(
+                    keymap::Press {
+                        typed: &logical_key,
+                        keycap: &keycap,
+                        code: physical_key,
+                        ctrl,
+                        shift,
+                        alt,
+                    },
+                    self.key_owner(),
+                );
                 // A character typed with Alt held (Option on a Mac) is
-                // typing when no chord of the keymap claims the key.
+                // typing when no chord of the keymap claims the key. A
+                // command with no receiver in what has the keys claims
+                // nothing (`Command::live`).
                 let claimed = resolved.is_some();
                 let alt = alt
                     && !keymap::alt_typing(
@@ -9563,20 +9552,22 @@ impl ApplicationHandler for App {
                     }
                     _ if self.goto_key(key, ctrl, shift, alt) => {}
                     // The go to line field has the keyboard, under the
-                    // search fields' own rule: what it did not claim
-                    // acts only when it is app-wide.
+                    // search field's own rule: what it did not claim
+                    // acts only when it is app-wide, which `resolved`
+                    // already holds to (`Command::live`).
                     _ if self.goto.is_some() => {
-                        if let Some(cmd) = resolved.filter(|cmd| cmd.live_under_a_field()) {
+                        if let Some(cmd) = resolved {
                             self.run_command(cmd, event_loop);
                         }
                     }
                     _ if self.search_key(key, ctrl, shift, alt) => {}
                     // A search field has the keyboard: what the bar did
-                    // not claim acts only when it is app-wide. Nothing
-                    // reaches the editor's own keys or the document's
-                    // editing chords while a field is open.
+                    // not claim acts only when it is app-wide, which
+                    // `resolved` already holds to. Nothing reaches the
+                    // editor's own keys or the document's editing chords
+                    // while a field is open.
                     _ if self.search.is_some() => {
-                        if let Some(cmd) = resolved.filter(|cmd| cmd.live_under_a_field()) {
+                        if let Some(cmd) = resolved {
                             self.run_command(cmd, event_loop);
                         }
                     }

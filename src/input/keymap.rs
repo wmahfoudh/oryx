@@ -149,17 +149,42 @@ impl Command {
     ];
 }
 
+/// What has the keys, in the order the routing of the window's key
+/// event asks: the question, a dialog, Go to line, the search bar,
+/// then the text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyOwner {
+    /// The unsaved changes or recovery question, answered by letters.
+    Question,
+    /// A dialog; `field` while one of its text fields is open.
+    Dialog {
+        field: bool,
+    },
+    GoTo,
+    Search,
+    /// The editor, or the page in reading mode.
+    Text,
+}
+
 impl Command {
-    /// Whether the command still acts while a text field has the
-    /// keyboard. The document's editing and selection keys fall silent
-    /// there, so nothing typed at a field ever edits the page; the
-    /// app-wide chords stay live (files, find, navigation, view,
-    /// export, help), and so does the editor toggle, a mode switch.
-    pub fn live_under_a_field(self) -> bool {
-        match section_of(self) {
-            Some("Edit") => self == Command::Edit,
-            Some("Selection") => false,
-            _ => true,
+    /// Whether the command has a receiver while `owner` has the keys.
+    /// The regex toggle acts on the search bar alone. While a text
+    /// field or a dialog has the keyboard, the document's editing and
+    /// selection keys fall silent, so nothing typed at a field ever
+    /// edits the page; the app-wide chords stay live (files, find,
+    /// navigation, view, export, help), and so does the editor toggle,
+    /// a mode switch. A press whose command has no receiver is no
+    /// chord (`command`), so that Option on a Mac types the key's
+    /// character (`alt_typing`).
+    pub fn live(self, owner: KeyOwner) -> bool {
+        match (self, owner) {
+            (Command::Regex, _) => owner == KeyOwner::Search,
+            (_, KeyOwner::Text) => true,
+            _ => match section_of(self) {
+                Some("Edit") => self == Command::Edit,
+                Some("Selection") => false,
+                _ => true,
+            },
         }
     }
 }
@@ -663,21 +688,25 @@ pub struct Press<'a> {
     pub alt: bool,
 }
 
-/// Resolves a key press against the table. Chords that require a
-/// modifier are tried first, so Ctrl+Shift+C never falls through to
-/// Ctrl+C and Ctrl+Left never falls through to plain Left; the key's
-/// place on the keyboard is tried last, once no character chord has
-/// claimed the press, with the row's modifier alone, and never for a
-/// plain letter, which is a chord by its letter wherever it sits. A
-/// letter chord is matched with `latin_key`, so a layout that types
-/// another script keeps its letter chords.
-pub fn command(press: Press) -> Option<Command> {
-    command_on(press, cfg!(target_os = "macos"))
+/// Resolves a key press against the table, for `owner` holding the
+/// keys. Chords that require a modifier are tried first, so
+/// Ctrl+Shift+C never falls through to Ctrl+C and Ctrl+Left never
+/// falls through to plain Left; the key's place on the keyboard is
+/// tried last, once no character chord has claimed the press, with the
+/// row's modifier alone, and never for a plain letter, which is a
+/// chord by its letter wherever it sits. A letter chord is matched
+/// with `latin_key`, so a layout that types another script keeps its
+/// letter chords. A command with no receiver under `owner` is no chord
+/// (`Command::live`): the regex toggle without a search bar, a list
+/// key under a field. On a Mac such a press types its Option character
+/// (`alt_typing`).
+pub fn command(press: Press, owner: KeyOwner) -> Option<Command> {
+    command_on(press, owner, cfg!(target_os = "macos"))
 }
 
 /// `command` for a named platform, so a test can ask for the Mac's
 /// chords from anywhere.
-fn command_on(press: Press, macos: bool) -> Option<Command> {
+fn command_on(press: Press, owner: KeyOwner, macos: bool) -> Option<Command> {
     let Press {
         typed,
         keycap,
@@ -741,7 +770,11 @@ fn command_on(press: Press, macos: bool) -> Option<Command> {
             _ => false,
         })
     };
-    shifted.or_else(plain).or_else(physical).map(|(_, cmd)| cmd)
+    shifted
+        .or_else(plain)
+        .or_else(physical)
+        .map(|(_, cmd)| cmd)
+        .filter(|cmd| cmd.live(owner))
 }
 
 /// The key a chord is matched with. The character the press types
@@ -916,7 +949,31 @@ mod tests {
                 shift,
                 alt,
             },
+            KeyOwner::Text,
             macos,
+        )
+    }
+
+    /// A Mac press with Option held: the character it types, the
+    /// keycap, the key's place, and who has the keys.
+    fn option_on(
+        typed: &str,
+        keycap: &str,
+        code: KeyCode,
+        shift: bool,
+        owner: KeyOwner,
+    ) -> Option<Command> {
+        super::command_on(
+            Press {
+                typed: &chr(typed),
+                keycap: &chr(keycap),
+                code: PhysicalKey::Code(code),
+                ctrl: false,
+                shift,
+                alt: true,
+            },
+            owner,
+            true,
         )
     }
 
@@ -1153,17 +1210,7 @@ mod tests {
     #[test]
     fn on_the_mac_option_chords_by_the_keycap_and_types_the_rest() {
         let on = |typed: &str, keycap: &str, code: KeyCode, shift: bool| {
-            super::command_on(
-                Press {
-                    typed: &chr(typed),
-                    keycap: &chr(keycap),
-                    code: PhysicalKey::Code(code),
-                    ctrl: false,
-                    shift,
-                    alt: true,
-                },
-                true,
-            )
+            option_on(typed, keycap, code, shift, KeyOwner::Text)
         };
         assert_eq!(
             on("\u{2013}", "-", KeyCode::Minus, false),
@@ -1231,17 +1278,7 @@ mod tests {
     #[test]
     fn the_rows_by_place_leave_the_mac_dash_a_plain_option_character_and_a_letter() {
         let mac = |typed: &str, keycap: &str, code: KeyCode| {
-            super::command_on(
-                Press {
-                    typed: &chr(typed),
-                    keycap: &chr(keycap),
-                    code: PhysicalKey::Code(code),
-                    ctrl: false,
-                    shift: false,
-                    alt: true,
-                },
-                true,
-            )
+            option_on(typed, keycap, code, false, KeyOwner::Text)
         };
         assert_eq!(
             mac("\u{bf}", "\u{df}", KeyCode::Minus),
@@ -1320,51 +1357,128 @@ mod tests {
     }
 
     /// Alt+R is a row of the keymap, so the rules of Option apply to it.
+    /// Its receiver is the search bar, so it is a chord there alone: in
+    /// the editor, Option+R is no chord and types ® on a Mac (claim 14
+    /// of the hunt of 1.3.0).
     #[test]
-    fn alt_r_toggles_the_regex_by_the_keymap() {
+    fn alt_r_toggles_the_regex_under_the_search_bar_alone() {
         let none = PhysicalKey::Unidentified(NativeKeyCode::Unidentified);
-        assert_eq!(
-            resolve(&chr("r"), none, false, false, true),
-            Some(Command::Regex)
-        );
-        assert_eq!(
-            resolve(&chr("R"), none, false, true, true),
-            Some(Command::Regex),
-            "Shift makes no difference elsewhere"
-        );
-        assert!(Command::Regex.live_under_a_field());
-        let mac = |typed: &str, keycap: &str, code: KeyCode, shift: bool| {
+        let linux = |typed: &str, shift: bool, owner: KeyOwner| {
             super::command_on(
                 Press {
                     typed: &chr(typed),
-                    keycap: &chr(keycap),
-                    code: PhysicalKey::Code(code),
+                    keycap: &chr(typed),
+                    code: none,
                     ctrl: false,
                     shift,
                     alt: true,
                 },
-                true,
+                owner,
+                false,
             )
         };
+        assert_eq!(linux("r", false, KeyOwner::Search), Some(Command::Regex));
         assert_eq!(
-            mac("\u{ae}", "r", KeyCode::KeyR, false),
+            linux("R", true, KeyOwner::Search),
             Some(Command::Regex),
-            "US Mac: Option+R"
+            "Shift makes no difference elsewhere"
         );
         assert_eq!(
-            mac("\u{2030}", "r", KeyCode::KeyR, true),
+            linux("r", false, KeyOwner::Text),
+            None,
+            "no search bar, nothing to toggle"
+        );
+        assert_eq!(
+            linux("r", false, KeyOwner::GoTo),
+            None,
+            "Go to line closes the search bar"
+        );
+        assert_eq!(
+            option_on("\u{ae}", "r", KeyCode::KeyR, false, KeyOwner::Search),
+            Some(Command::Regex),
+            "US Mac: Option+R under the search bar"
+        );
+        assert_eq!(
+            option_on("\u{ae}", "r", KeyCode::KeyR, false, KeyOwner::Text),
+            None,
+            "US Mac: Option+R in the editor is no chord"
+        );
+        let registered = chr("\u{ae}");
+        assert!(
+            alt_typing(&registered, false, true, false, true),
+            "and types ® into the editor"
+        );
+        assert!(
+            !alt_typing(&registered, false, true, true, true),
+            "claimed under the search bar, it toggles"
+        );
+        assert_eq!(
+            option_on("\u{2030}", "r", KeyCode::KeyR, true, KeyOwner::Search),
             None,
             "US Mac: Option+Shift+R types a per mille sign"
         );
         assert_eq!(
-            mac("\u{ae}", "r", KeyCode::KeyO, false),
+            option_on("\u{ae}", "r", KeyCode::KeyO, false, KeyOwner::Search),
             Some(Command::Regex),
             "Dvorak Mac: the key printed R"
         );
         assert_eq!(
-            mac("\u{3c0}", "p", KeyCode::KeyR, false),
+            option_on("\u{3c0}", "p", KeyCode::KeyR, false, KeyOwner::Search),
             None,
             "Dvorak Mac: the key printed P at the US R place types pi"
+        );
+    }
+
+    /// The list and quote keys act on the editor's lines. Under the
+    /// search bar, Go to line or a dialog's field they are no chord, so
+    /// on a Mac Option types its character into the field: an en dash
+    /// for Option+-, where the chord typed nothing before.
+    #[test]
+    fn under_a_field_the_option_list_keys_type_on_a_mac() {
+        let keys = [
+            ("\u{2013}", "-", KeyCode::Minus, Command::BulletList),
+            ("\u{a1}", "1", KeyCode::Digit1, Command::NumberedList),
+            ("\u{2248}", "x", KeyCode::KeyX, Command::TaskList),
+            ("\u{2265}", ".", KeyCode::Period, Command::Quote),
+        ];
+        for (typed, keycap, code, cmd) in keys {
+            assert_eq!(
+                option_on(typed, keycap, code, false, KeyOwner::Text),
+                Some(cmd),
+                "{cmd:?} with the text"
+            );
+            for owner in [
+                KeyOwner::Search,
+                KeyOwner::GoTo,
+                KeyOwner::Dialog { field: true },
+            ] {
+                assert_eq!(
+                    option_on(typed, keycap, code, false, owner),
+                    None,
+                    "{cmd:?} under {owner:?}"
+                );
+            }
+            assert!(
+                alt_typing(&chr(typed), false, true, false, true),
+                "{typed} is typed into the field"
+            );
+        }
+        let none = PhysicalKey::Unidentified(NativeKeyCode::Unidentified);
+        assert_eq!(
+            super::command_on(
+                Press {
+                    typed: &chr("-"),
+                    keycap: &chr("-"),
+                    code: none,
+                    ctrl: false,
+                    shift: false,
+                    alt: true,
+                },
+                KeyOwner::Search,
+                false,
+            ),
+            None,
+            "Linux: Alt+minus under the search bar is nothing, as before"
         );
     }
 
@@ -1694,7 +1808,8 @@ mod tests {
 
     /// While a text field has the keyboard, the document's editing and
     /// selection keys fall silent; the app-wide chords stay live. The
-    /// editor toggle is a mode switch, not an edit.
+    /// editor toggle is a mode switch, not an edit. The regex toggle
+    /// acts on the search bar alone.
     #[test]
     fn under_a_field_the_document_keys_fall_silent() {
         for cmd in [
@@ -1711,8 +1826,9 @@ mod tests {
             Command::Comment,
             Command::DeleteLines,
         ] {
+            assert!(cmd.live(KeyOwner::Text), "{cmd:?} acts on the text");
             assert!(
-                !cmd.live_under_a_field(),
+                !cmd.live(KeyOwner::Search),
                 "{cmd:?} edits or selects in the document"
             );
         }
@@ -1734,21 +1850,36 @@ mod tests {
             Command::Quit,
             Command::Export,
         ] {
-            assert!(cmd.live_under_a_field(), "{cmd:?} is app-wide");
+            assert!(cmd.live(KeyOwner::Text), "{cmd:?} is app-wide");
+            assert!(cmd.live(KeyOwner::Search), "{cmd:?} is app-wide");
         }
+        let owners = [
+            KeyOwner::Question,
+            KeyOwner::Dialog { field: false },
+            KeyOwner::Dialog { field: true },
+            KeyOwner::GoTo,
+            KeyOwner::Search,
+            KeyOwner::Text,
+        ];
         for row in SHORTCUTS {
             for (_, cmd) in row.bindings {
-                let expected = match row.section {
-                    "Edit" => *cmd == Command::Edit,
-                    "Selection" => false,
-                    _ => true,
-                };
-                assert_eq!(
-                    cmd.live_under_a_field(),
-                    expected,
-                    "{cmd:?} in the {} section",
-                    row.section
-                );
+                for owner in owners {
+                    let expected = match (cmd, owner) {
+                        (Command::Regex, _) => owner == KeyOwner::Search,
+                        (_, KeyOwner::Text) => true,
+                        _ => match row.section {
+                            "Edit" => *cmd == Command::Edit,
+                            "Selection" => false,
+                            _ => true,
+                        },
+                    };
+                    assert_eq!(
+                        cmd.live(owner),
+                        expected,
+                        "{cmd:?} in the {} section under {owner:?}",
+                        row.section
+                    );
+                }
             }
         }
     }
@@ -1893,7 +2024,7 @@ mod tests {
         assert_eq!(command(&chr("g"), true, false), Some(Command::GoToLine));
         assert_eq!(command(&chr("G"), true, true), Some(Command::GoToLine));
         assert!(
-            Command::GoToLine.live_under_a_field(),
+            Command::GoToLine.live(KeyOwner::Search),
             "Ctrl+G under the search field swaps the two bars"
         );
         assert_eq!(

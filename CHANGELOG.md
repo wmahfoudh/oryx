@@ -43,6 +43,8 @@
 - A zipped FB2 book whose inner file name is in an old Windows encoding, such as a Russian name in CP866, now opens. Before, it was refused as not readable.
 - A comic zipped on a Mac now shows its pages alone. Before, the hidden `__MACOSX` entries showed as blank pages at the start.
 - A damaged book or comic whose header declares an impossible size is now refused as damaged. Before, Oryx could crash on it.
+- On a Mac, `Option+R` now types ® in the editor. Before, it typed nothing. The key still switches regular expressions on and off in the search bar.
+- On a Mac, `Option+-`, `Option+1`, `Option+X` and `Option+.` now type their characters in the search bar, such as an en dash for `Option+-`. Before, they typed nothing there.
 - The zip library, used for EPUB books, CBZ comics and zipped FB2 books, was updated to version 9. Three security advisories were published on the old version in October 2026. They are about extracting an archive to disk. Oryx never does that. No release was affected.
 
 ## v1.2.2
