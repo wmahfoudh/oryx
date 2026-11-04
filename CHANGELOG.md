@@ -12,6 +12,10 @@
 
 - You can now update the AppImage in place with AppImageUpdate, AppImageLauncher or Gear Lever. Before, you downloaded each new version yourself.
 
+#### Selection
+
+- When you select with the mouse and drag above or below the window, the page now scrolls and the selection grows while you hold the button. The farther the pointer, the faster. Before, the page did not move.
+
 ### Fixes
 
 - In the markdown editor, a click on a heading in the Outline tab now lands on that heading after you edited the text above it. Before, the cursor landed where the heading was before the edit, and the next key could crash Oryx.

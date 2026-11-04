@@ -2,7 +2,7 @@
 //! memcpy slice; the band repaints recentered only near its edges.
 
 use std::ops::Range;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::doc::images::MediaCache;
 use crate::doc::model::{BlockKind, Document};
@@ -12,6 +12,106 @@ use crate::style::theme::Theme;
 
 pub fn clamp(y: f32, doc_height: f32, viewport_h: f32) -> f32 {
     y.clamp(0.0, (doc_height - viewport_h).max(0.0))
+}
+
+/// How often the edge scroll of a selection drag advances the view: the
+/// frame, as the fling's tick. A move during a drag costs about a
+/// millisecond on the window's thread at every tier (Task 347).
+pub const EDGE_SCROLL_TICK: Duration = Duration::from_millis(16);
+
+/// The bounds of the three bands of `edge_speed`, in rows past the
+/// edge: near, up to a row and a half; middle, up to three; far beyond.
+const EDGE_NEAR: f32 = 1.5;
+const EDGE_FAR: f32 = 3.0;
+
+/// The edge of the view a held pointer is at or past.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Edge {
+    Top,
+    Bottom,
+}
+
+/// The edge a pointer's y (the window's pixels) is at or past, with the
+/// pixels past it: 0 on the edge's own pixel row, which counts so that a
+/// maximized window, where the pointer cannot leave, scrolls too. None
+/// inside the view.
+pub fn edge_of(y: f32, view_h: f32) -> Option<(Edge, f32)> {
+    let bottom = view_h - 1.0;
+    if y <= 0.0 {
+        Some((Edge::Top, -y))
+    } else if y >= bottom {
+        Some((Edge::Bottom, y - bottom))
+    } else {
+        None
+    }
+}
+
+/// The speed of the edge scroll in rows a second, for a pointer
+/// `rows_past` the edge on a view of `rows_in_view` rows. VS Code's
+/// curve: a view a second on the edge, growing with the distance, ten
+/// views a second and more far out; the floors keep a short view
+/// moving.
+pub fn edge_speed(rows_past: f32, rows_in_view: f32) -> f32 {
+    let (views_added, floor) = if rows_past <= EDGE_NEAR {
+        (1.0, 30.0)
+    } else if rows_past <= EDGE_FAR {
+        (2.0, 60.0)
+    } else {
+        (7.0, 200.0)
+    };
+    (rows_in_view * (views_added + rows_past)).max(floor)
+}
+
+/// The y the selection's end is placed at during a drag: the pointer's
+/// y clamped to the view's pixel rows, so the end is never above or
+/// below the view.
+pub fn edge_clamp(y: f32, view_h: f32) -> f32 {
+    y.clamp(0.0, (view_h - 1.0).max(0.0))
+}
+
+/// The edge scroll of a selection drag: the edge the pointer is at or
+/// past with the pixels past it, and the instant the view last stepped
+/// (the pointer's arrival at the edge, before the first tick). Idle
+/// while the pointer is inside the view or no drag is live.
+#[derive(Debug, Default)]
+pub struct EdgeScroll {
+    edge: Option<(Edge, f32)>,
+    last: Option<Instant>,
+}
+
+impl EdgeScroll {
+    /// The pointer moved to `y` during a live drag: at or past an edge
+    /// the scroll runs, its clock started now when it was idle; inside,
+    /// it stops.
+    pub fn moved(&mut self, y: f32, view_h: f32, now: Instant) {
+        self.edge = edge_of(y, view_h);
+        self.last = self.edge.map(|_| self.last.unwrap_or(now));
+    }
+
+    /// The drag ended: the scroll stops.
+    pub fn stop(&mut self) {
+        self.edge = None;
+        self.last = None;
+    }
+
+    pub fn running(&self) -> bool {
+        self.edge.is_some()
+    }
+
+    /// A tick: the step in pixels toward the edge, the speed times the
+    /// time since the last tick, negative upward. None while idle.
+    pub fn tick(&mut self, now: Instant, row_h: f32, view_h: f32) -> Option<f32> {
+        let (edge, past) = self.edge?;
+        let elapsed = self.last.map_or(0.0, |last| {
+            now.saturating_duration_since(last).as_secs_f32()
+        });
+        self.last = Some(now);
+        let step = edge_speed(past / row_h, view_h / row_h) * elapsed * row_h;
+        Some(match edge {
+            Edge::Top => -step,
+            Edge::Bottom => step,
+        })
+    }
 }
 
 /// The source offset of what stands at the top of the view: the start
@@ -1004,5 +1104,110 @@ mod tests {
         assert_eq!(view.len(), 8);
         assert_eq!(view[0], 3);
         assert_eq!(view[7], 4);
+    }
+
+    /// The edge a pointer is at or past, and the pixels past it: the
+    /// edge's own pixel row counts, so a maximized window scrolls too;
+    /// a row inside does not.
+    #[test]
+    fn a_pointer_at_or_past_an_edge_names_the_edge_and_the_pixels_past_it() {
+        assert_eq!(edge_of(599.0, 600.0), Some((Edge::Bottom, 0.0)));
+        assert_eq!(edge_of(650.0, 600.0), Some((Edge::Bottom, 51.0)));
+        assert_eq!(edge_of(0.0, 600.0), Some((Edge::Top, 0.0)));
+        assert_eq!(edge_of(-24.0, 600.0), Some((Edge::Top, 24.0)));
+        assert_eq!(edge_of(1.0, 600.0), None);
+        assert_eq!(edge_of(598.0, 600.0), None);
+        assert_eq!(edge_of(300.0, 600.0), None);
+    }
+
+    /// The speed in rows a second: a view a second on the edge, more
+    /// with the distance past it, never under the floors.
+    #[test]
+    fn the_edge_speed_grows_with_the_distance_past_the_edge() {
+        assert_eq!(
+            edge_speed(0.0, 25.0),
+            30.0,
+            "25 rows in view: the floor of 30"
+        );
+        assert_eq!(
+            edge_speed(0.0, 40.0),
+            40.0,
+            "40 rows in view: a view a second"
+        );
+        assert_eq!(edge_speed(1.0, 25.0), 50.0);
+        assert_eq!(edge_speed(1.5, 25.0), 62.5);
+        assert_eq!(edge_speed(2.0, 25.0), 100.0);
+        assert_eq!(edge_speed(3.0, 25.0), 125.0);
+        assert_eq!(edge_speed(4.0, 25.0), 275.0);
+        assert_eq!(
+            edge_speed(5.0, 10.0),
+            200.0,
+            "far out on a short view: the floor of 200"
+        );
+    }
+
+    /// A tick steps the view toward the edge by the speed times the
+    /// time since the last tick, in pixels: a pointer on the bottom row
+    /// of a 600 px view of 24 px rows (30 rows a second) steps 72 px in
+    /// 100 ms, and on the top row the same upward.
+    #[test]
+    fn a_tick_steps_toward_the_edge_by_the_speed_times_the_elapsed_time() {
+        let t0 = Instant::now();
+        let mut edge = EdgeScroll::default();
+        edge.moved(599.0, 600.0, t0);
+        assert!(edge.running());
+        let step = edge
+            .tick(t0 + Duration::from_millis(100), 24.0, 600.0)
+            .expect("a step");
+        assert!((step - 72.0).abs() < 0.01, "{step}");
+        let mut edge = EdgeScroll::default();
+        edge.moved(0.0, 600.0, t0);
+        let step = edge
+            .tick(t0 + Duration::from_millis(100), 24.0, 600.0)
+            .expect("a step");
+        assert!((step + 72.0).abs() < 0.01, "{step}");
+    }
+
+    /// A tick counts from the last tick, and a return to the edge after
+    /// a stay inside starts the clock again at the return.
+    #[test]
+    fn a_tick_counts_from_the_last_tick_or_from_the_return_to_the_edge() {
+        let t0 = Instant::now();
+        let ms = Duration::from_millis;
+        let mut edge = EdgeScroll::default();
+        edge.moved(599.0, 600.0, t0);
+        edge.tick(t0 + ms(100), 24.0, 600.0);
+        let step = edge.tick(t0 + ms(200), 24.0, 600.0).expect("a step");
+        assert!((step - 72.0).abs() < 0.01, "{step}");
+        edge.moved(300.0, 600.0, t0 + ms(250));
+        edge.moved(599.0, 600.0, t0 + ms(1000));
+        let step = edge.tick(t0 + ms(1100), 24.0, 600.0).expect("a step");
+        assert!((step - 72.0).abs() < 0.01, "{step}, not the 800 ms inside");
+    }
+
+    /// The scroll stops when the pointer comes back inside and when the
+    /// drag ends: a tick then steps nothing.
+    #[test]
+    fn the_edge_scroll_stops_inside_the_view_and_at_the_drag_s_end() {
+        let t0 = Instant::now();
+        let ms = Duration::from_millis;
+        let mut edge = EdgeScroll::default();
+        edge.moved(650.0, 600.0, t0);
+        edge.moved(300.0, 600.0, t0 + ms(50));
+        assert!(!edge.running());
+        assert_eq!(edge.tick(t0 + ms(100), 24.0, 600.0), None);
+        edge.moved(650.0, 600.0, t0 + ms(150));
+        edge.stop();
+        assert!(!edge.running());
+        assert_eq!(edge.tick(t0 + ms(200), 24.0, 600.0), None);
+    }
+
+    /// The selection's end is placed on a row of the view: the pointer's
+    /// y clamped to the view's pixel rows.
+    #[test]
+    fn the_selection_s_end_stays_within_the_view() {
+        assert_eq!(edge_clamp(-10.0, 600.0), 0.0);
+        assert_eq!(edge_clamp(650.0, 600.0), 599.0);
+        assert_eq!(edge_clamp(300.0, 600.0), 300.0);
     }
 }

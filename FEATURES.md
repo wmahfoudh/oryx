@@ -95,7 +95,7 @@ The search field works like a text box: `Ctrl+Left` and `Ctrl+Right` move by wor
 
 `Ctrl+C` copies the selection with its formatting. It pastes into an email or a Word document with its headings, lists, tables, quotes, links and code, and with its pictures and formulas as images. A terminal or a text editor gets plain text. `Ctrl+Shift+C` copies the markdown source of the selection.
 
-A double click selects a word and highlights every other place where the same word appears. A selection of several words on one line, made with the mouse or the keyboard, highlights its other occurrences too. A triple click selects the paragraph, the line of code or the table cell, and a click with `Shift` held extends the selection to that point. Select all is instant whatever the size of the file. A selection stays when you zoom, change the theme or resize the window, and both kinds of copy work before a big file has finished loading.
+A double click selects a word and highlights every other place where the same word appears. A selection of several words on one line, made with the mouse or the keyboard, highlights its other occurrences too. A triple click selects the paragraph, the line of code or the table cell, and a click with `Shift` held extends the selection to that point. When you drag past the top or the bottom of the window, the page scrolls and the selection grows while you hold the button. Select all is instant whatever the size of the file. A selection stays when you zoom, change the theme or resize the window, and both kinds of copy work before a big file has finished loading.
 
 ### Sidebar
 

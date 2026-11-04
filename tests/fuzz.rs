@@ -11,6 +11,7 @@ use oryx::edit::manners::case_edit;
 use oryx::edit::splice::{combine, line_pieces, Ledger, Placed, Replay};
 use oryx::edit::undo::{Kind, Undo};
 use oryx::edit::{rendered_document, splice_document};
+use oryx::paint::scroll::{self, Edge, EdgeScroll};
 use oryx::ui::search;
 use proptest::prelude::*;
 use proptest::test_runner::TestCaseError;
@@ -1133,5 +1134,110 @@ fn fuzz_seams() {
         steps in prop::collection::vec(color_step(), 1..8),
     )| {
         run_coloring(&text, &steps)?;
+    });
+}
+
+/// One step of a selection drag held near the view's edge.
+#[derive(Debug, Clone, Copy)]
+enum EdgeStep {
+    /// The pointer moves to a y: inside the view or past an edge.
+    Move(f32),
+    /// A tick, that many milliseconds after the last step.
+    Tick(u16),
+    /// The drag ends.
+    Stop,
+}
+
+fn edge_step() -> impl Strategy<Value = EdgeStep> {
+    prop_oneof![
+        (-200f32..800f32).prop_map(EdgeStep::Move),
+        (0u16..200).prop_map(EdgeStep::Tick),
+        Just(EdgeStep::Stop),
+    ]
+}
+
+/// The edge scroll against a plain model: a view of `view_h` pixels on
+/// a document of `doc_h`, the pointer moving, ticks and the drag's end.
+/// The view moves only while the drag is live and the pointer is at or
+/// past an edge, toward that edge, by the speed of the pixels past it
+/// times the time since the last tick or the arrival at the edge, and
+/// it stays within the document.
+fn check_edge_scroll(view_h: f32, doc_h: f32, steps: &[EdgeStep]) -> Result<(), TestCaseError> {
+    let row_h = 24.0;
+    let mut now = Instant::now();
+    let mut edge = EdgeScroll::default();
+    let mut scroll_y = scroll::clamp(doc_h / 2.0, doc_h, view_h);
+    let mut at: Option<(Edge, f32)> = None;
+    let mut since: Option<Instant> = None;
+    for step in steps {
+        match *step {
+            EdgeStep::Move(y) => {
+                edge.moved(y, view_h, now);
+                at = scroll::edge_of(y, view_h);
+                since = at.map(|_| since.unwrap_or(now));
+                prop_assert_eq!(edge.running(), at.is_some(), "moved to {}", y);
+            }
+            EdgeStep::Tick(ms) => {
+                now += Duration::from_millis(u64::from(ms));
+                let got = edge.tick(now, row_h, view_h);
+                let Some((side, past)) = at else {
+                    prop_assert_eq!(got, None, "idle, no step");
+                    continue;
+                };
+                let elapsed = since.map_or(0.0, |s| (now - s).as_secs_f32());
+                since = Some(now);
+                let rows = scroll::edge_speed(past / row_h, view_h / row_h) * elapsed;
+                let expected = match side {
+                    Edge::Top => -rows * row_h,
+                    Edge::Bottom => rows * row_h,
+                };
+                let Some(step) = got else {
+                    prop_assert!(false, "no step while {:?} by {} px", side, past);
+                    unreachable!();
+                };
+                prop_assert!(
+                    (step - expected).abs() <= 0.001 * expected.abs().max(1.0),
+                    "{:?} by {} px after {} ms: {} px, not {}",
+                    side,
+                    past,
+                    ms,
+                    step,
+                    expected
+                );
+                scroll_y = scroll::clamp(scroll_y + step, doc_h, view_h);
+                prop_assert!(
+                    scroll_y >= 0.0 && scroll_y <= (doc_h - view_h).max(0.0),
+                    "the view left the document: {}",
+                    scroll_y
+                );
+            }
+            EdgeStep::Stop => {
+                edge.stop();
+                at = None;
+                since = None;
+                prop_assert!(!edge.running(), "stopped");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The edge scroll of a selection drag: views of 200 to 1200 pixels on
+/// documents up to 12,000, random moves of the pointer inside or past
+/// the edges, ticks of up to 200 ms and the drag's end, against the
+/// plain model.
+#[test]
+#[ignore]
+fn fuzz_edge_scroll() {
+    let config = ProptestConfig {
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    };
+    proptest!(config, |(
+        view_h in 200f32..1200f32,
+        doc_h in 100f32..12000f32,
+        steps in prop::collection::vec(edge_step(), 1..40),
+    )| {
+        check_edge_scroll(view_h, doc_h, &steps)?;
     });
 }

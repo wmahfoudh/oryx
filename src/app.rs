@@ -329,6 +329,7 @@ pub fn run(
         touch: touch::Tracker::new(1.0),
         pan_target: PanTarget::Document,
         fling: None,
+        edge_scroll: scroll::EdgeScroll::default(),
         wheel_zoom: 0.0,
         #[cfg(target_os = "linux")]
         drops: None,
@@ -1575,6 +1576,9 @@ struct App {
     pan_target: PanTarget,
     /// A running fling: its velocity and when it last stepped.
     fling: Option<(f32, Instant)>,
+    /// The edge scroll of a selection drag held at or past the view's
+    /// top or bottom edge.
+    edge_scroll: scroll::EdgeScroll,
     /// The wheel's fraction of a zoom notch not yet spent, while the
     /// chord key is held.
     wheel_zoom: f32,
@@ -5801,13 +5805,15 @@ impl App {
         }
     }
 
-    /// Extends the selection from the anchor to the cursor during a drag.
+    /// Extends the selection from the anchor to the cursor during a
+    /// drag. The end stays within the view: a pointer held past an edge
+    /// places it on the edge row, where the edge scroll brings the text.
     fn extend_selection(&mut self) {
         let Some(start) = self.sel_anchor else {
             return;
         };
         let x = self.cursor.x as f32 - self.inset();
-        let y = self.cursor.y as f32 + self.scroll_y;
+        let y = scroll::edge_clamp(self.cursor.y as f32, self.viewport_h()) + self.scroll_y;
         let Some(lay) = self.layout.as_ref() else {
             return;
         };
@@ -6140,6 +6146,24 @@ impl App {
             self.fling = Some((next, now));
         }
         wake.by(now + FLING_TICK);
+    }
+
+    /// Advances the edge scroll of a selection drag held at or past the
+    /// view's edge, and keeps the loop ticking while it runs: the view
+    /// steps toward the edge and the selection's end follows onto the
+    /// edge row. The drag's end stops it.
+    fn step_edge_scroll(&mut self, wake: &mut Wake) {
+        if !self.selecting() {
+            self.edge_scroll.stop();
+            return;
+        }
+        let now = Instant::now();
+        let Some(step) = self.edge_scroll.tick(now, self.row_h(), self.viewport_h()) else {
+            return;
+        };
+        self.scroll_by(step);
+        self.extend_selection();
+        wake.by(now + scroll::EDGE_SCROLL_TICK);
     }
 
     /// Hands pending highlight work to the worker. An empty list still
@@ -9287,6 +9311,7 @@ impl ApplicationHandler for App {
         self.maybe_speculate();
         self.ask_caret_seam();
         self.step_fling(&mut wake);
+        self.step_edge_scroll(&mut wake);
         event_loop.set_control_flow(wake.control_flow());
     }
 
@@ -9696,6 +9721,8 @@ impl ApplicationHandler for App {
                 } else if self.drag.is_some() {
                     self.drag_to(position.y as f32);
                 } else if self.selecting() {
+                    self.edge_scroll
+                        .moved(position.y as f32, self.viewport_h(), Instant::now());
                     self.extend_selection();
                 } else {
                     self.update_hover();
