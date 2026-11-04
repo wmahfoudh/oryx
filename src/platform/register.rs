@@ -80,9 +80,42 @@ pub fn desktop_entry(exe: &Path) -> String {
          Categories=Office;Viewer;\n\
          MimeType={};\n\
          StartupWMClass={APP_ID}\n",
-        exe.display(),
+        exec_argument(exe),
         MIME_TYPES.join(";")
     )
+}
+
+/// The program's path as the first word of the Exec line, as the
+/// Desktop Entry specification ("The Exec key") wants it: bare when
+/// plain; in double quotes when it holds a reserved character (a space,
+/// a quote, `$`, a backslash and others), where the double quote, the
+/// backtick, the dollar sign and the backslash take a backslash, after
+/// the string's own backslash; a percent written twice, since a
+/// percent starts a field code. An AppImage under a folder with a
+/// space in its name is the common case.
+fn exec_argument(path: &Path) -> String {
+    const RESERVED: &str = " \t\n\"'\\><~|&;$*?#()`";
+    let text = path.to_string_lossy();
+    let quoted = text.chars().any(|c| RESERVED.contains(c));
+    let mut out = String::with_capacity(text.len() + 2);
+    if quoted {
+        out.push('"');
+    }
+    for c in text.chars() {
+        match c {
+            '%' => out.push_str("%%"),
+            '"' | '`' | '$' => {
+                out.push_str("\\\\");
+                out.push(c);
+            }
+            '\\' => out.push_str("\\\\\\\\"),
+            c => out.push(c),
+        }
+    }
+    if quoted {
+        out.push('"');
+    }
+    out
 }
 
 /// What a Linux registration did under the data dir: the entry and
@@ -273,6 +306,49 @@ fn register_windows(exe: &Path) -> std::io::Result<()> {
 mod tests {
     use super::*;
     use crate::doc::load;
+
+    /// The program's path on the Exec line: bare when plain, in double
+    /// quotes with the escapes of the Desktop Entry specification ("The
+    /// Exec key") when it holds a reserved character, a literal percent
+    /// written twice, so an AppImage under a folder with a space starts
+    /// from the launcher (Task 340, claim 18 of the hunt of 1.3.0).
+    #[test]
+    fn the_exec_line_quotes_a_path_the_launcher_would_split() {
+        let line = |path: &str| {
+            desktop_entry(Path::new(path))
+                .lines()
+                .find(|l| l.starts_with("Exec="))
+                .expect("an Exec line")
+                .to_string()
+        };
+        assert_eq!(line("/usr/bin/oryx"), "Exec=/usr/bin/oryx %f");
+        assert_eq!(
+            line("/home/u/My Apps/Oryx-1.3.0-x86_64.AppImage"),
+            "Exec=\"/home/u/My Apps/Oryx-1.3.0-x86_64.AppImage\" %f"
+        );
+        assert_eq!(
+            line("/home/u/100%/oryx"),
+            "Exec=/home/u/100%%/oryx %f",
+            "a percent needs no quotes, only its double"
+        );
+        assert_eq!(
+            line("/home/u/it's/oryx"),
+            "Exec=\"/home/u/it's/oryx\" %f",
+            "a single quote is reserved, not escaped"
+        );
+        assert_eq!(
+            line("/home/u/a\"b/oryx"),
+            "Exec=\"/home/u/a\\\\\"b/oryx\" %f",
+            "a double quote: the string's backslash, then the quoting's"
+        );
+        assert_eq!(line("/home/u/$x/oryx"), "Exec=\"/home/u/\\\\$x/oryx\" %f");
+        assert_eq!(line("/home/u/a`b/oryx"), "Exec=\"/home/u/a\\\\`b/oryx\" %f");
+        assert_eq!(
+            line("/home/u/a\\b/oryx"),
+            "Exec=\"/home/u/a\\\\\\\\b/oryx\" %f",
+            "a backslash: four, as the specification spells it"
+        );
+    }
 
     #[test]
     fn desktop_entry_content_exact() {

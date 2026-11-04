@@ -48,6 +48,9 @@
 - Duplicating or editing a bundled theme now works with every install. The copy is saved in your themes folder: `~/.local/share/oryx/themes` on Linux, `%APPDATA%\oryx\themes` on Windows, `~/Library/Application Support/oryx/themes` on a Mac. Before, with a deb, an rpm, the AppImage, the Mac app, the MSI or the Store, the copy failed without a word.
 - When a theme cannot be saved, a notice now says so with the reason. Before, nothing showed.
 - `install.sh` and `make install` now keep your own themes and replace the bundled ones. `install.sh --uninstall` keeps your themes too and tells you where they are. Before, an install deleted the themes folder with your own themes in it, and the uninstall deleted the whole data folder.
+- On Linux, Oryx now starts from the launcher and from "Open with" when its program file is in a folder with a space or a special character in its name, such as an AppImage under `My Apps`. Before, the launcher could not start it.
+- A file Oryx cannot read, such as a damaged book, now opens a window that says why when you double click it. Before, nothing appeared, and the reason was printed in a terminal you did not see.
+- A file you can write in a folder you cannot write to is now saved. Before, the save failed with "Permission denied". On Linux and Mac, a file with a second hard link keeps its link, and a file owned by someone else keeps its owner. Before, a save broke the link and made you the owner.
 - The zip library, used for EPUB books, CBZ comics and zipped FB2 books, was updated to version 9. Three security advisories were published on the old version in October 2026. They are about extracting an archive to disk. Oryx never does that. No release was affected.
 
 ## v1.2.2

@@ -15,6 +15,7 @@ What Oryx keeps on your machine:
 - The downloaded images, in the cache folder.
 - The themes you edit or create, in the data folder.
 - A copy of a new note (`Ctrl+M`) while you type it, in the notes folder, so the note can be recovered if Oryx closes without saving it. The copy is removed once the note is saved or discarded.
+- Text you pipe into Oryx, such as `git diff | oryx`, as a file in the notes folder. The file is removed when you quit.
 
 Where these folders are:
 

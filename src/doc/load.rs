@@ -528,6 +528,26 @@ pub fn message(text: &str) -> Document {
     plain_document(text)
 }
 
+/// What a launch or an open shows when the file is refused: the
+/// refusal as a page, read-only, nothing streamed, no book and no line
+/// endings to write back. The page is not the file's bytes, so it is
+/// marked lossy, which keeps the editing door shut on it. A double
+/// click on such a file thus opens a window that says why, in place of
+/// a line on a terminal nobody reads.
+pub fn refused(err: &anyhow::Error) -> Opened {
+    Opened {
+        document: message(&err.to_string()),
+        pending: Vec::new(),
+        streamed: false,
+        book: None,
+        toc: Vec::new(),
+        lossy: true,
+        crlf: Vec::new(),
+        cr: false,
+        bom: false,
+    }
+}
+
 /// Every extension Oryx renders intentionally, for dialog filters.
 pub fn recognized_extensions() -> Vec<&'static str> {
     [
@@ -845,6 +865,29 @@ pub fn kind_is_plain(kind: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// A file Oryx refuses at the launch opens as a page that says why,
+    /// read-only, nothing streamed and no book, so a double click on
+    /// such a file shows a window in place of a line on a terminal
+    /// (Task 340, claim 19 of the hunt of 1.3.0).
+    #[test]
+    fn a_refused_file_opens_as_the_page_of_its_refusal() {
+        let opened = super::refused(&anyhow::anyhow!(
+            "This Kindle book is damaged and cannot be opened."
+        ));
+        assert!(
+            opened
+                .document
+                .source
+                .contains("damaged and cannot be opened"),
+            "the page is the message"
+        );
+        assert!(opened.lossy, "the page is not the file's bytes: no editing");
+        assert!(!opened.streamed);
+        assert!(opened.book.is_none());
+        assert!(opened.pending.is_empty());
+        assert!(opened.toc.is_empty() && opened.crlf.is_empty() && !opened.cr && !opened.bom);
+    }
+
     /// A code file's rows split at the line breaks alone: a return before
     /// a line break is a character of its line, as a lone return is.
     #[test]

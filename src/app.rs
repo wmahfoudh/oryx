@@ -173,10 +173,18 @@ pub fn run(
     // key the first file differently from the same file reopened.
     let path = path.map(|p| p.canonicalize().unwrap_or(p));
     let mut config = config::load();
+    let mut refused_at_start = false;
     let (document, pending, streamed, book, book_toc, lossy, opened_crlf, opened_cr, opened_bom) =
         match &path {
             Some(p) => {
-                let opened = load::open(p, Some(Instant::now() + load::OPEN_BUDGET))?;
+                // A refused file is a page that says why, so that a
+                // double click on it opens a window, as a later file
+                // refused does (`open_file`).
+                let opened = load::open(p, Some(Instant::now() + load::OPEN_BUDGET))
+                    .unwrap_or_else(|err| {
+                        refused_at_start = true;
+                        load::refused(&err)
+                    });
                 (
                     opened.document,
                     opened.pending,
@@ -420,7 +428,7 @@ pub fn run(
         count_at: None,
         count_inbox: std::sync::mpsc::channel(),
         count_asked: 0,
-        open_failed: false,
+        open_failed: refused_at_start,
         gutter_measured: None,
         notice: None,
         notice_canvas: None,
@@ -7168,39 +7176,24 @@ impl App {
         let loaded = load::open(&path, Some(Instant::now() + load::OPEN_BUDGET));
         let opened = loaded.is_ok();
         self.open_failed = !opened;
-        let mut book_job = None;
-        self.book_toc = Vec::new();
-        match loaded {
-            Ok(o) => {
-                self.document = o.document;
-                self.lossy = o.lossy;
-                self.crlf = o.crlf;
-                self.cr = o.cr;
-                self.bom = o.bom;
-                book_job = o.book;
-                self.book_toc = o.toc;
-                self.start_highlight(o.pending);
-                if o.streamed && book_job.is_none() {
-                    self.start_parse();
-                } else {
-                    // A book's worker starts through `start_book` below,
-                    // once the fresh media cache exists for its sink.
-                    self.parser.cancel();
-                    self.parse_pending = false;
-                }
-            }
-            Err(err) => {
-                self.document = load::message(&err.to_string());
-                // The message document is not the file's bytes; branding
-                // it lossy keeps the editing door shut on it.
-                self.lossy = true;
-                self.crlf = Vec::new();
-                self.cr = false;
-                self.bom = false;
-                self.start_highlight(Vec::new());
-                self.parser.cancel();
-                self.parse_pending = false;
-            }
+        // A refused file is a page that says why, in the file's place.
+        let o = loaded.unwrap_or_else(|err| load::refused(&err));
+        self.document = o.document;
+        self.lossy = o.lossy;
+        self.crlf = o.crlf;
+        self.cr = o.cr;
+        self.bom = o.bom;
+        let book_job = o.book;
+        self.book_toc = o.toc;
+        self.start_highlight(o.pending);
+        if o.streamed && book_job.is_none() {
+            self.start_parse();
+        } else {
+            // A book's worker starts through `start_book` below, once
+            // the fresh media cache exists for its sink; a refused file
+            // has nothing to parse.
+            self.parser.cancel();
+            self.parse_pending = false;
         }
         self.outline = if self.book_toc.is_empty() {
             OutlineTree::build(&self.document)
