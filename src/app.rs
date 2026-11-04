@@ -268,8 +268,7 @@ pub fn run(
     let theme_choice = theme_name.as_deref().unwrap_or(&config.theme);
     // At least one theme file always exists: an emptied collection is
     // reseeded from the compiled palette before resolution runs.
-    if let Some(base) = directories::BaseDirs::new() {
-        let target = base.data_dir().join("oryx/themes");
+    if let Some(target) = theme::user_dir() {
         if let Err(err) = theme::seed(&theme_dirs(), &target) {
             eprintln!("oryx: cannot seed themes: {err}");
         }
@@ -1427,10 +1426,11 @@ const DEFAULT_DATA_DIRS: &str = "/usr/local/share:/usr/share";
 const DEFAULT_DATA_DIRS: &str = "";
 
 /// Theme directories in lookup order: next to the binary, the user's
-/// data directory (a per-user install and the theme editor write there),
-/// each system data directory of `XDG_DATA_DIRS` (a package's
-/// `/usr/share`, a Flatpak's `/app/share`, an AppImage's bundled share
-/// through its AppRun), then the working directory.
+/// themes folder (`theme::user_dir`: a per-user install, the browser
+/// and the editor write there), each system data directory of
+/// `XDG_DATA_DIRS` (a package's `/usr/share`, a Flatpak's `/app/share`,
+/// an AppImage's bundled share through its AppRun), then the working
+/// directory.
 fn theme_dirs() -> Vec<PathBuf> {
     theme_dirs_from(std::env::var_os("XDG_DATA_DIRS").as_deref())
 }
@@ -1445,9 +1445,7 @@ fn theme_dirs_from(xdg_data_dirs: Option<&std::ffi::OsStr>) -> Vec<PathBuf> {
             }
         }
     }
-    if let Some(base) = directories::BaseDirs::new() {
-        dirs.push(base.data_dir().join("oryx/themes"));
-    }
+    dirs.extend(theme::user_dir());
     let system = match xdg_data_dirs {
         Some(value) if !value.is_empty() => value.to_os_string(),
         _ => std::ffi::OsString::from(DEFAULT_DATA_DIRS),
@@ -6519,6 +6517,7 @@ impl App {
             self.pre_browse = Some(self.theme.clone());
             self.overlay = Some(Box::new(ThemeBrowser::new(
                 theme_dirs(),
+                theme::user_dir(),
                 &self.config.theme,
             )));
             self.request_redraw();
@@ -7997,8 +7996,9 @@ impl App {
                     config::save(&self.config);
                 }
             }
+            OverlayResult::Apply(Action::Notice(text)) => self.show_notice(&text),
             OverlayResult::Apply(Action::EditTheme(path)) => {
-                if let Some(editor) = ThemeEditor::new(&path) {
+                if let Some(editor) = ThemeEditor::new(&path, theme::user_dir()) {
                     // Opened from the browser, the revert point is the
                     // confirmed theme, not a preview the arrows left live.
                     self.pre_edit = Some(match self.pre_browse.take() {

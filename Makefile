@@ -64,10 +64,10 @@ bump:
 
 install:
 	cargo build --release
-	mkdir -p ~/.local/bin ~/.local/share/oryx
+	mkdir -p ~/.local/bin ~/.local/share/oryx/themes
 	install -m 755 target/release/oryx ~/.local/bin/oryx
-	rm -rf ~/.local/share/oryx/themes ~/.local/share/oryx/examples
-	cp -r themes ~/.local/share/oryx/themes
+	cp themes/*.toml ~/.local/share/oryx/themes/
+	rm -rf ~/.local/share/oryx/examples
 	cp -r examples ~/.local/share/oryx/examples
 	~/.local/bin/oryx --register
 

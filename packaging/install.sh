@@ -2,17 +2,30 @@
 # Installs or removes Oryx for the current user. The desktop entry and
 # the icons are written by `oryx --register`, which also rebuilds the
 # desktop caches; the uninstall rebuilds them here so the entry leaves
-# the file manager without a new login.
+# the file manager without a new login. The themes folder of the data
+# directory holds the bundled themes and the user's own: an install
+# replaces the bundled ones by name, and the uninstall removes those
+# alone, so a theme of the user's own stays through both.
 set -e
 here="$(cd "$(dirname "$0")" && pwd)"
 bin="$HOME/.local/bin"
 data="$HOME/.local/share/oryx"
 applications="$HOME/.local/share/applications"
 icons="$HOME/.local/share/icons/hicolor"
+# The bundled themes: beside this script in the tarball, at the root of
+# the repository when the script runs from packaging/.
+themes="$here/themes"
+[ -d "$themes" ] || themes="$here/../themes"
 
 if [ "$1" = "--uninstall" ]; then
     rm -f "$bin/oryx"
-    rm -rf "$data"
+    if [ -d "$themes" ]; then
+        for theme in "$themes"/*.toml; do
+            rm -f "$data/themes/$(basename "$theme")"
+        done
+    fi
+    rm -rf "$data/examples"
+    rmdir "$data/themes" "$data" 2>/dev/null || true
     rm -f "$applications/com.steerania.Oryx.desktop" "$applications/oryx.desktop"
     for size in 16 32 48 64 128 256; do
         rm -f "$icons/${size}x${size}/apps/com.steerania.Oryx.png" "$icons/${size}x${size}/apps/oryx.png"
@@ -24,13 +37,16 @@ if [ "$1" = "--uninstall" ]; then
         gtk-update-icon-cache -q -t -f "$icons" || true
     fi
     echo "oryx removed"
+    if [ -d "$data/themes" ]; then
+        echo "your own themes stay in $data/themes"
+    fi
     exit 0
 fi
 
-mkdir -p "$bin" "$data"
+mkdir -p "$bin" "$data/themes"
 install -m 755 "$here/oryx" "$bin/oryx"
-rm -rf "$data/themes" "$data/examples"
-cp -r "$here/themes" "$data/themes"
+cp "$themes"/*.toml "$data/themes/"
+rm -rf "$data/examples"
 cp -r "$here/examples" "$data/examples"
 "$bin/oryx" --register
 echo "installed to $bin/oryx; themes in $data/themes; examples in $data/examples"

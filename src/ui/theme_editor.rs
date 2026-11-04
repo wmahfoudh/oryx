@@ -82,8 +82,9 @@ pub struct ThemeEditor {
 }
 
 impl ThemeEditor {
-    /// None when the file does not load.
-    pub fn new(path: &Path) -> Option<ThemeEditor> {
+    /// None when the file does not load. `user_dir` is the user's themes
+    /// folder, where the copy of a bundled theme is saved.
+    pub fn new(path: &Path, user_dir: Option<PathBuf>) -> Option<ThemeEditor> {
         let theme = theme::load_file(path)?;
         let name = path
             .file_stem()
@@ -102,7 +103,7 @@ impl ThemeEditor {
         let first = theme::role(&theme, 0);
         Some(ThemeEditor {
             name,
-            target: save_target(path),
+            target: save_target(path, user_dir.as_deref()),
             hsv: {
                 let (h, s, v) = rgb_to_hsv(first.r, first.g, first.b);
                 (h, s, v)
@@ -182,10 +183,20 @@ impl ThemeEditor {
         (self.entries.len() as f32 * ROW_H - self.geometry.list_h).max(0.0)
     }
 
+    /// Writes the theme to its target, the user's folder created on the
+    /// way. A save that fails is a notice with the reason, and the
+    /// editor stays open with the edits.
     fn save(&mut self) -> OverlayResult {
-        if let Err(err) = theme::save(&self.target, &self.theme) {
-            eprintln!("oryx: cannot save theme: {err}");
-            return OverlayResult::Open;
+        let written = match self.target.parent() {
+            Some(dir) => std::fs::create_dir_all(dir),
+            None => Ok(()),
+        }
+        .and_then(|()| theme::save(&self.target, &self.theme));
+        if let Err(err) = written {
+            return OverlayResult::Apply(Action::Notice(format!(
+                "Cannot save the theme to {}: {err}",
+                self.target.display()
+            )));
         }
         self.dirty = false;
         OverlayResult::Apply(Action::SetTheme(self.target.clone()))
@@ -742,15 +753,18 @@ impl Overlay for ThemeEditor {
     }
 }
 
-/// Where edits of this theme file get saved: the file itself, or a fresh
-/// duplicate when it belongs to the shipped collection.
-pub fn save_target(path: &Path) -> PathBuf {
+/// Where edits of this theme file get saved: the file itself, or a
+/// fresh copy when it belongs to the shipped collection, in the user's
+/// themes folder, since the bundled folder is read-only on a package
+/// install, or beside the file on a run with no home.
+pub fn save_target(path: &Path, user_dir: Option<&Path>) -> PathBuf {
     let stem = path
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or_default();
     if theme::is_bundled(stem) {
-        duplicate_path(path)
+        let dir = user_dir.unwrap_or_else(|| path.parent().unwrap_or(Path::new(".")));
+        duplicate_path(dir, stem, |_| false)
     } else {
         path.to_path_buf()
     }
@@ -836,7 +850,7 @@ mod tests {
     /// blinks; the list of roles alone has no caret.
     #[test]
     fn the_color_field_has_the_keys_while_it_is_open() {
-        let mut editor = ThemeEditor::new(Path::new("themes/nord.toml")).expect("nord loads");
+        let mut editor = ThemeEditor::new(Path::new("themes/nord.toml"), None).expect("nord loads");
         assert!(!editor.field_has_keys(), "the list of roles");
         editor.key(&Key::Named(NamedKey::Enter), false, false);
         assert!(editor.field_has_keys(), "the color field open");
@@ -844,11 +858,42 @@ mod tests {
         assert!(!editor.field_has_keys(), "the color field closed");
     }
 
+    /// A bundled theme is saved as a copy in the user's folder, never
+    /// beside the bundled file, read-only on a package install (Task
+    /// 339, claim 16 of the hunt of 1.3.0); a custom theme is saved in
+    /// place; without a user folder the copy goes beside the file.
     #[test]
-    fn bundled_theme_saves_to_copy() {
-        let bundled = save_target(Path::new("themes/dracula.toml"));
-        assert_eq!(bundled.file_name().unwrap(), "dracula-copy.toml");
-        let own = save_target(Path::new("themes/my-own-theme.toml"));
-        assert_eq!(own.file_name().unwrap(), "my-own-theme.toml");
+    fn bundled_theme_saves_to_copy_in_the_users_folder() {
+        let user = Path::new("/home/someone/.local/share/oryx/themes");
+        let bundled = save_target(Path::new("/usr/share/oryx/themes/dracula.toml"), Some(user));
+        assert_eq!(bundled, user.join("dracula-copy.toml"));
+        let own = save_target(
+            Path::new("/usr/share/oryx/themes/my-own-theme.toml"),
+            Some(user),
+        );
+        assert_eq!(own, Path::new("/usr/share/oryx/themes/my-own-theme.toml"));
+        let homeless = save_target(Path::new("themes/dracula.toml"), None);
+        assert_eq!(homeless, Path::new("themes/dracula-copy.toml"));
+    }
+
+    /// A save that fails is a notice with the reason, not a line on
+    /// stderr: the user's folder is created on the way, and here its
+    /// parent refuses.
+    #[cfg(unix)]
+    #[test]
+    fn a_save_that_fails_is_a_notice() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("oryx-editor-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let mut editor = ThemeEditor::new(Path::new("themes/nord.toml"), Some(dir.join("themes")))
+            .expect("nord loads");
+        let result = editor.key(&Key::Character("s".into()), true, false);
+        assert!(
+            matches!(result, OverlayResult::Apply(Action::Notice(ref text)) if text.contains("nord-copy")),
+            "a notice naming the file"
+        );
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

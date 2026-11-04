@@ -1790,3 +1790,89 @@ fn the_makefile_builds_the_arch_package_after_the_channels() {
     assert!(makefile.contains("arch:\n\tsh packaging/arch.sh $(VERSION) release"));
     assert!(makefile.contains(".PHONY: check audit release channels arch"));
 }
+
+/// The install script keeps the user's own themes: an install over an
+/// older one replaces the bundled themes by name, and the uninstall
+/// removes them with the examples and the binary, the user's themes and
+/// their folder kept, the script saying where (Task 339, claim 15 of
+/// the hunt of 1.3.0).
+#[cfg(unix)]
+#[test]
+fn the_install_script_keeps_the_users_own_themes() {
+    let dir = std::env::temp_dir().join(format!("oryx-install-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let home = dir.join("home");
+    let themes = home.join(".local/share/oryx/themes");
+    std::fs::create_dir_all(&themes).unwrap();
+    std::fs::write(themes.join("mine.toml"), "# mine\n").unwrap();
+    std::fs::write(themes.join("dracula.toml"), "# old\n").unwrap();
+    // The extracted tarball, with a stand-in binary that answers --register.
+    let tarball = dir.join("oryx");
+    stand_in(&tarball, "oryx", "exit 0\n");
+    std::fs::create_dir_all(tarball.join("themes")).unwrap();
+    std::fs::write(tarball.join("themes/dracula.toml"), "# new\n").unwrap();
+    std::fs::write(tarball.join("themes/nord.toml"), "# new\n").unwrap();
+    std::fs::create_dir_all(tarball.join("examples")).unwrap();
+    std::fs::write(tarball.join("examples/sample.md"), "# sample\n").unwrap();
+    std::fs::copy(
+        repo().join("packaging/install.sh"),
+        tarball.join("install.sh"),
+    )
+    .unwrap();
+    let run = |arg: Option<&str>| {
+        let mut command = Command::new("sh");
+        command.arg(tarball.join("install.sh"));
+        if let Some(arg) = arg {
+            command.arg(arg);
+        }
+        let out = command.env("HOME", &home).output().unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    run(None);
+    assert_eq!(
+        std::fs::read_to_string(themes.join("mine.toml")).unwrap(),
+        "# mine\n",
+        "the user's theme kept by the install"
+    );
+    assert_eq!(
+        std::fs::read_to_string(themes.join("dracula.toml")).unwrap(),
+        "# new\n",
+        "the bundled theme replaced by name"
+    );
+    assert!(
+        themes.join("nord.toml").is_file(),
+        "a new bundled theme added"
+    );
+    assert!(home.join(".local/share/oryx/examples/sample.md").is_file());
+    assert!(home.join(".local/bin/oryx").is_file());
+    let said = run(Some("--uninstall"));
+    assert_eq!(
+        std::fs::read_to_string(themes.join("mine.toml")).unwrap(),
+        "# mine\n",
+        "the user's theme kept by the uninstall"
+    );
+    assert!(
+        !themes.join("dracula.toml").exists() && !themes.join("nord.toml").exists(),
+        "the bundled themes removed"
+    );
+    assert!(!home.join(".local/share/oryx/examples").exists());
+    assert!(!home.join(".local/bin/oryx").exists());
+    assert!(
+        said.contains(&format!("your own themes stay in {}", themes.display())),
+        "the script says where the themes stay: {said}"
+    );
+    // With no theme of the user's own, the uninstall leaves no folder.
+    std::fs::remove_file(themes.join("mine.toml")).unwrap();
+    run(None);
+    run(Some("--uninstall"));
+    assert!(
+        !home.join(".local/share/oryx").exists(),
+        "the data folder removed when empty"
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}

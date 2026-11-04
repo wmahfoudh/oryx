@@ -18,6 +18,9 @@ pub enum Action {
     RenamedTheme { from: String, to: String },
     /// Open the theme editor on a file.
     EditTheme(PathBuf),
+    /// A line for the notice bar: a theme that could not be saved, with
+    /// the reason. The overlay stays open.
+    Notice(String),
     /// Restyle with an in-memory theme, without persisting anything.
     PreviewTheme(Box<Theme>),
     /// Persist the export settings, then export with them.

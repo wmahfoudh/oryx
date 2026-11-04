@@ -45,6 +45,9 @@
 - A damaged book or comic whose header declares an impossible size is now refused as damaged. Before, Oryx could crash on it.
 - On a Mac, `Option+R` now types ® in the editor. Before, it typed nothing. The key still switches regular expressions on and off in the search bar.
 - On a Mac, `Option+-`, `Option+1`, `Option+X` and `Option+.` now type their characters in the search bar, such as an en dash for `Option+-`. Before, they typed nothing there.
+- Duplicating or editing a bundled theme now works with every install. The copy is saved in your themes folder: `~/.local/share/oryx/themes` on Linux, `%APPDATA%\oryx\themes` on Windows, `~/Library/Application Support/oryx/themes` on a Mac. Before, with a deb, an rpm, the AppImage, the Mac app, the MSI or the Store, the copy failed without a word.
+- When a theme cannot be saved, a notice now says so with the reason. Before, nothing showed.
+- `install.sh` and `make install` now keep your own themes and replace the bundled ones. `install.sh --uninstall` keeps your themes too and tells you where they are. Before, an install deleted the themes folder with your own themes in it, and the uninstall deleted the whole data folder.
 - The zip library, used for EPUB books, CBZ comics and zipped FB2 books, was updated to version 9. Three security advisories were published on the old version in October 2026. They are about extracting an archive to disk. Oryx never does that. No release was affected.
 
 ## v1.2.2

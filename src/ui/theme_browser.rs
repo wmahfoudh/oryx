@@ -57,6 +57,9 @@ enum Commit {
 
 pub struct ThemeBrowser {
     dirs: Vec<PathBuf>,
+    /// The user's themes folder, where a duplicate is written; None on
+    /// a run with no home, where the copy goes beside its source.
+    user_dir: Option<PathBuf>,
     rows: Vec<Row>,
     selected: usize,
     /// List scroll offset in pixels.
@@ -80,9 +83,10 @@ pub struct ThemeBrowser {
 }
 
 impl ThemeBrowser {
-    pub fn new(dirs: Vec<PathBuf>, active: &str) -> ThemeBrowser {
+    pub fn new(dirs: Vec<PathBuf>, user_dir: Option<PathBuf>, active: &str) -> ThemeBrowser {
         let mut browser = ThemeBrowser {
             dirs,
+            user_dir,
             rows: Vec::new(),
             selected: 0,
             scroll: 0.0,
@@ -190,25 +194,38 @@ impl ThemeBrowser {
         }
     }
 
-    /// Copies the row's file and immediately opens the copy for renaming.
-    fn duplicate(&mut self, index: usize) {
+    /// Copies the row's file into the user's themes folder, never
+    /// beside the source, read-only on a package install, and opens
+    /// the copy for renaming. A copy that cannot be written is a
+    /// notice with the reason.
+    fn duplicate(&mut self, index: usize) -> OverlayResult {
         let Some(row) = self.rows.get(index) else {
-            return;
+            return OverlayResult::Open;
         };
-        let target = duplicate_path(&row.path);
+        let dir = match &self.user_dir {
+            Some(dir) => dir.clone(),
+            None => row.path.parent().unwrap_or(Path::new(".")).to_path_buf(),
+        };
+        let target = duplicate_path(&dir, &row.name, |name| {
+            self.rows.iter().any(|r| r.name == name)
+        });
         let name = target
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or_default()
             .to_string();
-        if let Err(err) = std::fs::copy(&row.path, &target) {
-            eprintln!("oryx: cannot duplicate theme: {err}");
-            return;
+        let copied = std::fs::create_dir_all(&dir).and_then(|()| std::fs::copy(&row.path, &target));
+        if let Err(err) = copied {
+            return OverlayResult::Apply(Action::Notice(format!(
+                "Cannot save the copy of the theme in {}: {err}",
+                dir.display()
+            )));
         }
         self.rescan();
         self.select_by_name(&name);
         let index = self.selected;
         self.start_rename(index, name);
+        OverlayResult::Open
     }
 
     /// A shipped theme keeps its file and its name: the editor saves
@@ -699,8 +716,7 @@ impl Overlay for ThemeBrowser {
             return OverlayResult::Open;
         }
         if x >= self.geometry.duplicate_x {
-            self.duplicate(index);
-            return OverlayResult::Open;
+            return self.duplicate(index);
         }
         if x >= self.geometry.edit_x {
             return OverlayResult::Apply(Action::EditTheme(self.rows[index].path.clone()));
@@ -755,19 +771,21 @@ pub fn rename_target(dir: &Path, name: &str) -> Option<PathBuf> {
     (!target.exists()).then_some(target)
 }
 
-/// Path for a duplicate of a theme file: `<stem>-copy.toml`, counting up
-/// while the name is taken.
-pub fn duplicate_path(path: &Path) -> PathBuf {
-    let dir = path.parent().unwrap_or(Path::new("."));
-    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("theme");
-    let first = dir.join(format!("{stem}-copy.toml"));
-    if !first.exists() {
-        return first;
-    }
-    (2..)
-        .map(|n| dir.join(format!("{stem}-copy-{n}.toml")))
-        .find(|p| !p.exists())
-        .expect("some copy name is free")
+/// The file of a copy of a theme in `dir`: `<stem>-copy.toml`, counting
+/// up while the name is a file of `dir` or `taken` says the list shows
+/// it, a file of another folder that would hide the copy.
+pub fn duplicate_path(dir: &Path, stem: &str, taken: impl Fn(&str) -> bool) -> PathBuf {
+    let free = |name: &str| !dir.join(format!("{name}.toml")).exists() && !taken(name);
+    let first = format!("{stem}-copy");
+    let name = if free(&first) {
+        first
+    } else {
+        (2..)
+            .map(|n| format!("{stem}-copy-{n}"))
+            .find(|name| free(name))
+            .expect("some copy name is free")
+    };
+    dir.join(format!("{name}.toml"))
 }
 
 #[cfg(test)]
@@ -796,7 +814,7 @@ mod tests {
             )
             .unwrap();
         }
-        let mut browser = ThemeBrowser::new(vec![dir.clone()], "theme-00");
+        let mut browser = ThemeBrowser::new(vec![dir.clone()], None, "theme-00");
         std::fs::remove_dir_all(&dir).unwrap();
         let theme = Theme::default_dark();
         let mut fonts = FontStore::new();
@@ -845,7 +863,7 @@ mod tests {
             "[surface]\nbackground = \"#282a36\"\n",
         )
         .unwrap();
-        let mut browser = ThemeBrowser::new(vec![dir.clone()], "mine");
+        let mut browser = ThemeBrowser::new(vec![dir.clone()], None, "mine");
         std::fs::remove_dir_all(&dir).unwrap();
         assert!(!browser.field_has_keys(), "the list alone");
         browser.start_rename(0, "mine".to_string());
@@ -864,7 +882,7 @@ mod tests {
             )
             .unwrap();
         }
-        let browser = ThemeBrowser::new(vec![dir.clone()], active);
+        let browser = ThemeBrowser::new(vec![dir.clone()], None, active);
         std::fs::remove_dir_all(&dir).unwrap();
         browser
     }
@@ -890,7 +908,7 @@ mod tests {
             .unwrap();
         }
         let mut fonts = FontStore::new();
-        let mut browser = ThemeBrowser::new(vec![dir.clone()], "dracula");
+        let mut browser = ThemeBrowser::new(vec![dir.clone()], None, "dracula");
         drawn(&mut browser, &mut fonts, 460, 320);
         let row_y = |browser: &ThemeBrowser, name: &str| {
             let index = browser.rows.iter().position(|r| r.name == name).unwrap();
@@ -1013,7 +1031,7 @@ mod tests {
             "[surface]\nbackground = \"#ffffff\"\n",
         )
         .unwrap();
-        let browser = ThemeBrowser::new(vec![dir.clone()], "alpha-dark");
+        let browser = ThemeBrowser::new(vec![dir.clone()], None, "alpha-dark");
         let names: Vec<&str> = browser.rows.iter().map(|r| r.name.as_str()).collect();
         std::fs::remove_dir_all(&dir).unwrap();
         assert_eq!(names, ["beta-light", "zulu-light", "alpha-dark"]);
@@ -1032,7 +1050,7 @@ mod tests {
             "[surface]\nbackground = \"#ffffff\"\n",
         )
         .unwrap();
-        let mut browser = ThemeBrowser::new(vec![dir.clone()], "beta-light");
+        let mut browser = ThemeBrowser::new(vec![dir.clone()], None, "beta-light");
         let stepped = browser.key(&Key::Named(NamedKey::ArrowDown), false, false);
         let pinned = browser.key(&Key::Named(NamedKey::ArrowDown), false, false);
         std::fs::remove_dir_all(&dir).unwrap();
@@ -1060,7 +1078,7 @@ mod tests {
             "[surface]\nbackground = \"#282a36\"\n",
         )
         .unwrap();
-        let mut browser = ThemeBrowser::new(vec![dir.clone()], "alpha-dark");
+        let mut browser = ThemeBrowser::new(vec![dir.clone()], None, "alpha-dark");
         let result = browser.key(&Key::Named(NamedKey::Enter), false, false);
         std::fs::remove_dir_all(&dir).unwrap();
         match result {
@@ -1095,21 +1113,82 @@ mod tests {
     #[test]
     fn duplicate_derives_copy_name() {
         let dir = temp_dir("first");
-        let original = dir.join("nord.toml");
-        std::fs::write(&original, "").unwrap();
-        let dup = duplicate_path(&original);
+        let dup = duplicate_path(&dir, "nord", |_| false);
         std::fs::remove_dir_all(&dir).unwrap();
-        assert_eq!(dup.file_name().unwrap(), "nord-copy.toml");
+        assert_eq!(dup, dir.join("nord-copy.toml"));
     }
 
     #[test]
     fn duplicate_counts_past_taken_names() {
         let dir = temp_dir("taken");
-        std::fs::write(dir.join("nord.toml"), "").unwrap();
         std::fs::write(dir.join("nord-copy.toml"), "").unwrap();
         std::fs::write(dir.join("nord-copy-2.toml"), "").unwrap();
-        let dup = duplicate_path(&dir.join("nord.toml"));
-        std::fs::remove_dir_all(&dir).unwrap();
+        let dup = duplicate_path(&dir, "nord", |_| false);
         assert_eq!(dup.file_name().unwrap(), "nord-copy-3.toml");
+        // A name the list shows from another folder would hide the copy.
+        let dup = duplicate_path(&dir, "nord", |name| name == "nord-copy-3");
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(dup.file_name().unwrap(), "nord-copy-4.toml");
+    }
+
+    /// A duplicate goes into the user's themes folder, never beside the
+    /// source: the bundled folder is read-only on a package install
+    /// (Task 339, claim 16 of the hunt of 1.3.0). A copy that cannot be
+    /// written is a notice. Without a user folder the copy goes beside
+    /// the source, as a run with no home did.
+    #[cfg(unix)]
+    #[test]
+    fn a_duplicate_lands_in_the_users_folder_not_beside_the_source() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = temp_dir("user-folder");
+        let bundled = root.join("bundled");
+        std::fs::create_dir_all(&bundled).unwrap();
+        theme::save(&bundled.join("dracula.toml"), &Theme::default_dark()).unwrap();
+        std::fs::set_permissions(&bundled, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let user = root.join("user/themes");
+        let mut browser = ThemeBrowser::new(
+            vec![bundled.clone(), user.clone()],
+            Some(user.clone()),
+            "dracula",
+        );
+        let result = browser.duplicate(0);
+        assert!(matches!(result, OverlayResult::Open), "the copy made");
+        assert!(
+            user.join("dracula-copy.toml").is_file(),
+            "the copy in the user's folder, created on the way"
+        );
+        assert_eq!(
+            std::fs::read_dir(&bundled).unwrap().count(),
+            1,
+            "nothing beside the source"
+        );
+        assert!(
+            browser.rows.iter().any(|r| r.name == "dracula-copy"),
+            "the copy listed"
+        );
+        assert!(browser.renaming.is_some(), "the copy open for renaming");
+        let sealed = root.join("sealed");
+        std::fs::create_dir_all(&sealed).unwrap();
+        std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let mut browser = ThemeBrowser::new(
+            vec![bundled.clone()],
+            Some(sealed.join("themes")),
+            "dracula",
+        );
+        let result = browser.duplicate(0);
+        assert!(
+            matches!(result, OverlayResult::Apply(Action::Notice(ref text)) if text.contains("sealed")),
+            "a notice naming the folder"
+        );
+        assert!(browser.renaming.is_none());
+        std::fs::set_permissions(&bundled, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut browser = ThemeBrowser::new(vec![bundled.clone()], None, "dracula");
+        browser.duplicate(0);
+        assert!(
+            bundled.join("dracula-copy.toml").is_file(),
+            "no user folder: beside the source"
+        );
+        std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }

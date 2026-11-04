@@ -41,6 +41,16 @@ pub fn seed(scan_dirs: &[PathBuf], target: &Path) -> std::io::Result<bool> {
     Ok(true)
 }
 
+/// The folder of the user's own themes, under the data folder: the
+/// copies and the edits the browser and the editor write, and the
+/// themes a per-user install copies. Nothing is written beside the
+/// bundled themes, whose folder is read-only on a package install (a
+/// deb's `/usr/share`, an AppImage, the Mac bundle, the MSI, the
+/// Store). None when the system names no data folder.
+pub fn user_dir() -> Option<PathBuf> {
+    directories::BaseDirs::new().map(|base| base.data_dir().join("oryx/themes"))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Theme {
     pub surface: Surface,
