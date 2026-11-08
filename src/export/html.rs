@@ -546,7 +546,7 @@ impl Writer<'_> {
             return;
         }
         if span.math {
-            match self.pictures.math(text, false) {
+            match self.pictures.math(text, span.display) {
                 Some(picture) => {
                     let size = (Some(picture.width), Some(picture.height));
                     out.push_str(&img(&picture, text, "vertical-align:middle", size));

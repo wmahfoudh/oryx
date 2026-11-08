@@ -566,6 +566,52 @@ fn a_formula_in_a_cell_is_a_picture() {
     assert_eq!(html.elements("td").len(), 1);
 }
 
+/// A `$$` formula in a cell is pictured in display style with its TeX as
+/// the alt, and the plain copy reads its TeX with no style word (the read
+/// of Task 355).
+#[test]
+fn a_display_formula_in_a_cell_is_pictured_in_display_style() {
+    struct Recording(Vec<(String, bool)>);
+    impl Pictures for Recording {
+        fn image(&mut self, _src: &str) -> Option<Picture> {
+            None
+        }
+
+        fn math(&mut self, tex: &str, display: bool) -> Option<Picture> {
+            self.0.push((tex.to_string(), display));
+            Some(Picture {
+                mime: "image/png",
+                bytes: vec![1, 2, 3],
+                width: 30,
+                height: 12,
+            })
+        }
+    }
+    let doc = markdown::parse("| a |\n|---|\n| $$\\sum_{i=1}^{n} i$$ and $y$ |\n");
+    let sel = selection::all(&doc).unwrap();
+    let mut pictures = Recording(Vec::new());
+    let html = Page::parse(selection_html(
+        &sel,
+        &doc,
+        &Theme::default_dark(),
+        &mut pictures,
+    ));
+    assert_eq!(
+        pictures.0,
+        [
+            ("\\sum_{i=1}^{n} i".to_string(), true),
+            ("y".to_string(), false)
+        ]
+    );
+    let images = html.elements("img");
+    assert_eq!(
+        attr(&images[0], "alt").as_deref(),
+        Some("\\sum_{i=1}^{n} i")
+    );
+    let plain = html_of(&doc);
+    assert!(!format!("{plain}").contains("displaystyle"), "{plain}");
+}
+
 /// The plain reading of a display formula shows an escaped reserved
 /// character as the page does.
 #[test]

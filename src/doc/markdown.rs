@@ -636,8 +636,9 @@ impl Builder {
                         // A cell holds no block: the formula is the cell's,
                         // set in display style as `$$` asks.
                         let mut span = self.style();
-                        span.set_text(format!("\\displaystyle {}", tex.trim()));
+                        span.set_text(tex.trim().to_string());
                         span.math = true;
+                        span.display = true;
                         self.push(span);
                     } else {
                         self.flush_spans();
@@ -1851,6 +1852,7 @@ impl Builder {
                 && last.mark == span.mark
                 && last.code == span.code
                 && last.math == span.math
+                && last.display == span.display
                 && last.script == span.script
                 && last.link == span.link
                 && last.abbr == span.abbr
@@ -3791,10 +3793,16 @@ mod tests {
             panic!("{:?}", d.blocks[0].kind)
         };
         let cell = &rows[0][0];
-        assert!(cell[0].math, "{cell:?}");
-        assert_eq!(cell[0].text(&d.source), "\\displaystyle x^2");
-        assert!(cell[2].math);
+        assert!(cell[0].math && cell[0].display, "{cell:?}");
+        assert_eq!(cell[0].text(&d.source), "x^2");
+        assert!(cell[2].math && !cell[2].display);
         assert_eq!(cell[2].text(&d.source), "y");
+        // Two formulas side by side stay two spans when their styles differ.
+        let d = parse("| a |\n|---|\n| $$\\alpha$$$b$ |\n");
+        let BlockKind::Table { rows, .. } = &d.blocks[0].kind else {
+            panic!()
+        };
+        assert_eq!(rows[0][0].len(), 2, "{:?}", rows[0][0]);
     }
 
     #[test]

@@ -640,6 +640,9 @@ pub struct Span {
     pub mark: bool,
     pub code: bool,
     pub math: bool,
+    /// A formula written as `$$...$$` where no block can stand (a table
+    /// cell): set in display style.
+    pub display: bool,
     pub script: SpanScript,
     /// Link target: a URL, a `#anchor`, or `footnote:<label>`.
     pub link: Option<String>,
@@ -669,6 +672,7 @@ impl Default for Span {
             mark: false,
             code: false,
             math: false,
+            display: false,
             script: SpanScript::None,
             link: None,
             abbr: None,

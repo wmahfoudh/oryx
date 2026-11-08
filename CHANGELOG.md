@@ -71,8 +71,8 @@
 - A file you can write in a folder you cannot write to is now saved. Before, the save failed with "Permission denied". On Linux and Mac, a file with a second hard link keeps its link, and a file owned by someone else keeps its owner. Before, a save broke the link and made you the owner.
 - The zip library, used for EPUB books, CBZ comics and zipped FB2 books, was updated to version 9. Three security advisories were published on the old version in October 2026. They are about extracting an archive to disk. Oryx never does that. No release was affected.
 - A formula inside a table cell is now typeset like the formulas of a paragraph, and the row grows to its height. Before, the cell showed the formula's text.
-- A `$$` formula inside a table cell now stays in its cell, in display style. Before, it was shown as a block above the table, and the cell was left empty.
-- An inline formula wider than its column or its cell now shrinks to fit, down to half its size, as a display formula does. Before, it ran past the right edge.
+- A `$$` formula inside a table cell now stays in its cell, in display style. Before, it was shown as a block above the table, and its cell lost it.
+- An inline formula wider than its column or its cell now shrinks to fit, down to half its size, as a display formula does. Before, it ran past the right edge. The picture of such a formula in a copy is whole too. Before, it was cut at the right.
 
 ## v1.2.2
 

@@ -1595,6 +1595,7 @@ struct Marks {
     rects: usize,
     runs: usize,
     images: usize,
+    math: usize,
 }
 
 /// What a block derives on entry and needs again when it finishes.
@@ -2233,6 +2234,7 @@ fn place_block(
         rects: out.rects.len(),
         runs: out.runs.len(),
         images: out.images.len(),
+        math: out.math_glyphs.len(),
     };
 
     // The first block of an alert region gets the bold title line; the
@@ -3114,6 +3116,7 @@ fn replay_position(
     let run_mark = out.runs.len();
     let rect_mark = out.rects.len();
     let image_mark = out.images.len();
+    let math_mark = out.math_glyphs.len();
     let mut scratch = LayoutDoc::default();
     if entry.flags & ENTRY_ALERT_TITLE != 0 {
         let kind = block.alert.expect("an alert title has a kind");
@@ -3181,7 +3184,9 @@ fn replay_position(
         }
     }
     if let Some(factor) = block.align_factor() {
-        align_lines(out, run_mark, rect_mark, image_mark, x_base, avail, factor);
+        align_lines(
+            out, run_mark, rect_mark, image_mark, math_mark, x_base, avail, factor,
+        );
     }
     if entry.deco_top.is_finite() {
         let decoration = quote_decoration(
@@ -3296,6 +3301,7 @@ fn finish_block(
             frame.marks.runs,
             frame.marks.rects,
             frame.marks.images,
+            frame.marks.math,
             frame.x_base,
             frame.avail,
             factor,
@@ -3911,7 +3917,9 @@ fn shape_block_lines(
             } else if i < shaped.len() {
                 height += line_height;
             }
-        } else {
+        } else if !shaped[i].text(source).is_empty() {
+            // A piece with no text (a span the flow masked out) joins no
+            // segment: alone after a break it would make an empty line.
             segment.push(i);
         }
         i += 1;
@@ -4493,8 +4501,9 @@ fn layout_table(
                 align: None,
             };
             if has_math(spans) {
+                let spans = cell_without_images(spans);
                 layout_flow(
-                    fonts, theme, cfg, source, media, spans, &base, 0.0, 0.0, 100_000.0, &mut tmp,
+                    fonts, theme, cfg, source, media, &spans, &base, 0.0, 0.0, 100_000.0, &mut tmp,
                 );
             } else {
                 shape_block(
@@ -4579,10 +4588,13 @@ fn layout_table(
             let mut tmp = LayoutDoc::default();
             let align = aligns.get(c).copied().and_then(cell_align);
             let math = has_math(spans);
+            let rtl = math && cell_reads_rtl(spans, source);
             // The flow sets a formula after its text: a centered or
             // right-aligned cell with a formula is laid out at the left
             // and moved as a block afterwards, so the formula moves with
-            // its text.
+            // its text. A right-to-left cell keeps its mark instead: its
+            // text sits at the right by nature, and the flow puts the
+            // formula's row at the marked side, the right when unmarked.
             let base = BlockStyle {
                 size,
                 color: theme.text.body,
@@ -4590,20 +4602,18 @@ fn layout_table(
                 block_index,
                 justify: false,
                 align: match align {
-                    Some(Align::Center) | Some(Align::Right) if math => None,
+                    Some(Align::Center) | Some(Align::Right) if math && !rtl => None,
+                    None if rtl => Some(Align::Right),
                     a => a,
                 },
             };
             let content_w = (col_width - 2.0 * pad).max(20.0);
             let h = if math {
+                let spans = cell_without_images(spans);
                 let h = layout_flow(
-                    fonts, theme, cfg, source, media, spans, &base, 0.0, 0.0, content_w, &mut tmp,
+                    fonts, theme, cfg, source, media, &spans, &base, 0.0, 0.0, content_w, &mut tmp,
                 );
-                let factor = match align {
-                    Some(Align::Center) => 0.5,
-                    Some(Align::Right) => 1.0,
-                    _ => 0.0,
-                };
+                let factor = if rtl { 0.0 } else { align_factor(align) };
                 // The room is the column's own, not the content floor's,
                 // which a very narrow column falls under: the cell never
                 // moves past its column.
@@ -4708,6 +4718,36 @@ fn layout_table(
             .stroked(t),
     );
     y - y0
+}
+
+/// A cell's spans for the paragraph's flow: an image span becomes its
+/// text, as every cell shows an image, and the pool's worker, which
+/// shapes tables, has no media cache to look one up in.
+fn cell_without_images(spans: &[Span]) -> std::borrow::Cow<'_, [Span]> {
+    if spans.iter().all(|s| s.image.is_none()) {
+        return std::borrow::Cow::Borrowed(spans);
+    }
+    std::borrow::Cow::Owned(
+        spans
+            .iter()
+            .map(|s| {
+                let mut c = s.clone();
+                c.image = None;
+                c
+            })
+            .collect(),
+    )
+}
+
+/// Whether a cell's text reads right to left: its first strong character,
+/// the formulas' TeX left out.
+fn cell_reads_rtl(spans: &[Span], source: &str) -> bool {
+    spans
+        .iter()
+        .filter(|s| !s.math)
+        .flat_map(|s| s.text(source).chars())
+        .find_map(crate::style::fonts::strong_rtl)
+        .unwrap_or(false)
 }
 
 /// The right edge of a cell laid out alone: its runs, its formulas' boxes
@@ -5662,6 +5702,26 @@ fn cut_at_a_break(
     }
 }
 
+/// Closes the flow's open line: a row of its own, whose height the flow
+/// books when the line closes, moves the pen below it.
+fn close_line(line: &mut Option<FlowLine>, y: &mut f32, size: f32) {
+    if let Some(l) = line.take() {
+        if l.row {
+            *y = l.top + l.height + 0.25 * size;
+        }
+    }
+}
+
+/// Where a box alone on its row sits in the room left: at the left, in
+/// the middle or at the right, by the block's alignment.
+fn align_factor(align: Option<Align>) -> f32 {
+    match align {
+        Some(Align::Center) => 0.5,
+        Some(Align::Right) => 1.0,
+        _ => 0.0,
+    }
+}
+
 /// Text with inline images or equations. Text shapes normally; an image
 /// or equation joins the last text line when it fits there, otherwise it
 /// opens its own row. A one-line text chunk that follows an equation on an
@@ -5696,12 +5756,17 @@ fn layout_flow(
             while i < spans.len() && spans[i].image.is_none() && !spans[i].math {
                 i += 1;
             }
+            // A hard break closes the open line: the next box starts a
+            // line of its own below it, as the text after the break does.
+            let ends_with_break = spans[i - 1].text(source) == "\n";
             if spans[start..i]
                 .iter()
                 .all(|s| s.text(source).trim().is_empty())
             {
-                // Whitespace between two placed boxes keeps its word gap.
-                if let Some(l) = line.as_mut() {
+                if spans[start..i].iter().any(|s| s.text(source) == "\n") {
+                    close_line(&mut line, &mut y, base.size);
+                } else if let Some(l) = line.as_mut() {
+                    // Whitespace between two placed boxes keeps its word gap.
                     if l.baseline.is_some() {
                         l.end_x += 0.25 * base.size;
                     }
@@ -5736,7 +5801,11 @@ fn layout_flow(
                     rects_mark, out,
                 );
                 if out.runs.len() == rm {
-                    // The whole chunk joined the line, which stays open.
+                    // The whole chunk joined the line, which stays open
+                    // unless the chunk ended with a hard break.
+                    if ends_with_break {
+                        close_line(&mut line, &mut y, base.size);
+                    }
                     continue;
                 }
                 (rh, rm, rcm, false)
@@ -5819,15 +5888,18 @@ fn layout_flow(
                     },
                 });
             }
+            if ends_with_break {
+                close_line(&mut line, &mut y, base.size);
+            }
         } else if spans[i].math {
             let span = &spans[i];
             let font = OryxMathFont::new();
-            let mut m = noad::layout::layout(
-                span.text(source).trim(),
-                noad::layout::MathStyle::Text,
-                base.size,
-                &font,
-            );
+            let style = if span.display {
+                noad::layout::MathStyle::Display
+            } else {
+                noad::layout::MathStyle::Text
+            };
+            let mut m = noad::layout::layout(span.text(source).trim(), style, base.size, &font);
             // A formula wider than the width at hand (a table cell, a
             // narrow column) shrinks into it, down to the half-size floor,
             // as a display block wider than the column does; past the
@@ -5885,12 +5957,15 @@ fn layout_flow(
                     math: out.math_glyphs.len(),
                 };
                 let baseline = y + m.ascent.max(0.75 * line_height);
-                emit_math_layout(fonts, theme, cfg, &m, x0, baseline, base.block_index, out);
+                // A row of its own follows the block's alignment, as the
+                // text lines do: centered or at the right under a mark.
+                let x = x0 + (avail - w).max(0.0) * align_factor(base.align);
+                emit_math_layout(fonts, theme, cfg, &m, x, baseline, base.block_index, out);
                 let height = (baseline - y) + m.descent.max(0.25 * line_height);
                 line = Some(FlowLine {
                     top: y,
                     height,
-                    end_x: x0 + w,
+                    end_x: x + w,
                     baseline: Some(baseline),
                     row: true,
                     marks,
@@ -6140,16 +6215,19 @@ fn fit_side_text(
 /// A line may move either way, since right-to-left text starts on the
 /// right; a line wider than the content stays where it is. Lines are
 /// clustered by vertical overlap.
+#[allow(clippy::too_many_arguments)]
 fn align_lines(
     out: &mut LayoutDoc,
     runs_mark: usize,
     rects_mark: usize,
     images_mark: usize,
+    math_mark: usize,
     x0: f32,
     avail: f32,
     factor: f32,
 ) {
-    // (top, bottom, kind, index) per element; kinds: 0 runs, 1 rects, 2 images.
+    // (top, bottom, kind, index) per element; kinds: 0 runs, 1 rects,
+    // 2 images, 3 math glyphs.
     let mut items: Vec<(f32, f32, u8, usize)> = Vec::new();
     for (i, r) in out.runs.iter().enumerate().skip(runs_mark) {
         items.push((r.y, r.y + metrics::LINE_HEIGHT * r.size, 0, i));
@@ -6159,6 +6237,9 @@ fn align_lines(
     }
     for (i, im) in out.images.iter().enumerate().skip(images_mark) {
         items.push((im.y, im.y + im.height, 2, i));
+    }
+    for (i, g) in out.math_glyphs.iter().enumerate().skip(math_mark) {
+        items.push((g.top, g.bottom, 3, i));
     }
     items.sort_by(|a, b| a.0.total_cmp(&b.0));
     let mut start = 0;
@@ -6174,7 +6255,11 @@ fn align_lines(
             match item.2 {
                 0 => (out.runs[item.3].x, out.runs[item.3].width),
                 1 => (out.rects[item.3].x, out.rects[item.3].width),
-                _ => (out.images[item.3].x, out.images[item.3].width),
+                2 => (out.images[item.3].x, out.images[item.3].width),
+                _ => {
+                    let g = &out.math_glyphs[item.3];
+                    (g.x, g.right - g.x)
+                }
             }
         };
         let min_x = group.iter().map(|it| span_x(it).0).fold(f32::MAX, f32::min);
@@ -6191,7 +6276,11 @@ fn align_lines(
                 match item.2 {
                     0 => out.runs[item.3].x += dx,
                     1 => out.rects[item.3].x += dx,
-                    _ => out.images[item.3].x += dx,
+                    2 => out.images[item.3].x += dx,
+                    _ => {
+                        out.math_glyphs[item.3].x += dx;
+                        out.math_glyphs[item.3].right += dx;
+                    }
                 }
             }
         }

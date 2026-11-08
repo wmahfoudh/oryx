@@ -8,8 +8,8 @@ use oryx::doc::model::{BlockKind, Document, Marker, SpanScript};
 use oryx::doc::stream::{self, Swap};
 use oryx::layout::{
     code_lines_in, layout, layout_begin, layout_extend, layout_more, layout_step, metrics,
-    recolor_batch, recolor_code_lines, window_to, DecoRect, DirectionMode, LayoutDoc, ShapePool,
-    TextRef, TextRun, ViewConfig,
+    recolor_batch, recolor_code_lines, window_to, DecoRect, DirectionMode, LayoutDoc, MathGlyph,
+    ShapePool, TextRef, TextRun, ViewConfig,
 };
 use oryx::style::fonts::{FontStore, ARABIC_FAMILY, BODY_FAMILY, CODE_FAMILY, HEBREW_FAMILY};
 use oryx::style::highlight::{self, Arrival};
@@ -708,11 +708,6 @@ fn table_columns_header_and_stripes() {
     assert!((a.x - alpha.x).abs() < 1.0, "same column aligns");
 }
 
-/// The marks of the separator row align the column: `:---:` centers the
-/// cell's lines in the column, `---:` puts them against its right edge,
-/// `:---` and `---` leave them at the left. The example of SYNTAX.md.
-/// A formula in a table cell goes through the text fallback, which
-/// reads an escaped reserved character as noad does on the page.
 /// Every math glyph of a table lies inside one of its row bands.
 fn assert_math_in_rows(l: &LayoutDoc) {
     assert!(!l.math_glyphs.is_empty(), "the cell's formula typesets");
@@ -993,6 +988,202 @@ fn math_glyphs_carry_their_box_s_right_edge() {
     );
 }
 
+/// The math glyph of a layout that renders `c`.
+fn glyph_of(l: &LayoutDoc, c: char) -> &MathGlyph {
+    l.math_glyphs
+        .iter()
+        .find(|g| g.ch == Some(c))
+        .unwrap_or_else(|| panic!("no glyph for {c}"))
+}
+
+/// A table inside a centered or right-aligned division moves with its
+/// formulas (the read of Task 355): the line aligner moves the math
+/// glyphs as it moves the runs. A paragraph in such a division had the
+/// same fault before.
+#[test]
+fn a_table_in_an_aligned_div_moves_its_formulas() {
+    for word in ["center", "right"] {
+        let l = lay(
+            &format!("<div align=\"{word}\">\n\n| a | b |\n|---|---|\n| $\\frac{{a}}{{b}}$ | t |\n\n</div>\n"),
+            800.0,
+        );
+        let (outline, _) = table_frame(&l);
+        assert!(
+            outline.x > 200.0,
+            "{word}: the table moved to {}",
+            outline.x
+        );
+        assert_math_in_rows(&l);
+        for g in &l.math_glyphs {
+            assert!(
+                g.x >= outline.x && g.right <= outline.x + outline.width + 0.01,
+                "{word}: glyph {:?} at [{}, {}] against the table [{}, {}]",
+                g.ch,
+                g.x,
+                g.right,
+                outline.x,
+                outline.x + outline.width
+            );
+        }
+    }
+}
+
+#[test]
+fn a_formula_in_a_centered_paragraph_moves_with_its_line() {
+    let (doc, l) = lay2(
+        "<div align=\"center\">\n\nsome $\\frac{a}{b}$ text\n\n</div>\n",
+        800.0,
+    );
+    let some = find_text(&l, &doc, "some");
+    let text = l
+        .runs
+        .iter()
+        .find(|r| l.run_text(&doc, r).contains("text"))
+        .expect("the word after");
+    let left = l.math_glyphs.iter().map(|g| g.x).fold(f32::MAX, f32::min);
+    let right = l.math_glyphs.iter().map(|g| g.right).fold(0.0, f32::max);
+    assert!(
+        left >= some.x + some.width - 0.01,
+        "the fraction after the first word: {left} against {}",
+        some.x + some.width
+    );
+    assert!(
+        right <= text.x + 0.01,
+        "the fraction before the second word: {right} against {}",
+        text.x
+    );
+}
+
+/// `$$a \over b$$` in a cell is the whole formula in display style: the
+/// numerator and the denominator at the body size, as in a block. The
+/// read of Task 355 found the denominator at script size when the style
+/// was written as a word before the TeX.
+#[test]
+fn a_display_formula_in_a_cell_keeps_tex_s_sizes_in_an_infix_fraction() {
+    let l = lay("| a |\n|---|\n| $$a \\over b$$ |\n", 800.0);
+    let (a, b) = (
+        glyph_of(&l, '\u{1D44E}').size,
+        glyph_of(&l, '\u{1D44F}').size,
+    );
+    assert!((a - b).abs() < 0.01, "a at {a}, b at {b}");
+    assert!(
+        (a - cfg().body_size).abs() < 0.01,
+        "the numerator at the body size: {a}"
+    );
+}
+
+/// A cell with an image and a formula shows the image's text, as every
+/// cell shows an image. The read of Task 355: the flow would have looked
+/// the image up, in the shaping pool's empty cache.
+#[test]
+fn a_cell_with_an_image_and_a_formula_shows_the_image_s_text() {
+    let (doc, l) = lay2("| a |\n|---|\n| ![alt](oryx-test.png) $x$ |\n", 800.0);
+    assert!(l.images.is_empty(), "no image placed in a cell");
+    find_text(&l, &doc, "alt");
+    assert_math_in_rows(&l);
+}
+
+/// A hard break before a formula starts a new line, in a cell as in a
+/// paragraph. The read of Task 355: the flow let the formula join the
+/// line above the break, and an empty line followed.
+#[test]
+fn a_hard_break_before_a_formula_starts_a_new_line() {
+    let lh = metrics::LINE_HEIGHT * cfg().body_size;
+    let l = lay("| a |\n|---|\n| $x$<br>$y$ |\n", 800.0);
+    let (x, y) = (glyph_of(&l, '\u{1D465}'), glyph_of(&l, '\u{1D466}'));
+    assert!(
+        y.top >= x.bottom - 0.01,
+        "y below x: {} against {}",
+        y.top,
+        x.bottom
+    );
+    let band = l.table_rows[1].bottom - l.table_rows[1].top;
+    assert!(band > 1.6 * lh && band < 2.6 * lh, "two lines: {band}");
+
+    let (doc, l) = lay2("| a |\n|---|\n| text<br>$y$ |\n", 800.0);
+    let text = find_text(&l, &doc, "text");
+    let y = glyph_of(&l, '\u{1D466}');
+    assert!(
+        y.top >= text.y + lh - 0.01,
+        "y below the text: {} against {}",
+        y.top,
+        text.y + lh
+    );
+    let band = l.table_rows[1].bottom - l.table_rows[1].top;
+    assert!(band < 2.6 * lh, "no empty line: {band}");
+
+    let (doc, l) = lay2("text<br>$y$ after\n", 800.0);
+    let text = find_text(&l, &doc, "text");
+    let y = glyph_of(&l, '\u{1D466}');
+    assert!(y.top >= text.y + lh - 0.01, "paragraph: y below the text");
+    let after = l
+        .runs
+        .iter()
+        .find(|r| l.run_text(&doc, r).contains("after"))
+        .expect("the word after");
+    assert!(
+        (after.baseline - y.y).abs() < 2.0,
+        "the word after on the formula's line: {} against {}",
+        after.baseline,
+        y.y
+    );
+}
+
+/// A right-to-left cell with a formula follows its column's mark (the
+/// read of Task 355). Under a right mark and under none, the text hugs
+/// the right edge and the formula's row stands at the right too; under a
+/// center mark the text is centered, and the formula hangs on its line
+/// inside the cell, in the flow's order for right-to-left text.
+#[test]
+fn a_right_to_left_cell_with_a_formula_follows_its_column_s_mark() {
+    for mark in ["--:", "---", ":-:"] {
+        let (doc, l) = lay2(
+            &format!("| a | b |\n|{mark}|---|\n| مرحبا $x^2$ بالعالم | t |\n"),
+            800.0,
+        );
+        assert_math_in_rows(&l);
+        let (outline, borders) = table_frame(&l);
+        assert_eq!(borders.len(), 1);
+        let content = (outline.x + 8.0, borders[0] - 8.0);
+        let left = l.math_glyphs.iter().map(|g| g.x).fold(f32::MAX, f32::min);
+        let right = l.math_glyphs.iter().map(|g| g.right).fold(0.0, f32::max);
+        assert!(
+            left >= content.0 - 0.01 && right <= content.1 + 0.01,
+            "{mark}: the formula [{left}, {right}] inside the content [{}, {}]",
+            content.0,
+            content.1
+        );
+        let word = l
+            .runs
+            .iter()
+            .find(|r| l.run_text(&doc, r).contains("مرحبا"))
+            .expect("the first word");
+        if mark == ":-:" {
+            let mid = (content.0 + content.1) / 2.0;
+            assert!(
+                ((word.x + word.width / 2.0) - mid).abs() < 4.0,
+                "{mark}: the word centered at {} against {mid}",
+                word.x + word.width / 2.0
+            );
+        } else {
+            assert!(
+                content.1 - right < 12.0,
+                "{mark}: the formula's row at the right: {right} against {}",
+                content.1
+            );
+            assert!(
+                content.1 - (word.x + word.width) < 12.0,
+                "{mark}: the word at the right: {} against {}",
+                word.x + word.width,
+                content.1
+            );
+        }
+    }
+}
+
+/// The marks of the separator row align the column: `:---:` centers the
+/// cell's lines in the column, `---:` puts them against its right edge,
+/// `:---` and `---` leave them at the left. The example of SYNTAX.md.
 #[test]
 fn table_columns_follow_their_alignment_marks() {
     let (doc, l) = lay2(
