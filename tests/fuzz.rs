@@ -1310,6 +1310,21 @@ const MATH_CLASSES: &[&str] = &[
     "mathinner",
 ];
 const MATH_MODULO: &[&str] = &["pmod", "mod", "bmod"];
+/// TeX's infix fraction words and its switches, which act on the group
+/// they stand in (Task 352).
+const MATH_INFIX: &[&str] = &["over", "atop", "choose", "brace", "brack"];
+const MATH_SWITCHES: &[&str] = &[
+    "bf",
+    "rm",
+    "it",
+    "sf",
+    "tt",
+    "cal",
+    "displaystyle",
+    "textstyle",
+    "scriptstyle",
+    "scriptscriptstyle",
+];
 /// The sixteen words of TeX's sized delimiters (Task 351).
 const MATH_SIZES: &[&str] = &[
     "big", "Big", "bigg", "Bigg", "bigl", "Bigl", "biggl", "Biggl", "bigr", "Bigr", "biggr",
@@ -1425,6 +1440,12 @@ fn math_formula() -> impl Strategy<Value = String> {
                 let body = if in_text { format!("\\text{{#1 {body}}}") } else { format!("#1 {body}") };
                 format!("\\newcommand{{\\{name}}}[1]{{{body}}} \\{name}{{{arg}}}")
             }),
+            // An infix word between two halves of a group, and a switch over
+            // the rest of one (Task 352).
+            2 => (prop::sample::select(MATH_INFIX), i(), i())
+                .prop_map(|(w, a, b)| format!("{{{a} \\{w} {b}}}")),
+            1 => (prop::sample::select(MATH_SWITCHES), i(), i())
+                .prop_map(|(w, a, b)| format!("{{{a} \\{w} {b}}}")),
             // A sized delimiter on each side of a formula (Task 351).
             2 => (
                 prop::sample::select(MATH_SIZES),
@@ -1503,7 +1524,9 @@ fn check_math_spans(list: &noad::mlist::MathList, tex: &str) -> Result<(), TestC
                     check_math_spans(d, tex)?;
                 }
             }
-            Field::LeftRight { body, .. } => check_math_spans(body, tex)?,
+            Field::LeftRight { body, .. } | Field::Styled { body, .. } => {
+                check_math_spans(body, tex)?
+            }
             Field::Accent { base, .. } => check_math_spans(base, tex)?,
             Field::Table { rows, .. } => {
                 for row in rows {

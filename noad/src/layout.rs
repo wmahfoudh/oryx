@@ -253,6 +253,15 @@ impl Ctx<'_> {
             Field::Literal(text) => self.literal_box(text, atom, style),
             Field::Text(text) => self.text_box(text, atom, style),
             Field::Sized { ch, size } => self.sized_box(atom, *ch, *size, style),
+            // A style switch sets the style whole, as TeX's style noad does:
+            // never cramped.
+            Field::Styled {
+                style: switched,
+                body,
+            } => LaidBox {
+                geom: self.hlist(body, *switched, false),
+                italic: 0.0,
+            },
             Field::Accent {
                 accent,
                 stretch,
@@ -1996,6 +2005,57 @@ mod tests {
             height >= min - 0.5 && height <= min + 0.5,
             "{height} tall against the minimum {min}"
         );
+    }
+
+    #[test]
+    fn infix_fractions_lay_out_as_their_commands() {
+        assert_eq!(shape(&lay("{a \\over b}")), shape(&lay("\\frac{a}{b}")));
+        assert_eq!(shape(&lay("{n \\choose k}")), shape(&lay("\\binom{n}{k}")));
+        assert!(lay("{a \\atop b}").rules.is_empty(), "no bar under \\atop");
+        assert_eq!(
+            shape(&lay("{\\displaystyle a \\over b}")),
+            shape(&lay("\\dfrac{a}{b}"))
+        );
+    }
+
+    #[test]
+    fn a_style_switch_lays_the_rest_out_in_its_style() {
+        let f = font();
+        // \displaystyle inside a text formula: the sum as in display style.
+        let switched = lay("{\\displaystyle \\sum}");
+        let display = layout("\\sum", MathStyle::Display, SIZE, &f);
+        assert_eq!(shape(&switched), shape(&display));
+        // \scriptstyle: the letter at the script size, as in a superscript.
+        let small = lay("{\\scriptstyle x}");
+        let x = small
+            .glyphs
+            .iter()
+            .find(|g| g.ch == Some('\u{1D465}'))
+            .expect("x");
+        let sup = lay("a^{x}");
+        let sx = sup
+            .glyphs
+            .iter()
+            .find(|g| g.ch == Some('\u{1D465}'))
+            .expect("x");
+        assert!(
+            (x.size - sx.size).abs() < EPS,
+            "{} against the script's {}",
+            x.size,
+            sx.size
+        );
+    }
+
+    #[test]
+    fn a_font_switch_draws_its_alphabet() {
+        // {\rm d}x: an upright d, then the italic x.
+        let l = lay("{\\rm d}x");
+        let d = l.glyphs.iter().find(|g| g.ch == Some('d')).expect("d");
+        assert_eq!(d.glyph, glyph_of('d'));
+        assert!(l.glyphs.iter().any(|g| g.ch == Some('\u{1D465}')));
+        // {\bf x}: the bold x.
+        let l = lay("{\\bf x}");
+        assert!(l.glyphs.iter().any(|g| g.ch == Some('\u{1D431}')));
     }
 
     #[test]

@@ -16,6 +16,7 @@
 
 - Formulas now accept the TeX commands Wikipedia's math uses: `\tfrac`, `\dfrac`, `\cfrac`, `\tbinom` and `\dbinom`, `\pmod` and `\mod`, `\mathop` and the other class commands, `\boldsymbol`, `\textrm`, `\hbox`, and about a hundred names such as `\sgn`, `\arccot`, `\R`, `\infin` and `\rarr`. `\mathrm dx` without braces works as in TeX. Before, these commands were shown as written.
 - Formulas now accept `\big`, `\Big`, `\bigg` and `\Bigg` before a delimiter, with their `l`, `r` and `m` forms, as in `\bigl( x \bigr)`. Before, these words were shown as written.
+- Formulas now accept TeX's `\over`, `\atop`, `\choose`, `\brace` and `\brack` between the two halves of a group, as in `{n \choose k}`, and the switches `\bf`, `\rm`, `\it`, `\sf`, `\tt`, `\cal`, `\displaystyle`, `\textstyle`, `\scriptstyle` and `\scriptscriptstyle` over the rest of a group. Before, these words were shown as written.
 
 #### Selection
 

@@ -72,6 +72,9 @@ pub enum Field {
     /// Ord bare, Open for `l`, Close for `r`, Rel for `m`. `None` is the
     /// dot form, TeX's invisible box of the size.
     Sized { ch: Option<char>, size: u8 },
+    /// The rest of a group after a style switch (`\displaystyle` and its
+    /// kin), laid out in that style, uncramped.
+    Styled { style: MathStyle, body: MathList },
     /// An accented base: the combining accent character, whether wide
     /// forms may stretch horizontally, and the accented list.
     Accent {
@@ -194,6 +197,7 @@ impl MathList {
                     radicand.collect_literals(out);
                 }
                 Field::LeftRight { body, .. } => body.collect_literals(out),
+                Field::Styled { body, .. } => body.collect_literals(out),
                 Field::Accent { base, .. } => base.collect_literals(out),
                 Field::Table { rows, .. } => {
                     for row in rows {

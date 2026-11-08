@@ -831,6 +831,15 @@ fn restyle(list: &mut MathList, name: &str) {
 }
 
 fn restyle_field(field: &mut Field, name: &str) {
+    // `\rm`: a Latin letter becomes an upright text atom, as `\mathrm x`
+    // reads one; the other symbols have no roman form to take.
+    if let Field::Symbol(c) = field {
+        if name == "mathrm" && c.is_ascii_alphabetic() {
+            let text = c.to_string();
+            *field = Field::Text(text);
+            return;
+        }
+    }
     match field {
         Field::Symbol(c) => *c = map_alphabet(name, *c),
         Field::List(inner) => restyle(inner, name),
@@ -848,7 +857,7 @@ fn restyle_field(field: &mut Field, name: &str) {
                 restyle(deg, name);
             }
         }
-        Field::LeftRight { body, .. } => restyle(body, name),
+        Field::LeftRight { body, .. } | Field::Styled { body, .. } => restyle(body, name),
         Field::Accent { base, .. } => restyle(base, name),
         Field::Table { rows, .. } => {
             for row in rows {
@@ -1011,6 +1020,253 @@ fn literal_atom(text: impl Into<String>, span: std::ops::Range<usize>) -> Atom {
 /// The TeX demotion rule: a binary atom with no quantity on its left reads
 /// as an ordinary symbol, so leading signs and doubled operators space as
 /// signs. Applies per list; groups and scripts recurse through `list`.
+/// The items of one group as they are read: the atoms, and TeX's infix
+/// words and switches as markers, which act when the group closes.
+/// `\over` and its kin split the group into a fraction, a font switch
+/// restyles the rest of the group, a style switch wraps it. The four
+/// readers of a group share it: the top level and a braced group
+/// (`list`), the body of `\left` (`left_right`), a table cell
+/// (`table_cells`) and a root's degree without its bracket
+/// (`list_until_char`).
+#[derive(Default)]
+struct Group {
+    items: Vec<Item>,
+}
+
+enum Item {
+    Atom(Atom),
+    Marker(Marker, std::ops::Range<usize>),
+}
+
+/// A word that acts on the group it stands in.
+#[derive(Clone, Copy)]
+enum Marker {
+    Infix(Infix),
+    /// The alphabet of `map_alphabet`, `mathrm` for `\rm`.
+    Font(&'static str),
+    Style(MathStyle),
+}
+
+/// TeX's infix fraction words.
+#[derive(Clone, Copy)]
+enum Infix {
+    Over,
+    Atop,
+    Choose,
+    Brace,
+    Brack,
+}
+
+impl Infix {
+    fn name(self) -> &'static str {
+        match self {
+            Infix::Over => "\\over",
+            Infix::Atop => "\\atop",
+            Infix::Choose => "\\choose",
+            Infix::Brace => "\\brace",
+            Infix::Brack => "\\brack",
+        }
+    }
+}
+
+impl Marker {
+    /// The marker a command name is, if any.
+    fn of(name: &str) -> Option<Marker> {
+        Some(match name {
+            "over" => Marker::Infix(Infix::Over),
+            "atop" => Marker::Infix(Infix::Atop),
+            "choose" => Marker::Infix(Infix::Choose),
+            "brace" => Marker::Infix(Infix::Brace),
+            "brack" => Marker::Infix(Infix::Brack),
+            "bf" => Marker::Font("mathbf"),
+            "rm" => Marker::Font("mathrm"),
+            "it" => Marker::Font("mathit"),
+            "sf" => Marker::Font("mathsf"),
+            "tt" => Marker::Font("mathtt"),
+            "cal" => Marker::Font("mathcal"),
+            "displaystyle" => Marker::Style(MathStyle::Display),
+            "textstyle" => Marker::Style(MathStyle::Text),
+            "scriptstyle" => Marker::Style(MathStyle::Script),
+            "scriptscriptstyle" => Marker::Style(MathStyle::ScriptScript),
+            _ => return None,
+        })
+    }
+}
+
+impl Group {
+    fn push(&mut self, atom: Atom) {
+        self.items.push(Item::Atom(atom));
+    }
+
+    fn mark(&mut self, marker: Marker, span: std::ops::Range<usize>) {
+        self.items.push(Item::Marker(marker, span));
+    }
+
+    /// The group's list with its markers applied, TeX's binary rules run
+    /// on it; a numerator, a denominator and a switched body are lists of
+    /// their own.
+    fn finish(self) -> MathList {
+        let mut noads = build_group(self.items, true);
+        demote_bins(&mut noads);
+        MathList(noads)
+    }
+}
+
+fn item_span(item: &Item) -> &std::ops::Range<usize> {
+    match item {
+        Item::Atom(atom) => &atom.span,
+        Item::Marker(_, span) => span,
+    }
+}
+
+/// The group's items as noads, the first marker applied and the rest
+/// built after it; no marker stands before the first.
+fn build_group(items: Vec<Item>, infix_allowed: bool) -> Vec<Noad> {
+    let atoms = |items: Vec<Item>| -> Vec<Noad> {
+        items
+            .into_iter()
+            .map(|item| match item {
+                Item::Atom(atom) => Noad::Atom(atom),
+                Item::Marker(..) => unreachable!("the first marker was taken"),
+            })
+            .collect()
+    };
+    let Some(at) = items
+        .iter()
+        .position(|item| matches!(item, Item::Marker(..)))
+    else {
+        return atoms(items);
+    };
+    let mut head = items;
+    let tail = head.split_off(at + 1);
+    let Some(Item::Marker(marker, span)) = head.pop() else {
+        unreachable!("the marker found")
+    };
+    match marker {
+        // A second infix word in a group: TeX refuses the formula
+        // ("Ambiguous"); the word stays a literal in the denominator.
+        Marker::Infix(infix) if !infix_allowed => {
+            head.push(Item::Atom(literal_atom(infix.name(), span)));
+            head.extend(tail);
+            build_group(head, false)
+        }
+        Marker::Infix(infix) => {
+            let start = head.first().map_or(span.start, |i| item_span(i).start);
+            let end = tail.last().map_or(span.end, |i| item_span(i).end);
+            let mut numerator = build_group(head, false);
+            demote_bins(&mut numerator);
+            let mut denominator = build_group(tail, false);
+            demote_bins(&mut denominator);
+            let atom = infix_atom(
+                infix,
+                MathList(numerator),
+                MathList(denominator),
+                start..end,
+            );
+            vec![Noad::Atom(atom)]
+        }
+        Marker::Font(alphabet) => {
+            let mut rest = MathList(build_group(tail, infix_allowed));
+            restyle(&mut rest, alphabet);
+            let mut noads = atoms(head);
+            noads.extend(rest.0);
+            noads
+        }
+        Marker::Style(style) => {
+            let end = tail.last().map_or(span.end, |i| item_span(i).end);
+            let mut body = build_group(tail, infix_allowed);
+            demote_bins(&mut body);
+            let body = MathList(body);
+            // The class of the body's first atom, so that the spacing
+            // around the switch is the body's, as TeX spaces through a
+            // style noad.
+            let class = body.atoms().next().map_or(AtomClass::Ord, |a| a.class);
+            let atom = Atom {
+                class,
+                nucleus: Field::Styled { style, body },
+                sup: None,
+                sub: None,
+                limits: Limits::default(),
+                span: span.start..end,
+                nucleus_span: span.start..end,
+            };
+            let mut noads = atoms(head);
+            noads.push(Noad::Atom(atom));
+            noads
+        }
+    }
+}
+
+/// The fraction an infix word makes of its group's two halves: `\over`
+/// with a bar, `\atop` without, `\choose`, `\brace` and `\brack` the
+/// barless stack between their stretched delimiters, as `\binom`.
+fn infix_atom(
+    infix: Infix,
+    numerator: MathList,
+    denominator: MathList,
+    span: std::ops::Range<usize>,
+) -> Atom {
+    match infix {
+        Infix::Over | Infix::Atop => Atom {
+            class: AtomClass::Inner,
+            nucleus: Field::Fraction {
+                numerator,
+                denominator,
+                bar: matches!(infix, Infix::Over),
+                style: None,
+                continued: false,
+            },
+            sup: None,
+            sub: None,
+            limits: Limits::default(),
+            span: span.clone(),
+            nucleus_span: span,
+        },
+        Infix::Choose => binom_atom(numerator, denominator, None, span, ('(', ')')),
+        Infix::Brace => binom_atom(numerator, denominator, None, span, ('{', '}')),
+        Infix::Brack => binom_atom(numerator, denominator, None, span, ('[', ']')),
+    }
+}
+
+/// A barless stack inside stretched delimiters: `\binom` and the infix
+/// `\choose` family.
+fn binom_atom(
+    numerator: MathList,
+    denominator: MathList,
+    style: Option<MathStyle>,
+    span: std::ops::Range<usize>,
+    delimiters: (char, char),
+) -> Atom {
+    let stack = Atom {
+        class: AtomClass::Inner,
+        nucleus: Field::Fraction {
+            numerator,
+            denominator,
+            bar: false,
+            style,
+            continued: false,
+        },
+        sup: None,
+        sub: None,
+        limits: Limits::default(),
+        span: span.clone(),
+        nucleus_span: span.clone(),
+    };
+    Atom {
+        class: AtomClass::Inner,
+        nucleus: Field::LeftRight {
+            open: Some(delimiters.0),
+            close: Some(delimiters.1),
+            body: MathList(vec![Noad::Atom(stack)]),
+        },
+        sup: None,
+        sub: None,
+        limits: Limits::default(),
+        span: span.clone(),
+        nucleus_span: span,
+    }
+}
+
 fn demote_bins(items: &mut [Noad]) {
     // Kerns are not atoms: demotion reads through them.
     let is_atom = |noad: &Noad| {
@@ -1075,6 +1331,19 @@ impl Parser<'_> {
         self.tokens.get(self.pos)
     }
 
+    /// A marker word at the stream's head; a user macro of that name is
+    /// not one, it expands as an atom.
+    fn marker(&self) -> Option<Marker> {
+        use crate::token::TokenKind as K;
+        let K::Command(name) = &self.peek()?.kind else {
+            return None;
+        };
+        if self.macros.contains_key(name) {
+            return None;
+        }
+        Marker::of(name)
+    }
+
     fn next(&mut self) -> Option<crate::token::Token> {
         let tok = self.tokens.get(self.pos).cloned();
         if tok.is_some() {
@@ -1088,7 +1357,7 @@ impl Parser<'_> {
     /// literal; a missing closer closes at the end.
     fn list(&mut self, top: bool) -> MathList {
         use crate::token::TokenKind as K;
-        let mut items: Vec<Noad> = Vec::new();
+        let mut group = Group::default();
         while let Some(tok) = self.peek() {
             let span = tok.span.clone();
             match &tok.kind {
@@ -1097,11 +1366,11 @@ impl Parser<'_> {
                     if !top {
                         break;
                     }
-                    items.push(Noad::Atom(literal_atom("}", span)));
+                    group.push(literal_atom("}", span));
                 }
                 K::Align => {
                     self.pos += 1;
-                    items.push(Noad::Atom(literal_atom("&", span)));
+                    group.push(literal_atom("&", span));
                 }
                 K::Sup | K::Sub | K::Prime => {
                     // A script with nothing to hang on: TeX's implicit empty
@@ -1116,18 +1385,22 @@ impl Parser<'_> {
                         nucleus_span: span.start..span.start,
                     };
                     self.scripts(&mut atom);
-                    items.push(Noad::Atom(atom));
+                    group.push(atom);
                 }
                 _ => {
+                    if let Some(marker) = self.marker() {
+                        self.pos += 1;
+                        group.mark(marker, span);
+                        continue;
+                    }
                     if let Some(mut atom) = self.atom() {
                         self.scripts(&mut atom);
-                        items.push(Noad::Atom(atom));
+                        group.push(atom);
                     }
                 }
             }
         }
-        demote_bins(&mut items);
-        MathList(items)
+        group.finish()
     }
 
     /// One scriptless atom from the stream: a character, a command, or a
@@ -1394,35 +1667,7 @@ impl Parser<'_> {
         let numerator = self.script_operand();
         let denominator = self.script_operand();
         let end = self.consumed_end(start.end);
-        let span = start.start..end;
-        let stack = Atom {
-            class: AtomClass::Inner,
-            nucleus: Field::Fraction {
-                numerator,
-                denominator,
-                bar: false,
-                style,
-                continued: false,
-            },
-            sup: None,
-            sub: None,
-            limits: Limits::default(),
-            span: span.clone(),
-            nucleus_span: span.clone(),
-        };
-        Atom {
-            class: AtomClass::Inner,
-            nucleus: Field::LeftRight {
-                open: Some('('),
-                close: Some(')'),
-                body: MathList(vec![Noad::Atom(stack)]),
-            },
-            sup: None,
-            sub: None,
-            limits: Limits::default(),
-            span: span.clone(),
-            nucleus_span: span,
-        }
+        binom_atom(numerator, denominator, style, start.start..end, ('(', ')'))
     }
 
     /// A letter-style command: the operand parses normally, then its
@@ -2042,7 +2287,7 @@ impl Parser<'_> {
         use crate::token::TokenKind as K;
         let mut rows: Vec<Vec<MathList>> = Vec::new();
         let mut row: Vec<MathList> = Vec::new();
-        let mut cell: Vec<Noad> = Vec::new();
+        let mut cell = Group::default();
         loop {
             let Some(tok) = self.peek() else {
                 return (rows, false);
@@ -2051,20 +2296,17 @@ impl Parser<'_> {
             match &tok.kind {
                 K::Align => {
                     self.pos += 1;
-                    demote_bins(&mut cell);
-                    row.push(MathList(std::mem::take(&mut cell)));
+                    row.push(std::mem::take(&mut cell).finish());
                 }
                 K::Command(name) if name == "\\" => {
                     self.pos += 1;
-                    demote_bins(&mut cell);
-                    row.push(MathList(std::mem::take(&mut cell)));
+                    row.push(std::mem::take(&mut cell).finish());
                     rows.push(std::mem::take(&mut row));
                 }
                 K::Command(name) if name == "end" => {
                     self.pos += 1;
                     let _ = self.env_name();
-                    demote_bins(&mut cell);
-                    row.push(MathList(std::mem::take(&mut cell)));
+                    row.push(std::mem::take(&mut cell).finish());
                     // A trailing \\ leaves one empty row; TeX drops it.
                     let trailing_empty = row.len() == 1 && row[0].0.is_empty() && !rows.is_empty();
                     if !trailing_empty {
@@ -2086,12 +2328,17 @@ impl Parser<'_> {
                         nucleus_span: span.start..span.start,
                     };
                     self.scripts(&mut atom);
-                    cell.push(Noad::Atom(atom));
+                    cell.push(atom);
                 }
                 _ => {
+                    if let Some(marker) = self.marker() {
+                        self.pos += 1;
+                        cell.mark(marker, span);
+                        continue;
+                    }
                     if let Some(mut atom) = self.atom() {
                         self.scripts(&mut atom);
-                        cell.push(Noad::Atom(atom));
+                        cell.push(atom);
                     } else {
                         self.pos += 1;
                     }
@@ -2144,8 +2391,9 @@ impl Parser<'_> {
     /// Elements up to a closing character, consumed; end of input closes.
     fn list_until_char(&mut self, closer: char) -> MathList {
         use crate::token::TokenKind as K;
-        let mut items: Vec<Noad> = Vec::new();
+        let mut group = Group::default();
         while let Some(tok) = self.peek() {
+            let span = tok.span.clone();
             if matches!(&tok.kind, K::Char(c) if *c == closer) {
                 self.pos += 1;
                 break;
@@ -2153,15 +2401,19 @@ impl Parser<'_> {
             if matches!(tok.kind, K::EndGroup) {
                 break;
             }
+            if let Some(marker) = self.marker() {
+                self.pos += 1;
+                group.mark(marker, span);
+                continue;
+            }
             if let Some(mut atom) = self.atom() {
                 self.scripts(&mut atom);
-                items.push(Noad::Atom(atom));
+                group.push(atom);
             } else {
                 self.pos += 1;
             }
         }
-        demote_bins(&mut items);
-        MathList(items)
+        group.finish()
     }
 
     /// `\left⟨delim⟩ ... \right⟨delim⟩`. A missing `\right` fails open at
@@ -2170,9 +2422,10 @@ impl Parser<'_> {
     fn left_right(&mut self, start: std::ops::Range<usize>) -> Atom {
         use crate::token::TokenKind as K;
         let open = self.delimiter().flatten();
-        let mut items: Vec<Noad> = Vec::new();
+        let mut group = Group::default();
         let mut close = None;
         while let Some(tok) = self.peek() {
+            let span = tok.span.clone();
             match &tok.kind {
                 K::Command(name) if name == "right" => {
                     self.pos += 1;
@@ -2181,22 +2434,26 @@ impl Parser<'_> {
                 }
                 K::EndGroup => break,
                 _ => {
+                    if let Some(marker) = self.marker() {
+                        self.pos += 1;
+                        group.mark(marker, span);
+                        continue;
+                    }
                     if let Some(mut atom) = self.atom() {
                         self.scripts(&mut atom);
-                        items.push(Noad::Atom(atom));
+                        group.push(atom);
                     } else {
                         self.pos += 1;
                     }
                 }
             }
         }
-        demote_bins(&mut items);
         self.construct(
             start,
             Field::LeftRight {
                 open,
                 close,
-                body: MathList(items),
+                body: group.finish(),
             },
             AtomClass::Inner,
         )
@@ -2319,9 +2576,15 @@ impl Parser<'_> {
                 }
             }
             // A closer of the structure around (a row break, `\\right`,
-            // `\\end`) or a marker is no operand: the operand is empty and
+            // `\\end`), a script marker or a word that acts on the group
+            // (`\\over`, a switch) is no operand: the operand is empty and
             // the token stays for its reader, TeX's missing argument.
-            K::Command(name) if name == "\\" || name == "right" || name == "end" => {
+            K::Command(name)
+                if name == "\\"
+                    || name == "right"
+                    || name == "end"
+                    || Marker::of(name).is_some() =>
+            {
                 MathList::default()
             }
             K::Sup | K::Sub | K::Prime | K::Align | K::EndGroup => MathList::default(),
@@ -3698,11 +3961,296 @@ mod tests {
         for tex in whole {
             assert_eq!(parse(tex).literals(), Vec::<String>::new(), "{tex}");
         }
-        // The `\choose` of category C is what is left in this one.
+    }
+
+    /// The atoms inside a braced group's atom.
+    fn inner(atom: &Atom) -> Vec<Atom> {
+        let Field::List(list) = &atom.nucleus else {
+            panic!("{:?}", atom.nucleus)
+        };
+        list.atoms().cloned().collect()
+    }
+
+    #[test]
+    fn infix_fractions_take_the_group_s_two_halves() {
+        // TeX's \over: what came before it in the group is the numerator,
+        // the rest of the group the denominator, one atom in their place.
+        let a = atoms("{a+b \\over c} d");
+        assert_eq!(a.len(), 2);
+        assert_eq!(a[0].span, 0..13);
+        assert_eq!(a[1].nucleus, Field::Symbol('d'));
+        let g = inner(&a[0]);
+        assert_eq!(g.len(), 1);
+        let Field::Fraction {
+            numerator,
+            denominator,
+            bar,
+            style,
+            ..
+        } = &g[0].nucleus
+        else {
+            panic!("{:?}", g[0].nucleus)
+        };
+        assert!(*bar);
+        assert_eq!(*style, None);
+        assert_eq!(numerator.atoms().count(), 3);
+        assert_eq!(denominator.atoms().count(), 1);
+        assert_eq!(g[0].class, AtomClass::Inner);
+        assert_eq!(g[0].span, 1..12);
+        // The top level is a group too.
+        let a = atoms("a \\over b");
+        assert_eq!(a.len(), 1);
+        assert!(matches!(a[0].nucleus, Field::Fraction { bar: true, .. }));
+        // \atop has no bar; an empty half is an empty list.
+        let g = inner(&atoms("{\\atop b}")[0]);
+        let Field::Fraction { numerator, bar, .. } = &g[0].nucleus else {
+            panic!("{:?}", g[0].nucleus)
+        };
+        assert!(!*bar);
+        assert!(numerator.0.is_empty());
+        let g = inner(&atoms("{a \\over}")[0]);
+        let Field::Fraction { denominator, .. } = &g[0].nucleus else {
+            panic!("{:?}", g[0].nucleus)
+        };
+        assert!(denominator.0.is_empty());
+        // \choose is \binom; \brace and \brack take their delimiters.
+        for (word, open, close) in [
+            ("choose", '(', ')'),
+            ("brace", '{', '}'),
+            ("brack", '[', ']'),
+        ] {
+            let g = inner(&atoms(&format!("{{n \\{word} k}}"))[0]);
+            let Field::LeftRight {
+                open: o,
+                close: c,
+                body,
+            } = &g[0].nucleus
+            else {
+                panic!("{:?}", g[0].nucleus)
+            };
+            assert_eq!((*o, *c), (Some(open), Some(close)), "\\{word}");
+            let stack = body.atoms().next().unwrap();
+            assert!(matches!(stack.nucleus, Field::Fraction { bar: false, .. }));
+        }
+        // A second infix word in the group is a literal in the denominator.
+        let g = inner(&atoms("{a \\over b \\over c}")[0]);
+        assert_eq!(g.len(), 1);
+        let Field::Fraction { denominator, .. } = &g[0].nucleus else {
+            panic!("{:?}", g[0].nucleus)
+        };
+        let den: Vec<&Atom> = denominator.atoms().collect();
+        assert_eq!(den.len(), 3);
+        assert_eq!(den[1].nucleus, Field::Literal("\\over".into()));
+        // Every group kind: a radicand, a degree, a \left body, a cell, a script.
+        let a = atoms("\\sqrt{a \\over b}");
+        let Field::Radical { radicand, .. } = &a[0].nucleus else {
+            panic!("{:?}", a[0].nucleus)
+        };
+        assert!(matches!(
+            radicand.atoms().next().unwrap().nucleus,
+            Field::Fraction { .. }
+        ));
+        let a = atoms("\\sqrt[a \\over b]{c}");
+        let Field::Radical { degree, .. } = &a[0].nucleus else {
+            panic!("{:?}", a[0].nucleus)
+        };
+        let degree = degree.as_ref().unwrap();
+        assert!(matches!(
+            degree.atoms().next().unwrap().nucleus,
+            Field::Fraction { .. }
+        ));
+        let a = atoms("\\left( a \\over b \\right) c");
+        let Field::LeftRight { body, .. } = &a[0].nucleus else {
+            panic!("{:?}", a[0].nucleus)
+        };
+        assert_eq!(body.atoms().count(), 1);
+        assert!(matches!(
+            body.atoms().next().unwrap().nucleus,
+            Field::Fraction { .. }
+        ));
+        assert_eq!(a[1].nucleus, Field::Symbol('c'));
+        let a = atoms("\\begin{matrix} a \\over b & c \\\\ d & e \\end{matrix}");
+        let Field::Table { rows, .. } = &a[0].nucleus else {
+            panic!("{:?}", a[0].nucleus)
+        };
+        assert_eq!(rows.len(), 2);
+        assert!(matches!(
+            rows[0][0].atoms().next().unwrap().nucleus,
+            Field::Fraction { .. }
+        ));
         assert_eq!(
-            parse(r"\frac{\sin (nx)}{\sin^n x} = \Bigg( {n \choose 1} \cot^{n - 1} x - {n \choose 3} \cot^{n - 3} x \pm \cdots \Bigg).").literals(),
-            ["\\choose", "\\choose"]
+            rows[0][1].atoms().next().unwrap().nucleus,
+            Field::Symbol('c')
         );
+        let a = atoms("x^{a \\over b}");
+        let sup = a[0].sup.as_ref().unwrap();
+        assert!(matches!(
+            sup.atoms().next().unwrap().nucleus,
+            Field::Fraction { .. }
+        ));
+        // Without a brace the word is no operand: the script is empty and
+        // the word acts on the group, TeX's missing argument.
+        let a = atoms("x^\\over y");
+        assert_eq!(a.len(), 1);
+        let Field::Fraction { numerator, .. } = &a[0].nucleus else {
+            panic!("{:?}", a[0].nucleus)
+        };
+        let x = numerator.atoms().next().unwrap();
+        assert_eq!(x.nucleus, Field::Symbol('x'));
+        assert!(x.sup.as_ref().unwrap().0.is_empty());
+        // An empty macro before the word leaves a radical of nothing.
+        let a = atoms("{\\newcommand{\\e}{} \\sqrt\\e \\over b}");
+        let g = inner(&a[0]);
+        let Field::Fraction { numerator, .. } = &g[0].nucleus else {
+            panic!("{:?}", g[0].nucleus)
+        };
+        assert!(matches!(
+            numerator.atoms().next().unwrap().nucleus,
+            Field::Radical { .. }
+        ));
+    }
+
+    #[test]
+    fn font_switches_restyle_the_rest_of_the_group() {
+        let a = atoms("{\\bf x} y");
+        assert_eq!(
+            inner(&a[0])[0].nucleus,
+            Field::Symbol(map_alphabet("mathbf", 'x'))
+        );
+        assert_eq!(a[1].nucleus, Field::Symbol('y'));
+        // From the switch to the end of the group, scripts included.
+        let g = inner(&atoms("{a \\bf b c^d}")[0]);
+        assert_eq!(g.len(), 3);
+        assert_eq!(g[0].nucleus, Field::Symbol('a'));
+        assert_eq!(g[1].nucleus, Field::Symbol(map_alphabet("mathbf", 'b')));
+        assert_eq!(g[2].nucleus, Field::Symbol(map_alphabet("mathbf", 'c')));
+        let sup = g[2].sup.as_ref().unwrap();
+        assert_eq!(
+            sup.atoms().next().unwrap().nucleus,
+            Field::Symbol(map_alphabet("mathbf", 'd'))
+        );
+        // \rm sets the Latin letters upright, as \mathrm does.
+        let a = atoms("{\\rm d}x");
+        assert_eq!(inner(&a[0])[0].nucleus, Field::Text("d".into()));
+        assert_eq!(a[1].nucleus, Field::Symbol('x'));
+        let g = inner(&atoms("{\\rm \\alpha 2}")[0]);
+        assert_eq!(g[0].nucleus, Field::Symbol('\u{03B1}'));
+        assert_eq!(g[1].nucleus, Field::Symbol('2'));
+        // A later switch replaces the earlier one.
+        let g = inner(&atoms("{\\bf a \\rm b}")[0]);
+        assert_eq!(g[0].nucleus, Field::Symbol(map_alphabet("mathbf", 'a')));
+        assert_eq!(g[1].nucleus, Field::Text("b".into()));
+        for (word, alphabet) in [
+            ("it", "mathit"),
+            ("sf", "mathsf"),
+            ("tt", "mathtt"),
+            ("cal", "mathcal"),
+        ] {
+            let g = inner(&atoms(&format!("{{\\{word} A}}"))[0]);
+            assert_eq!(
+                g[0].nucleus,
+                Field::Symbol(map_alphabet(alphabet, 'A')),
+                "\\{word}"
+            );
+        }
+        // A switch before \over restyles both halves.
+        let g = inner(&atoms("{\\bf a \\over b}")[0]);
+        let Field::Fraction {
+            numerator,
+            denominator,
+            ..
+        } = &g[0].nucleus
+        else {
+            panic!("{:?}", g[0].nucleus)
+        };
+        assert_eq!(
+            numerator.atoms().next().unwrap().nucleus,
+            Field::Symbol(map_alphabet("mathbf", 'a'))
+        );
+        assert_eq!(
+            denominator.atoms().next().unwrap().nucleus,
+            Field::Symbol(map_alphabet("mathbf", 'b'))
+        );
+        // A switch with nothing after it adds nothing.
+        let a = atoms("{a \\bf} b");
+        assert_eq!(a.len(), 2);
+        assert_eq!(inner(&a[0]).len(), 1);
+    }
+
+    #[test]
+    fn style_switches_wrap_the_rest_of_the_group() {
+        let a = atoms("a \\textstyle b c");
+        assert_eq!(a.len(), 2);
+        assert_eq!(a[0].nucleus, Field::Symbol('a'));
+        let Field::Styled { style, body } = &a[1].nucleus else {
+            panic!("{:?}", a[1].nucleus)
+        };
+        assert_eq!(*style, MathStyle::Text);
+        assert_eq!(body.atoms().count(), 2);
+        assert_eq!(a[1].span, 2..16);
+        // The atom takes the class of the body's first atom.
+        let a = atoms("x = {\\displaystyle \\sum_i x}");
+        let g = inner(&a[2]);
+        let Field::Styled { style, .. } = &g[0].nucleus else {
+            panic!("{:?}", g[0].nucleus)
+        };
+        assert_eq!(*style, MathStyle::Display);
+        assert_eq!(g[0].class, AtomClass::Op);
+        for (word, style) in [
+            ("scriptstyle", MathStyle::Script),
+            ("scriptscriptstyle", MathStyle::ScriptScript),
+        ] {
+            let g = inner(&atoms(&format!("{{\\{word} x}}"))[0]);
+            assert!(
+                matches!(&g[0].nucleus, Field::Styled { style: s, .. } if *s == style),
+                "\\{word}"
+            );
+        }
+        // A later style switch sits inside the earlier one's body.
+        let g = inner(&atoms("{\\displaystyle a \\scriptstyle b}")[0]);
+        let Field::Styled { body, .. } = &g[0].nucleus else {
+            panic!("{:?}", g[0].nucleus)
+        };
+        let items: Vec<&Atom> = body.atoms().collect();
+        assert_eq!(items.len(), 2);
+        assert!(matches!(
+            items[1].nucleus,
+            Field::Styled {
+                style: MathStyle::Script,
+                ..
+            }
+        ));
+        // Before \over, the switch holds the fraction: `{\displaystyle a \over b}` is \dfrac.
+        let g = inner(&atoms("{\\displaystyle a \\over b}")[0]);
+        let Field::Styled { body, .. } = &g[0].nucleus else {
+            panic!("{:?}", g[0].nucleus)
+        };
+        assert_eq!(body.atoms().count(), 1);
+        assert!(matches!(
+            body.atoms().next().unwrap().nucleus,
+            Field::Fraction { .. }
+        ));
+        // In a script's operand.
+        let a = atoms("x^{\\displaystyle y}");
+        let sup = a[0].sup.as_ref().unwrap();
+        assert!(matches!(
+            sup.atoms().next().unwrap().nucleus,
+            Field::Styled { .. }
+        ));
+    }
+
+    #[test]
+    fn the_file_s_formulas_of_category_c_parse_whole() {
+        let whole = [
+            r"\int {1 \over x}\,dx = \ln \left|x \right| + C",
+            r"p(t) = { {2m + 1} \choose 1}t^m - { {2m + 1} \choose 3}t^{m - 1} \pm \cdots + (-1)^m{ {2m+1} \choose {2m + 1} }.",
+            r"\frac{\sin (nx)}{\sin^n x} = \Bigg( {n \choose 1} \cot^{n - 1} x - {n \choose 3} \cot^{n - 3} x \pm \cdots \Bigg).",
+            r"\psi( {\bf x},t)=\sqrt{\rho({\bf x},t)}\exp\left(\frac{i}{\hbar} S({\bf x},t)\right)",
+            r"\mathbf{J} \cdot {\rm d}\mathbf{S} = - I_{\partial \Omega}.",
+        ];
+        for tex in whole {
+            assert_eq!(parse(tex).literals(), Vec::<String>::new(), "{tex}");
+        }
     }
 
     #[test]
