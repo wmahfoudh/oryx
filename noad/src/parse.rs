@@ -959,6 +959,32 @@ fn text_gap(src: &str, a: usize, a_own: bool, b: usize, b_own: bool) -> String {
     }
 }
 
+/// What a token is as a delimiter: `Some(None)` for the dot, TeX's empty
+/// delimiter; `Some(Some(c))` for TeX's delimiter characters (`<` and `>`
+/// as the angle brackets, as TeX's delimiter codes map them), for a
+/// character one of the delimiter commands stands for, and for a command
+/// of `DELIMITERS`; `None` for anything else, a letter among them, which
+/// TeX refuses as a delimiter.
+fn delimiter_of(kind: &crate::token::TokenKind) -> Option<Option<char>> {
+    use crate::token::TokenKind as K;
+    match kind {
+        K::Char('.') => Some(None),
+        K::Char('<') => Some(Some('\u{27E8}')),
+        K::Char('>') => Some(Some('\u{27E9}')),
+        K::Char(c)
+            if matches!(c, '(' | ')' | '[' | ']' | '/' | '|')
+                || DELIMITERS.iter().any(|row| row.1 == *c) =>
+        {
+            Some(Some(*c))
+        }
+        K::Command(name) => DELIMITERS
+            .binary_search_by(|row| row.0.cmp(name.as_str()))
+            .ok()
+            .map(|i| Some(DELIMITERS[i].1)),
+        _ => None,
+    }
+}
+
 fn classify_char(c: char) -> AtomClass {
     match c {
         '+' | '\u{2212}' | '-' | '*' => AtomClass::Bin,
@@ -986,18 +1012,32 @@ fn literal_atom(text: impl Into<String>, span: std::ops::Range<usize>) -> Atom {
 /// as an ordinary symbol, so leading signs and doubled operators space as
 /// signs. Applies per list; groups and scripts recurse through `list`.
 fn demote_bins(items: &mut [Noad]) {
-    let mut prev: Option<AtomClass> = None;
-    for noad in items.iter_mut() {
+    // Kerns are not atoms: demotion reads through them.
+    let is_atom = |noad: &Noad| {
         let Noad::Atom(atom) = noad;
-        // Kerns are not atoms: demotion reads through them.
-        if matches!(atom.nucleus, Field::Kern(_)) {
+        !matches!(atom.nucleus, Field::Kern(_))
+    };
+    let mut prev: Option<AtomClass> = None;
+    for i in 0..items.len() {
+        if !is_atom(&items[i]) {
             continue;
         }
+        // TeX's rules 5 and 6: a binary operator is ordinary after nothing,
+        // after another Bin, an Op, a Rel, an Open or a Punct, and before
+        // nothing, a Rel, a Close or a Punct.
+        let next = items[i + 1..].iter().find(|n| is_atom(n)).map(|n| {
+            let Noad::Atom(atom) = n;
+            atom.class
+        });
+        let Noad::Atom(atom) = &mut items[i];
         if atom.class == AtomClass::Bin
-            && !matches!(
+            && (!matches!(
                 prev,
                 Some(AtomClass::Ord) | Some(AtomClass::Close) | Some(AtomClass::Inner)
-            )
+            ) || matches!(
+                next,
+                None | Some(AtomClass::Rel) | Some(AtomClass::Close) | Some(AtomClass::Punct)
+            ))
         {
             atom.class = AtomClass::Ord;
         }
@@ -1539,9 +1579,10 @@ impl Parser<'_> {
     /// `\big(` and its kin, TeX's four fixed sizes of a delimiter: the
     /// word names the size and, by its ending, the class (`l` Open, `r`
     /// Close, `m` Rel, bare Ord); the delimiter follows by the rule of
-    /// `\left`. A `.` is an empty nucleus; anything else leaves the word a
-    /// literal and parses on.
+    /// `\left`, braced or not. A `.` is the invisible box of the size;
+    /// anything else leaves the word a literal and parses on.
     fn sized(&mut self, start: std::ops::Range<usize>, name: &str) -> Atom {
+        use crate::token::TokenKind as K;
         let (stem, class) = if let Some(stem) = name.strip_suffix('l') {
             (stem, AtomClass::Open)
         } else if let Some(stem) = name.strip_suffix('r') {
@@ -1557,9 +1598,25 @@ impl Parser<'_> {
             "bigg" => 3,
             _ => 4,
         };
+        // TeX's \big takes an argument: the delimiter may stand braced
+        // on its own, `\big{(}`, read without expanding anything inside.
+        if let Some(K::BeginGroup) = self.peek().map(|t| &t.kind) {
+            let inner = self
+                .tokens
+                .get(self.pos + 1)
+                .and_then(|t| delimiter_of(&t.kind));
+            let closed = matches!(
+                self.tokens.get(self.pos + 2).map(|t| &t.kind),
+                Some(K::EndGroup)
+            );
+            if let (Some(ch), true) = (inner, closed) {
+                self.pos += 3;
+                return self.construct(start, Field::Sized { ch, size }, class);
+            }
+            return literal_atom(format!("\\{name}"), start);
+        }
         match self.delimiter() {
-            Some(Some(ch)) => self.construct(start, Field::Sized { ch, size }, class),
-            Some(None) => self.construct(start, Field::Empty, class),
+            Some(ch) => self.construct(start, Field::Sized { ch, size }, class),
             None => literal_atom(format!("\\{name}"), start),
         }
     }
@@ -2145,10 +2202,9 @@ impl Parser<'_> {
         )
     }
 
-    /// One delimiter token after `\left`, `\right` or a `\big` word: a
-    /// character or a delimiter command as `Some(Some(c))`, `.` as
-    /// `Some(None)`, TeX's empty delimiter. Anything else answers `None`
-    /// and stays.
+    /// One delimiter token after `\left`, `\right` or a `\big` word, as
+    /// `delimiter_of` reads it, a user macro expanded first. Anything
+    /// else answers `None` and stays.
     fn delimiter(&mut self) -> Option<Option<char>> {
         use crate::token::TokenKind as K;
         // A user macro expands first, as everywhere else.
@@ -2164,15 +2220,7 @@ impl Parser<'_> {
                 return None;
             }
         }
-        let resolved = match self.peek().map(|t| &t.kind) {
-            Some(K::Char('.')) => Some(None),
-            Some(K::Char(c)) => Some(Some(*c)),
-            Some(K::Command(name)) => DELIMITERS
-                .binary_search_by(|row| row.0.cmp(name.as_str()))
-                .ok()
-                .map(|i| Some(DELIMITERS[i].1)),
-            _ => None,
-        };
+        let resolved = self.peek().and_then(|t| delimiter_of(&t.kind));
         if resolved.is_some() {
             self.pos += 1;
         }
@@ -2311,15 +2359,16 @@ mod tests {
 
     #[test]
     fn commands_resolve_symbol_and_class() {
-        let a = atoms("\\alpha\\pm\\leq\\sum");
-        assert_eq!(a.len(), 4);
+        // The binary operator between two operands, where TeX keeps it one.
+        let a = atoms("\\alpha\\pm\\beta\\leq\\sum");
+        assert_eq!(a.len(), 5);
         assert_eq!(a[0].nucleus, Field::Symbol('\u{03B1}'));
         assert_eq!(a[0].class, AtomClass::Ord);
         assert_eq!(a[1].nucleus, Field::Symbol('\u{00B1}'));
         assert_eq!(a[1].class, AtomClass::Bin);
-        assert_eq!(a[2].class, AtomClass::Rel);
-        assert_eq!(a[3].nucleus, Field::Symbol('\u{2211}'));
-        assert_eq!(a[3].class, AtomClass::Op);
+        assert_eq!(a[3].class, AtomClass::Rel);
+        assert_eq!(a[4].nucleus, Field::Symbol('\u{2211}'));
+        assert_eq!(a[4].class, AtomClass::Op);
     }
 
     #[test]
@@ -3459,20 +3508,39 @@ mod tests {
     #[test]
     fn sized_delimiters_parse_with_their_size_and_class() {
         let a = atoms("\\bigl( x \\bigr)");
-        assert_eq!(a[0].nucleus, Field::Sized { ch: '(', size: 1 });
+        assert_eq!(
+            a[0].nucleus,
+            Field::Sized {
+                ch: Some('('),
+                size: 1
+            }
+        );
         assert_eq!(a[0].class, AtomClass::Open);
         assert_eq!(a[1].nucleus, Field::Symbol('x'));
-        assert_eq!(a[2].nucleus, Field::Sized { ch: ')', size: 1 });
+        assert_eq!(
+            a[2].nucleus,
+            Field::Sized {
+                ch: Some(')'),
+                size: 1
+            }
+        );
         assert_eq!(a[2].class, AtomClass::Close);
         for (word, size) in [("big", 1), ("Big", 2), ("bigg", 3), ("Bigg", 4)] {
             let a = atoms(&format!("\\{word}|"));
-            assert_eq!(a[0].nucleus, Field::Sized { ch: '|', size }, "\\{word}");
+            assert_eq!(
+                a[0].nucleus,
+                Field::Sized {
+                    ch: Some('|'),
+                    size
+                },
+                "\\{word}"
+            );
             assert_eq!(a[0].class, AtomClass::Ord);
             let a = atoms(&format!("\\{word}m\\|"));
             assert_eq!(
                 a[0].nucleus,
                 Field::Sized {
-                    ch: '\u{2016}',
+                    ch: Some('\u{2016}'),
                     size
                 },
                 "\\{word}m"
@@ -3481,36 +3549,81 @@ mod tests {
             let a = atoms(&format!("\\{word}l[ \\{word}r]"));
             assert_eq!(a[0].class, AtomClass::Open);
             assert_eq!(a[1].class, AtomClass::Close);
-            assert_eq!(a[1].nucleus, Field::Sized { ch: ']', size });
+            assert_eq!(
+                a[1].nucleus,
+                Field::Sized {
+                    ch: Some(']'),
+                    size
+                }
+            );
         }
         // The delimiter commands of \left, a slash and a brace.
         assert_eq!(
             atoms("\\bigg\\langle")[0].nucleus,
             Field::Sized {
-                ch: '\u{27E8}',
+                ch: Some('\u{27E8}'),
                 size: 3
             }
         );
         assert_eq!(
             atoms("\\big/")[0].nucleus,
-            Field::Sized { ch: '/', size: 1 }
+            Field::Sized {
+                ch: Some('/'),
+                size: 1
+            }
         );
         assert_eq!(
             atoms("\\Bigl\\{")[0].nucleus,
-            Field::Sized { ch: '{', size: 2 }
+            Field::Sized {
+                ch: Some('{'),
+                size: 2
+            }
         );
         assert_eq!(
             atoms("\\Bigg\\Updownarrow")[0].nucleus,
             Field::Sized {
-                ch: '\u{21D5}',
+                ch: Some('\u{21D5}'),
                 size: 4
             }
         );
-        // A dot is an empty delimiter, as after \left.
+        // A dot is an empty delimiter of the size, TeX's invisible box.
         let a = atoms("\\big. x");
-        assert_eq!(a[0].nucleus, Field::Empty);
+        assert_eq!(a[0].nucleus, Field::Sized { ch: None, size: 1 });
         assert_eq!(a[0].class, AtomClass::Ord);
         assert_eq!(a[1].nucleus, Field::Symbol('x'));
+        // The delimiter may be braced, as TeX's \big takes an argument.
+        let a = atoms("\\big{(} x");
+        assert_eq!(
+            a[0].nucleus,
+            Field::Sized {
+                ch: Some('('),
+                size: 1
+            }
+        );
+        assert_eq!(a[1].nucleus, Field::Symbol('x'));
+        // TeX's `<` and `>` delimiters are the angle brackets.
+        assert_eq!(
+            atoms("\\big<")[0].nucleus,
+            Field::Sized {
+                ch: Some('\u{27E8}'),
+                size: 1
+            }
+        );
+        assert_eq!(
+            atoms("\\Bigr>")[0].nucleus,
+            Field::Sized {
+                ch: Some('\u{27E9}'),
+                size: 2
+            }
+        );
+        // A character that is no delimiter in TeX leaves the word a literal
+        // and parses as itself.
+        let a = atoms("\\big x");
+        assert_eq!(a[0].nucleus, Field::Literal("\\big".into()));
+        assert_eq!(a[1].nucleus, Field::Symbol('x'));
+        let a = atoms("\\big+ y");
+        assert_eq!(a[0].nucleus, Field::Literal("\\big".into()));
+        assert_eq!(a[1].nucleus, Field::Symbol('+'));
         // No delimiter leaves the word a literal, and what follows parses on.
         let a = atoms("\\big{x}");
         assert_eq!(a[0].nucleus, Field::Literal("\\big".into()));
@@ -3527,6 +3640,44 @@ mod tests {
         assert!(a[0].sup.is_some());
         assert_eq!(a[0].span, 0..8);
         assert_eq!(a[0].nucleus_span, 0..6);
+    }
+
+    #[test]
+    fn the_delimiter_reader_takes_tex_s_delimiters_alone() {
+        // After \left, a letter is no delimiter: TeX inserts `.` and the
+        // letter goes to the body.
+        let a = atoms("\\left x \\right.");
+        let Field::LeftRight { open, close, body } = &a[0].nucleus else {
+            panic!("{:?}", a[0].nucleus)
+        };
+        assert_eq!((*open, *close), (None, None));
+        assert_eq!(body.atoms().next().unwrap().nucleus, Field::Symbol('x'));
+        // `<` and `>` are the angle brackets after \left too.
+        let a = atoms("\\left< x \\right>");
+        let Field::LeftRight { open, close, .. } = &a[0].nucleus else {
+            panic!("{:?}", a[0].nucleus)
+        };
+        assert_eq!((*open, *close), (Some('\u{27E8}'), Some('\u{27E9}')));
+        // A delimiter character written directly is one.
+        let a = atoms("\\left\u{27E8} x \\right\u{2016}");
+        let Field::LeftRight { open, close, .. } = &a[0].nucleus else {
+            panic!("{:?}", a[0].nucleus)
+        };
+        assert_eq!((*open, *close), (Some('\u{27E8}'), Some('\u{2016}')));
+    }
+
+    #[test]
+    fn a_bin_before_a_closer_or_a_relation_is_ordinary() {
+        // TeX's rule 6: a binary operator followed by a relation, a closer
+        // or punctuation, or ending the list, is an ordinary atom.
+        assert_eq!(atoms("x+)")[1].class, AtomClass::Ord);
+        assert_eq!(atoms("x+\\bigr)")[1].class, AtomClass::Ord);
+        assert_eq!(atoms("x+=y")[1].class, AtomClass::Ord);
+        assert_eq!(atoms("x+,y")[1].class, AtomClass::Ord);
+        assert_eq!(atoms("x+")[1].class, AtomClass::Ord);
+        assert_eq!(atoms("x+\\,")[1].class, AtomClass::Ord);
+        assert_eq!(atoms("x+y")[1].class, AtomClass::Bin);
+        assert_eq!(atoms("x+\\bigl(y\\bigr)")[1].class, AtomClass::Bin);
     }
 
     #[test]

@@ -46,6 +46,9 @@
 - In a formula, a superscript or subscript after a spacing command such as `\,` is now shown. Before, it was dropped.
 - A formula that gives a command a macro expanding to nothing as its argument, such as `\frac1\e` after `\newcommand{\e}{}`, no longer crashes Oryx.
 - In a formula, the text of `\text` or `\mathrm` written inside a macro, such as `\newcommand{\st}{\text{ s.t. }}`, is now shown. Before, it was blank.
+- In a formula, `\left<` and `\right>` now draw angle brackets, as in TeX. Before, they drew the less-than and greater-than signs.
+- In a formula, a bar, a double bar or an arrow stretched with `\left` and `\right` now fits what it encloses. Before, it could be taller than needed.
+- In a formula, a plus or minus sign right before a closing bracket, a relation or a comma, as in `(a+)`, is now set tight, as TeX sets it. Before, it kept its spaces.
 - Typing in a plain text file no longer runs the syntax coloring on each key. Before, each key could cost a few milliseconds for nothing.
 - A key on a long markdown line with several code spans or links no longer freezes the editor while that line is parsed. The line is now colored in the background. Before, each key on such a line could cost 50 ms.
 - When the colors below a key are recomputed right after the cursor moved to a far line, they now land at once. Before, they could wait up to half a second.

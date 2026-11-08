@@ -114,8 +114,13 @@ const STRUT_HEIGHT_EM: f32 = 0.85;
 const STRUT_DEPTH_EM: f32 = 0.35;
 
 /// The heights of TeX's four sized delimiters, `\big` to `\Bigg`, in ems
-/// of the current style: KaTeX's `sizeToMaxHeight`.
+/// of the text size: KaTeX's `sizeToMaxHeight`.
 const SIZED_DELIMITER_HEIGHTS_EM: [f32; 4] = [1.2, 1.8, 2.4, 3.0];
+/// TeX lets a delimiter fall short of the height it is asked for by a
+/// tenth (`\delimiterfactor` 901) or by half an em of the text size
+/// (`\delimitershortfall` 5pt at 10pt), whichever is the smaller gap.
+const DELIMITER_FACTOR: f32 = 0.901;
+const DELIMITER_SHORTFALL_EM: f32 = 0.5;
 
 struct Ctx<'a> {
     font: &'a dyn MathFont,
@@ -350,7 +355,7 @@ impl Ctx<'_> {
             });
         }
         let asm = assembly.expect("checked");
-        let overlap = self.font.constants().min_connector_overlap * u;
+        let min_overlap = self.font.constants().min_connector_overlap * u;
         for reps in 1..=64usize {
             let mut parts: Vec<&crate::font::AssemblyPart> = Vec::new();
             for p in &asm.parts {
@@ -362,9 +367,23 @@ impl Ctx<'_> {
                     parts.push(p);
                 }
             }
-            let total: f32 = parts.iter().map(|p| p.full_advance * u).sum::<f32>()
-                - overlap * parts.len().saturating_sub(1) as f32;
-            if total >= target || reps == 64 {
+            let advances: f32 = parts.iter().map(|p| p.full_advance * u).sum();
+            let joints = parts.len().saturating_sub(1) as f32;
+            if advances - min_overlap * joints >= target || reps == 64 {
+                // The pieces overlap as far as their connectors allow, the
+                // same at every joint, so the assembly lands on the target
+                // and not a whole extender above it: the MATH table's rule.
+                let most = parts
+                    .windows(2)
+                    .map(|w| w[0].end_connector.min(w[1].start_connector) * u)
+                    .fold(f32::INFINITY, f32::min)
+                    .max(min_overlap);
+                let overlap = if joints > 0.0 {
+                    ((advances - target) / joints).clamp(min_overlap, most)
+                } else {
+                    0.0
+                };
+                let total = advances - overlap * joints;
                 let mut glyphs = Vec::new();
                 let mut width = 0.0f32;
                 let mut cursor = 0.0;
@@ -780,12 +799,23 @@ impl Ctx<'_> {
     }
 
     /// `\big(` and its kin: the delimiter stretched to its size's height
-    /// and centered on the axis, as `\left` centers a delimiter.
-    fn sized_box(&self, atom: &Atom, ch: char, size: u8, style: MathStyle) -> LaidBox {
+    /// and centered on the axis, as `\left` centers a delimiter. The
+    /// height is the text size's whatever the style, TeX's `\big` being
+    /// defined on the text font, and the font's variant just under it is
+    /// taken as TeX takes it (`DELIMITER_FACTOR`). A dot is the invisible
+    /// box of the height, with no width.
+    fn sized_box(&self, atom: &Atom, ch: Option<char>, size: u8, style: MathStyle) -> LaidBox {
         let axis = self.font.constants().axis_height * self.unit(style);
         let index = usize::from(size.clamp(1, 4) - 1);
-        let target = SIZED_DELIMITER_HEIGHTS_EM[index] * self.em(style);
+        let text_em = self.em(MathStyle::Text);
+        let height = SIZED_DELIMITER_HEIGHTS_EM[index] * text_em;
         let mut geom = MathLayout::default();
+        let Some(ch) = ch else {
+            geom.ascent = axis + height / 2.0;
+            geom.descent = height / 2.0 - axis;
+            return LaidBox { geom, italic: 0.0 };
+        };
+        let target = (height * DELIMITER_FACTOR).max(height - DELIMITER_SHORTFALL_EM * text_em);
         let width =
             self.place_delimiter(&mut geom, ch, target, axis, 0.0, style, &atom.nucleus_span);
         geom.width = width;
@@ -1868,12 +1898,15 @@ mod tests {
         use crate::MathFont as _;
         let axis = font().constants().axis_height * scale();
         let mut last = 0.0;
-        for (word, min_em) in [("big", 1.2), ("Big", 1.8), ("bigg", 2.4), ("Bigg", 3.0)] {
+        // TeX's rule: the delimiter may fall short of its size by a tenth
+        // (\delimiterfactor 901), and the font's next step is taken above
+        // it, so each size lands within a ladder step of its height.
+        for (word, em) in [("big", 1.2), ("Big", 1.8), ("bigg", 2.4), ("Bigg", 3.0)] {
             let l = lay(&format!("\\{word}("));
             let height = l.ascent + l.descent;
             assert!(
-                height >= min_em * SIZE - 0.5,
-                "\\{word}( is {height} tall, under {min_em} em"
+                height >= 0.9 * em * SIZE - 0.5 && height < (em + 0.25) * SIZE,
+                "\\{word}( is {height} tall for {em} em"
             );
             assert!(height > last, "\\{word}( taller than the size before it");
             last = height;
@@ -1900,7 +1933,69 @@ mod tests {
             .find(|g| g.ch == Some('\u{1D465}'))
             .expect("x");
         assert!(x.x > 0.0 && x.x < pair.width);
-        assert!(pair.ascent + pair.descent >= 1.2 * SIZE - 0.5);
+        assert!(pair.ascent + pair.descent >= 0.9 * 1.2 * SIZE - 0.5);
+        // A bar has no size variants, only an assembly: its pieces overlap
+        // as far as their connectors allow, so the four sizes grow as the
+        // parentheses do.
+        let mut last = 0.0;
+        for (word, em) in [("big", 1.2), ("Big", 1.8), ("bigg", 2.4), ("Bigg", 3.0)] {
+            let l = lay(&format!("\\{word}|"));
+            let height = l.ascent + l.descent;
+            assert!(
+                height >= 0.9 * em * SIZE - 0.5 && height <= em * SIZE + 0.5,
+                "\\{word}| is {height} tall for {em} em"
+            );
+            assert!(height > last, "\\{word}| taller than the size before it");
+            last = height;
+        }
+    }
+
+    #[test]
+    fn a_sized_delimiter_keeps_the_text_height_in_a_script() {
+        // TeX's \big sizes are the text size's whatever the style: in
+        // script style the parenthesis is as tall as at the top level, an
+        // assembly when the font's variants at that size fall short.
+        let f = font();
+        let height = |style| {
+            let l = layout("\\Bigg(", style, SIZE, &f);
+            l.ascent + l.descent
+        };
+        let top = height(MathStyle::Text);
+        let script = height(MathStyle::Script);
+        assert!(
+            (top - script).abs() < 0.25 * SIZE,
+            "{top} at the top level, {script} in script style"
+        );
+    }
+
+    #[test]
+    fn a_sized_dot_is_an_empty_box_of_its_height() {
+        // `\big.` is TeX's invisible box of the size, centered on the axis:
+        // nothing drawn, no width, and a script on it rises with it.
+        let l = lay("\\big.");
+        assert!(l.glyphs.is_empty() && l.literals.is_empty());
+        assert!(l.width.abs() < EPS);
+        assert!(
+            (l.ascent + l.descent - 1.2 * SIZE).abs() < 0.5,
+            "{} tall",
+            l.ascent + l.descent
+        );
+        let two = |l: &MathLayout| l.glyphs.iter().find(|g| g.ch == Some('2')).expect("2").y;
+        assert!(two(&lay("\\bigr.^2")) < two(&lay(")^2")) - 1.0);
+    }
+
+    #[test]
+    fn a_left_right_bar_fits_its_body() {
+        // An assembly lands on its target: `\left| x \right|` is the
+        // delimited formula's minimum, no longer a whole extender above.
+        use crate::MathFont as _;
+        let min = font().constants().delimited_sub_formula_min_height * scale();
+        let l = lay("\\left| x \\right|");
+        let height = l.ascent + l.descent;
+        assert!(
+            height >= min - 0.5 && height <= min + 0.5,
+            "{height} tall against the minimum {min}"
+        );
     }
 
     #[test]

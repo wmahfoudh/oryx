@@ -69,8 +69,9 @@ pub enum Field {
     },
     /// A delimiter at one of TeX's four fixed sizes, `\big` to `\Bigg`
     /// (the size 1 to 4), with the class of the word's form on the atom:
-    /// Ord bare, Open for `l`, Close for `r`, Rel for `m`.
-    Sized { ch: char, size: u8 },
+    /// Ord bare, Open for `l`, Close for `r`, Rel for `m`. `None` is the
+    /// dot form, TeX's invisible box of the size.
+    Sized { ch: Option<char>, size: u8 },
     /// An accented base: the combining accent character, whether wide
     /// forms may stretch horizontally, and the accented list.
     Accent {
