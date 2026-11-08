@@ -113,6 +113,10 @@ fn math_italic(c: char) -> char {
 const STRUT_HEIGHT_EM: f32 = 0.85;
 const STRUT_DEPTH_EM: f32 = 0.35;
 
+/// The heights of TeX's four sized delimiters, `\big` to `\Bigg`, in ems
+/// of the current style: KaTeX's `sizeToMaxHeight`.
+const SIZED_DELIMITER_HEIGHTS_EM: [f32; 4] = [1.2, 1.8, 2.4, 3.0];
+
 struct Ctx<'a> {
     font: &'a dyn MathFont,
     /// Text-style em size in pixels.
@@ -243,6 +247,7 @@ impl Ctx<'_> {
             },
             Field::Literal(text) => self.literal_box(text, atom, style),
             Field::Text(text) => self.text_box(text, atom, style),
+            Field::Sized { ch, size } => self.sized_box(atom, *ch, *size, style),
             Field::Accent {
                 accent,
                 stretch,
@@ -770,6 +775,19 @@ impl Ctx<'_> {
             let x = (width - low.width) / 2.0 - ic / 2.0;
             merge(&mut geom, low, x, op_descent + drop);
         }
+        geom.width = width;
+        LaidBox { geom, italic: 0.0 }
+    }
+
+    /// `\big(` and its kin: the delimiter stretched to its size's height
+    /// and centered on the axis, as `\left` centers a delimiter.
+    fn sized_box(&self, atom: &Atom, ch: char, size: u8, style: MathStyle) -> LaidBox {
+        let axis = self.font.constants().axis_height * self.unit(style);
+        let index = usize::from(size.clamp(1, 4) - 1);
+        let target = SIZED_DELIMITER_HEIGHTS_EM[index] * self.em(style);
+        let mut geom = MathLayout::default();
+        let width =
+            self.place_delimiter(&mut geom, ch, target, axis, 0.0, style, &atom.nucleus_span);
         geom.width = width;
         LaidBox { geom, italic: 0.0 }
     }
@@ -1843,6 +1861,46 @@ mod tests {
             v.y,
             pv.y
         );
+    }
+
+    #[test]
+    fn sized_delimiters_grow_with_their_size_and_sit_on_the_axis() {
+        use crate::MathFont as _;
+        let axis = font().constants().axis_height * scale();
+        let mut last = 0.0;
+        for (word, min_em) in [("big", 1.2), ("Big", 1.8), ("bigg", 2.4), ("Bigg", 3.0)] {
+            let l = lay(&format!("\\{word}("));
+            let height = l.ascent + l.descent;
+            assert!(
+                height >= min_em * SIZE - 0.5,
+                "\\{word}( is {height} tall, under {min_em} em"
+            );
+            assert!(height > last, "\\{word}( taller than the size before it");
+            last = height;
+            // Centered on the axis: as much ink above it as below.
+            let over = l.ascent - axis;
+            let under = l.descent + axis;
+            assert!(
+                (over - under).abs() < 1.0,
+                "\\{word}( off the axis: {over} over, {under} under"
+            );
+        }
+        let plain = lay("(");
+        let big = lay("\\big(");
+        assert!(plain.ascent + plain.descent < big.ascent + big.descent);
+        // The same glyph whatever the class of the form.
+        assert_eq!(shape(&lay("\\bigl(")), shape(&big));
+        assert_eq!(shape(&lay("\\bigm(")), shape(&big));
+        // A body between a pair keeps its place: the pair adds no spacing
+        // that \left and \right would not.
+        let pair = lay("\\bigl( x \\bigr)");
+        let x = pair
+            .glyphs
+            .iter()
+            .find(|g| g.ch == Some('\u{1D465}'))
+            .expect("x");
+        assert!(x.x > 0.0 && x.x < pair.width);
+        assert!(pair.ascent + pair.descent >= 1.2 * SIZE - 0.5);
     }
 
     #[test]

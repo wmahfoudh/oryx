@@ -1310,6 +1310,11 @@ const MATH_CLASSES: &[&str] = &[
     "mathinner",
 ];
 const MATH_MODULO: &[&str] = &["pmod", "mod", "bmod"];
+/// The sixteen words of TeX's sized delimiters (Task 351).
+const MATH_SIZES: &[&str] = &[
+    "big", "Big", "bigg", "Bigg", "bigl", "Bigl", "biggl", "Biggl", "bigr", "Bigr", "biggr",
+    "Biggr", "bigm", "Bigm", "biggm", "Biggm",
+];
 /// The commands that read one operand, the place a macro expanding to
 /// nothing used to crash.
 const MATH_OPERAND_TAKERS: &[&str] = &[
@@ -1420,6 +1425,15 @@ fn math_formula() -> impl Strategy<Value = String> {
                 let body = if in_text { format!("\\text{{#1 {body}}}") } else { format!("#1 {body}") };
                 format!("\\newcommand{{\\{name}}}[1]{{{body}}} \\{name}{{{arg}}}")
             }),
+            // A sized delimiter on each side of a formula (Task 351).
+            2 => (
+                prop::sample::select(MATH_SIZES),
+                math_delimiter(),
+                i(),
+                prop::sample::select(MATH_SIZES),
+                math_delimiter(),
+            )
+                .prop_map(|(s1, l, a, s2, r)| format!("\\{s1}{l} {a} \\{s2}{r}")),
         ]
     })
 }
@@ -1499,6 +1513,7 @@ fn check_math_spans(list: &noad::mlist::MathList, tex: &str) -> Result<(), TestC
                 }
             }
             Field::Symbol(_)
+            | Field::Sized { .. }
             | Field::Text(_)
             | Field::Kern(_)
             | Field::Literal(_)

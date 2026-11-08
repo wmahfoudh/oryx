@@ -857,7 +857,11 @@ fn restyle_field(field: &mut Field, name: &str) {
                 }
             }
         }
-        Field::Text(_) | Field::Literal(_) | Field::Kern(_) | Field::Empty => {}
+        Field::Text(_)
+        | Field::Literal(_)
+        | Field::Kern(_)
+        | Field::Sized { .. }
+        | Field::Empty => {}
     }
 }
 
@@ -1169,6 +1173,10 @@ impl Parser<'_> {
                 }
                 "pmod" => self.modulo(tok.span, true),
                 "mod" => self.modulo(tok.span, false),
+                "big" | "Big" | "bigg" | "Bigg" | "bigl" | "Bigl" | "biggl" | "Biggl" | "bigr"
+                | "Bigr" | "biggr" | "Biggr" | "bigm" | "Bigm" | "biggm" | "Biggm" => {
+                    self.sized(tok.span, &name)
+                }
                 "mathop" => self.classed(tok.span, AtomClass::Op),
                 "mathrel" => self.classed(tok.span, AtomClass::Rel),
                 "mathbin" => self.classed(tok.span, AtomClass::Bin),
@@ -1526,6 +1534,34 @@ impl Parser<'_> {
         atom.span = span.clone();
         atom.nucleus_span = span;
         atom
+    }
+
+    /// `\big(` and its kin, TeX's four fixed sizes of a delimiter: the
+    /// word names the size and, by its ending, the class (`l` Open, `r`
+    /// Close, `m` Rel, bare Ord); the delimiter follows by the rule of
+    /// `\left`. A `.` is an empty nucleus; anything else leaves the word a
+    /// literal and parses on.
+    fn sized(&mut self, start: std::ops::Range<usize>, name: &str) -> Atom {
+        let (stem, class) = if let Some(stem) = name.strip_suffix('l') {
+            (stem, AtomClass::Open)
+        } else if let Some(stem) = name.strip_suffix('r') {
+            (stem, AtomClass::Close)
+        } else if let Some(stem) = name.strip_suffix('m') {
+            (stem, AtomClass::Rel)
+        } else {
+            (name, AtomClass::Ord)
+        };
+        let size = match stem {
+            "big" => 1,
+            "Big" => 2,
+            "bigg" => 3,
+            _ => 4,
+        };
+        match self.delimiter() {
+            Some(Some(ch)) => self.construct(start, Field::Sized { ch, size }, class),
+            Some(None) => self.construct(start, Field::Empty, class),
+            None => literal_atom(format!("\\{name}"), start),
+        }
     }
 
     /// `\pmod{n}` and `\mod{n}` as KaTeX's macros expand them, with the
@@ -2076,14 +2112,14 @@ impl Parser<'_> {
     /// for the group to consume.
     fn left_right(&mut self, start: std::ops::Range<usize>) -> Atom {
         use crate::token::TokenKind as K;
-        let open = self.delimiter();
+        let open = self.delimiter().flatten();
         let mut items: Vec<Noad> = Vec::new();
         let mut close = None;
         while let Some(tok) = self.peek() {
             match &tok.kind {
                 K::Command(name) if name == "right" => {
                     self.pos += 1;
-                    close = self.delimiter();
+                    close = self.delimiter().flatten();
                     break;
                 }
                 K::EndGroup => break,
@@ -2109,9 +2145,11 @@ impl Parser<'_> {
         )
     }
 
-    /// One delimiter token after `\left` or `\right`: a character, `.` for
-    /// none, or a delimiter command. Anything else answers none and stays.
-    fn delimiter(&mut self) -> Option<char> {
+    /// One delimiter token after `\left`, `\right` or a `\big` word: a
+    /// character or a delimiter command as `Some(Some(c))`, `.` as
+    /// `Some(None)`, TeX's empty delimiter. Anything else answers `None`
+    /// and stays.
+    fn delimiter(&mut self) -> Option<Option<char>> {
         use crate::token::TokenKind as K;
         // A user macro expands first, as everywhere else.
         if let Some(K::Command(name)) = self.peek().map(|t| &t.kind) {
@@ -2135,13 +2173,10 @@ impl Parser<'_> {
                 .map(|i| Some(DELIMITERS[i].1)),
             _ => None,
         };
-        match resolved {
-            Some(delim) => {
-                self.pos += 1;
-                delim
-            }
-            None => None,
+        if resolved.is_some() {
+            self.pos += 1;
         }
+        resolved
     }
 
     /// Attaches every following script marker to the atom. Repeated markers
@@ -3419,6 +3454,104 @@ mod tests {
         let a = atoms("\\newcommand{\\m}{\\mathrm{d}x}\\m + \\m");
         assert_eq!(a[0].nucleus, Field::Text("d".into()));
         assert_eq!(a[3].nucleus, Field::Text("d".into()));
+    }
+
+    #[test]
+    fn sized_delimiters_parse_with_their_size_and_class() {
+        let a = atoms("\\bigl( x \\bigr)");
+        assert_eq!(a[0].nucleus, Field::Sized { ch: '(', size: 1 });
+        assert_eq!(a[0].class, AtomClass::Open);
+        assert_eq!(a[1].nucleus, Field::Symbol('x'));
+        assert_eq!(a[2].nucleus, Field::Sized { ch: ')', size: 1 });
+        assert_eq!(a[2].class, AtomClass::Close);
+        for (word, size) in [("big", 1), ("Big", 2), ("bigg", 3), ("Bigg", 4)] {
+            let a = atoms(&format!("\\{word}|"));
+            assert_eq!(a[0].nucleus, Field::Sized { ch: '|', size }, "\\{word}");
+            assert_eq!(a[0].class, AtomClass::Ord);
+            let a = atoms(&format!("\\{word}m\\|"));
+            assert_eq!(
+                a[0].nucleus,
+                Field::Sized {
+                    ch: '\u{2016}',
+                    size
+                },
+                "\\{word}m"
+            );
+            assert_eq!(a[0].class, AtomClass::Rel);
+            let a = atoms(&format!("\\{word}l[ \\{word}r]"));
+            assert_eq!(a[0].class, AtomClass::Open);
+            assert_eq!(a[1].class, AtomClass::Close);
+            assert_eq!(a[1].nucleus, Field::Sized { ch: ']', size });
+        }
+        // The delimiter commands of \left, a slash and a brace.
+        assert_eq!(
+            atoms("\\bigg\\langle")[0].nucleus,
+            Field::Sized {
+                ch: '\u{27E8}',
+                size: 3
+            }
+        );
+        assert_eq!(
+            atoms("\\big/")[0].nucleus,
+            Field::Sized { ch: '/', size: 1 }
+        );
+        assert_eq!(
+            atoms("\\Bigl\\{")[0].nucleus,
+            Field::Sized { ch: '{', size: 2 }
+        );
+        assert_eq!(
+            atoms("\\Bigg\\Updownarrow")[0].nucleus,
+            Field::Sized {
+                ch: '\u{21D5}',
+                size: 4
+            }
+        );
+        // A dot is an empty delimiter, as after \left.
+        let a = atoms("\\big. x");
+        assert_eq!(a[0].nucleus, Field::Empty);
+        assert_eq!(a[0].class, AtomClass::Ord);
+        assert_eq!(a[1].nucleus, Field::Symbol('x'));
+        // No delimiter leaves the word a literal, and what follows parses on.
+        let a = atoms("\\big{x}");
+        assert_eq!(a[0].nucleus, Field::Literal("\\big".into()));
+        let Field::List(inner) = &a[1].nucleus else {
+            panic!("{:?}", a[1].nucleus)
+        };
+        assert_eq!(inner.atoms().next().unwrap().nucleus, Field::Symbol('x'));
+        assert_eq!(atoms("\\bigr")[0].nucleus, Field::Literal("\\bigr".into()));
+        let a = atoms("\\Big\\frac12");
+        assert_eq!(a[0].nucleus, Field::Literal("\\Big".into()));
+        assert!(matches!(a[1].nucleus, Field::Fraction { .. }));
+        // Scripts attach to the delimiter.
+        let a = atoms("\\bigr)^2");
+        assert!(a[0].sup.is_some());
+        assert_eq!(a[0].span, 0..8);
+        assert_eq!(a[0].nucleus_span, 0..6);
+    }
+
+    #[test]
+    fn the_file_s_formulas_of_category_b_parse_whole() {
+        let whole = [
+            r"\sum_{n=2}^\infty\bigl(\zeta(n)-1\bigr) = 1",
+            r"f(x)={\ln}\bigl(1+(\cos x-1)\bigr),",
+            r"\sqrt{b^2 - 4ac}\big/ 2a",
+            r"\Gamma(-x) = \frac{1}{\Gamma(x+1)}\frac{\pi}{\sin\big(\pi(x+1)\big)},",
+            r"j_{8A'}(\tau) = -j_{8A}\Big(\tau+\tfrac12\Big)",
+            r"\frac{1}{P}\int_{P} |s(x)|^2 \, dx = \sum_{n=-\infty}^\infty \Bigl|S[n]\Bigr|^2.",
+            r"J_\nu(z)=\sum_{k=0}^\infty \frac{(-1)^k}{\Gamma(k+\nu+1)k!}\bigg(\frac{z}{2}\bigg)^{2k+\nu}",
+            r"\biggl(\sum_{n\ne 0}\bigl|S[n]\bigr|\biggr)^2\le \sum_{n\ne 0}\frac1{n^2}\cdot\sum_{n\ne 0}\bigl|nS[n]\bigr|^2.",
+            r"\zeta (s)=\frac{1}{s-1}\sum_{k=0}^\infty \biggl(\prod_{i=1}^{k} (i-\frac{s}{2})\biggl) \frac{A_{k} }{k!}",
+            r"\begin{aligned} \|f\|^2 & = \int_0^1 \vartheta^2 \, d\vartheta = \frac{1}{3} \\ \langle f, e_k\rangle & = \int_0^1 \vartheta e^{-2\pi\imath k\vartheta} \, d\vartheta = \Biggl\{\begin{array}{ll} \frac{1}{2}, & k = 0 \\ -\frac{1}{2\pi\imath k} & k \neq 0, \end{array} \end{aligned}",
+            r"\begin{array}{rlc} \mathsf{Time\ domain} & s & = s_{\mathrm{RE} } \\ &\Bigg\Updownarrow\mathcal{F} & \Bigg\Updownarrow\mathcal{F} \end{array}",
+        ];
+        for tex in whole {
+            assert_eq!(parse(tex).literals(), Vec::<String>::new(), "{tex}");
+        }
+        // The `\choose` of category C is what is left in this one.
+        assert_eq!(
+            parse(r"\frac{\sin (nx)}{\sin^n x} = \Bigg( {n \choose 1} \cot^{n - 1} x - {n \choose 3} \cot^{n - 3} x \pm \cdots \Bigg).").literals(),
+            ["\\choose", "\\choose"]
+        );
     }
 
     #[test]

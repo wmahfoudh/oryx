@@ -67,6 +67,10 @@ pub enum Field {
         close: Option<char>,
         body: MathList,
     },
+    /// A delimiter at one of TeX's four fixed sizes, `\big` to `\Bigg`
+    /// (the size 1 to 4), with the class of the word's form on the atom:
+    /// Ord bare, Open for `l`, Close for `r`, Rel for `m`.
+    Sized { ch: char, size: u8 },
     /// An accented base: the combining accent character, whether wide
     /// forms may stretch horizontally, and the accented list.
     Accent {
@@ -197,7 +201,11 @@ impl MathList {
                         }
                     }
                 }
-                Field::Symbol(_) | Field::Text(_) | Field::Kern(_) | Field::Empty => {}
+                Field::Symbol(_)
+                | Field::Sized { .. }
+                | Field::Text(_)
+                | Field::Kern(_)
+                | Field::Empty => {}
             }
             if let Some(list) = &atom.sup {
                 list.collect_literals(out);
