@@ -672,6 +672,10 @@ impl Ctx<'_> {
 
     /// `\not` over a symbol with no negated form of its own: the combining
     /// long solidus, its ink centered on the base's, in the base's width.
+    /// With no base (a `\not` before a closer or at the end), the slash
+    /// alone: its ink from the left edge and the box as wide as the ink,
+    /// so that it stands clear of what follows, where TeX's zero-width
+    /// slash would overprint it.
     fn negated_box(
         &self,
         atom: &Atom,
@@ -684,6 +688,20 @@ impl Ctx<'_> {
             return LaidBox { geom, italic: 0.0 };
         };
         let u = self.unit(style);
+        if base.0.is_empty() {
+            let b = self.font.bounds(slash);
+            self.push_glyph(
+                &mut geom,
+                slash,
+                -b.x_min * u,
+                0.0,
+                style,
+                Some('\u{0338}'),
+                &atom.nucleus_span,
+            );
+            geom.width = (b.x_max - b.x_min) * u;
+            return LaidBox { geom, italic: 0.0 };
+        }
         let (left, right) = geom.glyphs.iter().fold((f32::MAX, f32::MIN), |(l, r), g| {
             let b = self.font.bounds(g.glyph);
             let gu = g.size / self.font.units_per_em();
@@ -2667,6 +2685,41 @@ mod tests {
         }
         // A relation: thick spaces around it, as around TeX's \not.
         assert!(lay("a \\not\\alpha b").width > lay("a \\alpha b").width + 2.0 * 5.0);
+    }
+
+    #[test]
+    fn a_lone_slash_of_not_takes_its_ink_width() {
+        let f = font();
+        let l = lay("\\not");
+        assert_eq!(l.glyphs.len(), 1);
+        let slash = &l.glyphs[0];
+        assert_eq!(slash.ch, Some('\u{0338}'));
+        let (sl, sr, _, _) = ink(&f, slash);
+        assert!(
+            sl.abs() < EPS,
+            "the ink starts at the box's left edge, not at {sl}"
+        );
+        assert!(
+            (l.width - (sr - sl)).abs() < EPS,
+            "the box as wide as the ink: {} against {}",
+            l.width,
+            sr - sl
+        );
+        assert!(l.ascent > 0.0 && l.descent > 0.0);
+        // A relation: a thick space before it, as before TeX's \not.
+        let gap = lay("a \\not").width - lay("a").width - (sr - sl);
+        assert!(
+            (4.0..8.0).contains(&gap),
+            "the space before the slash: {gap}"
+        );
+        // Before a closer, the slash stands clear of it.
+        let l = lay("\\left( a \\not\\right)");
+        let slash = glyph_by_ch(&l, '\u{0338}');
+        let close = glyph_by_ch(&l, ')');
+        assert!(
+            ink(&f, slash).1 <= ink(&f, close).0 + EPS,
+            "the slash before the parenthesis"
+        );
     }
 
     #[test]

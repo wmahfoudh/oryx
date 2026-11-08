@@ -2199,19 +2199,31 @@ impl Parser<'_> {
 
     /// `\not` before a symbol: the symbol's negated form when Unicode has
     /// one, the class kept; else the combining long solidus laid over it,
-    /// in a relation, as TeX's `\not` is one. Before nothing readable, or
-    /// a closer, the word is a literal.
+    /// in a relation, as TeX's `\not` is one. Before nothing readable, a
+    /// closer or a marker, the slash stands alone, as TeX's zero-width
+    /// relation does: a relation whose negated base is empty.
     fn negated(&mut self, start: std::ops::Range<usize>) -> Atom {
         use crate::token::TokenKind as K;
-        // A closer of the structure around is no operand: the word is a
-        // literal and the closer stays for its reader.
+        let lone = |span: std::ops::Range<usize>| Atom {
+            class: AtomClass::Rel,
+            nucleus: Field::Negated {
+                base: MathList(vec![]),
+            },
+            sup: None,
+            sub: None,
+            limits: Limits::default(),
+            span: span.clone(),
+            nucleus_span: span,
+        };
+        // A closer of the structure around is no operand: the slash stands
+        // alone and the closer stays for its reader.
         if let Some(K::Command(name)) = self.peek().map(|t| &t.kind) {
             if name == "\\" || name == "right" || name == "end" {
-                return literal_atom("\\not", start);
+                return lone(start);
             }
         }
         let Some(mut atom) = self.atom() else {
-            return literal_atom("\\not", start);
+            return lone(start);
         };
         let span = start.start..atom.span.end.max(start.end);
         if let Field::Symbol(c) = atom.nucleus {
@@ -4801,7 +4813,16 @@ mod tests {
     }
 
     #[test]
-    fn not_before_a_closer_stays_a_literal() {
+    fn not_before_a_closer_draws_a_lone_slash() {
+        let lone = |a: &Atom| {
+            assert_eq!(a.class, AtomClass::Rel);
+            assert!(
+                matches!(&a.nucleus, Field::Negated { base } if base.0.is_empty()),
+                "{:?}",
+                a.nucleus
+            );
+        };
+        // Before `\right`: the pair keeps its closer.
         let a = atoms("\\left( a \\not\\right)");
         let Field::LeftRight { close, body, .. } = &a[0].nucleus else {
             panic!("{:?}", a[0].nucleus)
@@ -4809,14 +4830,42 @@ mod tests {
         assert_eq!(*close, Some(')'));
         let items: Vec<&Atom> = body.atoms().collect();
         assert_eq!(items.len(), 2);
-        assert_eq!(items[1].nucleus, Field::Literal("\\not".into()));
-        let a = atoms("\\begin{matrix} a \\not \\\\ b \\end{matrix}");
+        lone(items[1]);
+        assert_eq!(items[1].span, 9..13);
+        // Before a column break, a row break and `\end`: the matrix keeps
+        // its rows and its columns.
+        let a = atoms("\\begin{matrix} a \\not & b \\\\ c & d \\not \\end{matrix}");
         let Field::Table { rows, .. } = &a[0].nucleus else {
             panic!("{:?}", a[0].nucleus)
         };
         assert_eq!(rows.len(), 2);
-        let a = atoms("\\begin{matrix} a & b \\not\\end{matrix}");
-        assert!(matches!(a[0].nucleus, Field::Table { .. }));
+        assert_eq!(rows[0].len(), 2);
+        assert_eq!(rows[1].len(), 2);
+        lone(rows[0][0].atoms().nth(1).unwrap());
+        lone(rows[1][1].atoms().nth(1).unwrap());
+        // Before a group's closer, and at the end of the formula.
+        let a = atoms("{a \\not} b");
+        let Field::List(inner) = &a[0].nucleus else {
+            panic!("{:?}", a[0].nucleus)
+        };
+        lone(inner.atoms().nth(1).unwrap());
+        let a = atoms("a \\not");
+        assert_eq!(a.len(), 2);
+        lone(&a[1]);
+        // A script after it hangs on the slash, as on TeX's relation.
+        let a = atoms("\\not^2");
+        lone(&a[0]);
+        assert!(a[0].sup.is_some());
+        // None of these is a literal.
+        for tex in [
+            "\\left( a \\not\\right)",
+            "\\begin{matrix} a \\not \\\\ b \\end{matrix}",
+            "{a \\not} b",
+            "a \\not",
+            "\\not",
+        ] {
+            assert!(parse(tex).literals().is_empty(), "{tex}");
+        }
     }
 
     #[test]
@@ -4888,8 +4937,12 @@ mod tests {
         );
         assert_eq!(a[1].class, AtomClass::Rel);
         assert_eq!(a[1].span, 2..12);
-        // Nothing readable after it: a literal, as before.
-        assert_eq!(atoms("\\not")[0].nucleus, Field::Literal("\\not".into()));
+        // Nothing readable after it: the slash alone (the test of the
+        // closers has the cases).
+        assert!(matches!(
+            &atoms("\\not")[0].nucleus,
+            Field::Negated { base } if base.0.is_empty()
+        ));
     }
 
     #[test]

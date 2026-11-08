@@ -1475,6 +1475,12 @@ fn math_formula() -> impl Strategy<Value = String> {
                 },
             ),
             1 => prop::sample::select(MATH_NEGATED).prop_map(|r| format!("a \\not{r} b")),
+            // A `\not` with nothing after it: at the end of the formula,
+            // before a column break, a row break and `\end` (Task 354).
+            1 => i().prop_map(|a| format!("{a} \\not")),
+            1 => (i(), i(), i()).prop_map(|(a, b, c)| {
+                format!("\\begin{{matrix}} {a} \\not & {b} \\\\ {c} \\not \\end{{matrix}}")
+            }),
             1 => (prop::sample::select(MATH_COLORS), i(), i())
                 .prop_map(|(c, a, b)| format!("{{\\color{{{c}}} {a}}} \\textcolor{{{c}}}{{{b}}}")),
             // An infix word between two halves of a group, and a switch over
