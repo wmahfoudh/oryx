@@ -1247,3 +1247,305 @@ fn fuzz_edge_scroll() {
         check_edge_scroll(view_h, doc_h, &steps)?;
     });
 }
+
+/// The math font noad lays out with, the one the app ships.
+const MATH_FONT: &[u8] = include_bytes!("../assets/fonts/STIXTwoMath-Regular.otf");
+
+/// What a mutation inserts into a formula: TeX's syntax characters and a
+/// character of two bytes.
+const MATH_SPECIALS: &[char] = &[
+    '\\', '{', '}', '^', '_', '&', '#', '[', ']', '%', '\'', '$', '~', 'é',
+];
+const MATH_SYMBOLS: &[&str] = &[
+    "+", "-", "=", "<", ">", ",", ";", ":", "!", "(", ")", "[", "]", "|", "/", "*", ".",
+];
+const MATH_DELIMS: &[&str] = &["(", ")", "[", "]", "|", "."];
+const MATH_FRACTIONS: &[&str] = &[
+    "frac", "tfrac", "dfrac", "cfrac", "binom", "tbinom", "dbinom",
+];
+const MATH_ENVIRONMENTS: &[&str] = &[
+    "matrix",
+    "pmatrix",
+    "bmatrix",
+    "Bmatrix",
+    "vmatrix",
+    "Vmatrix",
+    "smallmatrix",
+    "cases",
+];
+const MATH_ALPHABETS: &[&str] = &[
+    "mathbb",
+    "mathbf",
+    "mathcal",
+    "mathfrak",
+    "mathit",
+    "mathsf",
+    "mathtt",
+    "boldsymbol",
+    "bm",
+    "Bbb",
+    "bold",
+    "frak",
+    "mathscr",
+    "scr",
+    "mathnormal",
+];
+const MATH_TEXT: &[&str] = &[
+    "text",
+    "mathrm",
+    "textrm",
+    "textnormal",
+    "textup",
+    "hbox",
+    "mbox",
+];
+const MATH_CLASSES: &[&str] = &[
+    "mathop",
+    "mathrel",
+    "mathbin",
+    "mathord",
+    "mathopen",
+    "mathclose",
+    "mathpunct",
+    "mathinner",
+];
+const MATH_MODULO: &[&str] = &["pmod", "mod", "bmod"];
+const MATH_SPACES: &[&str] = &[
+    ",",
+    ":",
+    ";",
+    "!",
+    " ",
+    "quad",
+    "qquad",
+    "enspace",
+    "thinspace",
+    "medspace",
+    "thickspace",
+    "negthinspace",
+    "negmedspace",
+    "negthickspace",
+    "nobreakspace",
+    "space",
+];
+
+/// One leaf of a formula: a letter, a digit, a symbol command, an
+/// operator name or a plain symbol.
+fn math_leaf() -> impl Strategy<Value = String> {
+    use noad::parse::{OP_NAMES, VOCABULARY};
+    prop_oneof![
+        4 => "[a-zA-Z]".prop_map(String::from),
+        2 => "[0-9]".prop_map(String::from),
+        3 => (0..VOCABULARY.len()).prop_map(|i| format!("\\{} ", VOCABULARY[i].0)),
+        1 => (0..OP_NAMES.len()).prop_map(|i| format!("\\{} ", OP_NAMES[i].0)),
+        1 => prop::sample::select(MATH_SYMBOLS).prop_map(String::from),
+    ]
+}
+
+/// A delimiter after `\left` or `\right`: a character or a command.
+fn math_delimiter() -> impl Strategy<Value = String> {
+    use noad::parse::DELIMITERS;
+    prop_oneof![
+        3 => prop::sample::select(MATH_DELIMS).prop_map(String::from),
+        2 => (0..DELIMITERS.len()).prop_map(|i| format!("\\{}", DELIMITERS[i].0)),
+    ]
+}
+
+/// A well-formed formula over the vocabulary noad knows, nested a few
+/// levels deep. Each math category adds its productions here.
+fn math_formula() -> impl Strategy<Value = String> {
+    use noad::parse::ACCENTS;
+    math_leaf().prop_recursive(3, 48, 4, |inner| {
+        let i = move || inner.clone();
+        prop_oneof![
+            3 => (i(), i()).prop_map(|(a, b)| format!("{a} {b}")),
+            2 => i().prop_map(|a| format!("{{{a}}}")),
+            2 => (prop::sample::select(MATH_FRACTIONS), i(), i())
+                .prop_map(|(f, a, b)| format!("\\{f}{{{a}}}{{{b}}}")),
+            1 => i().prop_map(|a| format!("\\sqrt{{{a}}}")),
+            1 => (i(), i()).prop_map(|(a, b)| format!("\\sqrt[{a}]{{{b}}}")),
+            2 => (i(), i()).prop_map(|(a, b)| format!("{{{a}}}^{{{b}}}")),
+            2 => (i(), i()).prop_map(|(a, b)| format!("{{{a}}}_{{{b}}}")),
+            1 => (i(), i(), i()).prop_map(|(a, b, c)| format!("{{{a}}}^{{{b}}}_{{{c}}}")),
+            1 => (i(), i(), i()).prop_map(|(a, b, c)| format!("\\sum_{{{a}}}^{{{b}}} {c}")),
+            1 => (i(), i()).prop_map(|(a, b)| format!("\\lim_{{{a}}} {b}")),
+            1 => i().prop_map(|a| format!("{a}'")),
+            2 => (math_delimiter(), i(), math_delimiter())
+                .prop_map(|(l, a, r)| format!("\\left{l} {a} \\right{r}")),
+            1 => (prop::sample::select(MATH_ENVIRONMENTS), i(), i(), i(), i()).prop_map(
+                |(e, a, b, c, d)| format!("\\begin{{{e}}} {a} & {b} \\\\ {c} & {d} \\end{{{e}}}")
+            ),
+            1 => (i(), i()).prop_map(|(a, b)| {
+                format!("\\begin{{aligned}} {a} &= {b} \\\\ {b} &= {a} \\end{{aligned}}")
+            }),
+            1 => (0..ACCENTS.len(), i()).prop_map(|(k, a)| format!("\\{}{{{a}}}", ACCENTS[k].0)),
+            2 => (prop::sample::select(MATH_ALPHABETS), i())
+                .prop_map(|(al, a)| format!("\\{al}{{{a}}}")),
+            1 => (prop::sample::select(MATH_TEXT), "[a-z ]{1,6}")
+                .prop_map(|(t, s)| format!("\\{t}{{{s}}}")),
+            1 => "[a-z]".prop_map(|t| format!("\\mathrm {t}")),
+            1 => "[a-z]{1,5}".prop_map(|t| format!("\\operatorname{{{t}}}")),
+            1 => (prop::sample::select(MATH_CLASSES), i())
+                .prop_map(|(s, a)| format!("\\{s}{{{a}}}")),
+            1 => (prop::sample::select(MATH_MODULO), i(), i())
+                .prop_map(|(m, a, b)| format!("{a} \\{m}{{{b}}}")),
+            1 => (prop::sample::select(MATH_SPACES), i(), i())
+                .prop_map(|(s, a, b)| format!("{a}\\{s} {b}")),
+            1 => (i(), i()).prop_map(|(a, b)| format!("{a}~{b}")),
+        ]
+    })
+}
+
+/// One mutation of a formula: a truncation, a deletion, an insertion of
+/// a syntax character, a duplicated run or a swap, on character
+/// boundaries.
+fn mutate_math(src: &str, kind: u8, at: u16, ch: char) -> String {
+    let mut out: Vec<char> = src.chars().collect();
+    if out.is_empty() {
+        return String::new();
+    }
+    let i = at as usize % out.len();
+    match kind % 5 {
+        0 => out.truncate(i),
+        1 => {
+            out.remove(i);
+        }
+        2 => out.insert(i, ch),
+        3 => {
+            let j = (i * 7 + 3) % out.len();
+            let (a, b) = (i.min(j), i.max(j));
+            let run: Vec<char> = out[a..b].to_vec();
+            out.splice(a..a, run);
+        }
+        _ => {
+            let j = (i * 5 + 1) % out.len();
+            out.swap(i, j);
+        }
+    }
+    out.into_iter().collect()
+}
+
+/// Every span of a math list lies inside the source on character
+/// boundaries, and a nucleus inside its atom.
+fn check_math_spans(list: &noad::mlist::MathList, tex: &str) -> Result<(), TestCaseError> {
+    use noad::mlist::Field;
+    for atom in list.atoms() {
+        for span in [&atom.span, &atom.nucleus_span] {
+            prop_assert!(
+                span.start <= span.end
+                    && span.end <= tex.len()
+                    && tex.is_char_boundary(span.start)
+                    && tex.is_char_boundary(span.end),
+                "span {span:?} in {tex:?}"
+            );
+        }
+        prop_assert!(
+            atom.span.start <= atom.nucleus_span.start && atom.nucleus_span.end <= atom.span.end,
+            "nucleus {:?} outside its atom {:?} in {tex:?}",
+            atom.nucleus_span,
+            atom.span
+        );
+        match &atom.nucleus {
+            Field::List(l) => check_math_spans(l, tex)?,
+            Field::Fraction {
+                numerator,
+                denominator,
+                ..
+            } => {
+                check_math_spans(numerator, tex)?;
+                check_math_spans(denominator, tex)?;
+            }
+            Field::Radical { radicand, degree } => {
+                check_math_spans(radicand, tex)?;
+                if let Some(d) = degree {
+                    check_math_spans(d, tex)?;
+                }
+            }
+            Field::LeftRight { body, .. } => check_math_spans(body, tex)?,
+            Field::Accent { base, .. } => check_math_spans(base, tex)?,
+            Field::Table { rows, .. } => {
+                for row in rows {
+                    for cell in row {
+                        check_math_spans(cell, tex)?;
+                    }
+                }
+            }
+            Field::Symbol(_)
+            | Field::Text(_)
+            | Field::Kern(_)
+            | Field::Literal(_)
+            | Field::Empty => {}
+        }
+        if let Some(s) = &atom.sup {
+            check_math_spans(s, tex)?;
+        }
+        if let Some(s) = &atom.sub {
+            check_math_spans(s, tex)?;
+        }
+    }
+    Ok(())
+}
+
+/// The properties of a formula: parsed whole when `whole` (no literal),
+/// its spans inside the source, its geometry finite and bounded in both
+/// styles, every glyph's source inside the formula.
+fn check_math(tex: &str, font: &noad::font::TtfMathFont, whole: bool) -> Result<(), TestCaseError> {
+    use noad::layout::{layout, MathStyle};
+    let list = noad::parse::parse(tex);
+    if whole {
+        let literals = list.literals();
+        prop_assert!(literals.is_empty(), "literals {literals:?} in {tex:?}");
+    }
+    check_math_spans(&list, tex)?;
+    // A glyph is at most a few ems; a formula cannot be wider or taller
+    // than a few ems per byte of its source.
+    let bound = 60.0 * (tex.len() as f32 + 4.0);
+    for style in [MathStyle::Display, MathStyle::Text] {
+        let l = layout(tex, style, 20.0, font);
+        for v in [l.width, l.ascent, l.descent] {
+            prop_assert!(
+                v.is_finite() && v >= 0.0 && v <= bound,
+                "geometry {v} of {tex:?}"
+            );
+        }
+        let sources = l
+            .glyphs
+            .iter()
+            .map(|g| g.source.clone())
+            .chain(l.literals.iter().map(|t| t.source.clone()));
+        for source in sources {
+            prop_assert!(
+                source.start <= source.end
+                    && source.end <= tex.len()
+                    && tex.is_char_boundary(source.start)
+                    && tex.is_char_boundary(source.end),
+                "source {source:?} in {tex:?}"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// The math fuzzer (Task 349): well-formed formulas from the vocabulary
+/// noad knows, nested, against four properties: no panic, no literal,
+/// finite and bounded geometry in both styles, every span inside the
+/// source on a character boundary. The formula mutated keeps the first
+/// and the last.
+#[test]
+#[ignore]
+fn fuzz_math() {
+    let font = noad::font::TtfMathFont::from_bytes(MATH_FONT).expect("the math font");
+    let config = ProptestConfig {
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    };
+    proptest!(config, |(
+        tex in math_formula(),
+        kind in 0..5u8,
+        at in any::<u16>(),
+        ch in prop::sample::select(MATH_SPECIALS),
+    )| {
+        check_math(&tex, &font, true)?;
+        check_math(&mutate_math(&tex, kind, at, ch), &font, false)?;
+    });
+}

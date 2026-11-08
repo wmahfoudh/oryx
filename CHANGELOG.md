@@ -12,6 +12,10 @@
 
 - You can now update the AppImage in place with AppImageUpdate, AppImageLauncher or Gear Lever. Before, you downloaded each new version yourself.
 
+#### Math
+
+- Formulas now accept the TeX commands Wikipedia's math uses: `\tfrac`, `\dfrac`, `\cfrac`, `\tbinom` and `\dbinom`, `\pmod` and `\mod`, `\mathop` and the other class commands, `\boldsymbol`, `\textrm`, `\hbox`, and about a hundred names such as `\sgn`, `\arccot`, `\R`, `\infin` and `\rarr`. `\mathrm dx` without braces works as in TeX. Before, these commands were shown as written.
+
 #### Selection
 
 - When you select with the mouse and drag above or below the window, the page now scrolls and the selection grows while you hold the button. The farther the pointer, the faster. Before, the page did not move.
@@ -37,6 +41,7 @@
 - When a search match is taller than the screen, such as `[\s\S]+` in the editor, the part on screen is now highlighted wherever you scroll. Before, the match lost its highlight when you scrolled down.
 - When you open a comment in a big code file and type above it before the colors below have caught up, the lines below are now colored to the end of the file. Before, the lines the coloring had not reached kept their old colors. The same held for two keys typed in the same instant, one below the other.
 - A key typed on a line far below the colored lines of a big code file, right after the file opened or after a zoom, no longer crashes Oryx.
+- In a formula, `~` is now a space, as in TeX. Before, it drew a tilde.
 - Typing in a plain text file no longer runs the syntax coloring on each key. Before, each key could cost a few milliseconds for nothing.
 - A key on a long markdown line with several code spans or links no longer freezes the editor while that line is parsed. The line is now colored in the background. Before, each key on such a line could cost 50 ms.
 - When the colors below a key are recomputed right after the cursor moved to a far line, they now land at once. Before, they could wait up to half a second.

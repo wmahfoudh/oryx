@@ -13,14 +13,7 @@ use crate::font::MathFont;
 use crate::mlist::{Atom, AtomClass, ColAlign, Field, MathList, Noad, TableGaps};
 use std::ops::Range;
 
-/// The four TeX styles. Cramped variants are tracked internally.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MathStyle {
-    Display,
-    Text,
-    Script,
-    ScriptScript,
-}
+pub use crate::mlist::MathStyle;
 
 /// A glyph at its position, in the math font at `size` pixels per em.
 #[derive(Debug, Clone, PartialEq)]
@@ -113,6 +106,12 @@ fn math_italic(c: char) -> char {
     };
     char::from_u32(mapped).unwrap_or(c)
 }
+
+/// Plain TeX's `\strutbox` (8.5 pt over and 3.5 pt under the baseline at
+/// 10 pt), in ems of the part's style: the least height and depth of a
+/// `\cfrac` part, so that nested continued fractions keep even rows.
+const STRUT_HEIGHT_EM: f32 = 0.85;
+const STRUT_DEPTH_EM: f32 = 0.35;
 
 struct Ctx<'a> {
     font: &'a dyn MathFont,
@@ -260,7 +259,17 @@ impl Ctx<'_> {
                 numerator,
                 denominator,
                 bar,
-            } => self.fraction_box(numerator, denominator, *bar, style, cramped),
+                style: forced,
+                continued,
+            } => self.fraction_box(
+                numerator,
+                denominator,
+                *bar,
+                *forced,
+                *continued,
+                style,
+                cramped,
+            ),
             Field::Radical { radicand, degree } => self.radical_box(atom, radicand, degree, style),
             Field::LeftRight { open, close, body } => {
                 self.left_right_box(atom, *open, *close, body, style, cramped)
@@ -840,20 +849,33 @@ impl Ctx<'_> {
     /// the bar centered on the axis with the minimum gaps enforced. The
     /// barless form is TeX's stack, `\binom`'s interior, on the stack
     /// constants.
+    #[allow(clippy::too_many_arguments)]
     fn fraction_box(
         &self,
         num_list: &MathList,
         den_list: &MathList,
         bar: bool,
+        forced: Option<MathStyle>,
+        continued: bool,
         style: MathStyle,
         cramped: bool,
     ) -> LaidBox {
+        // A forced style (\tfrac, \dfrac, \cfrac) replaces the style
+        // around the fraction, scripts included: TeX's {\displaystyle ...}.
+        let style = forced.unwrap_or(style);
         let c = self.font.constants();
         let u = self.unit(style);
         let display = style == MathStyle::Display;
         let sub_style = Self::fraction_sub_style(style);
-        let num = self.hlist(num_list, sub_style, cramped);
-        let den = self.hlist(den_list, sub_style, true);
+        let mut num = self.hlist(num_list, sub_style, cramped);
+        let mut den = self.hlist(den_list, sub_style, true);
+        if continued {
+            let em = self.em(sub_style);
+            for part in [&mut num, &mut den] {
+                part.ascent = part.ascent.max(STRUT_HEIGHT_EM * em);
+                part.descent = part.descent.max(STRUT_DEPTH_EM * em);
+            }
+        }
         let width = num.width.max(den.width);
         let mut geom = MathLayout::default();
 
@@ -1112,6 +1134,17 @@ mod tests {
         }
         for (name, ch, _) in crate::parse::ACCENTS {
             assert!(f.glyph(*ch).is_some(), "\\{name} U+{:04X}", *ch as u32);
+        }
+        // The bold italic alphabet of \boldsymbol, letter by letter.
+        for c in ('a'..='z')
+            .chain('A'..='Z')
+            .chain('0'..='9')
+            .chain('\u{03B1}'..='\u{03C9}')
+            .chain('\u{0391}'..='\u{03A9}')
+            .chain(['\u{2207}', '\u{2202}'])
+        {
+            let m = crate::parse::map_alphabet("boldsymbol", c);
+            assert!(f.glyph(m).is_some(), "boldsymbol {c} U+{:04X}", m as u32);
         }
     }
 
@@ -1654,6 +1687,90 @@ mod tests {
             "delimiter centers on the axis, center {}",
             center
         );
+    }
+
+    /// The glyphs as positions and sizes, without their source stamps,
+    /// so that two spellings of one shape compare equal.
+    fn shape(l: &MathLayout) -> Vec<(crate::font::GlyphId, i32, i32, i32)> {
+        l.glyphs
+            .iter()
+            .map(|g| {
+                (
+                    g.glyph,
+                    (g.x * 100.0).round() as i32,
+                    (g.y * 100.0).round() as i32,
+                    (g.size * 100.0).round() as i32,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn tfrac_and_dfrac_take_their_own_style_whatever_the_style_around() {
+        let f = font();
+        let tfrac_display = layout("\\tfrac{1}{2}", MathStyle::Display, SIZE, &f);
+        let frac_text = lay("\\frac{1}{2}");
+        assert_eq!(shape(&tfrac_display), shape(&frac_text));
+        assert_eq!(tfrac_display.rules, frac_text.rules);
+        let dfrac_text = lay("\\dfrac{1}{2}");
+        let frac_display = layout("\\frac{1}{2}", MathStyle::Display, SIZE, &f);
+        assert_eq!(shape(&dfrac_text), shape(&frac_display));
+        assert!((dfrac_text.ascent - frac_display.ascent).abs() < EPS);
+        // The style holds inside a script too: a \dfrac in a superscript
+        // is a display fraction at the script's size.
+        let in_script = lay("x^{\\dfrac{1}{2}}");
+        let plain_script = lay("x^{\\frac{1}{2}}");
+        assert!(in_script.ascent > plain_script.ascent + 1.0);
+    }
+
+    #[test]
+    fn cfrac_parts_stand_on_struts() {
+        let f = font();
+        let plain = layout("\\dfrac{1}{2}", MathStyle::Display, SIZE, &f);
+        let cont = layout("\\cfrac{1}{2}", MathStyle::Display, SIZE, &f);
+        assert!(
+            cont.glyphs[0].y < plain.glyphs[0].y - 1.0,
+            "the numerator rises on the strut's depth: {} vs {}",
+            cont.glyphs[0].y,
+            plain.glyphs[0].y
+        );
+        assert!(
+            cont.glyphs[1].y > plain.glyphs[1].y + 1.0,
+            "the denominator drops under the strut's height: {} vs {}",
+            cont.glyphs[1].y,
+            plain.glyphs[1].y
+        );
+        // Two continued fractions of different content keep one row height.
+        let a = layout("\\cfrac{1}{2}", MathStyle::Display, SIZE, &f);
+        let b = layout("\\cfrac{x}{y}", MathStyle::Display, SIZE, &f);
+        assert!((a.glyphs[0].y - b.glyphs[0].y).abs() < EPS);
+        assert!((a.glyphs[1].y - b.glyphs[1].y).abs() < EPS);
+    }
+
+    #[test]
+    fn pmod_renders_mod_upright_in_parentheses_after_a_gap() {
+        let l = lay("a \\pmod{n}");
+        let chars: String = l.glyphs.iter().filter_map(|g| g.ch).collect();
+        assert_eq!(chars, "\u{1D44E}(mod\u{1D45B})");
+        let gap = l.glyphs[1].x - (l.glyphs[0].x + adv('\u{1D44E}'));
+        assert!(
+            (gap - 8.0 / 18.0 * SIZE).abs() < EPS,
+            "8 mu before the parenthesis, got {gap}"
+        );
+        let l = lay("a \\mod n");
+        let chars: String = l.glyphs.iter().filter_map(|g| g.ch).collect();
+        assert_eq!(chars, "\u{1D44E}mod\u{1D45B}");
+    }
+
+    #[test]
+    fn texvc_function_names_render_upright_with_operator_spacing() {
+        let l = lay("\\sgn x");
+        let chars: String = l.glyphs.iter().filter_map(|g| g.ch).collect();
+        assert_eq!(chars, "sgn\u{1D465}");
+        let plain = lay("\\sin x");
+        // The same spacing as an operator name the font already knew.
+        let gap = |l: &MathLayout| l.glyphs[3].x - l.glyphs[2].x;
+        assert!((gap(&l) - gap(&plain)).abs() < EPS);
     }
 
     #[test]

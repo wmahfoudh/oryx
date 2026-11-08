@@ -20,6 +20,17 @@ pub enum AtomClass {
     Inner,
 }
 
+/// The four TeX styles. Cramped variants are tracked inside the layout.
+/// A construct that forces its own style (`\dfrac`, `\tfrac`) carries
+/// one; the layout takes the style around it otherwise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MathStyle {
+    Display,
+    Text,
+    Script,
+    ScriptScript,
+}
+
 /// A nucleus, superscript, or subscript content. Constructs are nuclei,
 /// so scripts, spacing, and demotion see every noad as an atom.
 #[derive(Debug, Clone, PartialEq)]
@@ -36,6 +47,13 @@ pub enum Field {
         denominator: MathList,
         /// False for `\binom` and `\atop`: the stack constants take over.
         bar: bool,
+        /// The style the fraction is laid out in whatever the style
+        /// around it: `\tfrac` and `\tbinom` force text style, `\dfrac`,
+        /// `\dbinom` and `\cfrac` display style. `\frac` carries none.
+        style: Option<MathStyle>,
+        /// `\cfrac`: each part stands on a strut, so that nested
+        /// continued fractions keep even rows.
+        continued: bool,
     },
     /// A radical with an optional degree.
     Radical {
@@ -137,5 +155,55 @@ impl MathList {
         self.0.iter().map(|n| match n {
             Noad::Atom(a) => a,
         })
+    }
+
+    /// The TeX the parser did not understand, in source order: the text
+    /// of every `Field::Literal` through every field and script. Empty
+    /// means the whole formula typesets.
+    pub fn literals(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        self.collect_literals(&mut out);
+        out
+    }
+
+    fn collect_literals(&self, out: &mut Vec<String>) {
+        for atom in self.atoms() {
+            // Exhaustive on purpose: a field added later must say where
+            // its literals are.
+            match &atom.nucleus {
+                Field::Literal(text) => out.push(text.clone()),
+                Field::List(list) => list.collect_literals(out),
+                Field::Fraction {
+                    numerator,
+                    denominator,
+                    ..
+                } => {
+                    numerator.collect_literals(out);
+                    denominator.collect_literals(out);
+                }
+                Field::Radical { radicand, degree } => {
+                    if let Some(degree) = degree {
+                        degree.collect_literals(out);
+                    }
+                    radicand.collect_literals(out);
+                }
+                Field::LeftRight { body, .. } => body.collect_literals(out),
+                Field::Accent { base, .. } => base.collect_literals(out),
+                Field::Table { rows, .. } => {
+                    for row in rows {
+                        for cell in row {
+                            cell.collect_literals(out);
+                        }
+                    }
+                }
+                Field::Symbol(_) | Field::Text(_) | Field::Kern(_) | Field::Empty => {}
+            }
+            if let Some(list) = &atom.sup {
+                list.collect_literals(out);
+            }
+            if let Some(list) = &atom.sub {
+                list.collect_literals(out);
+            }
+        }
     }
 }
