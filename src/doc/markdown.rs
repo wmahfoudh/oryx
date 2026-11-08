@@ -632,10 +632,19 @@ impl Builder {
             }
             Event::DisplayMath(tex) => {
                 if dollar_math_allowed(&self.source, &range) {
-                    self.flush_spans();
-                    self.emit(BlockKind::MathBlock {
-                        tex: tex.into_string(),
-                    });
+                    if self.table.is_some() {
+                        // A cell holds no block: the formula is the cell's,
+                        // set in display style as `$$` asks.
+                        let mut span = self.style();
+                        span.set_text(format!("\\displaystyle {}", tex.trim()));
+                        span.math = true;
+                        self.push(span);
+                    } else {
+                        self.flush_spans();
+                        self.emit(BlockKind::MathBlock {
+                            tex: tex.into_string(),
+                        });
+                    }
                 } else {
                     let mut span = self.style();
                     span.set_text(self.source[range].to_string());
@@ -3769,6 +3778,23 @@ mod tests {
         };
         assert_eq!(label, "1");
         assert_eq!(spans[0].text(&d.source), "the note");
+    }
+
+    /// `$$` inside a table cell is the cell's own formula, in display
+    /// style. Before, the builder emitted a display block from inside the
+    /// table, before it, and the cell lost its formula.
+    #[test]
+    fn display_math_inside_a_cell_is_the_cell_s_formula() {
+        let d = parse("| a |\n|---|\n| $$x^2$$ and $y$ |\n");
+        assert_eq!(d.blocks.len(), 1, "{:?}", d.blocks);
+        let BlockKind::Table { rows, .. } = &d.blocks[0].kind else {
+            panic!("{:?}", d.blocks[0].kind)
+        };
+        let cell = &rows[0][0];
+        assert!(cell[0].math, "{cell:?}");
+        assert_eq!(cell[0].text(&d.source), "\\displaystyle x^2");
+        assert!(cell[2].math);
+        assert_eq!(cell[2].text(&d.source), "y");
     }
 
     #[test]

@@ -713,21 +713,284 @@ fn table_columns_header_and_stripes() {
 /// `:---` and `---` leave them at the left. The example of SYNTAX.md.
 /// A formula in a table cell goes through the text fallback, which
 /// reads an escaped reserved character as noad does on the page.
-#[test]
-fn a_formula_in_a_cell_shows_its_escaped_characters() {
-    let (doc, l) = lay2("| cell |\n|---|\n| $15\\%$ and $x\\_1$ |\n", 800.0);
-    find_text(&l, &doc, "15%");
-    find_text(&l, &doc, "x_1");
+/// Every math glyph of a table lies inside one of its row bands.
+fn assert_math_in_rows(l: &LayoutDoc) {
+    assert!(!l.math_glyphs.is_empty(), "the cell's formula typesets");
+    for g in &l.math_glyphs {
+        assert!(
+            l.table_rows
+                .iter()
+                .any(|r| r.top - 0.01 <= g.top && g.bottom <= r.bottom + 0.01),
+            "glyph {:?} box [{}, {}] inside a row of {:?}",
+            g.ch,
+            g.top,
+            g.bottom,
+            l.table_rows
+        );
+    }
 }
 
-/// A control word as a script's argument shows its symbol, whole, in a
-/// cell (claim 10 of the hunt of Task 328). Before, the script took two
-/// characters: `e` with a raised `\p`, then `i`.
+/// The table's outline and the x of its column borders.
+fn table_frame(l: &LayoutDoc) -> (DecoRect, Vec<f32>) {
+    let outline = l
+        .rects
+        .iter()
+        .find(|r| r.stroke > 0.0)
+        .copied()
+        .expect("the table's outline");
+    let mut borders: Vec<f32> = l
+        .rects
+        .iter()
+        .filter(|r| r.stroke == 0.0 && r.width <= 1.5 && r.height > 20.0)
+        .map(|r| r.x)
+        .collect();
+    borders.sort_by(f32::total_cmp);
+    (outline, borders)
+}
+
+/// A formula in a cell is typeset (Task 355), its escaped characters as
+/// glyphs. Before, the cell showed the formula's text, where Task 320 had
+/// corrected the escapes.
 #[test]
-fn a_formula_in_a_cell_shows_a_control_word_as_its_script() {
-    let (doc, l) = lay2("| a |\n|---|\n| $e^\\pi$ and $90^\\circ$ |\n", 800.0);
-    find_text(&l, &doc, "\u{03C0}");
-    find_text(&l, &doc, "\u{2218}");
+fn a_formula_in_a_cell_is_typeset_with_its_escaped_characters() {
+    let (doc, l) = lay2("| cell |\n|---|\n| $15\\%$ and $x\\_1$ |\n", 800.0);
+    let chars: Vec<char> = l.math_glyphs.iter().filter_map(|g| g.ch).collect();
+    assert!(
+        chars.contains(&'%'),
+        "the percent sign typeset, got {chars:?}"
+    );
+    assert!(
+        chars.contains(&'_'),
+        "the underscore typeset, got {chars:?}"
+    );
+    assert!(
+        l.runs.iter().all(|r| l.run_text(&doc, r) != "15%"),
+        "the text fallback is gone"
+    );
+    assert_math_in_rows(&l);
+}
+
+/// A control word as a script's argument is typeset in a cell (claim 10
+/// of the hunt of Task 328 read it whole in the text fallback).
+#[test]
+fn a_formula_in_a_cell_typesets_a_control_word_as_its_script() {
+    let l = lay("| a |\n|---|\n| $e^\\pi$ and $90^\\circ$ |\n", 800.0);
+    let pi = l
+        .math_glyphs
+        .iter()
+        .find(|g| g.ch == Some('\u{1D70B}'))
+        .expect("the italic pi");
+    let e = l
+        .math_glyphs
+        .iter()
+        .find(|g| g.ch == Some('\u{1D452}'))
+        .expect("the e");
+    assert!(pi.size < e.size, "the script smaller than its base");
+    assert!(
+        l.math_glyphs.iter().any(|g| g.ch == Some('\u{2218}')),
+        "the degree ring"
+    );
+    assert_math_in_rows(&l);
+}
+
+/// A formula between two words of a cell sits on their line, on their
+/// baseline, as in a paragraph.
+#[test]
+fn a_formula_in_a_cell_sits_on_the_text_s_line() {
+    let (doc, l) = lay2("| a |\n|---|\n| energy $E=mc^2$ inline |\n", 800.0);
+    let energy = find_text(&l, &doc, "energy");
+    let after = l
+        .runs
+        .iter()
+        .find(|r| l.run_text(&doc, r).contains("inline"))
+        .expect("the word after");
+    let first = l.math_glyphs.iter().map(|g| g.x).fold(f32::MAX, f32::min);
+    let right = l.math_glyphs.iter().map(|g| g.right).fold(0.0, f32::max);
+    assert!(
+        first > energy.x + energy.width,
+        "the formula after the word"
+    );
+    assert!(after.x >= right - 0.01, "the next word after the formula");
+    assert!(
+        l.math_glyphs
+            .iter()
+            .any(|g| (g.y - energy.baseline).abs() < 2.0),
+        "the base glyphs on the text's baseline"
+    );
+    assert_eq!(l.table_rows.len(), 2);
+    assert_math_in_rows(&l);
+}
+
+#[test]
+fn a_row_grows_to_its_formula() {
+    let l = lay("| a |\n|---|\n| plain |\n| $\\frac{a}{b}$ |\n", 800.0);
+    assert_eq!(l.table_rows.len(), 3);
+    let plain = l.table_rows[1].bottom - l.table_rows[1].top;
+    let fraction = l.table_rows[2].bottom - l.table_rows[2].top;
+    assert!(
+        fraction > plain + 4.0,
+        "the fraction's row taller: {fraction} against {plain}"
+    );
+    assert_math_in_rows(&l);
+}
+
+#[test]
+fn a_column_is_as_wide_as_its_formula() {
+    let (doc, l) = lay2(
+        "| a | b |\n|---|---|\n| $\\sum_{i=1}^{n} x_i + y_i$ | t |\n",
+        800.0,
+    );
+    let t = find_text(&l, &doc, "t");
+    let right = l.math_glyphs.iter().map(|g| g.right).fold(0.0, f32::max);
+    assert!(
+        t.x > right,
+        "the next column starts after the formula: {} against {right}",
+        t.x
+    );
+    let (outline, borders) = table_frame(&l);
+    assert!(right <= outline.x + outline.width);
+    assert_eq!(borders.len(), 1);
+    assert!(borders[0] >= right, "the border after the formula");
+    assert_math_in_rows(&l);
+    let row = l.table_rows[1];
+    assert!(
+        row.bottom - row.top < 2.5 * metrics::LINE_HEIGHT * cfg().body_size,
+        "the formula on one line of the cell"
+    );
+}
+
+/// A formula wider than its cell shrinks into it, as a display block
+/// wider than the column does.
+#[test]
+fn a_formula_wider_than_its_cell_shrinks() {
+    let body = cfg().body_size;
+    let l = lay(
+        "| a | b | c |\n|---|---|---|\n| $\\sum_{i=1}^{n} \\frac{x_i + y_i}{z_i} = \\int_0^1 f(x) \\, dx$ | t | u |\n",
+        300.0,
+    );
+    assert_math_in_rows(&l);
+    let (outline, borders) = table_frame(&l);
+    let left = l.math_glyphs.iter().map(|g| g.x).fold(f32::MAX, f32::min);
+    let right = l.math_glyphs.iter().map(|g| g.right).fold(0.0, f32::max);
+    assert!(
+        right <= outline.x + outline.width + 0.01,
+        "inside the table: {right} against {}",
+        outline.x + outline.width
+    );
+    let widest = l.math_glyphs.iter().map(|g| g.size).fold(0.0, f32::max);
+    assert!(
+        widest < body - 0.5,
+        "the glyphs shrunk: {widest} against {body}"
+    );
+    assert_eq!(borders.len(), 2);
+    assert!(
+        borders.iter().all(|&b| b <= left || b >= right),
+        "the formula crosses no border: {borders:?} against [{left}, {right}]"
+    );
+}
+
+/// A cell with a formula follows its column's mark: centered under
+/// `:-:`, at the right under `--:`, at the left without a mark.
+#[test]
+fn a_formula_in_an_aligned_column_moves_with_the_cell() {
+    let l = lay("| a | b | c |\n|:-:|--:|---|\n| $x$ | $y$ | $z$ |\n", 800.0);
+    assert_math_in_rows(&l);
+    let (outline, borders) = table_frame(&l);
+    assert_eq!(borders.len(), 2);
+    let glyph = |c: char| {
+        l.math_glyphs
+            .iter()
+            .find(|g| g.ch == Some(c))
+            .unwrap_or_else(|| panic!("{c}"))
+    };
+    let (x, y, z) = (glyph('\u{1D465}'), glyph('\u{1D466}'), glyph('\u{1D467}'));
+    let col_mid = (outline.x + borders[0]) / 2.0;
+    assert!(
+        ((x.x + x.right) / 2.0 - col_mid).abs() < 3.0,
+        "centered: {} against {col_mid}",
+        (x.x + x.right) / 2.0
+    );
+    assert!(
+        borders[1] - y.right > 4.0 && borders[1] - y.right < 12.0,
+        "at the right: {} against the border at {}",
+        y.right,
+        borders[1]
+    );
+    assert!(
+        z.x - borders[1] > 4.0 && z.x - borders[1] < 12.0,
+        "at the left: {} against the border at {}",
+        z.x,
+        borders[1]
+    );
+}
+
+#[test]
+fn an_arabic_cell_with_a_formula_stays_in_its_row() {
+    let l = lay("| a |\n|---|\n| مرحبا $x^2$ بالعالم |\n", 800.0);
+    assert_math_in_rows(&l);
+    let (outline, _) = table_frame(&l);
+    for g in &l.math_glyphs {
+        assert!(g.x >= outline.x && g.right <= outline.x + outline.width);
+    }
+}
+
+/// `$$` inside a cell is the cell's formula, in display style: the sum's
+/// limits above and below deepen the row. Before, the formula left the
+/// cell as a display block before the table.
+#[test]
+fn a_display_formula_in_a_cell_takes_display_style() {
+    let text = lay("| a |\n|---|\n| $\\sum_{i=1}^{n} i$ |\n", 800.0);
+    let (doc, display) = lay2("| a |\n|---|\n| $$\\sum_{i=1}^{n} i$$ |\n", 800.0);
+    assert_eq!(doc.blocks.len(), 1, "the formula stays in the table");
+    assert_eq!(display.table_rows.len(), 2);
+    assert_math_in_rows(&display);
+    let band = |l: &LayoutDoc| l.table_rows[1].bottom - l.table_rows[1].top;
+    assert!(
+        band(&display) > band(&text) + 4.0,
+        "the limits deepen the row: {} against {}",
+        band(&display),
+        band(&text)
+    );
+    assert!(display.math_glyphs.iter().any(|g| g.ch == Some('\u{2211}')));
+}
+
+/// An inline formula wider than its column shrinks into it, to half size
+/// at least, as a display block does (Task 355 brought the rule for the
+/// cells, and a paragraph takes it too).
+#[test]
+fn a_formula_wider_than_its_column_shrinks() {
+    let body = cfg().body_size;
+    let l = lay(
+        "Text $\\sum_{i=1}^{n} \\frac{x_i + y_i}{z_i} = \\int_0^1 f(x) \\, dx + \\prod_{k} a_k$ after.\n",
+        220.0,
+    );
+    let widest = l.math_glyphs.iter().map(|g| g.size).fold(0.0, f32::max);
+    assert!(
+        widest < body - 0.5,
+        "the glyphs shrunk: {widest} against {body}"
+    );
+    assert!(widest >= 0.5 * body - 0.5, "not below the floor: {widest}");
+    let right = l.math_glyphs.iter().map(|g| g.right).fold(0.0, f32::max);
+    assert!(right <= 220.0 + 0.01, "inside the column: {right}");
+}
+
+/// Every glyph of a formula carries the box's right edge, as it carries
+/// its top and bottom.
+#[test]
+fn math_glyphs_carry_their_box_s_right_edge() {
+    let l = lay("a $x^2 + y$ b\n", 800.0);
+    let right = l.math_glyphs[0].right;
+    assert!(
+        l.math_glyphs.iter().all(|g| g.right == right),
+        "one box, one right edge"
+    );
+    let last_x = l.math_glyphs.iter().map(|g| g.x).fold(0.0, f32::max);
+    assert!(right > last_x, "the box ends after the last glyph's origin");
+    let left = l.math_glyphs.iter().map(|g| g.x).fold(f32::MAX, f32::min);
+    assert!(
+        right - left > 2.0 * cfg().body_size,
+        "about four symbols wide"
+    );
 }
 
 #[test]

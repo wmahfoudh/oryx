@@ -1672,3 +1672,125 @@ fn fuzz_math() {
         check_math(&mutate_math(&tex, kind, at, ch), &font, false)?;
     });
 }
+
+/// The cells of the cells fuzzer: text, formulas, both, a display
+/// formula, a right-to-left text with a formula.
+const CELLS: &[&str] = &[
+    "",
+    "text",
+    "a longer cell of text that wraps in a narrow column",
+    "$x^2$",
+    "$\\frac{a}{b}$",
+    "$\\sum_{i=1}^{n} i$",
+    "$\\int_0^1 f(x)\\,dx$",
+    "t $x$ t",
+    "see $\\alpha + \\beta$ here",
+    "$$\\sum_{k=0}^\\infty \\frac{x^k}{k!}$$",
+    "$\\left( \\frac{a}{b} \\right)^2$",
+    "**bold** $y$",
+    "$\\not$",
+    "$x\\_1 \\%$",
+    "مرحبا $x^2$ بالعالم",
+];
+const MARKS: &[&str] = &["---", ":--", ":-:", "--:"];
+
+/// The cells fuzzer (Task 355): random tables whose cells mix text and
+/// formulas, laid out at random widths under random column marks,
+/// against three properties: no panic, every formula's box inside one
+/// row band of its table, and no formula past the table's outline or
+/// across a column border, unless the formula is at its half-size floor.
+#[test]
+#[ignore]
+fn fuzz_cells() {
+    use oryx::doc::images::MediaCache;
+    use oryx::layout::{layout, ViewConfig};
+    use oryx::style::fonts::FontStore;
+    use oryx::style::theme::Theme;
+    // The closure of the runner is `Fn`: the font store lives in a cell.
+    let fonts = std::cell::RefCell::new(FontStore::new());
+    let theme = Theme::default_dark();
+    let cfg = ViewConfig::default();
+    let config = ProptestConfig {
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    };
+    proptest!(config, |(
+        cols in 1..4usize,
+        rows in 1..4usize,
+        cells in prop::collection::vec(prop::sample::select(CELLS), 16),
+        marks in prop::collection::vec(prop::sample::select(MARKS), 4),
+        width in 200.0f32..1200.0,
+    )| {
+        let mut md = String::new();
+        let line = |md: &mut String, r: usize| {
+            md.push('|');
+            for c in 0..cols {
+                md.push(' ');
+                md.push_str(cells[(r * cols + c) % cells.len()]);
+                md.push_str(" |");
+            }
+            md.push('\n');
+        };
+        line(&mut md, 0);
+        md.push('|');
+        for c in 0..cols {
+            md.push_str(marks[c % marks.len()]);
+            md.push('|');
+        }
+        md.push('\n');
+        for r in 1..=rows {
+            line(&mut md, r);
+        }
+        let doc = markdown::parse(md.as_str());
+        let mut media = MediaCache::offline(std::path::PathBuf::from("."));
+        let l = layout(&doc, &theme, &mut fonts.borrow_mut(), &mut media, &cfg, width);
+        let outline = l.rects.iter().find(|r| r.stroke > 0.0);
+        let borders: Vec<f32> = l
+            .rects
+            .iter()
+            .filter(|r| r.stroke == 0.0 && r.width <= 1.5 && r.height > 20.0)
+            .map(|r| r.x)
+            .collect();
+        for g in &l.math_glyphs {
+            prop_assert!(
+                g.x.is_finite() && g.right.is_finite() && g.top.is_finite() && g.bottom.is_finite(),
+                "finite\n{md}"
+            );
+            prop_assert!(
+                l.table_rows
+                    .iter()
+                    .any(|r| r.top - 0.01 <= g.top && g.bottom <= r.bottom + 0.01),
+                "glyph {:?} box [{}, {}] in a row of {:?}\n{md}",
+                g.ch,
+                g.top,
+                g.bottom,
+                l.table_rows
+            );
+            let formula_size = l
+                .math_glyphs
+                .iter()
+                .filter(|h| h.right == g.right && h.top == g.top)
+                .map(|h| h.size)
+                .fold(0.0, f32::max);
+            if formula_size <= 0.5 * cfg.body_size + 0.01 {
+                continue;
+            }
+            if let Some(o) = outline {
+                prop_assert!(
+                    g.x >= o.x - 0.01 && g.right <= o.x + o.width + 0.01,
+                    "inside the outline [{}, {}]: [{}, {}]\n{md}",
+                    o.x,
+                    o.x + o.width,
+                    g.x,
+                    g.right
+                );
+            }
+            prop_assert!(
+                borders.iter().all(|&b| b <= g.x + 0.01 || b >= g.right - 0.01),
+                "across a border of {borders:?}: [{}, {}]\n{md}",
+                g.x,
+                g.right
+            );
+        }
+    });
+}

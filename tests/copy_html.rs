@@ -548,6 +548,24 @@ fn math_becomes_a_picture_or_stays_text() {
     );
 }
 
+/// A formula in a table cell is a picture in the copy, as a paragraph's
+/// (Task 355).
+#[test]
+fn a_formula_in_a_cell_is_a_picture() {
+    let doc = markdown::parse("| a |\n|---|\n| $x^2$ |\n");
+    let sel = selection::all(&doc).unwrap();
+    let html = Page::parse(selection_html(
+        &sel,
+        &doc,
+        &Theme::default_dark(),
+        &mut OnePixel,
+    ));
+    let images = html.elements("img");
+    assert_eq!(images.len(), 1, "{html}");
+    assert_eq!(attr(&images[0], "alt").as_deref(), Some("x^2"));
+    assert_eq!(html.elements("td").len(), 1);
+}
+
 /// The plain reading of a display formula shows an escaped reserved
 /// character as the page does.
 #[test]

@@ -656,6 +656,9 @@ pub struct MathGlyph {
     pub ch: Option<char>,
     pub top: f32,
     pub bottom: f32,
+    /// The right edge of the formula's box, as `top` and `bottom` are
+    /// its vertical edges: a table's measuring pass reads it.
+    pub right: f32,
     pub color: crate::style::theme::Rgba,
     pub block: usize,
 }
@@ -2479,6 +2482,7 @@ pub(crate) fn shape_kind(
             theme,
             cfg,
             source,
+            media,
             header,
             rows,
             aligns,
@@ -4444,6 +4448,7 @@ fn layout_table(
     theme: &Theme,
     cfg: &ViewConfig,
     source: &str,
+    media: &mut MediaCache,
     header: &[Vec<Span>],
     rows: &[Vec<Vec<Span>>],
     aligns: &[ColumnAlign],
@@ -4472,28 +4477,44 @@ fn layout_table(
         return 0.0;
     }
 
-    let measure = |fonts: &mut FontStore, spans: &[Span], bold: bool| -> f32 {
-        let mut tmp = LayoutDoc::default();
-        let base = BlockStyle {
-            size,
-            color: theme.text.body,
-            bold,
-            block_index,
-            justify: false,
-            align: None,
+    // A cell with a formula goes through the paragraph's flow, which
+    // typesets the formula and sets it on the text's line or on a row of
+    // its own; a cell without one keeps the plain shaper.
+    let has_math = |spans: &[Span]| spans.iter().any(|s| s.math);
+    let measure =
+        |fonts: &mut FontStore, media: &mut MediaCache, spans: &[Span], bold: bool| -> f32 {
+            let mut tmp = LayoutDoc::default();
+            let base = BlockStyle {
+                size,
+                color: theme.text.body,
+                bold,
+                block_index,
+                justify: false,
+                align: None,
+            };
+            if has_math(spans) {
+                layout_flow(
+                    fonts, theme, cfg, source, media, spans, &base, 0.0, 0.0, 100_000.0, &mut tmp,
+                );
+            } else {
+                shape_block(
+                    fonts, theme, cfg, source, spans, true, &base, 0.0, 0.0, 100_000.0, &mut tmp,
+                );
+            }
+            cell_right_edge(&tmp)
         };
-        shape_block(
-            fonts, theme, cfg, source, spans, true, &base, 0.0, 0.0, 100_000.0, &mut tmp,
-        );
-        tmp.runs.iter().map(|r| r.x + r.width).fold(0.0, f32::max)
-    };
 
     let empty_cell: Vec<Span> = Vec::new();
     let mut widths = vec![0.0f32; ncols];
     for (c, w) in widths.iter_mut().enumerate() {
-        let mut natural = measure(fonts, header.get(c).unwrap_or(&empty_cell), true);
+        let mut natural = measure(fonts, media, header.get(c).unwrap_or(&empty_cell), true);
         for row in rows {
-            natural = natural.max(measure(fonts, row.get(c).unwrap_or(&empty_cell), false));
+            natural = natural.max(measure(
+                fonts,
+                media,
+                row.get(c).unwrap_or(&empty_cell),
+                false,
+            ));
         }
         // One pixel of slack: the measuring pass shapes the cell without a
         // wrap width and the layout pass shapes it inside the column, and
@@ -4556,27 +4577,46 @@ fn layout_table(
         for (c, col_width) in widths.iter().enumerate() {
             let spans = cells.get(c).unwrap_or(&empty_cell);
             let mut tmp = LayoutDoc::default();
+            let align = aligns.get(c).copied().and_then(cell_align);
+            let math = has_math(spans);
+            // The flow sets a formula after its text: a centered or
+            // right-aligned cell with a formula is laid out at the left
+            // and moved as a block afterwards, so the formula moves with
+            // its text.
             let base = BlockStyle {
                 size,
                 color: theme.text.body,
                 bold: *is_header,
                 block_index,
                 justify: false,
-                align: aligns.get(c).copied().and_then(cell_align),
+                align: match align {
+                    Some(Align::Center) | Some(Align::Right) if math => None,
+                    a => a,
+                },
             };
-            let h = shape_block(
-                fonts,
-                theme,
-                cfg,
-                source,
-                spans,
-                true,
-                &base,
-                0.0,
-                0.0,
-                (col_width - 2.0 * pad).max(20.0),
-                &mut tmp,
-            );
+            let content_w = (col_width - 2.0 * pad).max(20.0);
+            let h = if math {
+                let h = layout_flow(
+                    fonts, theme, cfg, source, media, spans, &base, 0.0, 0.0, content_w, &mut tmp,
+                );
+                let factor = match align {
+                    Some(Align::Center) => 0.5,
+                    Some(Align::Right) => 1.0,
+                    _ => 0.0,
+                };
+                // The room is the column's own, not the content floor's,
+                // which a very narrow column falls under: the cell never
+                // moves past its column.
+                let room = (col_width - 2.0 * pad) - cell_right_edge(&tmp);
+                if factor > 0.0 && room > 0.0 {
+                    shift_cell_right(&mut tmp, room * factor);
+                }
+                h
+            } else {
+                shape_block(
+                    fonts, theme, cfg, source, spans, true, &base, 0.0, 0.0, content_w, &mut tmp,
+                )
+            };
             for run in &mut tmp.runs {
                 if run.span != usize::MAX {
                     run.span += span_base;
@@ -4632,6 +4672,19 @@ fn layout_table(
                 rect.y += dy;
                 out.rects.push(rect);
             }
+            for mut g in tmp.math_glyphs {
+                g.x += dx;
+                g.right += dx;
+                g.y += dy;
+                g.top += dy;
+                g.bottom += dy;
+                out.math_glyphs.push(g);
+            }
+            for mut image in tmp.images {
+                image.x += dx;
+                image.y += dy;
+                out.images.push(image);
+            }
             for (name, ay) in tmp.anchors {
                 out.anchors.push((name, ay + dy));
             }
@@ -4655,6 +4708,32 @@ fn layout_table(
             .stroked(t),
     );
     y - y0
+}
+
+/// The right edge of a cell laid out alone: its runs, its formulas' boxes
+/// and its images.
+fn cell_right_edge(cell: &LayoutDoc) -> f32 {
+    let runs = cell.runs.iter().map(|r| r.x + r.width);
+    let math = cell.math_glyphs.iter().map(|g| g.right);
+    let images = cell.images.iter().map(|i| i.x + i.width);
+    runs.chain(math).chain(images).fold(0.0, f32::max)
+}
+
+/// Moves a cell laid out alone to the right, as a block.
+fn shift_cell_right(cell: &mut LayoutDoc, dx: f32) {
+    for run in &mut cell.runs {
+        run.x += dx;
+    }
+    for rect in &mut cell.rects {
+        rect.x += dx;
+    }
+    for g in &mut cell.math_glyphs {
+        g.x += dx;
+        g.right += dx;
+    }
+    for image in &mut cell.images {
+        image.x += dx;
+    }
 }
 
 /// How much of its natural size an image is drawn at. Pixels are all an
@@ -5133,6 +5212,7 @@ fn emit_math_layout(
     };
     let top = baseline - m.ascent;
     let bottom = baseline + m.descent;
+    let right = x + m.width;
     for g in &m.glyphs {
         out.math_glyphs.push(MathGlyph {
             glyph: g.glyph.0,
@@ -5142,6 +5222,7 @@ fn emit_math_layout(
             ch: g.ch,
             top,
             bottom,
+            right,
             color: color(g.color),
             block: block_index,
         });
@@ -5741,12 +5822,20 @@ fn layout_flow(
         } else if spans[i].math {
             let span = &spans[i];
             let font = OryxMathFont::new();
-            let m = noad::layout::layout(
+            let mut m = noad::layout::layout(
                 span.text(source).trim(),
                 noad::layout::MathStyle::Text,
                 base.size,
                 &font,
             );
+            // A formula wider than the width at hand (a table cell, a
+            // narrow column) shrinks into it, down to the half-size floor,
+            // as a display block wider than the column does; past the
+            // floor it overflows.
+            if m.width > avail {
+                let s = (avail / m.width).max(0.5);
+                scale_math_layout(&mut m, s);
+            }
             let w = m.width.max(1.0);
             // A space the author typed before the equation is the trailing
             // byte of the preceding text chunk, and shaping drops trailing

@@ -956,6 +956,36 @@ fn a_colored_formula_exports_with_its_color() {
     );
 }
 
+/// A table with a formula in a cell exports the formula's glyphs on its
+/// page (Task 355).
+#[test]
+fn a_table_with_a_formula_exports_its_glyphs() {
+    let doc = markdown::parse("| a | b |\n|---|---|\n| $\\frac{x}{y}$ | t |\n");
+    let (geometry, cfg) = geometry_and_cfg();
+    let mut fonts = FontStore::new();
+    let mut media = MediaCache::offline(PathBuf::from("tests/fixtures"));
+    let lay = layout(
+        &doc,
+        &Theme::default_dark(),
+        &mut fonts,
+        &mut media,
+        &cfg,
+        geometry.width,
+    );
+    let pages = paginate(&doc, &lay, &geometry);
+    assert_eq!(pages.len(), 1);
+    assert!(
+        !pages[0].math.is_empty(),
+        "the cell's glyphs reach the page"
+    );
+    assert!(pages[0]
+        .math
+        .iter()
+        .all(|g| g.y >= pages[0].top && g.y <= pages[0].bottom));
+    let bytes = export_to_bytes(&doc, PageSize::A4);
+    assert!(Pdf::load_mem(&bytes).is_ok());
+}
+
 #[test]
 fn every_display_equation_lands_whole_on_one_page() {
     let mut source = String::new();
