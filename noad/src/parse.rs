@@ -999,6 +999,7 @@ impl Parser<'_> {
     /// the call consumes at least one token.
     fn atom(&mut self) -> Option<Atom> {
         use crate::token::TokenKind as K;
+        let mut expanded = false;
         let tok = loop {
             let tok = self.next()?;
             if let K::Command(name) = &tok.kind {
@@ -1014,9 +1015,17 @@ impl Parser<'_> {
                 if self.macros.contains_key(name.as_str()) {
                     let name = name.clone();
                     if self.expand(&name, tok.span.clone()) {
+                        expanded = true;
                         continue;
                     }
                     return Some(literal_atom(format!("\\{name}"), tok.span));
+                }
+                // A closer met after a macro expanded to nothing (a row
+                // break, `\\right`, `\\end`): the reader of the structure
+                // takes it, as it would have without the macro.
+                if expanded && (name == "\\" || name == "right" || name == "end") {
+                    self.pos -= 1;
+                    return None;
                 }
             }
             break tok;
@@ -1182,7 +1191,13 @@ impl Parser<'_> {
                     nucleus_span: tok.span.start..end,
                 })
             }
-            _ => None,
+            // A marker is no atom: it stays for the caller, which closes its
+            // group on it or reads an empty operand (a macro that expanded
+            // to nothing stood before it).
+            _ => {
+                self.pos -= 1;
+                None
+            }
         }
     }
 
@@ -1329,10 +1344,13 @@ impl Parser<'_> {
             }
             Some(K::Command(command)) => {
                 if self.macros.contains_key(&command) {
+                    // `expand` works on a consumed macro token.
                     let span = self.peek().map(|t| t.span.clone()).unwrap_or(start.clone());
+                    self.pos += 1;
                     if self.expand(&command, span) {
                         return self.text(start, name);
                     }
+                    self.pos -= 1;
                     return literal_atom(format!("\\{name}"), start);
                 }
                 let Some((ch, _)) = vocabulary_lookup(&command) else {
@@ -1893,13 +1911,41 @@ impl Parser<'_> {
     fn radical(&mut self, start: std::ops::Range<usize>) -> Atom {
         use crate::token::TokenKind as K;
         let degree = if matches!(self.peek().map(|t| &t.kind), Some(K::Char('['))) {
-            self.pos += 1;
-            Some(self.list_until_char(']'))
+            // LaTeX reads an optional argument by its tokens, up to the `]`
+            // at brace depth zero, before anything in it expands: a macro
+            // inside the degree cannot swallow the bracket. Without a
+            // closing bracket the degree runs to the end, as before.
+            match self.bracket_tokens() {
+                Some(tokens) => Some(self.sub_list(tokens)),
+                None => {
+                    self.pos += 1;
+                    Some(self.list_until_char(']'))
+                }
+            }
         } else {
             None
         };
         let radicand = self.script_operand();
         self.construct(start, Field::Radical { radicand, degree }, AtomClass::Ord)
+    }
+
+    /// A list parsed from tokens already cut out of the input, an optional
+    /// argument, with this parser's macros and budgets, which it hands
+    /// back.
+    fn sub_list(&mut self, tokens: Vec<crate::token::Token>) -> MathList {
+        let mut sub = Parser {
+            tokens,
+            pos: 0,
+            src: self.src,
+            macros: std::mem::take(&mut self.macros),
+            expansions: self.expansions,
+            spliced: self.spliced,
+        };
+        let list = sub.list(true);
+        self.macros = sub.macros;
+        self.expansions = sub.expansions;
+        self.spliced = sub.spliced;
+        list
     }
 
     /// Elements up to a closing character, consumed; end of input closes.
@@ -1972,9 +2018,11 @@ impl Parser<'_> {
             if self.macros.contains_key(name) {
                 let name = name.clone();
                 let span = self.peek().map(|t| t.span.clone()).unwrap_or_default();
+                self.pos += 1;
                 if self.expand(&name, span) {
                     return self.delimiter();
                 }
+                self.pos -= 1;
                 return None;
             }
         }
@@ -2074,22 +2122,30 @@ impl Parser<'_> {
                 self.pos += 1;
                 self.list(false)
             }
-            K::Char(_) | K::Command(_) => {
-                let atom = self.atom().expect("peeked");
-                MathList(vec![Noad::Atom(atom)])
-            }
-            K::Sup | K::Sub | K::Prime | K::Align | K::EndGroup => {
-                // ^ with no legal operand: degrade the marker itself.
-                let text = match tok.kind {
-                    K::Sup => "^",
-                    K::Sub => "_",
-                    K::Prime => "'",
-                    K::Align => "&",
-                    _ => "}",
-                };
+            // A macro expands first, and the operand is what follows it.
+            K::Command(name) if self.macros.contains_key(name.as_str()) => {
+                let name = name.clone();
                 self.pos += 1;
-                MathList(vec![Noad::Atom(literal_atom(text, span))])
+                if self.expand(&name, span) {
+                    return self.script_operand();
+                }
+                self.pos -= 1;
+                match self.atom() {
+                    Some(atom) => MathList(vec![Noad::Atom(atom)]),
+                    None => MathList::default(),
+                }
             }
+            // A closer of the structure around (a row break, `\\right`,
+            // `\\end`) or a marker is no operand: the operand is empty and
+            // the token stays for its reader, TeX's missing argument.
+            K::Command(name) if name == "\\" || name == "right" || name == "end" => {
+                MathList::default()
+            }
+            K::Sup | K::Sub | K::Prime | K::Align | K::EndGroup => MathList::default(),
+            K::Char(_) | K::Command(_) => match self.atom() {
+                Some(atom) => MathList(vec![Noad::Atom(atom)]),
+                None => MathList::default(),
+            },
         }
     }
 }
@@ -3108,13 +3164,15 @@ mod tests {
     fn a_text_command_and_a_delimiter_expand_a_macro_first() {
         let a = atoms("\\newcommand{\\C}{x}\\mathrm\\C");
         assert_eq!(a[0].nucleus, Field::Text("x".into()));
+        assert_eq!(a.len(), 1, "the macro is read once");
         let a = atoms("\\renewcommand{\\alpha}{\\beta}\\mathrm\\alpha");
         assert_eq!(a[0].nucleus, Field::Text("\u{03B2}".into()));
         // A macro that expands to one character reads it.
         let a = atoms("\\newcommand{\\g}{y}\\text\\g");
         assert_eq!(a[0].nucleus, Field::Text("y".into()));
-        // The delimiter after \left expands a macro too.
+        // The delimiter after \left expands a macro too, once.
         let a = atoms("\\newcommand{\\lang}{[}\\left\\lang x \\right]");
+        assert_eq!(a.len(), 1);
         assert!(matches!(
             a[0].nucleus,
             Field::LeftRight {
@@ -3159,6 +3217,77 @@ mod tests {
         let a = atoms("\\mathop =");
         assert_eq!(a[0].nucleus, Field::Symbol('='));
         assert_eq!(a[0].class, AtomClass::Op);
+    }
+
+    #[test]
+    fn a_macro_that_expands_to_nothing_leaves_an_empty_operand() {
+        // The read of Task 349: `script_operand` panicked when the atom it
+        // had peeked expanded to nothing or to a marker.
+        let a = atoms("a\\newcommand{\\e}{}\\frac1\\e");
+        let Field::Fraction { denominator, .. } = &a[1].nucleus else {
+            panic!("{:?}", a[1].nucleus)
+        };
+        assert!(denominator.0.is_empty());
+        let a = atoms("a\\newcommand{\\e}{}\\mathop\\e");
+        assert_eq!(a[1].class, AtomClass::Op);
+        assert_eq!(a[1].nucleus, Field::List(MathList::default()));
+        let a = atoms("{\\newcommand{\\e}{}\\pmod\\e} x");
+        assert_eq!(a.len(), 2);
+        let a = atoms("\\newcommand{\\e}{^}\\mathrel\\e x");
+        assert_eq!(a[0].class, AtomClass::Rel);
+        assert!(
+            a[0].sup.is_some(),
+            "the marker the macro left attaches as a script"
+        );
+        // The fuzzer's cases: an empty macro before a row break keeps the
+        // break for the matrix, and before \right keeps the closer.
+        let a = atoms("\\left( \\newcommand{\\AA}{} \\AA A \\sqrt\\AA \\right(");
+        assert!(matches!(
+            a[0].nucleus,
+            Field::LeftRight {
+                close: Some('('),
+                ..
+            }
+        ));
+        assert!(
+            parse("\\left( \\newcommand{\\AA}{} \\AA A \\sqrt\\AA \\right(")
+                .literals()
+                .is_empty()
+        );
+        // The degree of a root is read by its tokens: the bracket stays
+        // the degree's whatever an empty macro before it leaves.
+        let a = atoms("\\sqrt[\\newcommand{\\AA}{} \\AA A \\sqrt\\AA]{a}");
+        assert_eq!(a.len(), 1);
+        let Field::Radical { degree, radicand } = &a[0].nucleus else {
+            panic!("{:?}", a[0].nucleus)
+        };
+        assert_eq!(degree.as_ref().unwrap().atoms().count(), 2);
+        assert_eq!(radicand.atoms().next().unwrap().nucleus, Field::Symbol('a'));
+        assert!(parse("\\sqrt[\\newcommand{\\AA}{} \\AA A \\sqrt\\AA]{a}")
+            .literals()
+            .is_empty());
+        // A marker as the operand: an empty operand, the marker kept.
+        let a = atoms("{x^}y");
+        assert_eq!(a.len(), 2);
+        assert_eq!(a[1].nucleus, Field::Symbol('y'));
+        let a = atoms(
+            "\\begin{matrix} A & \\newcommand{\\AA}{} \\AA A \\sqrt\\AA \\\\ a & a \\end{matrix}",
+        );
+        let Field::Table { rows, .. } = &a[0].nucleus else {
+            panic!("{:?}", a[0].nucleus)
+        };
+        assert_eq!(rows.len(), 2);
+        assert!(parse(
+            "\\begin{matrix} A & \\newcommand{\\AA}{} \\AA A \\sqrt\\AA \\\\ a & a \\end{matrix}"
+        )
+        .literals()
+        .is_empty());
+        // TeX's reading of the empty macro before each argument: each
+        // command takes the next one, and the chain nests on the x.
+        let a = atoms("\\newcommand{\\e}{}\\sqrt\\e \\mathbf\\e \\hat\\e x^\\e");
+        assert_eq!(a.len(), 1);
+        assert!(matches!(a[0].nucleus, Field::Radical { .. }));
+        assert_eq!(a[0].sup, Some(MathList::default()));
     }
 
     #[test]

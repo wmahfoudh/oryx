@@ -1310,6 +1310,19 @@ const MATH_CLASSES: &[&str] = &[
     "mathinner",
 ];
 const MATH_MODULO: &[&str] = &["pmod", "mod", "bmod"];
+/// The commands that read one operand, the place a macro expanding to
+/// nothing used to crash.
+const MATH_OPERAND_TAKERS: &[&str] = &[
+    "sqrt",
+    "mathbf",
+    "hat",
+    "mathop",
+    "mathrel",
+    "pmod",
+    "boldsymbol",
+    "tfrac1",
+    "frac1",
+];
 const MATH_SPACES: &[&str] = &[
     ",",
     ":",
@@ -1363,7 +1376,9 @@ fn math_formula() -> impl Strategy<Value = String> {
             2 => (prop::sample::select(MATH_FRACTIONS), i(), i())
                 .prop_map(|(f, a, b)| format!("\\{f}{{{a}}}{{{b}}}")),
             1 => i().prop_map(|a| format!("\\sqrt{{{a}}}")),
-            1 => (i(), i()).prop_map(|(a, b)| format!("\\sqrt[{a}]{{{b}}}")),
+            // The degree is braced: a `]` inside it would end the optional
+            // argument, in LaTeX as here.
+            1 => (i(), i()).prop_map(|(a, b)| format!("\\sqrt[{{{a}}}]{{{b}}}")),
             2 => (i(), i()).prop_map(|(a, b)| format!("{{{a}}}^{{{b}}}")),
             2 => (i(), i()).prop_map(|(a, b)| format!("{{{a}}}_{{{b}}}")),
             1 => (i(), i(), i()).prop_map(|(a, b, c)| format!("{{{a}}}^{{{b}}}_{{{c}}}")),
@@ -1392,6 +1407,13 @@ fn math_formula() -> impl Strategy<Value = String> {
             1 => (prop::sample::select(MATH_SPACES), i(), i())
                 .prop_map(|(s, a, b)| format!("{a}\\{s} {b}")),
             1 => (i(), i()).prop_map(|(a, b)| format!("{a}~{b}")),
+            // A macro defined and used: as an atom, and as the operand of
+            // a construct, its body a formula or nothing (Task 350).
+            2 => ("[A-Z]{2,3}", prop::option::of(i()), i(), prop::sample::select(MATH_OPERAND_TAKERS))
+                .prop_map(|(name, body, a, taker)| {
+                    let body = body.unwrap_or_default();
+                    format!("\\newcommand{{\\{name}}}{{{body}}} \\{name} {a} \\{taker}\\{name}")
+                }),
         ]
     })
 }
@@ -1498,8 +1520,15 @@ fn check_math(tex: &str, font: &noad::font::TtfMathFont, whole: bool) -> Result<
     }
     check_math_spans(&list, tex)?;
     // A glyph is at most a few ems; a formula cannot be wider or taller
-    // than a few ems per byte of its source.
-    let bound = 60.0 * (tex.len() as f32 + 4.0);
+    // than a few ems per byte of its source. A formula that defines a
+    // macro can multiply its content up to noad's expansion cap (a
+    // mutation can make a macro call itself), so it is held to finite
+    // geometry alone.
+    let bound = if tex.contains("\\newcommand") {
+        f32::INFINITY
+    } else {
+        60.0 * (tex.len() as f32 + 4.0)
+    };
     for style in [MathStyle::Display, MathStyle::Text] {
         let l = layout(tex, style, 20.0, font);
         for v in [l.width, l.ascent, l.descent] {
