@@ -186,8 +186,19 @@ impl Ctx<'_> {
         let mut out = MathLayout::default();
         let mut cursor = 0.0;
         let mut prev: Option<AtomClass> = None;
+        let mut style = style;
+        let mut cramped = cramped;
         for noad in &list.0 {
-            let Noad::Atom(atom) = noad;
+            let atom = match noad {
+                Noad::Atom(atom) => atom,
+                // TeX's style noad: the rest of the list in the new style,
+                // uncramped, the spacing before the next atom read in it.
+                Noad::Style(switched) => {
+                    style = *switched;
+                    cramped = false;
+                    continue;
+                }
+            };
             // An explicit kern is TeX's kern item, not an atom: it moves
             // the pen and breaks the adjacency the spacing matrix reads.
             if let Field::Kern(ems) = atom.nucleus {
@@ -253,15 +264,6 @@ impl Ctx<'_> {
             Field::Literal(text) => self.literal_box(text, atom, style),
             Field::Text(text) => self.text_box(text, atom, style),
             Field::Sized { ch, size } => self.sized_box(atom, *ch, *size, style),
-            // A style switch sets the style whole, as TeX's style noad does:
-            // never cramped.
-            Field::Styled {
-                style: switched,
-                body,
-            } => LaidBox {
-                geom: self.hlist(body, *switched, false),
-                italic: 0.0,
-            },
             Field::Accent {
                 accent,
                 stretch,
@@ -2012,10 +2014,22 @@ mod tests {
         assert_eq!(shape(&lay("{a \\over b}")), shape(&lay("\\frac{a}{b}")));
         assert_eq!(shape(&lay("{n \\choose k}")), shape(&lay("\\binom{n}{k}")));
         assert!(lay("{a \\atop b}").rules.is_empty(), "no bar under \\atop");
-        assert_eq!(
-            shape(&lay("{\\displaystyle a \\over b}")),
-            shape(&lay("\\dfrac{a}{b}"))
-        );
+        // A style switch before \over stays in the numerator, as in TeX:
+        // the numerator in display style at the text size, the denominator
+        // one size down, where \dfrac would set both at the text size.
+        let l = lay("{\\displaystyle a \\over b}");
+        let a = l
+            .glyphs
+            .iter()
+            .find(|g| g.ch == Some('\u{1D44E}'))
+            .expect("a");
+        let b = l
+            .glyphs
+            .iter()
+            .find(|g| g.ch == Some('\u{1D44F}'))
+            .expect("b");
+        assert!((a.size - SIZE).abs() < EPS, "a at {}", a.size);
+        assert!(b.size < SIZE - 1.0, "b at {}", b.size);
     }
 
     #[test]
@@ -2044,6 +2058,18 @@ mod tests {
             x.size,
             sx.size
         );
+        // The spacing after the switch is read in the new style: no space
+        // around a relation in script style, and the medium spaces of a
+        // binary operator kept across a switch to display style.
+        let s = f.constants().script_percent_scale_down / 100.0;
+        let l = lay("a \\scriptstyle = b");
+        let expected = adv('\u{1D44E}') + s * (adv('=') + adv('\u{1D44F}'));
+        assert!(
+            (l.width - expected).abs() < 0.5,
+            "{} against {expected} with no space around the relation",
+            l.width
+        );
+        assert!((lay("a \\displaystyle + b").width - lay("a + b").width).abs() < EPS);
     }
 
     #[test]

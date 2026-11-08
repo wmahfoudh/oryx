@@ -1524,9 +1524,7 @@ fn check_math_spans(list: &noad::mlist::MathList, tex: &str) -> Result<(), TestC
                     check_math_spans(d, tex)?;
                 }
             }
-            Field::LeftRight { body, .. } | Field::Styled { body, .. } => {
-                check_math_spans(body, tex)?
-            }
+            Field::LeftRight { body, .. } => check_math_spans(body, tex)?,
             Field::Accent { base, .. } => check_math_spans(base, tex)?,
             Field::Table { rows, .. } => {
                 for row in rows {

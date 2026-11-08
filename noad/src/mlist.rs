@@ -72,9 +72,6 @@ pub enum Field {
     /// Ord bare, Open for `l`, Close for `r`, Rel for `m`. `None` is the
     /// dot form, TeX's invisible box of the size.
     Sized { ch: Option<char>, size: u8 },
-    /// The rest of a group after a style switch (`\displaystyle` and its
-    /// kin), laid out in that style, uncramped.
-    Styled { style: MathStyle, body: MathList },
     /// An accented base: the combining accent character, whether wide
     /// forms may stretch horizontally, and the accented list.
     Accent {
@@ -152,6 +149,11 @@ pub struct Atom {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Noad {
     Atom(Atom),
+    /// TeX's style noad, `\displaystyle` and its kin: the style of the
+    /// rest of the list, uncramped. It is no atom: the binary rules and
+    /// the scripts see through it, and the spacing after it is read in
+    /// the new style.
+    Style(MathStyle),
 }
 
 /// A parsed math list.
@@ -160,8 +162,9 @@ pub struct MathList(pub Vec<Noad>);
 
 impl MathList {
     pub fn atoms(&self) -> impl Iterator<Item = &Atom> {
-        self.0.iter().map(|n| match n {
-            Noad::Atom(a) => a,
+        self.0.iter().filter_map(|n| match n {
+            Noad::Atom(a) => Some(a),
+            Noad::Style(_) => None,
         })
     }
 
@@ -197,7 +200,6 @@ impl MathList {
                     radicand.collect_literals(out);
                 }
                 Field::LeftRight { body, .. } => body.collect_literals(out),
-                Field::Styled { body, .. } => body.collect_literals(out),
                 Field::Accent { base, .. } => base.collect_literals(out),
                 Field::Table { rows, .. } => {
                     for row in rows {
