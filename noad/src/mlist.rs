@@ -94,6 +94,9 @@ pub enum Field {
     },
     /// `\textcolor{c}{...}`: the body in a color.
     Colored { color: [u8; 3], body: MathList },
+    /// `\not` before a symbol with no negated form of its own: the
+    /// combining long solidus drawn over it; a relation, as `\not` is.
+    Negated { base: MathList },
     /// An accented base: the combining accent character, whether wide
     /// forms may stretch horizontally, and the accented list.
     Accent {
@@ -227,7 +230,9 @@ impl MathList {
                 Field::LeftRight { body, .. }
                 | Field::Phantom { body, .. }
                 | Field::Colored { body, .. } => body.collect_literals(out),
-                Field::Line { base, .. } | Field::Brace { base, .. } => base.collect_literals(out),
+                Field::Line { base, .. } | Field::Brace { base, .. } | Field::Negated { base } => {
+                    base.collect_literals(out)
+                }
                 Field::Arrow { above, below, .. } => {
                     above.collect_literals(out);
                     below.collect_literals(out);

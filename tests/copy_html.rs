@@ -728,6 +728,34 @@ fn page_pictures<'a>(
 }
 
 #[test]
+fn a_colored_formula_paints_with_its_colors() {
+    // Task 353: the picture keeps `\color`, read back from two papers.
+    let theme = Theme::default_dark();
+    let cfg = oryx::layout::ViewConfig::default();
+    let mut fonts = oryx::style::fonts::FontStore::new();
+    let mut media = oryx::doc::images::MediaCache::offline("tests/fixtures".into());
+    let mut pictures = page_pictures(&theme, &cfg, &mut fonts, &mut media);
+    let picture = pictures.math("x \\color{red} y", false).expect("a picture");
+    let decoded = image::load_from_memory(&picture.bytes)
+        .expect("a PNG")
+        .into_rgba8();
+    let ink = theme.surface.foreground;
+    assert!(
+        decoded
+            .pixels()
+            .any(|p| p[3] == 255 && p[0] == ink.r && p[1] == ink.g && p[2] == ink.b),
+        "the x in the ink"
+    );
+    assert!(
+        decoded
+            .pixels()
+            .any(|p| p[3] == 255 && p[0] == 255 && p[1] == 0 && p[2] == 0),
+        "the y in red"
+    );
+    assert_eq!(decoded.get_pixel(0, 0)[3], 0, "the corner clear");
+}
+
+#[test]
 fn a_formula_paints_as_a_transparent_picture() {
     let theme = Theme::default_dark();
     let cfg = oryx::layout::ViewConfig::default();

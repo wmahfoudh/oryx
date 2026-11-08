@@ -1564,7 +1564,9 @@ fn check_math_spans(list: &noad::mlist::MathList, tex: &str) -> Result<(), TestC
             Field::LeftRight { body, .. }
             | Field::Phantom { body, .. }
             | Field::Colored { body, .. } => check_math_spans(body, tex)?,
-            Field::Line { base, .. } | Field::Brace { base, .. } => check_math_spans(base, tex)?,
+            Field::Line { base, .. } | Field::Brace { base, .. } | Field::Negated { base } => {
+                check_math_spans(base, tex)?
+            }
             Field::Arrow { above, below, .. } => {
                 check_math_spans(above, tex)?;
                 check_math_spans(below, tex)?;

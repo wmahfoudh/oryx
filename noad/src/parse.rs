@@ -631,8 +631,6 @@ fn vocabulary_lookup(name: &str) -> Option<(char, AtomClass)> {
         .map(|i| (VOCABULARY[i].1, VOCABULARY[i].2))
 }
 
-/// Accent commands: the combining character and whether wide forms may
-/// stretch horizontally. Sorted for binary search.
 /// `\not` before a symbol: the symbol and its negated form, the 45 pairs
 /// of the Unicode database whose decomposition is the symbol and the
 /// combining long solidus U+0338, sorted by the symbol.
@@ -727,6 +725,8 @@ fn parse_color(text: &str) -> Option<[u8; 3]> {
         .map(|i| COLORS[i].1)
 }
 
+/// Accent commands: the combining character and whether wide forms may
+/// stretch horizontally. Sorted for binary search.
 pub const ACCENTS: &[(&str, char, bool)] = &[
     ("acute", '\u{0301}', false),
     ("bar", '\u{0304}', false),
@@ -960,9 +960,10 @@ fn restyle_field(field: &mut Field, name: &str) {
         Field::LeftRight { body, .. }
         | Field::Phantom { body, .. }
         | Field::Colored { body, .. } => restyle(body, name),
-        Field::Accent { base, .. } | Field::Line { base, .. } | Field::Brace { base, .. } => {
-            restyle(base, name)
-        }
+        Field::Accent { base, .. }
+        | Field::Line { base, .. }
+        | Field::Brace { base, .. }
+        | Field::Negated { base } => restyle(base, name),
         Field::Arrow { above, below, .. } => {
             restyle(above, name);
             restyle(below, name);
@@ -1102,13 +1103,22 @@ fn delimiter_of(kind: &crate::token::TokenKind) -> Option<Option<char>> {
     }
 }
 
-/// The class a symbol has on its own: its vocabulary row's, else the
-/// character's.
-fn class_of_symbol(c: char) -> AtomClass {
-    VOCABULARY
-        .iter()
-        .find(|row| row.1 == c)
-        .map_or_else(|| classify_char(c), |row| row.2)
+/// The class an atom had on its own: a binary operator alone in its group
+/// reads as ordinary by TeX's rule 5, and `\overset`, `\textcolor` and
+/// kin, which take the operand's class for the whole, give it back. Any
+/// other class is the atom's own.
+fn undemoted_class(atom: &Atom) -> AtomClass {
+    match (&atom.nucleus, atom.class) {
+        (Field::Symbol(c), AtomClass::Ord)
+            if classify_char(*c) == AtomClass::Bin
+                || VOCABULARY
+                    .iter()
+                    .any(|row| row.1 == *c && row.2 == AtomClass::Bin) =>
+        {
+            AtomClass::Bin
+        }
+        _ => atom.class,
+    }
 }
 
 fn classify_char(c: char) -> AtomClass {
@@ -1275,6 +1285,12 @@ impl Group {
             .map(item_span)
             .fold((usize::MAX, 0), |(s, e), r| (s.min(r.start), e.max(r.end)));
         let span = start..end;
+        // TeX's color is a state of the group: one set before the word
+        // reaches the fraction whole, bar and denominator included.
+        let color = items[..at].iter().rev().find_map(|item| match item {
+            Item::Marker(Marker::Color(c), _) => Some(*c),
+            _ => None,
+        });
         let mut tail = items.split_off(at + 1);
         let Some(Item::Marker(Marker::Infix(infix), _)) = items.pop() else {
             unreachable!("the infix word found")
@@ -1288,7 +1304,27 @@ impl Group {
         demote_bins(&mut numerator);
         let mut denominator = noads_of(tail);
         demote_bins(&mut denominator);
-        let atom = infix_atom(infix, MathList(numerator), MathList(denominator), span);
+        let atom = infix_atom(
+            infix,
+            MathList(numerator),
+            MathList(denominator),
+            span.clone(),
+        );
+        let atom = match color {
+            Some(color) => Atom {
+                class: atom.class,
+                nucleus: Field::Colored {
+                    color,
+                    body: MathList(vec![Noad::Atom(atom)]),
+                },
+                sup: None,
+                sub: None,
+                limits: Limits::default(),
+                span: span.clone(),
+                nucleus_span: span,
+            },
+            None => atom,
+        };
         MathList(vec![Noad::Atom(atom)])
     }
 }
@@ -2089,25 +2125,21 @@ impl Parser<'_> {
     }
 
     /// `\stackrel{a}{b}`, `\overset{a}{b}` and `\underset{a}{b}`: amsmath's
-    /// `\mathop{b}\limits^{a}`, the base as the nucleus (one plain atom as
-    /// itself, else a list), the text as a limit. `\stackrel` is a
-    /// relation; the others keep the base's class when it is a binary
-    /// operator or a relation, and are ordinary otherwise.
+    /// `\mathop{b}\limits^{a}` in a box, the base as the nucleus of an
+    /// inner atom (one plain atom as itself with its own class, so that an
+    /// operator keeps its size, else a list) with the text as a limit,
+    /// inside an atom of the stack's class, which takes the side scripts
+    /// of what follows. `\stackrel` is a relation; the others keep the
+    /// base's class when it is a binary operator or a relation, and are
+    /// ordinary otherwise.
     fn stacked(&mut self, start: std::ops::Range<usize>, kind: Stack) -> Atom {
         let script = self.script_operand();
         let base = self.script_operand();
         let end = self.consumed_end(start.end);
         let span = start.start..end;
-        // The base's own class, as amsmath reads the symbol's: a binary
-        // operator alone in its group was read as ordinary by the group's
-        // rules, which do not apply to it here.
         let single = match base.0.as_slice() {
             [Noad::Atom(a)] if a.sup.is_none() && a.sub.is_none() => {
-                let class = match a.nucleus {
-                    Field::Symbol(c) => class_of_symbol(c),
-                    _ => a.class,
-                };
-                Some((a.nucleus.clone(), class))
+                Some((a.nucleus.clone(), undemoted_class(a)))
             }
             _ => None,
         };
@@ -2126,12 +2158,21 @@ impl Parser<'_> {
             Stack::Under => (None, Some(script)),
             Stack::Rel | Stack::Over => (Some(script), None),
         };
-        Atom {
-            class,
+        let stack = Atom {
+            class: base_class,
             nucleus,
             sup,
             sub,
             limits: Limits::Limits,
+            span: span.clone(),
+            nucleus_span: span.clone(),
+        };
+        Atom {
+            class,
+            nucleus: Field::List(MathList(vec![Noad::Atom(stack)])),
+            sup: None,
+            sub: None,
+            limits: Limits::default(),
             span: span.clone(),
             nucleus_span: span,
         }
@@ -2157,9 +2198,18 @@ impl Parser<'_> {
     }
 
     /// `\not` before a symbol: the symbol's negated form when Unicode has
-    /// one, else the combining long solidus laid over it, in one atom of
-    /// the symbol's class. Before nothing readable the word is a literal.
+    /// one, the class kept; else the combining long solidus laid over it,
+    /// in a relation, as TeX's `\not` is one. Before nothing readable, or
+    /// a closer, the word is a literal.
     fn negated(&mut self, start: std::ops::Range<usize>) -> Atom {
+        use crate::token::TokenKind as K;
+        // A closer of the structure around is no operand: the word is a
+        // literal and the closer stays for its reader.
+        if let Some(K::Command(name)) = self.peek().map(|t| &t.kind) {
+            if name == "\\" || name == "right" || name == "end" {
+                return literal_atom("\\not", start);
+            }
+        }
         let Some(mut atom) = self.atom() else {
             return literal_atom("\\not", start);
         };
@@ -2172,19 +2222,11 @@ impl Parser<'_> {
                 return atom;
             }
         }
-        let class = atom.class;
-        let slash = Atom {
-            class,
-            nucleus: Field::Symbol('\u{0338}'),
-            sup: None,
-            sub: None,
-            limits: Limits::default(),
-            span: start.clone(),
-            nucleus_span: start,
-        };
         Atom {
-            class,
-            nucleus: Field::List(MathList(vec![Noad::Atom(atom), Noad::Atom(slash)])),
+            class: AtomClass::Rel,
+            nucleus: Field::Negated {
+                base: MathList(vec![Noad::Atom(atom)]),
+            },
             sup: None,
             sub: None,
             limits: Limits::default(),
@@ -2215,7 +2257,7 @@ impl Parser<'_> {
         };
         let body = self.script_operand();
         let class = match body.0.as_slice() {
-            [Noad::Atom(a)] => a.class,
+            [Noad::Atom(a)] => undemoted_class(a),
             _ => AtomClass::Ord,
         };
         self.construct(start, Field::Colored { color, body }, class)
@@ -4704,24 +4746,84 @@ mod tests {
         assert!(a[0].sup.is_some());
         assert!(matches!(a[1].nucleus, Field::Brace { under: true, .. }));
         assert!(a[1].sub.is_some());
-        // A stack: the base as the nucleus, the text as a limit.
+        // A stack: the base as the nucleus of an inner atom with the text as
+        // its limit, inside an atom of the stack's class, amsmath's box.
         let a = atoms("\\stackrel{N \\to \\infty}{\\longrightarrow}");
         assert_eq!(a[0].class, AtomClass::Rel);
-        assert_eq!(a[0].nucleus, Field::Symbol('\u{27F6}'));
-        assert_eq!(a[0].sup.as_ref().unwrap().atoms().count(), 3);
-        assert_eq!(a[0].limits, Limits::Limits);
+        let g = inner(&a[0]);
+        assert_eq!(g.len(), 1);
+        assert_eq!(g[0].nucleus, Field::Symbol('\u{27F6}'));
+        assert_eq!(g[0].sup.as_ref().unwrap().atoms().count(), 3);
+        assert_eq!(g[0].limits, Limits::Limits);
         let a = atoms("\\overset{a}{b}");
         assert_eq!(a[0].class, AtomClass::Ord);
-        assert_eq!(a[0].nucleus, Field::Symbol('b'));
-        assert!(a[0].sup.is_some() && a[0].sub.is_none());
+        let g = inner(&a[0]);
+        assert_eq!(g[0].nucleus, Field::Symbol('b'));
+        assert!(g[0].sup.is_some() && g[0].sub.is_none());
         // The base's class holds for a relation or a binary operator.
         assert_eq!(atoms("\\overset{a}{=}")[0].class, AtomClass::Rel);
         let a = atoms("x \\underset{a}{+} y");
         assert_eq!(a[1].class, AtomClass::Bin);
-        assert!(a[1].sub.is_some() && a[1].sup.is_none());
+        let g = inner(&a[1]);
+        assert!(g[0].sub.is_some() && g[0].sup.is_none());
         let a = atoms("\\overset{a}{xy}");
-        assert!(matches!(a[0].nucleus, Field::List(_)));
         assert_eq!(a[0].class, AtomClass::Ord);
+        assert!(matches!(inner(&a[0])[0].nucleus, Field::List(_)));
+    }
+
+    #[test]
+    fn a_stack_takes_side_scripts_and_keeps_its_base_s_own_class() {
+        // A script after the stack is a side script on the whole, as on
+        // amsmath's box; the limit stays inside.
+        let a = atoms("\\overset{a}{b}^2");
+        assert_eq!(a.len(), 1);
+        assert!(a[0].sup.is_some());
+        let g = inner(&a[0]);
+        assert_eq!(g[0].sup.as_ref().unwrap().atoms().count(), 1);
+        let a = atoms("\\stackrel{a}{b}_c");
+        assert!(a[0].sub.is_some() && a[0].sup.is_none());
+        assert_eq!(a[0].class, AtomClass::Rel);
+        // An operator base keeps its class inside, for its display size;
+        // the whole is ordinary, as amsmath reads it.
+        let a = atoms("\\overset{a}{\\sum}");
+        assert_eq!(a[0].class, AtomClass::Ord);
+        assert_eq!(inner(&a[0])[0].class, AtomClass::Op);
+        // The base's own class: a lone binary operator read as ordinary by
+        // its group's rules gets it back, and a character with rows of two
+        // classes keeps the one it was written with.
+        assert_eq!(atoms("x \\overset{a}{\\perp} y")[1].class, AtomClass::Rel);
+        assert_eq!(atoms("x \\overset{a}{\\dagger} y")[1].class, AtomClass::Bin);
+        assert_eq!(
+            atoms("x \\underset{a}{\\vartriangleright} y")[1].class,
+            AtomClass::Rel
+        );
+        assert_eq!(atoms("x \\underset{a}{\\lhd} y")[1].class, AtomClass::Bin);
+    }
+
+    #[test]
+    fn not_before_a_closer_stays_a_literal() {
+        let a = atoms("\\left( a \\not\\right)");
+        let Field::LeftRight { close, body, .. } = &a[0].nucleus else {
+            panic!("{:?}", a[0].nucleus)
+        };
+        assert_eq!(*close, Some(')'));
+        let items: Vec<&Atom> = body.atoms().collect();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[1].nucleus, Field::Literal("\\not".into()));
+        let a = atoms("\\begin{matrix} a \\not \\\\ b \\end{matrix}");
+        let Field::Table { rows, .. } = &a[0].nucleus else {
+            panic!("{:?}", a[0].nucleus)
+        };
+        assert_eq!(rows.len(), 2);
+        let a = atoms("\\begin{matrix} a & b \\not\\end{matrix}");
+        assert!(matches!(a[0].nucleus, Field::Table { .. }));
+    }
+
+    #[test]
+    fn textcolor_keeps_the_operand_s_own_class() {
+        assert_eq!(atoms("a \\textcolor{red}{+} b")[1].class, AtomClass::Bin);
+        assert_eq!(atoms("a \\textcolor{red}{=} b")[1].class, AtomClass::Rel);
+        assert_eq!(atoms("\\textcolor{red}{\\int}")[0].class, AtomClass::Op);
     }
 
     #[test]
@@ -4773,12 +4875,19 @@ mod tests {
         ] {
             assert_eq!(atoms(tex)[0].nucleus, Field::Symbol(negated), "{tex}");
         }
-        // A symbol with no negated form takes the combining slash over it.
-        let a = atoms("\\not\\alpha");
-        assert_eq!(a.len(), 1);
-        let g = inner(&a[0]);
-        assert_eq!(g[0].nucleus, Field::Symbol('\u{03B1}'));
-        assert_eq!(g[1].nucleus, Field::Symbol('\u{0338}'));
+        // A symbol with no negated form takes the combining slash over it,
+        // in a relation, as \not is one in TeX.
+        let a = atoms("a \\not\\alpha b");
+        assert_eq!(a.len(), 3);
+        let Field::Negated { base } = &a[1].nucleus else {
+            panic!("{:?}", a[1].nucleus)
+        };
+        assert_eq!(
+            base.atoms().next().unwrap().nucleus,
+            Field::Symbol('\u{03B1}')
+        );
+        assert_eq!(a[1].class, AtomClass::Rel);
+        assert_eq!(a[1].span, 2..12);
         // Nothing readable after it: a literal, as before.
         assert_eq!(atoms("\\not")[0].nucleus, Field::Literal("\\not".into()));
     }

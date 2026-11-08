@@ -5107,7 +5107,7 @@ impl noad::MathFont for OryxMathFont {
 }
 
 /// Emits a laid-out equation into the document at `x` with its baseline at
-/// `baseline`: glyphs into the math vector in the foreground ink, rules as
+/// `baseline`: glyphs into the math vector in their color or the foreground ink, rules as
 /// filled rects, and literal fallbacks as code-family runs in the theme's
 /// math color, which is that role's job under rendered math.
 #[allow(clippy::too_many_arguments)]

@@ -21,7 +21,7 @@ use crate::doc::model::{
     AlertKind, Block, BlockKind, ColumnAlign, Document, Marker, Span, SpanScript,
 };
 use crate::layout::{alert_color, alert_title, layout, math_display, role_color, ViewConfig};
-use crate::paint::{band, paper};
+use crate::paint::band;
 use crate::style::fonts::FontStore;
 use crate::style::highlight::{role_face, SyntaxRole};
 use crate::style::theme::{hex_string, Rgba, Theme};
@@ -828,10 +828,28 @@ impl Pictures for PagePictures<'_> {
         let laid = layout(&doc, self.theme, self.fonts, self.media, &cfg, MATH_WIDTH);
         let width = MATH_WIDTH as u32;
         let height = laid.height.ceil().max(1.0) as u32;
-        let pixels = band(
+        // Painted twice, over a black and a white paper: what the two
+        // papers change in a pixel is the paper showing through, the rest
+        // is ink, whatever its color (`\color` sets some), read back from
+        // the black paper where it stands alone.
+        let mut on_black = self.theme.clone();
+        on_black.surface.background = crate::style::theme::Rgba {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 255,
+        };
+        let mut on_white = self.theme.clone();
+        on_white.surface.background = crate::style::theme::Rgba {
+            r: 255,
+            g: 255,
+            b: 255,
+            a: 255,
+        };
+        let black = band(
             &laid,
             &doc,
-            self.theme,
+            &on_black,
             self.fonts,
             self.media,
             &[],
@@ -839,21 +857,39 @@ impl Pictures for PagePictures<'_> {
             width,
             height,
         );
-        let paper = paper(&doc, self.theme);
-        let paper_px = ((paper.r as u32) << 16) | ((paper.g as u32) << 8) | paper.b as u32;
+        let white = band(
+            &laid,
+            &doc,
+            &on_white,
+            self.fonts,
+            self.media,
+            &[],
+            0.0,
+            width,
+            height,
+        );
+        let channel = |px: u32, shift: u32| ((px >> shift) & 0xFF) as i32;
+        let alpha_of = |b: u32, w: u32| {
+            [16u32, 8, 0]
+                .into_iter()
+                .map(|s| 255 - (channel(w, s) - channel(b, s)).clamp(0, 255))
+                .max()
+                .unwrap_or(0) as u8
+        };
         let mut x0 = u32::MAX;
         let mut y0 = u32::MAX;
         let mut x1 = 0u32;
         let mut y1 = 0u32;
-        for (i, px) in pixels.iter().enumerate() {
-            if *px & 0x00FF_FFFF != paper_px {
-                let x = i as u32 % width;
-                let y = i as u32 / width;
-                x0 = x0.min(x);
-                y0 = y0.min(y);
-                x1 = x1.max(x);
-                y1 = y1.max(y);
+        for (i, (b, w)) in black.iter().zip(&white).enumerate() {
+            if alpha_of(*b, *w) == 0 {
+                continue;
             }
+            let x = i as u32 % width;
+            let y = i as u32 / width;
+            x0 = x0.min(x);
+            y0 = y0.min(y);
+            x1 = x1.max(x);
+            y1 = y1.max(y);
         }
         if x0 > x1 {
             return None;
@@ -863,29 +899,19 @@ impl Pictures for PagePictures<'_> {
         let x1 = (x1 + MATH_PAD).min(width - 1);
         let y1 = (y1 + MATH_PAD).min(height - 1);
         let (w, h) = (x1 - x0 + 1, y1 - y0 + 1);
-        // The ink over the paper, read back as the ink with an alpha:
-        // the channel the two colors differ most in tells how much of
-        // the pixel is ink. The layout sets formulas in the foreground.
-        let ink = self.theme.surface.foreground;
-        let channel = [
-            (ink.r, paper.r, 16),
-            (ink.g, paper.g, 8),
-            (ink.b, paper.b, 0),
-        ]
-        .into_iter()
-        .max_by_key(|(i, p, _)| i.abs_diff(*p))?;
-        let (ink_c, paper_c, shift) = channel;
-        if ink_c == paper_c {
-            return None;
-        }
         let mut rgba = Vec::with_capacity((w * h * 4) as usize);
         for y in y0..=y1 {
             for x in x0..=x1 {
-                let px = pixels[(y * width + x) as usize];
-                let c = ((px >> shift) & 0xFF) as f32;
-                let alpha = (c - f32::from(paper_c)) / (f32::from(ink_c) - f32::from(paper_c));
-                let alpha = (alpha.clamp(0.0, 1.0) * 255.0).round() as u8;
-                rgba.extend_from_slice(&[ink.r, ink.g, ink.b, alpha]);
+                let i = (y * width + x) as usize;
+                let alpha = alpha_of(black[i], white[i]);
+                let color = |s: u32| {
+                    if alpha == 0 {
+                        0
+                    } else {
+                        (channel(black[i], s) * 255 / i32::from(alpha)).min(255) as u8
+                    }
+                };
+                rgba.extend_from_slice(&[color(16), color(8), color(0), alpha]);
             }
         }
         let bytes = png_bytes(w, h, rgba)?;

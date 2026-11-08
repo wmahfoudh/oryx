@@ -311,10 +311,22 @@ impl Ctx<'_> {
                 height,
             } => self.phantom_box(body, *width, *height, style, cramped),
             Field::Colored { color, body } => {
-                let mut geom = self.hlist(body, style, cramped);
-                paint(&mut geom, 0, 0, *color);
-                LaidBox { geom, italic: 0.0 }
+                // One atom keeps its own box, its italic correction with it,
+                // so that a colored operator's side scripts fall as the
+                // operator's would.
+                let mut laid = match body.0.as_slice() {
+                    [Noad::Atom(a)] if !matches!(a.nucleus, Field::Kern(_)) => {
+                        self.atom_box(a, style, cramped)
+                    }
+                    _ => LaidBox {
+                        geom: self.hlist(body, style, cramped),
+                        italic: 0.0,
+                    },
+                };
+                paint(&mut laid.geom, 0, 0, *color);
+                laid
             }
+            Field::Negated { base } => self.negated_box(atom, base, style, cramped),
             Field::Accent {
                 accent,
                 stretch,
@@ -656,6 +668,46 @@ impl Ctx<'_> {
         }
         geom.width = arrow.width;
         self.stack_limits(LaidBox { geom, italic: 0.0 }, up, low, style)
+    }
+
+    /// `\not` over a symbol with no negated form of its own: the combining
+    /// long solidus, its ink centered on the base's, in the base's width.
+    fn negated_box(
+        &self,
+        atom: &Atom,
+        base: &MathList,
+        style: MathStyle,
+        cramped: bool,
+    ) -> LaidBox {
+        let mut geom = self.hlist(base, style, cramped);
+        let Some(slash) = self.font.glyph('\u{0338}') else {
+            return LaidBox { geom, italic: 0.0 };
+        };
+        let u = self.unit(style);
+        let (left, right) = geom.glyphs.iter().fold((f32::MAX, f32::MIN), |(l, r), g| {
+            let b = self.font.bounds(g.glyph);
+            let gu = g.size / self.font.units_per_em();
+            (l.min(g.x + b.x_min * gu), r.max(g.x + b.x_max * gu))
+        });
+        let center = if left <= right {
+            (left + right) / 2.0
+        } else {
+            geom.width / 2.0
+        };
+        let b = self.font.bounds(slash);
+        let slash_center = (b.x_min + b.x_max) / 2.0 * u;
+        let width = geom.width;
+        self.push_glyph(
+            &mut geom,
+            slash,
+            center - slash_center,
+            0.0,
+            style,
+            Some('\u{0338}'),
+            &atom.nucleus_span,
+        );
+        geom.width = width;
+        LaidBox { geom, italic: 0.0 }
     }
 
     /// `\phantom` and its kin: the body's size with none of its ink.
@@ -1027,11 +1079,27 @@ impl Ctx<'_> {
 
     /// Whether an operator's `Limits::Default` resolves to stacked limits
     /// in display style: TeX's convention, everything except integrals.
+    /// The character a nucleus is: a symbol, or one symbol atom inside a
+    /// color, which keeps the character's script rule as KaTeX reads it.
+    fn char_of(nucleus: &Field) -> Option<char> {
+        match nucleus {
+            Field::Symbol(c) => Some(*c),
+            Field::Colored { body, .. } => match body.0.as_slice() {
+                [Noad::Atom(a)] => Self::char_of(&a.nucleus),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     fn op_defaults_to_limits(nucleus: &Field) -> bool {
-        !matches!(
-            nucleus,
-            Field::Symbol(c) if matches!(*c, '\u{222B}'..='\u{2233}' | '\u{2A0B}'..='\u{2A1C}')
-        )
+        match nucleus {
+            Field::Symbol(c) => !matches!(*c, '\u{222B}'..='\u{2233}' | '\u{2A0B}'..='\u{2A1C}'),
+            // A colored operator is a box, as in TeX and KaTeX: its scripts
+            // stay at the side.
+            Field::Colored { .. } => false,
+            _ => true,
+        }
     }
 
     /// Rule 13a: limits centered above and below the operator, the gap and
@@ -1047,6 +1115,18 @@ impl Ctx<'_> {
         let sub_style = Self::script_style(style);
         let upper = atom.sup.as_ref().map(|l| self.hlist(l, sub_style, cramped));
         let lower = atom.sub.as_ref().map(|l| self.hlist(l, sub_style, true));
+        // The italic correction splits the limits of an operator alone
+        // (rule 13a); amsmath's stacks set their base in a list, which
+        // has none.
+        let italic = if atom.class == AtomClass::Op {
+            nucleus.italic
+        } else {
+            0.0
+        };
+        let nucleus = LaidBox {
+            geom: nucleus.geom,
+            italic,
+        };
         self.stack_limits(nucleus, upper, lower, style)
     }
 
@@ -1140,7 +1220,18 @@ impl Ctx<'_> {
         merge(&mut geom, body, x, 0.0);
         x += body_w;
         if let Some(ch) = close {
+            let from = geom.glyphs.len();
             x += self.place_delimiter(&mut geom, ch, target, axis, x, style, &atom.nucleus_span);
+            // A color set in the body holds to the group's end, as TeX's
+            // does: the closing delimiter takes it.
+            let trailing = body_list.0.iter().rev().find_map(|n| match n {
+                Noad::Color(c) => Some(*c),
+                _ => None,
+            });
+            if let Some(color) = trailing {
+                let rules = geom.rules.len();
+                paint(&mut geom, from, rules, color);
+            }
         }
         geom.width = x;
         LaidBox { geom, italic: 0.0 }
@@ -1356,7 +1447,7 @@ impl Ctx<'_> {
         // Shifts are positive: sup up, sub down. Rule 18a: a character
         // nucleus takes the style constants alone; a box nucleus carries
         // its scripts with its own extent less the baseline drops.
-        let is_char = matches!(atom.nucleus, Field::Symbol(_));
+        let is_char = Self::char_of(&atom.nucleus).is_some();
         let mut sup_shift = 0.0f32;
         if let Some(s) = &sup {
             let plain = if cramped {
@@ -1401,8 +1492,6 @@ impl Ctx<'_> {
     }
 }
 
-/// Translates `src` by (dx, dy) into `dst`, extending the vertical extents.
-/// Widths stay the caller's business.
 /// Gives the color to the glyphs and rules from the given indices on that
 /// have none yet: an inner color was set first and wins.
 fn paint(geom: &mut MathLayout, glyphs_from: usize, rules_from: usize, color: [u8; 3]) {
@@ -1414,6 +1503,8 @@ fn paint(geom: &mut MathLayout, glyphs_from: usize, rules_from: usize, color: [u
     }
 }
 
+/// Translates `src` by (dx, dy) into `dst`, extending the vertical extents.
+/// Widths stay the caller's business.
 fn merge(dst: &mut MathLayout, src: MathLayout, dx: f32, dy: f32) {
     for mut g in src.glyphs {
         g.x += dx;
@@ -2546,17 +2637,86 @@ mod tests {
     }
 
     #[test]
-    fn not_without_a_negated_form_overlays_the_slash() {
+    fn a_slash_of_not_is_centered_over_its_symbol() {
         let f = font();
-        let l = lay("\\not\\alpha");
-        assert_eq!(l.glyphs.len(), 2);
-        assert_eq!(l.glyphs[1].ch, Some('\u{0338}'));
-        let (left, _, _, _) = ink(&f, &l.glyphs[1]);
+        for tex in ["\\not\\alpha", "\\not\\longrightarrow", "\\not|"] {
+            let l = lay(tex);
+            let slash = l
+                .glyphs
+                .iter()
+                .find(|g| g.ch == Some('\u{0338}'))
+                .expect("the slash");
+            let base: Vec<&PositionedGlyph> = l
+                .glyphs
+                .iter()
+                .filter(|g| g.ch != Some('\u{0338}'))
+                .collect();
+            let (sl, sr, _, _) = ink(&f, slash);
+            let bl = base.iter().map(|g| ink(&f, g).0).fold(f32::MAX, f32::min);
+            let br = base.iter().map(|g| ink(&f, g).1).fold(f32::MIN, f32::max);
+            assert!(
+                ((sl + sr) / 2.0 - (bl + br) / 2.0).abs() < 1.0,
+                "{tex}: the slash at {} over the symbol at {}",
+                (sl + sr) / 2.0,
+                (bl + br) / 2.0
+            );
+            assert!(
+                (l.width - lay(&tex[4..]).width).abs() < EPS,
+                "{tex}: the symbol's width"
+            );
+        }
+        // A relation: thick spaces around it, as around TeX's \not.
+        assert!(lay("a \\not\\alpha b").width > lay("a \\alpha b").width + 2.0 * 5.0);
+    }
+
+    #[test]
+    fn a_stack_over_an_operator_takes_the_display_size_and_side_scripts() {
+        let f = font();
+        let stacked = layout("\\overset{a}{\\sum}", MathStyle::Display, SIZE, &f);
+        let plain = layout("\\sum", MathStyle::Display, SIZE, &f);
+        let sum_in = |l: &MathLayout| glyph_by_ch(l, '\u{2211}').glyph;
+        assert_eq!(sum_in(&stacked), sum_in(&plain));
+        // A script after the stack sits at the side: the box grows in
+        // width, and the 2 stands after the a.
+        let one = lay("\\overset{a}{b}");
+        let two = lay("\\overset{a}{b}^2");
         assert!(
-            left < l.width - EPS,
-            "the slash over the letter, from {left} in {}",
-            l.width
+            two.width > one.width + 0.3 * SIZE,
+            "{} against {}",
+            two.width,
+            one.width
         );
+        let digit = glyph_by_ch(&two, '2');
+        let a = glyph_by_ch(&two, '\u{1D44E}');
+        assert!(digit.x > a.x + 0.3 * SIZE, "the 2 after the stack");
+    }
+
+    #[test]
+    fn textcolor_keeps_an_operator_s_limits_at_the_side() {
+        // A colored operator is a box, as in TeX and KaTeX: its scripts
+        // stay at the side in display style, with the operator's own
+        // italic correction.
+        let f = font();
+        let colored = layout("\\textcolor{red}{\\int}_0^1", MathStyle::Display, SIZE, &f);
+        let plain = layout("\\int_0^1", MathStyle::Display, SIZE, &f);
+        assert_eq!(shape(&colored), shape(&plain));
+        let colored = layout("\\textcolor{red}{\\sum}_0^1", MathStyle::Display, SIZE, &f);
+        let plain = layout("\\sum\\nolimits_0^1", MathStyle::Display, SIZE, &f);
+        assert_eq!(shape(&colored), shape(&plain));
+    }
+
+    #[test]
+    fn a_color_before_over_or_right_reaches_the_bar_and_the_delimiter() {
+        // TeX's color is a state of the group: `\over` splits the group
+        // after it, and `\right` closes it.
+        let l = lay("{\\color{red} A \\over B}");
+        assert_eq!(glyph_by_ch(&l, '\u{1D434}').color, Some([255, 0, 0]));
+        assert_eq!(glyph_by_ch(&l, '\u{1D435}').color, Some([255, 0, 0]));
+        assert_eq!(l.rules[0].color, Some([255, 0, 0]));
+        let l = lay("\\left( \\color{red} A \\right)");
+        assert_eq!(glyph_by_ch(&l, '(').color, None);
+        assert_eq!(glyph_by_ch(&l, '\u{1D434}').color, Some([255, 0, 0]));
+        assert_eq!(glyph_by_ch(&l, ')').color, Some([255, 0, 0]));
     }
 
     #[test]
