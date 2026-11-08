@@ -1310,6 +1310,26 @@ const MATH_CLASSES: &[&str] = &[
     "mathinner",
 ];
 const MATH_MODULO: &[&str] = &["pmod", "mod", "bmod"];
+/// The boxes of category D (Task 353): the lines and the phantoms over one
+/// operand, the braces with a limit, the stacks, the long arrows, the
+/// symbols `\not` negates (one with no negated form among them), and the
+/// colors.
+const MATH_LINES: &[&str] = &["overline", "underline", "phantom", "vphantom", "hphantom"];
+const MATH_BRACES: &[&str] = &["overbrace", "underbrace"];
+const MATH_STACKS: &[&str] = &["stackrel", "overset", "underset"];
+const MATH_ARROWS: &[&str] = &[
+    "xrightarrow",
+    "xleftarrow",
+    "xRightarrow",
+    "xLeftarrow",
+    "xleftrightarrow",
+    "xLeftrightarrow",
+    "xmapsto",
+];
+const MATH_NEGATED: &[&str] = &["\\in", "=", "<", "\\equiv", "\\subset", "\\leq", "\\alpha"];
+/// The colors by name alone: a `#rgb` form inside a macro's body reads as
+/// a parameter mark, in TeX as in noad, and the generator nests freely.
+const MATH_COLORS: &[&str] = &["red", "blue", "teal", "gray", "violet", "black"];
 /// TeX's infix fraction words and its switches, which act on the group
 /// they stand in (Task 352).
 const MATH_INFIX: &[&str] = &["over", "atop", "choose", "brace", "brack"];
@@ -1440,6 +1460,23 @@ fn math_formula() -> impl Strategy<Value = String> {
                 let body = if in_text { format!("\\text{{#1 {body}}}") } else { format!("#1 {body}") };
                 format!("\\newcommand{{\\{name}}}[1]{{{body}}} \\{name}{{{arg}}}")
             }),
+            // The boxes of category D (Task 353).
+            1 => (prop::sample::select(MATH_LINES), i()).prop_map(|(w, a)| format!("\\{w}{{{a}}}")),
+            1 => (prop::sample::select(MATH_BRACES), i(), i()).prop_map(|(w, a, b)| {
+                let marker = if w == "overbrace" { '^' } else { '_' };
+                format!("\\{w}{{{a}}}{marker}{{{b}}}")
+            }),
+            1 => (prop::sample::select(MATH_STACKS), i(), i())
+                .prop_map(|(w, a, b)| format!("\\{w}{{{a}}}{{{b}}}")),
+            1 => (prop::sample::select(MATH_ARROWS), i(), prop::option::of(i())).prop_map(
+                |(w, a, b)| match b {
+                    Some(b) => format!("\\{w}[{{{b}}}]{{{a}}}"),
+                    None => format!("\\{w}{{{a}}}"),
+                },
+            ),
+            1 => prop::sample::select(MATH_NEGATED).prop_map(|r| format!("a \\not{r} b")),
+            1 => (prop::sample::select(MATH_COLORS), i(), i())
+                .prop_map(|(c, a, b)| format!("{{\\color{{{c}}} {a}}} \\textcolor{{{c}}}{{{b}}}")),
             // An infix word between two halves of a group, and a switch over
             // the rest of one (Task 352).
             2 => (prop::sample::select(MATH_INFIX), i(), i())
@@ -1524,7 +1561,14 @@ fn check_math_spans(list: &noad::mlist::MathList, tex: &str) -> Result<(), TestC
                     check_math_spans(d, tex)?;
                 }
             }
-            Field::LeftRight { body, .. } => check_math_spans(body, tex)?,
+            Field::LeftRight { body, .. }
+            | Field::Phantom { body, .. }
+            | Field::Colored { body, .. } => check_math_spans(body, tex)?,
+            Field::Line { base, .. } | Field::Brace { base, .. } => check_math_spans(base, tex)?,
+            Field::Arrow { above, below, .. } => {
+                check_math_spans(above, tex)?;
+                check_math_spans(below, tex)?;
+            }
             Field::Accent { base, .. } => check_math_spans(base, tex)?,
             Field::Table { rows, .. } => {
                 for row in rows {

@@ -5360,3 +5360,23 @@ fn a_lone_image_in_markdown_stays_at_the_left() {
         l.images[0].x
     );
 }
+
+#[test]
+fn a_formula_s_color_reaches_its_glyphs_and_rules() {
+    let l = lay("$a {\\color{red} b \\frac{c}{d}}$", 600.0);
+    let red = oryx::style::theme::Rgba {
+        r: 255,
+        g: 0,
+        b: 0,
+        a: 255,
+    };
+    assert!(l.math_glyphs.iter().any(|g| g.color == red), "a red glyph");
+    assert!(
+        l.math_glyphs.iter().any(|g| g.color != red),
+        "the a in the theme's ink"
+    );
+    assert!(
+        l.rects.iter().any(|r| r.color == red),
+        "the fraction bar red"
+    );
+}

@@ -633,6 +633,100 @@ fn vocabulary_lookup(name: &str) -> Option<(char, AtomClass)> {
 
 /// Accent commands: the combining character and whether wide forms may
 /// stretch horizontally. Sorted for binary search.
+/// `\not` before a symbol: the symbol and its negated form, the 45 pairs
+/// of the Unicode database whose decomposition is the symbol and the
+/// combining long solidus U+0338, sorted by the symbol.
+pub const NEGATIONS: &[(char, char)] = &[
+    ('<', '\u{226E}'),
+    ('=', '\u{2260}'),
+    ('>', '\u{226F}'),
+    ('\u{2190}', '\u{219A}'),
+    ('\u{2192}', '\u{219B}'),
+    ('\u{2194}', '\u{21AE}'),
+    ('\u{21D0}', '\u{21CD}'),
+    ('\u{21D2}', '\u{21CF}'),
+    ('\u{21D4}', '\u{21CE}'),
+    ('\u{2203}', '\u{2204}'),
+    ('\u{2208}', '\u{2209}'),
+    ('\u{220B}', '\u{220C}'),
+    ('\u{2223}', '\u{2224}'),
+    ('\u{2225}', '\u{2226}'),
+    ('\u{223C}', '\u{2241}'),
+    ('\u{2243}', '\u{2244}'),
+    ('\u{2245}', '\u{2247}'),
+    ('\u{2248}', '\u{2249}'),
+    ('\u{224D}', '\u{226D}'),
+    ('\u{2261}', '\u{2262}'),
+    ('\u{2264}', '\u{2270}'),
+    ('\u{2265}', '\u{2271}'),
+    ('\u{2272}', '\u{2274}'),
+    ('\u{2273}', '\u{2275}'),
+    ('\u{2276}', '\u{2278}'),
+    ('\u{2277}', '\u{2279}'),
+    ('\u{227A}', '\u{2280}'),
+    ('\u{227B}', '\u{2281}'),
+    ('\u{227C}', '\u{22E0}'),
+    ('\u{227D}', '\u{22E1}'),
+    ('\u{2282}', '\u{2284}'),
+    ('\u{2283}', '\u{2285}'),
+    ('\u{2286}', '\u{2288}'),
+    ('\u{2287}', '\u{2289}'),
+    ('\u{2291}', '\u{22E2}'),
+    ('\u{2292}', '\u{22E3}'),
+    ('\u{22A2}', '\u{22AC}'),
+    ('\u{22A8}', '\u{22AD}'),
+    ('\u{22A9}', '\u{22AE}'),
+    ('\u{22AB}', '\u{22AF}'),
+    ('\u{22B2}', '\u{22EA}'),
+    ('\u{22B3}', '\u{22EB}'),
+    ('\u{22B4}', '\u{22EC}'),
+    ('\u{22B5}', '\u{22ED}'),
+    ('\u{2ADD}', '\u{2ADC}'),
+];
+
+/// xcolor's base colors, the names `\color` and `\textcolor` take beside
+/// the `#rgb` and `#rrggbb` forms; sorted.
+const COLORS: &[(&str, [u8; 3])] = &[
+    ("black", [0, 0, 0]),
+    ("blue", [0, 0, 255]),
+    ("brown", [191, 128, 64]),
+    ("cyan", [0, 255, 255]),
+    ("darkgray", [64, 64, 64]),
+    ("gray", [128, 128, 128]),
+    ("green", [0, 255, 0]),
+    ("lightgray", [191, 191, 191]),
+    ("lime", [191, 255, 0]),
+    ("magenta", [255, 0, 255]),
+    ("olive", [128, 128, 0]),
+    ("orange", [255, 128, 0]),
+    ("pink", [255, 191, 191]),
+    ("purple", [191, 0, 64]),
+    ("red", [255, 0, 0]),
+    ("teal", [0, 128, 128]),
+    ("violet", [128, 0, 128]),
+    ("white", [255, 255, 255]),
+    ("yellow", [255, 255, 0]),
+];
+
+/// A color as `\color` reads it: one of `COLORS` by name, or `#rgb` and
+/// `#rrggbb`.
+fn parse_color(text: &str) -> Option<[u8; 3]> {
+    if let Some(hex) = text.strip_prefix('#') {
+        let digit = |c: char| c.to_digit(16).map(|d| d as u8);
+        let digits: Option<Vec<u8>> = hex.chars().map(digit).collect();
+        let digits = digits?;
+        return match digits.as_slice() {
+            [r, g, b] => Some([r * 17, g * 17, b * 17]),
+            [r1, r2, g1, g2, b1, b2] => Some([r1 * 16 + r2, g1 * 16 + g2, b1 * 16 + b2]),
+            _ => None,
+        };
+    }
+    COLORS
+        .binary_search_by(|row| row.0.cmp(text))
+        .ok()
+        .map(|i| COLORS[i].1)
+}
+
 pub const ACCENTS: &[(&str, char, bool)] = &[
     ("acute", '\u{0301}', false),
     ("bar", '\u{0304}', false),
@@ -863,8 +957,16 @@ fn restyle_field(field: &mut Field, name: &str) {
                 restyle(deg, name);
             }
         }
-        Field::LeftRight { body, .. } => restyle(body, name),
-        Field::Accent { base, .. } => restyle(base, name),
+        Field::LeftRight { body, .. }
+        | Field::Phantom { body, .. }
+        | Field::Colored { body, .. } => restyle(body, name),
+        Field::Accent { base, .. } | Field::Line { base, .. } | Field::Brace { base, .. } => {
+            restyle(base, name)
+        }
+        Field::Arrow { above, below, .. } => {
+            restyle(above, name);
+            restyle(below, name);
+        }
         Field::Table { rows, .. } => {
             for row in rows {
                 for cell in row {
@@ -1000,6 +1102,15 @@ fn delimiter_of(kind: &crate::token::TokenKind) -> Option<Option<char>> {
     }
 }
 
+/// The class a symbol has on its own: its vocabulary row's, else the
+/// character's.
+fn class_of_symbol(c: char) -> AtomClass {
+    VOCABULARY
+        .iter()
+        .find(|row| row.1 == c)
+        .map_or_else(|| classify_char(c), |row| row.2)
+}
+
 fn classify_char(c: char) -> AtomClass {
     match c {
         '+' | '\u{2212}' | '-' | '*' => AtomClass::Bin,
@@ -1046,6 +1157,16 @@ enum Marker {
     /// The alphabet of `map_alphabet`, `mathrm` for `\rm`.
     Font(&'static str),
     Style(MathStyle),
+    /// `\color{c}`: the rest of the group in the color.
+    Color([u8; 3]),
+}
+
+/// The three stacking commands of amsmath.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Stack {
+    Rel,
+    Over,
+    Under,
 }
 
 /// TeX's infix fraction words.
@@ -1071,7 +1192,8 @@ impl Infix {
 }
 
 impl Marker {
-    /// The marker a command name is, if any.
+    /// The marker a command name alone is, if any; `\color` needs its
+    /// argument and is read by `Parser::marker`.
     fn of(name: &str) -> Option<Marker> {
         Some(match name {
             "over" => Marker::Infix(Infix::Over),
@@ -1187,6 +1309,7 @@ fn noads_of(items: Vec<Item>) -> Vec<Noad> {
         .filter_map(|item| match item {
             Item::Atom(atom) => Some(Noad::Atom(atom)),
             Item::Marker(Marker::Style(style), _) => Some(Noad::Style(style)),
+            Item::Marker(Marker::Color(color), _) => Some(Noad::Color(color)),
             Item::Marker(Marker::Font(_), _) => None,
             Item::Marker(Marker::Infix(_), _) => unreachable!("the infix words were taken"),
         })
@@ -1284,7 +1407,7 @@ fn demote_bins(items: &mut [Noad]) {
             .find(|n| is_atom(n))
             .and_then(|n| match n {
                 Noad::Atom(atom) => Some(atom.class),
-                Noad::Style(_) => None,
+                Noad::Style(_) | Noad::Color(_) => None,
             });
         let Noad::Atom(atom) = &mut items[i] else {
             unreachable!("an atom")
@@ -1334,17 +1457,31 @@ impl Parser<'_> {
         self.tokens.get(self.pos)
     }
 
-    /// A marker word at the stream's head; a user macro of that name is
-    /// not one, it expands as an atom.
-    fn marker(&self) -> Option<Marker> {
+    /// A marker word at the stream's head, consumed with its argument
+    /// when it reads as one (`\color{c}` needs a color it knows); a user
+    /// macro of that name is not one, it expands as an atom.
+    fn marker(&mut self) -> Option<(Marker, std::ops::Range<usize>)> {
         use crate::token::TokenKind as K;
-        let K::Command(name) = &self.peek()?.kind else {
+        let tok = self.peek()?;
+        let span = tok.span.clone();
+        let K::Command(name) = &tok.kind else {
             return None;
         };
         if self.macros.contains_key(name) {
             return None;
         }
-        Marker::of(name)
+        if name == "color" {
+            self.pos += 1;
+            if let Some(color) = self.color_argument() {
+                let end = self.consumed_end(span.end);
+                return Some((Marker::Color(color), span.start..end));
+            }
+            self.pos -= 1;
+            return None;
+        }
+        let marker = Marker::of(name)?;
+        self.pos += 1;
+        Some((marker, span))
     }
 
     /// One item of a group from the stream into the collector: a marker
@@ -1386,8 +1523,7 @@ impl Parser<'_> {
                 true
             }
             _ => {
-                if let Some(marker) = self.marker() {
-                    self.pos += 1;
+                if let Some((marker, span)) = self.marker() {
                     group.mark(marker, span);
                     return true;
                 }
@@ -1480,7 +1616,7 @@ impl Parser<'_> {
                 // A word that acts on the group (`\\over`, a switch) is no
                 // atom: the group's reader takes it, after a definition or
                 // an expansion as at the head of the stream.
-                if Marker::of(name).is_some() {
+                if self.acts_on_group(name, self.pos) {
                     self.pos -= 1;
                     return None;
                 }
@@ -1532,6 +1668,25 @@ impl Parser<'_> {
                 }
                 "pmod" => self.modulo(tok.span, true),
                 "mod" => self.modulo(tok.span, false),
+                "overline" => self.lined(tok.span, false),
+                "underline" => self.lined(tok.span, true),
+                "overbrace" => self.braced(tok.span, false),
+                "underbrace" => self.braced(tok.span, true),
+                "stackrel" => self.stacked(tok.span, Stack::Rel),
+                "overset" => self.stacked(tok.span, Stack::Over),
+                "underset" => self.stacked(tok.span, Stack::Under),
+                "xrightarrow" => self.long_arrow(tok.span, '\u{2192}'),
+                "xleftarrow" => self.long_arrow(tok.span, '\u{2190}'),
+                "xRightarrow" => self.long_arrow(tok.span, '\u{21D2}'),
+                "xLeftarrow" => self.long_arrow(tok.span, '\u{21D0}'),
+                "xleftrightarrow" => self.long_arrow(tok.span, '\u{2194}'),
+                "xLeftrightarrow" => self.long_arrow(tok.span, '\u{21D4}'),
+                "xmapsto" => self.long_arrow(tok.span, '\u{21A6}'),
+                "not" => self.negated(tok.span),
+                "phantom" => self.phantom(tok.span, true, true),
+                "vphantom" => self.phantom(tok.span, false, true),
+                "hphantom" => self.phantom(tok.span, true, false),
+                "textcolor" => self.textcolor(tok.span),
                 "big" | "Big" | "bigg" | "Bigg" | "bigl" | "Bigl" | "biggl" | "Biggl" | "bigr"
                 | "Bigr" | "biggr" | "Biggr" | "bigm" | "Bigm" | "biggm" | "Biggm" => {
                     self.sized(tok.span, &name)
@@ -1916,6 +2071,190 @@ impl Parser<'_> {
             Some(ch) => self.construct(start, Field::Sized { ch, size }, class),
             None => literal_atom(format!("\\{name}"), start),
         }
+    }
+
+    /// `\overline` and `\underline`.
+    fn lined(&mut self, start: std::ops::Range<usize>, under: bool) -> Atom {
+        let base = self.script_operand();
+        self.construct(start, Field::Line { base, under }, AtomClass::Ord)
+    }
+
+    /// `\overbrace` and `\underbrace`: an operator with limits, as plain
+    /// TeX defines them, so that `^` and `_` stack beyond the brace.
+    fn braced(&mut self, start: std::ops::Range<usize>, under: bool) -> Atom {
+        let base = self.script_operand();
+        let mut atom = self.construct(start, Field::Brace { base, under }, AtomClass::Op);
+        atom.limits = Limits::Limits;
+        atom
+    }
+
+    /// `\stackrel{a}{b}`, `\overset{a}{b}` and `\underset{a}{b}`: amsmath's
+    /// `\mathop{b}\limits^{a}`, the base as the nucleus (one plain atom as
+    /// itself, else a list), the text as a limit. `\stackrel` is a
+    /// relation; the others keep the base's class when it is a binary
+    /// operator or a relation, and are ordinary otherwise.
+    fn stacked(&mut self, start: std::ops::Range<usize>, kind: Stack) -> Atom {
+        let script = self.script_operand();
+        let base = self.script_operand();
+        let end = self.consumed_end(start.end);
+        let span = start.start..end;
+        // The base's own class, as amsmath reads the symbol's: a binary
+        // operator alone in its group was read as ordinary by the group's
+        // rules, which do not apply to it here.
+        let single = match base.0.as_slice() {
+            [Noad::Atom(a)] if a.sup.is_none() && a.sub.is_none() => {
+                let class = match a.nucleus {
+                    Field::Symbol(c) => class_of_symbol(c),
+                    _ => a.class,
+                };
+                Some((a.nucleus.clone(), class))
+            }
+            _ => None,
+        };
+        let (nucleus, base_class) = single.unwrap_or((Field::List(base), AtomClass::Ord));
+        let class = match kind {
+            Stack::Rel => AtomClass::Rel,
+            Stack::Over | Stack::Under => {
+                if matches!(base_class, AtomClass::Bin | AtomClass::Rel) {
+                    base_class
+                } else {
+                    AtomClass::Ord
+                }
+            }
+        };
+        let (sup, sub) = match kind {
+            Stack::Under => (None, Some(script)),
+            Stack::Rel | Stack::Over => (Some(script), None),
+        };
+        Atom {
+            class,
+            nucleus,
+            sup,
+            sub,
+            limits: Limits::Limits,
+            span: span.clone(),
+            nucleus_span: span,
+        }
+    }
+
+    /// `\xrightarrow[below]{above}` and its kin: the optional text below
+    /// read by its tokens as a root's degree is, then the text above.
+    fn long_arrow(&mut self, start: std::ops::Range<usize>, ch: char) -> Atom {
+        use crate::token::TokenKind as K;
+        let below = if matches!(self.peek().map(|t| &t.kind), Some(K::Char('['))) {
+            match self.bracket_tokens() {
+                Some(tokens) => self.sub_list(tokens),
+                None => {
+                    self.pos += 1;
+                    self.list_until_char(']')
+                }
+            }
+        } else {
+            MathList::default()
+        };
+        let above = self.script_operand();
+        self.construct(start, Field::Arrow { ch, above, below }, AtomClass::Rel)
+    }
+
+    /// `\not` before a symbol: the symbol's negated form when Unicode has
+    /// one, else the combining long solidus laid over it, in one atom of
+    /// the symbol's class. Before nothing readable the word is a literal.
+    fn negated(&mut self, start: std::ops::Range<usize>) -> Atom {
+        let Some(mut atom) = self.atom() else {
+            return literal_atom("\\not", start);
+        };
+        let span = start.start..atom.span.end.max(start.end);
+        if let Field::Symbol(c) = atom.nucleus {
+            if let Ok(i) = NEGATIONS.binary_search_by(|row| row.0.cmp(&c)) {
+                atom.nucleus = Field::Symbol(NEGATIONS[i].1);
+                atom.span = span.clone();
+                atom.nucleus_span = span;
+                return atom;
+            }
+        }
+        let class = atom.class;
+        let slash = Atom {
+            class,
+            nucleus: Field::Symbol('\u{0338}'),
+            sup: None,
+            sub: None,
+            limits: Limits::default(),
+            span: start.clone(),
+            nucleus_span: start,
+        };
+        Atom {
+            class,
+            nucleus: Field::List(MathList(vec![Noad::Atom(atom), Noad::Atom(slash)])),
+            sup: None,
+            sub: None,
+            limits: Limits::default(),
+            span: span.clone(),
+            nucleus_span: span,
+        }
+    }
+
+    /// `\phantom`, `\vphantom`, `\hphantom`.
+    fn phantom(&mut self, start: std::ops::Range<usize>, width: bool, height: bool) -> Atom {
+        let body = self.script_operand();
+        self.construct(
+            start,
+            Field::Phantom {
+                body,
+                width,
+                height,
+            },
+            AtomClass::Ord,
+        )
+    }
+
+    /// `\textcolor{c}{...}`: the operand in the color, with the class of
+    /// its one atom. An unreadable color leaves the command a literal.
+    fn textcolor(&mut self, start: std::ops::Range<usize>) -> Atom {
+        let Some(color) = self.color_argument() else {
+            return literal_atom("\\textcolor", start);
+        };
+        let body = self.script_operand();
+        let class = match body.0.as_slice() {
+            [Noad::Atom(a)] => a.class,
+            _ => AtomClass::Ord,
+        };
+        self.construct(start, Field::Colored { color, body }, class)
+    }
+
+    /// The braced color after `\color` or `\textcolor`, consumed when it
+    /// reads.
+    fn color_argument(&mut self) -> Option<[u8; 3]> {
+        let (color, end) = self.color_at(self.pos)?;
+        self.pos = end;
+        Some(color)
+    }
+
+    /// A braced color at a token index, without consuming it: letters,
+    /// digits and `#` up to the closing brace, one of the colors known.
+    /// Answers the color and the index after the group.
+    fn color_at(&self, at: usize) -> Option<([u8; 3], usize)> {
+        use crate::token::TokenKind as K;
+        if !matches!(self.tokens.get(at).map(|t| &t.kind), Some(K::BeginGroup)) {
+            return None;
+        }
+        let mut text = String::new();
+        let mut i = at + 1;
+        loop {
+            match self.tokens.get(i).map(|t| &t.kind) {
+                Some(K::Char(c)) if c.is_ascii_alphanumeric() || *c == '#' => text.push(*c),
+                Some(K::EndGroup) => break,
+                _ => return None,
+            }
+            i += 1;
+        }
+        Some((parse_color(&text)?, i + 1))
+    }
+
+    /// Whether a command acts on the group it stands in: a marker word, or
+    /// `\color` followed by a color it reads (`after` is the index of its
+    /// argument). An unreadable color leaves `\color` an ordinary command.
+    fn acts_on_group(&self, name: &str, after: usize) -> bool {
+        Marker::of(name).is_some() || (name == "color" && self.color_at(after).is_some())
     }
 
     /// `\pmod{n}` and `\mod{n}` as KaTeX's macros expand them, with the
@@ -2595,7 +2934,7 @@ impl Parser<'_> {
                 if name == "\\"
                     || name == "right"
                     || name == "end"
-                    || Marker::of(name).is_some() =>
+                    || self.acts_on_group(name, self.pos + 1) =>
             {
                 MathList::default()
             }
@@ -2628,6 +2967,17 @@ mod tests {
             assert!(pair[0].0 < pair[1].0, "{} before {}", pair[0].0, pair[1].0);
         }
         for pair in ACCENTS.windows(2) {
+            assert!(pair[0].0 < pair[1].0, "{} before {}", pair[0].0, pair[1].0);
+        }
+        for pair in NEGATIONS.windows(2) {
+            assert!(
+                pair[0].0 < pair[1].0,
+                "{:?} before {:?}",
+                pair[0].0,
+                pair[1].0
+            );
+        }
+        for pair in COLORS.windows(2) {
             assert!(pair[0].0 < pair[1].0, "{} before {}", pair[0].0, pair[1].0);
         }
     }
@@ -3612,10 +3962,10 @@ mod tests {
         for tex in whole {
             assert_eq!(parse(tex).literals(), Vec::<String>::new(), "{tex}");
         }
-        // The `\not` of category D is the one literal left in this formula.
+        // The `\not` of category D parses too since Task 353.
         assert_eq!(
             parse("\\theta \\not\\equiv 0 \\pmod{2\\pi}.").literals(),
-            ["\\not"]
+            Vec::<String>::new()
         );
     }
 
@@ -4330,6 +4680,188 @@ mod tests {
             r"\frac{\sin (nx)}{\sin^n x} = \Bigg( {n \choose 1} \cot^{n - 1} x - {n \choose 3} \cot^{n - 3} x \pm \cdots \Bigg).",
             r"\psi( {\bf x},t)=\sqrt{\rho({\bf x},t)}\exp\left(\frac{i}{\hbar} S({\bf x},t)\right)",
             r"\mathbf{J} \cdot {\rm d}\mathbf{S} = - I_{\partial \Omega}.",
+        ];
+        for tex in whole {
+            assert_eq!(parse(tex).literals(), Vec::<String>::new(), "{tex}");
+        }
+    }
+
+    #[test]
+    fn lines_braces_and_stacks_parse_to_their_fields() {
+        let a = atoms("\\overline{BD} \\underline x");
+        let Field::Line { base, under } = &a[0].nucleus else {
+            panic!("{:?}", a[0].nucleus)
+        };
+        assert!(!under);
+        assert_eq!(base.atoms().count(), 2);
+        assert_eq!(a[0].class, AtomClass::Ord);
+        assert!(matches!(a[1].nucleus, Field::Line { under: true, .. }));
+        // A brace is an operator with limits: its scripts stack beyond it.
+        let a = atoms("\\overbrace{a+b}^{n} \\underbrace{x}_{m}");
+        assert!(matches!(a[0].nucleus, Field::Brace { under: false, .. }));
+        assert_eq!(a[0].class, AtomClass::Op);
+        assert_eq!(a[0].limits, Limits::Limits);
+        assert!(a[0].sup.is_some());
+        assert!(matches!(a[1].nucleus, Field::Brace { under: true, .. }));
+        assert!(a[1].sub.is_some());
+        // A stack: the base as the nucleus, the text as a limit.
+        let a = atoms("\\stackrel{N \\to \\infty}{\\longrightarrow}");
+        assert_eq!(a[0].class, AtomClass::Rel);
+        assert_eq!(a[0].nucleus, Field::Symbol('\u{27F6}'));
+        assert_eq!(a[0].sup.as_ref().unwrap().atoms().count(), 3);
+        assert_eq!(a[0].limits, Limits::Limits);
+        let a = atoms("\\overset{a}{b}");
+        assert_eq!(a[0].class, AtomClass::Ord);
+        assert_eq!(a[0].nucleus, Field::Symbol('b'));
+        assert!(a[0].sup.is_some() && a[0].sub.is_none());
+        // The base's class holds for a relation or a binary operator.
+        assert_eq!(atoms("\\overset{a}{=}")[0].class, AtomClass::Rel);
+        let a = atoms("x \\underset{a}{+} y");
+        assert_eq!(a[1].class, AtomClass::Bin);
+        assert!(a[1].sub.is_some() && a[1].sup.is_none());
+        let a = atoms("\\overset{a}{xy}");
+        assert!(matches!(a[0].nucleus, Field::List(_)));
+        assert_eq!(a[0].class, AtomClass::Ord);
+    }
+
+    #[test]
+    fn long_arrows_take_their_texts() {
+        let a = atoms("\\xrightarrow{n \\rightarrow \\infty}");
+        let Field::Arrow { ch, above, below } = &a[0].nucleus else {
+            panic!("{:?}", a[0].nucleus)
+        };
+        assert_eq!(*ch, '\u{2192}');
+        assert_eq!(above.atoms().count(), 3);
+        assert!(below.0.is_empty());
+        assert_eq!(a[0].class, AtomClass::Rel);
+        let a = atoms("\\xleftarrow[a]{b}");
+        let Field::Arrow { ch, above, below } = &a[0].nucleus else {
+            panic!("{:?}", a[0].nucleus)
+        };
+        assert_eq!(*ch, '\u{2190}');
+        assert_eq!(above.atoms().next().unwrap().nucleus, Field::Symbol('b'));
+        assert_eq!(below.atoms().next().unwrap().nucleus, Field::Symbol('a'));
+        for (word, ch) in [
+            ("xRightarrow", '\u{21D2}'),
+            ("xLeftarrow", '\u{21D0}'),
+            ("xleftrightarrow", '\u{2194}'),
+            ("xLeftrightarrow", '\u{21D4}'),
+            ("xmapsto", '\u{21A6}'),
+        ] {
+            let a = atoms(&format!("\\{word}{{x}}"));
+            assert!(
+                matches!(a[0].nucleus, Field::Arrow { ch: c, .. } if c == ch),
+                "\\{word}"
+            );
+        }
+    }
+
+    #[test]
+    fn not_negates_the_symbol_after_it() {
+        let a = atoms("x\\not\\in\\mathbb{Z}");
+        assert_eq!(a[1].nucleus, Field::Symbol('\u{2209}'));
+        assert_eq!(a[1].class, AtomClass::Rel);
+        assert_eq!(a[1].span, 1..8);
+        for (tex, negated) in [
+            ("\\not=", '\u{2260}'),
+            ("\\not<", '\u{226E}'),
+            ("\\not\\equiv", '\u{2262}'),
+            ("\\not\\subset", '\u{2284}'),
+            ("\\not\\leq", '\u{2270}'),
+            ("\\not\\exists", '\u{2204}'),
+            ("\\not\\rightarrow", '\u{219B}'),
+        ] {
+            assert_eq!(atoms(tex)[0].nucleus, Field::Symbol(negated), "{tex}");
+        }
+        // A symbol with no negated form takes the combining slash over it.
+        let a = atoms("\\not\\alpha");
+        assert_eq!(a.len(), 1);
+        let g = inner(&a[0]);
+        assert_eq!(g[0].nucleus, Field::Symbol('\u{03B1}'));
+        assert_eq!(g[1].nucleus, Field::Symbol('\u{0338}'));
+        // Nothing readable after it: a literal, as before.
+        assert_eq!(atoms("\\not")[0].nucleus, Field::Literal("\\not".into()));
+    }
+
+    #[test]
+    fn phantoms_keep_the_size_and_lose_the_ink() {
+        let a = atoms("\\vphantom{\\int} \\hphantom{-} \\phantom{x}");
+        assert!(matches!(
+            a[0].nucleus,
+            Field::Phantom {
+                width: false,
+                height: true,
+                ..
+            }
+        ));
+        assert!(matches!(
+            a[1].nucleus,
+            Field::Phantom {
+                width: true,
+                height: false,
+                ..
+            }
+        ));
+        assert!(matches!(
+            a[2].nucleus,
+            Field::Phantom {
+                width: true,
+                height: true,
+                ..
+            }
+        ));
+        assert_eq!(a[0].class, AtomClass::Ord);
+        let Field::Phantom { body, .. } = &a[0].nucleus else {
+            panic!("{:?}", a[0].nucleus)
+        };
+        assert_eq!(
+            body.atoms().next().unwrap().nucleus,
+            Field::Symbol('\u{222B}')
+        );
+    }
+
+    #[test]
+    fn colors_mark_the_rest_of_a_group_or_an_operand() {
+        let l = parse("{\\color{blue}{1} }2");
+        let g = inner_list(l.atoms().next().unwrap());
+        assert!(matches!(g.0[0], Noad::Color([0, 0, 255])));
+        assert_eq!(g.atoms().count(), 1);
+        assert_eq!(l.atoms().count(), 2);
+        let a = atoms("\\textcolor{red}{x} y");
+        let Field::Colored { color, body } = &a[0].nucleus else {
+            panic!("{:?}", a[0].nucleus)
+        };
+        assert_eq!(*color, [255, 0, 0]);
+        assert_eq!(body.atoms().next().unwrap().nucleus, Field::Symbol('x'));
+        assert_eq!(a[1].nucleus, Field::Symbol('y'));
+        // The hex forms, and the class of a one-atom operand.
+        let l = parse("\\color{#0f0} x");
+        assert!(matches!(l.0[0], Noad::Color([0, 255, 0])));
+        let l = parse("\\color{#00ff7f} x");
+        assert!(matches!(l.0[0], Noad::Color([0, 255, 127])));
+        assert_eq!(atoms("a \\textcolor{teal}{=} b")[1].class, AtomClass::Rel);
+        // An unknown color leaves the command a literal, as before.
+        let a = atoms("\\color{nope} x");
+        assert_eq!(a[0].nucleus, Field::Literal("\\color".into()));
+        // The color is transparent to the binary rules.
+        assert_eq!(atoms("a \\color{red} + b")[1].class, AtomClass::Bin);
+    }
+
+    #[test]
+    fn the_file_s_formulas_of_category_d_parse_whole() {
+        let whole = [
+            r"\overline{BD}",
+            r"\zeta(s)=\overline{\zeta(\overline{s})}",
+            r"{\vphantom{\int} }_{\partial \Omega}",
+            r"- \frac {\hbar^2\vphantom{\psi} }{2m\vphantom{x^2} } \frac {d^2 \psi}{dx^2} = E \psi.",
+            r"x\not\in\mathbb{Z}",
+            r"\Gamma(1-z) \Gamma(z) = \frac{\pi}{\sin \pi z}, \qquad z \not\in \mathbb{Z} ,",
+            r"\begin{aligned} \Chi(\varphi) &= \int_{P} s(x) \cdot \cos\left( 2\pi \tfrac{n}{P} x -\varphi \right)\, dx\quad \varphi \in \left[ 0, 2\pi \right]\\ &=\cos(\varphi) \underbrace{\int_{P} s(x) \cdot \cos\left( 2\pi \tfrac{n}{P} x\right) dx}_{X(0)} + \sin(\varphi) \underbrace{\int_{P} s(x) \cdot \sin\left( 2\pi \tfrac{n}{P} x\right) dx}_{ X(\pi/2) } \end{aligned}",
+            r"\sum_{k=0}^\infty \frac{1}{(z + k)^2} \sim \underbrace{\int_0^\infty\frac{1}{(z + k)^2}\,dk}_{= \dfrac{1}{z} } + \frac{1}{2z^2} + \sum_{t = 1}^\infty \frac{B_{2t} }{z^{2t + 1} }.",
+            r"\begin{aligned} \sum_{n=1}^N \frac{1}{n^2} & < 1 + \sum_{n=2}^N \frac{1}{n(n-1)} \\ & = 1 + \sum_{n=2}^N \left( \frac{1}{n-1} - \frac{1}{n} \right) \\ & = 1 + 1 - \frac{1}{N} \;{\stackrel{N \to \infty}{\longrightarrow} }\; 2. \end{aligned}",
+            r"\mathbf J(r, \theta) = \begin{bmatrix} \dfrac{\partial x}{\partial r} & \dfrac{\partial x}{\partial\theta}\\[1em] \dfrac{\partial y}{\partial r} & \dfrac{\partial y}{\partial\theta} \end{bmatrix} = \begin{bmatrix} \cos\theta & - r\sin \theta \\ \sin\theta & \hphantom{-} r\cos \theta \end{bmatrix}",
+            r"\begin{aligned} \left[x^4\right] \frac{S_n(x)}{x} & = \frac{1}{2\pi^4}\left(\left(H_n^{(2)}\right)^2 - H_n^{(4)}\right) \qquad \xrightarrow{n \rightarrow \infty} \qquad \frac{1}{2\pi^4}\left(\zeta(2)^2-\zeta(4)\right) \\[4pt] & \qquad \implies \zeta(4) = \frac{\pi^4}{90} = -2\pi^4 \cdot [x^4] \frac{\sin(x)}{x} +\frac{\pi^4}{36} \\[8pt] \left[x^6\right] \frac{S_n(x)}{x} & = -\frac{1}{6\pi^6}\left(\left(H_n^{(2)}\right)^3 - 3H_n^{(2)} H_n^{(4)} + 2H_n^{(6)}\right) \qquad \xrightarrow{n \rightarrow \infty} \qquad \frac{1}{6\pi^6}\left(\zeta(2)^3-3\zeta(2)\zeta(4) + 2\zeta(6)\right) \\[4pt] & \qquad \implies \zeta(6) = \frac{\pi^6}{945} = -3 \cdot \pi^6 [x^6] \frac{\sin(x)}{x} - \frac{2}{3} \frac{\pi^2}{6} \frac{\pi^4}{90} + \frac{\pi^6}{216}, \end{aligned}",
+            r"C_{10} = 0.{\color{blue}{1} }2{\color{blue}{3} }4{\color{blue}{5} }6{\color{blue}{7} }8{\color{blue}{9} }10{\color{blue}{11} }12{\color{blue}{13} }14{\color{blue}{15} }16\dots",
         ];
         for tex in whole {
             assert_eq!(parse(tex).literals(), Vec::<String>::new(), "{tex}");

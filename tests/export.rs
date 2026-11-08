@@ -940,6 +940,23 @@ fn an_equation_exports_typeset_and_extracts_its_characters() {
 }
 
 #[test]
+fn a_colored_formula_exports_with_its_color() {
+    // Task 353: `\color` reaches the PDF through the glyph's color, which
+    // `draw_math` groups by; the red run sets its own fill.
+    let doc = markdown::parse("Plain $a {\\color{red} b}$ after.\n");
+    let bytes = export_to_bytes(&doc, PageSize::A4);
+    let pdf = Pdf::load_mem(&bytes).expect("a reader parses the file");
+    let content: String = pdf
+        .page_iter()
+        .map(|id| String::from_utf8_lossy(&pdf.get_page_content(id)).into_owned())
+        .collect();
+    assert!(
+        content.contains("1 0 0 rg"),
+        "a red fill in the page's content, got {content:?}"
+    );
+}
+
+#[test]
 fn every_display_equation_lands_whole_on_one_page() {
     let mut source = String::new();
     for i in 0..60 {

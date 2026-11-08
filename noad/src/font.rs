@@ -101,6 +101,12 @@ pub struct MathConstants {
     pub radical_kern_before_degree: f32,
     pub radical_kern_after_degree: f32,
     pub radical_degree_bottom_raise_percent: f32,
+    pub overbar_vertical_gap: f32,
+    pub overbar_rule_thickness: f32,
+    pub overbar_extra_ascender: f32,
+    pub underbar_vertical_gap: f32,
+    pub underbar_rule_thickness: f32,
+    pub underbar_extra_descender: f32,
     pub min_connector_overlap: f32,
 }
 
@@ -302,6 +308,12 @@ mod ttf {
                 radical_degree_bottom_raise_percent: f32::from(
                     c.radical_degree_bottom_raise_percent(),
                 ),
+                overbar_vertical_gap: v(c.overbar_vertical_gap()),
+                overbar_rule_thickness: v(c.overbar_rule_thickness()),
+                overbar_extra_ascender: v(c.overbar_extra_ascender()),
+                underbar_vertical_gap: v(c.underbar_vertical_gap()),
+                underbar_rule_thickness: v(c.underbar_rule_thickness()),
+                underbar_extra_descender: v(c.underbar_extra_descender()),
                 min_connector_overlap: self
                     .math()
                     .variants
@@ -428,6 +440,8 @@ mod tests {
         assert_eq!(c.display_operator_min_height, 1800.0);
         assert_eq!(c.min_connector_overlap, 100.0);
         assert!(c.superscript_shift_up_cramped < c.superscript_shift_up);
+        assert!(c.overbar_vertical_gap > 0.0 && c.overbar_rule_thickness > 0.0);
+        assert!(c.underbar_vertical_gap > 0.0 && c.underbar_extra_descender > 0.0);
     }
 
     #[test]

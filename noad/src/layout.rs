@@ -27,6 +27,9 @@ pub struct PositionedGlyph {
     pub ch: Option<char>,
     /// Byte range of the TeX source this glyph renders.
     pub source: Range<usize>,
+    /// The color a `\color` or `\textcolor` gave it; `None` is the host's
+    /// ink.
+    pub color: Option<[u8; 3]>,
 }
 
 /// A filled rectangle: fraction bars, radical strokes.
@@ -36,6 +39,9 @@ pub struct Rule {
     pub y: f32,
     pub width: f32,
     pub height: f32,
+    /// The color a `\color` or `\textcolor` gave it; `None` is the host's
+    /// ink.
+    pub color: Option<[u8; 3]>,
 }
 
 /// A box reserved for literal TeX the host renders in its own face.
@@ -121,6 +127,13 @@ const SIZED_DELIMITER_HEIGHTS_EM: [f32; 4] = [1.2, 1.8, 2.4, 3.0];
 /// (`\delimitershortfall` 5pt at 10pt), whichever is the smaller gap.
 const DELIMITER_FACTOR: f32 = 0.901;
 const DELIMITER_SHORTFALL_EM: f32 = 0.5;
+/// The gap between a formula and the brace of `\overbrace` or
+/// `\underbrace`, in ems of the current style.
+const BRACE_GAP_EM: f32 = 0.1;
+/// A long arrow (`\xrightarrow`) reaches this far past its texts on each
+/// side, and is at least this long, in ems of the current style.
+const ARROW_PAD_EM: f32 = 0.4;
+const ARROW_MIN_EM: f32 = 1.2;
 
 struct Ctx<'a> {
     font: &'a dyn MathFont,
@@ -133,6 +146,14 @@ struct Ctx<'a> {
 struct LaidBox {
     geom: MathLayout,
     italic: f32,
+}
+
+/// A glyph stretched horizontally: its pieces with their x offsets from
+/// the left edge, the character when one glyph renders it, and the width.
+struct Spanned {
+    glyphs: Vec<(crate::font::GlyphId, f32)>,
+    ch: Option<char>,
+    width: f32,
 }
 
 /// A glyph stretched along the vertical axis: one ladder pick or the parts
@@ -188,6 +209,10 @@ impl Ctx<'_> {
         let mut prev: Option<AtomClass> = None;
         let mut style = style;
         let mut cramped = cramped;
+        // `\color`: the glyphs and rules laid after it in this list take the
+        // color, from the next color noad or to the end, an inner color
+        // (already set) winning.
+        let mut tint: Option<([u8; 3], usize, usize)> = None;
         for noad in &list.0 {
             let atom = match noad {
                 Noad::Atom(atom) => atom,
@@ -196,6 +221,13 @@ impl Ctx<'_> {
                 Noad::Style(switched) => {
                     style = *switched;
                     cramped = false;
+                    continue;
+                }
+                Noad::Color(color) => {
+                    if let Some((c, g, r)) = tint.take() {
+                        paint(&mut out, g, r, c);
+                    }
+                    tint = Some((*color, out.glyphs.len(), out.rules.len()));
                     continue;
                 }
             };
@@ -218,6 +250,9 @@ impl Ctx<'_> {
             merge(&mut out, laid.geom, cursor, 0.0);
             cursor += width;
             prev = Some(atom.class);
+        }
+        if let Some((c, g, r)) = tint {
+            paint(&mut out, g, r, c);
         }
         out.width = cursor;
         out
@@ -245,6 +280,7 @@ impl Ctx<'_> {
                         size: self.em(style),
                         ch: Some(mapped),
                         source: atom.nucleus_span.clone(),
+                        color: None,
                     }],
                     rules: Vec::new(),
                     literals: Vec::new(),
@@ -264,6 +300,21 @@ impl Ctx<'_> {
             Field::Literal(text) => self.literal_box(text, atom, style),
             Field::Text(text) => self.text_box(text, atom, style),
             Field::Sized { ch, size } => self.sized_box(atom, *ch, *size, style),
+            Field::Line { base, under } => self.line_box(base, *under, style, cramped),
+            Field::Brace { base, under } => self.brace_box(atom, base, *under, style, cramped),
+            Field::Arrow { ch, above, below } => {
+                self.arrow_box(atom, *ch, above, below, style, cramped)
+            }
+            Field::Phantom {
+                body,
+                width,
+                height,
+            } => self.phantom_box(body, *width, *height, style, cramped),
+            Field::Colored { color, body } => {
+                let mut geom = self.hlist(body, style, cramped);
+                paint(&mut geom, 0, 0, *color);
+                LaidBox { geom, italic: 0.0 }
+            }
             Field::Accent {
                 accent,
                 stretch,
@@ -328,6 +379,7 @@ impl Ctx<'_> {
             size: self.em(style),
             ch,
             source: source.clone(),
+            color: None,
         });
         geom.ascent = geom.ascent.max(-(y - b.y_max * u));
         geom.descent = geom.descent.max(y - b.y_min * u);
@@ -366,6 +418,37 @@ impl Ctx<'_> {
             });
         }
         let asm = assembly.expect("checked");
+        let (parts, overlap) = self.assembly_parts(&asm, target, u);
+        let mut glyphs = Vec::new();
+        let mut width = 0.0f32;
+        let mut cursor = 0.0;
+        for p in &parts {
+            let b = self.font.bounds(p.glyph);
+            glyphs.push((p.glyph, -cursor + b.y_min * u));
+            width = width.max(self.font.advance(p.glyph) * u);
+            cursor += p.full_advance * u - overlap;
+        }
+        Some(Stretched {
+            glyphs,
+            ch: None,
+            width,
+            height: cursor + overlap,
+        })
+    }
+
+    /// The pieces of an assembly that reach `target`, with the overlap at
+    /// every joint: the fewest repeats of the extenders whose length at
+    /// the font's minimum overlap reaches the target, then the pieces
+    /// overlapping as far as their connectors allow, the same at every
+    /// joint, so that the assembly lands on the target and not a whole
+    /// extender beyond it (the MATH table's rule). Past 64 repeats the
+    /// assembly stays short.
+    fn assembly_parts<'a>(
+        &self,
+        asm: &'a crate::font::Assembly,
+        target: f32,
+        u: f32,
+    ) -> (Vec<&'a crate::font::AssemblyPart>, f32) {
         let min_overlap = self.font.constants().min_connector_overlap * u;
         for reps in 1..=64usize {
             let mut parts: Vec<&crate::font::AssemblyPart> = Vec::new();
@@ -381,9 +464,6 @@ impl Ctx<'_> {
             let advances: f32 = parts.iter().map(|p| p.full_advance * u).sum();
             let joints = parts.len().saturating_sub(1) as f32;
             if advances - min_overlap * joints >= target || reps == 64 {
-                // The pieces overlap as far as their connectors allow, the
-                // same at every joint, so the assembly lands on the target
-                // and not a whole extender above it: the MATH table's rule.
                 let most = parts
                     .windows(2)
                     .map(|w| w[0].end_connector.min(w[1].start_connector) * u)
@@ -394,25 +474,211 @@ impl Ctx<'_> {
                 } else {
                     0.0
                 };
-                let total = advances - overlap * joints;
-                let mut glyphs = Vec::new();
-                let mut width = 0.0f32;
-                let mut cursor = 0.0;
-                for p in &parts {
-                    let b = self.font.bounds(p.glyph);
-                    glyphs.push((p.glyph, -cursor + b.y_min * u));
-                    width = width.max(self.font.advance(p.glyph) * u);
-                    cursor += p.full_advance * u - overlap;
-                }
-                return Some(Stretched {
-                    glyphs,
-                    ch: None,
-                    width,
-                    height: total,
-                });
+                return (parts, overlap);
             }
         }
-        None
+        unreachable!("the loop returns at 64 repeats")
+    }
+
+    /// A glyph stretched horizontally to cover `target`, the twin of
+    /// `stretch_vertical`: the base, the font's variants, then an assembly
+    /// laid left to right. The offsets are x positions from the left edge,
+    /// the pieces on the baseline.
+    fn stretch_horizontal(&self, ch: char, target: f32, style: MathStyle) -> Option<Spanned> {
+        let u = self.unit(style);
+        let base = self.font.glyph(ch)?;
+        let ink_w = |g: crate::font::GlyphId| {
+            let b = self.font.bounds(g);
+            (b.x_max - b.x_min) * u
+        };
+        let mut chosen = base;
+        let mut w = ink_w(base);
+        if w < target {
+            for v in self.font.horizontal_variants(base) {
+                chosen = v.glyph;
+                w = ink_w(v.glyph);
+                if w >= target {
+                    break;
+                }
+            }
+        }
+        let assembly = self.font.horizontal_assembly(base);
+        if w >= target || assembly.is_none() {
+            return Some(Spanned {
+                glyphs: vec![(chosen, 0.0)],
+                ch: Some(ch),
+                width: self.font.advance(chosen) * u,
+            });
+        }
+        let asm = assembly.expect("checked");
+        let (parts, overlap) = self.assembly_parts(&asm, target, u);
+        let mut glyphs = Vec::new();
+        let mut cursor = 0.0;
+        for p in &parts {
+            glyphs.push((p.glyph, cursor));
+            cursor += p.full_advance * u - overlap;
+        }
+        Some(Spanned {
+            glyphs,
+            ch: None,
+            width: cursor + overlap,
+        })
+    }
+
+    /// The ink of a horizontally stretched glyph above and below the
+    /// baseline, in pixels, from its pieces' bounds: (top, bottom), the
+    /// top negative when above the baseline.
+    fn spanned_extent(&self, spanned: &Spanned, u: f32) -> (f32, f32) {
+        spanned
+            .glyphs
+            .iter()
+            .fold((f32::MAX, f32::MIN), |(t, b), (g, _)| {
+                let bb = self.font.bounds(*g);
+                (t.min(-bb.y_max * u), b.max(-bb.y_min * u))
+            })
+    }
+
+    /// `\overline` and `\underline`: a rule at the font's gap above or
+    /// below the base, the font's extra space beyond it. TeX's rule 11
+    /// sets the overlined base cramped; rule 10 leaves the underlined one.
+    fn line_box(&self, base: &MathList, under: bool, style: MathStyle, cramped: bool) -> LaidBox {
+        let c = self.font.constants();
+        let u = self.unit(style);
+        let mut geom = self.hlist(base, style, cramped || !under);
+        let (gap, thickness, extra) = if under {
+            (
+                c.underbar_vertical_gap,
+                c.underbar_rule_thickness,
+                c.underbar_extra_descender,
+            )
+        } else {
+            (
+                c.overbar_vertical_gap,
+                c.overbar_rule_thickness,
+                c.overbar_extra_ascender,
+            )
+        };
+        let (gap, thickness, extra) = (gap * u, thickness * u, extra * u);
+        let y = if under {
+            geom.descent + gap
+        } else {
+            -(geom.ascent + gap + thickness)
+        };
+        geom.rules.push(Rule {
+            x: 0.0,
+            y,
+            width: geom.width,
+            height: thickness,
+            color: None,
+        });
+        if under {
+            geom.descent += gap + thickness + extra;
+        } else {
+            geom.ascent += gap + thickness + extra;
+        }
+        LaidBox { geom, italic: 0.0 }
+    }
+
+    /// `\overbrace` and `\underbrace`: the brace stretched to the base's
+    /// width, a gap away from it, centered under or over it. The atom's
+    /// scripts come as limits through `atom_box`.
+    fn brace_box(
+        &self,
+        atom: &Atom,
+        base: &MathList,
+        under: bool,
+        style: MathStyle,
+        cramped: bool,
+    ) -> LaidBox {
+        let base = self.hlist(base, style, cramped);
+        let ch = if under { '\u{23DF}' } else { '\u{23DE}' };
+        let Some(brace) = self.stretch_horizontal(ch, base.width, style) else {
+            return LaidBox {
+                geom: base,
+                italic: 0.0,
+            };
+        };
+        let u = self.unit(style);
+        let gap = BRACE_GAP_EM * self.em(style);
+        let (top, bottom) = self.spanned_extent(&brace, u);
+        let y = if under {
+            base.descent + gap - top
+        } else {
+            -(base.ascent + gap) - bottom
+        };
+        let width = base.width.max(brace.width);
+        let mut geom = MathLayout::default();
+        let base_w = base.width;
+        merge(&mut geom, base, (width - base_w) / 2.0, 0.0);
+        let x0 = (width - brace.width) / 2.0;
+        for (g, dx) in &brace.glyphs {
+            self.push_glyph(
+                &mut geom,
+                *g,
+                x0 + dx,
+                y,
+                style,
+                brace.ch,
+                &atom.nucleus_span,
+            );
+        }
+        geom.width = width;
+        LaidBox { geom, italic: 0.0 }
+    }
+
+    /// `\xrightarrow` and its kin: the texts set in script style, the arrow
+    /// stretched past the wider one by `ARROW_PAD_EM` on each side and at
+    /// least `ARROW_MIN_EM` long, the texts placed as an operator's limits.
+    fn arrow_box(
+        &self,
+        atom: &Atom,
+        ch: char,
+        above: &MathList,
+        below: &MathList,
+        style: MathStyle,
+        cramped: bool,
+    ) -> LaidBox {
+        let sub_style = Self::script_style(style);
+        let up = (!above.0.is_empty()).then(|| self.hlist(above, sub_style, cramped));
+        let low = (!below.0.is_empty()).then(|| self.hlist(below, sub_style, true));
+        let em = self.em(style);
+        let texts = up
+            .as_ref()
+            .map_or(0.0, |b| b.width)
+            .max(low.as_ref().map_or(0.0, |b| b.width));
+        let target = (texts + 2.0 * ARROW_PAD_EM * em).max(ARROW_MIN_EM * em);
+        let Some(arrow) = self.stretch_horizontal(ch, target, style) else {
+            return self.literal_box(&ch.to_string(), atom, style);
+        };
+        let mut geom = MathLayout::default();
+        for (g, dx) in &arrow.glyphs {
+            self.push_glyph(&mut geom, *g, *dx, 0.0, style, arrow.ch, &atom.nucleus_span);
+        }
+        geom.width = arrow.width;
+        self.stack_limits(LaidBox { geom, italic: 0.0 }, up, low, style)
+    }
+
+    /// `\phantom` and its kin: the body's size with none of its ink.
+    fn phantom_box(
+        &self,
+        body: &MathList,
+        width: bool,
+        height: bool,
+        style: MathStyle,
+        cramped: bool,
+    ) -> LaidBox {
+        let mut geom = self.hlist(body, style, cramped);
+        geom.glyphs.clear();
+        geom.rules.clear();
+        geom.literals.clear();
+        if !width {
+            geom.width = 0.0;
+        }
+        if !height {
+            geom.ascent = 0.0;
+            geom.descent = 0.0;
+        }
+        LaidBox { geom, italic: 0.0 }
     }
 
     /// Upright text: `\text{...}` and operator names, each character its
@@ -703,6 +969,7 @@ impl Ctx<'_> {
             y: bar_y,
             width: inner.width + overlap,
             height: t,
+            color: None,
         });
         let inner_w = inner.width;
         merge(&mut geom, inner, inner_x, 0.0);
@@ -777,13 +1044,26 @@ impl Ctx<'_> {
         style: MathStyle,
         cramped: bool,
     ) -> LaidBox {
-        let c = self.font.constants();
-        let u = self.unit(style);
         let sub_style = Self::script_style(style);
-        let op = nucleus.geom;
-        let ic = nucleus.italic;
         let upper = atom.sup.as_ref().map(|l| self.hlist(l, sub_style, cramped));
         let lower = atom.sub.as_ref().map(|l| self.hlist(l, sub_style, true));
+        self.stack_limits(nucleus, upper, lower, style)
+    }
+
+    /// The limits placement: the upper and lower boxes centered over and
+    /// under the nucleus, at the font's gaps, the italic correction
+    /// shifting them apart as TeX's rule 13a does.
+    fn stack_limits(
+        &self,
+        nucleus: LaidBox,
+        upper: Option<MathLayout>,
+        lower: Option<MathLayout>,
+        style: MathStyle,
+    ) -> LaidBox {
+        let c = self.font.constants();
+        let u = self.unit(style);
+        let op = nucleus.geom;
+        let ic = nucleus.italic;
         let width = op
             .width
             .max(upper.as_ref().map(|b| b.width).unwrap_or(0.0))
@@ -981,6 +1261,7 @@ impl Ctx<'_> {
                 y: -(axis + t / 2.0),
                 width,
                 height: t,
+                color: None,
             });
         } else {
             let (stack_up, stack_down, gap_min) = if display {
@@ -1042,14 +1323,17 @@ impl Ctx<'_> {
         if atom.sup.is_none() && atom.sub.is_none() {
             return nucleus;
         }
-        let stacked = atom.class == AtomClass::Op
-            && match atom.limits {
-                crate::mlist::Limits::Limits => true,
-                crate::mlist::Limits::NoLimits => false,
-                crate::mlist::Limits::Default => {
-                    style == MathStyle::Display && Self::op_defaults_to_limits(&atom.nucleus)
-                }
-            };
+        // Explicit limits stack whatever the class: TeX's `\mathop{...}\limits`
+        // behind `\stackrel`, `\overset` and the braces.
+        let stacked = match atom.limits {
+            crate::mlist::Limits::Limits => true,
+            crate::mlist::Limits::NoLimits => false,
+            crate::mlist::Limits::Default => {
+                atom.class == AtomClass::Op
+                    && style == MathStyle::Display
+                    && Self::op_defaults_to_limits(&atom.nucleus)
+            }
+        };
         if stacked {
             return self.limits_box(atom, nucleus, style, cramped);
         }
@@ -1119,6 +1403,17 @@ impl Ctx<'_> {
 
 /// Translates `src` by (dx, dy) into `dst`, extending the vertical extents.
 /// Widths stay the caller's business.
+/// Gives the color to the glyphs and rules from the given indices on that
+/// have none yet: an inner color was set first and wins.
+fn paint(geom: &mut MathLayout, glyphs_from: usize, rules_from: usize, color: [u8; 3]) {
+    for g in geom.glyphs.iter_mut().skip(glyphs_from) {
+        g.color.get_or_insert(color);
+    }
+    for r in geom.rules.iter_mut().skip(rules_from) {
+        r.color.get_or_insert(color);
+    }
+}
+
 fn merge(dst: &mut MathLayout, src: MathLayout, dx: f32, dy: f32) {
     for mut g in src.glyphs {
         g.x += dx;
@@ -2082,6 +2377,186 @@ mod tests {
         // {\bf x}: the bold x.
         let l = lay("{\\bf x}");
         assert!(l.glyphs.iter().any(|g| g.ch == Some('\u{1D431}')));
+    }
+
+    /// The ink of a glyph in the layout: its left and right edges, its
+    /// top and bottom, in the layout's pixels.
+    fn ink(f: &TtfMathFont<'_>, g: &PositionedGlyph) -> (f32, f32, f32, f32) {
+        use crate::MathFont as _;
+        let b = f.bounds(g.glyph);
+        let u = g.size / f.units_per_em();
+        (
+            g.x + b.x_min * u,
+            g.x + b.x_max * u,
+            g.y - b.y_max * u,
+            g.y - b.y_min * u,
+        )
+    }
+
+    #[test]
+    fn an_overline_rules_above_its_base_and_an_underline_below() {
+        let plain = lay("x");
+        let l = lay("\\overline{x}");
+        assert_eq!(l.rules.len(), 1);
+        let r = &l.rules[0];
+        assert!(
+            r.y + r.height <= -plain.ascent + EPS,
+            "the rule above the x: {} against {}",
+            r.y + r.height,
+            -plain.ascent
+        );
+        assert!(l.ascent > plain.ascent + r.height);
+        assert!((r.width - plain.width).abs() < EPS);
+        let l = lay("\\underline{x}");
+        let r = &l.rules[0];
+        assert!(r.y >= plain.descent - EPS, "the rule below the x: {}", r.y);
+        assert!(l.descent > plain.descent + r.height);
+    }
+
+    #[test]
+    fn a_brace_spans_its_base_and_takes_the_script_beyond_it() {
+        let f = font();
+        let base = lay("a+b+c");
+        let l = lay("\\underbrace{a+b+c}_{n}");
+        let is_brace = |g: &&PositionedGlyph| g.ch.is_none_or(|c| c == '\u{23DF}');
+        let brace: Vec<&PositionedGlyph> = l.glyphs.iter().filter(is_brace).collect();
+        assert!(!brace.is_empty(), "a brace glyph");
+        let left = brace.iter().map(|g| ink(&f, g).0).fold(f32::MAX, f32::min);
+        let right = brace.iter().map(|g| ink(&f, g).1).fold(f32::MIN, f32::max);
+        assert!(
+            right - left >= base.width - 1.0,
+            "the brace spans {} of {}",
+            right - left,
+            base.width
+        );
+        let bottom = brace.iter().map(|g| ink(&f, g).3).fold(f32::MIN, f32::max);
+        let n = glyph_by_ch(&l, '\u{1D45B}');
+        assert!(ink(&f, n).2 >= bottom - EPS, "the n below the brace");
+        assert!(n.size < SIZE);
+        let l = lay("\\overbrace{a+b+c}^{n}");
+        let brace: Vec<&PositionedGlyph> = l
+            .glyphs
+            .iter()
+            .filter(|g| g.ch.is_none_or(|c| c == '\u{23DE}'))
+            .collect();
+        let top = brace.iter().map(|g| ink(&f, g).2).fold(f32::MAX, f32::min);
+        let n = glyph_by_ch(&l, '\u{1D45B}');
+        assert!(ink(&f, n).3 <= top + EPS, "the n above the brace");
+    }
+
+    #[test]
+    fn a_stack_sets_its_text_as_a_limit() {
+        let f = font();
+        let l = lay("\\stackrel{a}{\\to}");
+        let a = glyph_by_ch(&l, '\u{1D44E}');
+        let arrow = glyph_by_ch(&l, '\u{2192}');
+        assert!(
+            ink(&f, a).3 <= ink(&f, arrow).2 + EPS,
+            "the a above the arrow"
+        );
+        assert!(a.size < SIZE, "at the script size");
+        let center = |g: &PositionedGlyph| (ink(&f, g).0 + ink(&f, g).1) / 2.0;
+        assert!(
+            (center(a) - center(arrow)).abs() < 1.0,
+            "centered: {} against {}",
+            center(a),
+            center(arrow)
+        );
+        assert_eq!(
+            shape(&lay("\\overset{a}{=}")),
+            shape(&lay("\\stackrel{a}{=}"))
+        );
+        let l = lay("\\underset{a}{=}");
+        let a = glyph_by_ch(&l, '\u{1D44E}');
+        let eq = glyph_by_ch(&l, '=');
+        assert!(
+            ink(&f, a).2 >= ink(&f, eq).3 - EPS,
+            "the a below the relation"
+        );
+    }
+
+    #[test]
+    fn a_long_arrow_spans_its_text() {
+        let f = font();
+        let l = lay("\\xrightarrow{abc}");
+        let text: Vec<&PositionedGlyph> = l
+            .glyphs
+            .iter()
+            .filter(|g| g.ch.is_some_and(|c| c != '\u{2192}'))
+            .collect();
+        assert_eq!(text.len(), 3);
+        let arrow: Vec<&PositionedGlyph> = l
+            .glyphs
+            .iter()
+            .filter(|g| g.ch.is_none_or(|c| c == '\u{2192}'))
+            .collect();
+        assert!(!arrow.is_empty());
+        let text_left = text.iter().map(|g| ink(&f, g).0).fold(f32::MAX, f32::min);
+        let text_right = text.iter().map(|g| ink(&f, g).1).fold(f32::MIN, f32::max);
+        let arrow_left = arrow.iter().map(|g| ink(&f, g).0).fold(f32::MAX, f32::min);
+        let arrow_right = arrow.iter().map(|g| ink(&f, g).1).fold(f32::MIN, f32::max);
+        assert!(
+            arrow_left <= text_left + EPS && arrow_right >= text_right - EPS,
+            "the arrow under the whole text"
+        );
+        let arrow_top = arrow.iter().map(|g| ink(&f, g).2).fold(f32::MAX, f32::min);
+        assert!(
+            text.iter().all(|g| ink(&f, g).3 <= arrow_top + EPS),
+            "the text above the arrow"
+        );
+        assert!(l.width >= 1.2 * SIZE - EPS);
+        let l = lay("\\xleftarrow[a]{b}");
+        assert!(glyph_by_ch(&l, '\u{1D44E}').y > 0.0 && glyph_by_ch(&l, '\u{1D44F}').y < 0.0);
+    }
+
+    #[test]
+    fn phantoms_have_the_size_and_no_ink() {
+        let int = lay("\\int");
+        let v = lay("\\vphantom{\\int}");
+        assert!(v.glyphs.is_empty() && v.rules.is_empty() && v.literals.is_empty());
+        assert!(v.width.abs() < EPS);
+        assert!((v.ascent - int.ascent).abs() < EPS && (v.descent - int.descent).abs() < EPS);
+        let x = lay("x");
+        let h = lay("\\hphantom{x}");
+        assert!(h.glyphs.is_empty());
+        assert!((h.width - x.width).abs() < EPS && h.ascent.abs() < EPS && h.descent.abs() < EPS);
+        let p = lay("\\phantom{x}");
+        assert!(p.glyphs.is_empty());
+        assert!((p.width - x.width).abs() < EPS && (p.ascent - x.ascent).abs() < EPS);
+    }
+
+    #[test]
+    fn a_color_tints_the_glyphs_after_it_in_its_group() {
+        let l = lay("a {\\color{red} b} c");
+        assert_eq!(glyph_by_ch(&l, '\u{1D44E}').color, None);
+        assert_eq!(glyph_by_ch(&l, '\u{1D44F}').color, Some([255, 0, 0]));
+        assert_eq!(glyph_by_ch(&l, '\u{1D450}').color, None);
+        let l = lay("\\textcolor{blue}{x}");
+        assert_eq!(glyph_by_ch(&l, '\u{1D465}').color, Some([0, 0, 255]));
+        // An inner color wins, and a rule takes the color too.
+        let l = lay("{\\color{red} a \\textcolor{blue}{b} \\frac{c}{d}}");
+        assert_eq!(glyph_by_ch(&l, '\u{1D44E}').color, Some([255, 0, 0]));
+        assert_eq!(glyph_by_ch(&l, '\u{1D44F}').color, Some([0, 0, 255]));
+        assert_eq!(l.rules[0].color, Some([255, 0, 0]));
+        // A second color replaces the first; the group's end ends it.
+        let l = lay("{\\color{red} a \\color{blue} b} c");
+        assert_eq!(glyph_by_ch(&l, '\u{1D44E}').color, Some([255, 0, 0]));
+        assert_eq!(glyph_by_ch(&l, '\u{1D44F}').color, Some([0, 0, 255]));
+        assert_eq!(glyph_by_ch(&l, '\u{1D450}').color, None);
+    }
+
+    #[test]
+    fn not_without_a_negated_form_overlays_the_slash() {
+        let f = font();
+        let l = lay("\\not\\alpha");
+        assert_eq!(l.glyphs.len(), 2);
+        assert_eq!(l.glyphs[1].ch, Some('\u{0338}'));
+        let (left, _, _, _) = ink(&f, &l.glyphs[1]);
+        assert!(
+            left < l.width - EPS,
+            "the slash over the letter, from {left} in {}",
+            l.width
+        );
     }
 
     #[test]

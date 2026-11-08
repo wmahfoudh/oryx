@@ -72,6 +72,28 @@ pub enum Field {
     /// Ord bare, Open for `l`, Close for `r`, Rel for `m`. `None` is the
     /// dot form, TeX's invisible box of the size.
     Sized { ch: Option<char>, size: u8 },
+    /// `\overline` and `\underline`: a rule over or under the base.
+    Line { base: MathList, under: bool },
+    /// `\overbrace` and `\underbrace`: a brace stretched over or under the
+    /// base; the atom is an operator with limits, so its scripts stack
+    /// beyond the brace.
+    Brace { base: MathList, under: bool },
+    /// `\xrightarrow` and its kin: an arrow stretched past the texts set
+    /// above and below it.
+    Arrow {
+        ch: char,
+        above: MathList,
+        below: MathList,
+    },
+    /// `\phantom`, `\vphantom`, `\hphantom`: the size of the body with no
+    /// ink, the width kept or zero, the height and depth kept or zero.
+    Phantom {
+        body: MathList,
+        width: bool,
+        height: bool,
+    },
+    /// `\textcolor{c}{...}`: the body in a color.
+    Colored { color: [u8; 3], body: MathList },
     /// An accented base: the combining accent character, whether wide
     /// forms may stretch horizontally, and the accented list.
     Accent {
@@ -154,6 +176,9 @@ pub enum Noad {
     /// the scripts see through it, and the spacing after it is read in
     /// the new style.
     Style(MathStyle),
+    /// `\color{c}`: the rest of the list in the color, the glyphs and the
+    /// rules, an inner color winning. No atom either.
+    Color([u8; 3]),
 }
 
 /// A parsed math list.
@@ -164,7 +189,7 @@ impl MathList {
     pub fn atoms(&self) -> impl Iterator<Item = &Atom> {
         self.0.iter().filter_map(|n| match n {
             Noad::Atom(a) => Some(a),
-            Noad::Style(_) => None,
+            Noad::Style(_) | Noad::Color(_) => None,
         })
     }
 
@@ -199,7 +224,14 @@ impl MathList {
                     }
                     radicand.collect_literals(out);
                 }
-                Field::LeftRight { body, .. } => body.collect_literals(out),
+                Field::LeftRight { body, .. }
+                | Field::Phantom { body, .. }
+                | Field::Colored { body, .. } => body.collect_literals(out),
+                Field::Line { base, .. } | Field::Brace { base, .. } => base.collect_literals(out),
+                Field::Arrow { above, below, .. } => {
+                    above.collect_literals(out);
+                    below.collect_literals(out);
+                }
                 Field::Accent { base, .. } => base.collect_literals(out),
                 Field::Table { rows, .. } => {
                     for row in rows {

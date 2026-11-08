@@ -5122,6 +5122,15 @@ fn emit_math_layout(
     out: &mut LayoutDoc,
 ) {
     let ink = theme.surface.foreground;
+    // A color the formula set (`\color`, `\textcolor`) over the theme's ink.
+    let color = |c: Option<[u8; 3]>| {
+        c.map_or(ink, |[r, g, b]| crate::style::theme::Rgba {
+            r,
+            g,
+            b,
+            a: 255,
+        })
+    };
     let top = baseline - m.ascent;
     let bottom = baseline + m.descent;
     for g in &m.glyphs {
@@ -5133,13 +5142,14 @@ fn emit_math_layout(
             ch: g.ch,
             top,
             bottom,
-            color: ink,
+            color: color(g.color),
             block: block_index,
         });
     }
     for r in &m.rules {
-        out.rects
-            .push(DecoRect::fill(x + r.x, baseline + r.y, r.width, r.height, ink).smooth());
+        out.rects.push(
+            DecoRect::fill(x + r.x, baseline + r.y, r.width, r.height, color(r.color)).smooth(),
+        );
     }
     for lit in &m.literals {
         let (runs, _) = shape_side_text(
