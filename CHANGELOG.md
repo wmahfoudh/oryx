@@ -44,6 +44,7 @@
 - In a formula, `~` is now a space, as in TeX. Before, it drew a tilde.
 - In a formula, a superscript or subscript after a spacing command such as `\,` is now shown. Before, it was dropped.
 - A formula that gives a command a macro expanding to nothing as its argument, such as `\frac1\e` after `\newcommand{\e}{}`, no longer crashes Oryx.
+- In a formula, the text of `\text` or `\mathrm` written inside a macro, such as `\newcommand{\st}{\text{ s.t. }}`, is now shown. Before, it was blank.
 - Typing in a plain text file no longer runs the syntax coloring on each key. Before, each key could cost a few milliseconds for nothing.
 - A key on a long markdown line with several code spans or links no longer freezes the editor while that line is parsed. The line is now colored in the background. Before, each key on such a line could cost 50 ms.
 - When the colors below a key are recomputed right after the cursor moved to a far line, they now land at once. Before, they could wait up to half a second.

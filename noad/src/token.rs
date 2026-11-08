@@ -26,6 +26,9 @@ pub enum TokenKind {
 pub struct Token {
     pub kind: TokenKind,
     pub span: Range<usize>,
+    /// For a token a macro expansion spliced in: where its text is in the
+    /// source, in the body of the definition. The span is the call's.
+    pub origin: Option<Range<usize>>,
 }
 
 /// Tokenizes a TeX math string. Total: every byte lands in a token, a
@@ -69,41 +72,50 @@ pub fn tokenize(tex: &str) -> Vec<Token> {
                     out.push(Token {
                         kind: TokenKind::Char('\\'),
                         span: start..start + 1,
+                        origin: None,
                     });
                 } else {
                     out.push(Token {
                         kind: TokenKind::Command(name),
                         span: start..end,
+                        origin: None,
                     });
                 }
             }
             '{' => out.push(Token {
                 kind: TokenKind::BeginGroup,
                 span: start..start + 1,
+                origin: None,
             }),
             '}' => out.push(Token {
                 kind: TokenKind::EndGroup,
                 span: start..start + 1,
+                origin: None,
             }),
             '^' => out.push(Token {
                 kind: TokenKind::Sup,
                 span: start..start + 1,
+                origin: None,
             }),
             '_' => out.push(Token {
                 kind: TokenKind::Sub,
                 span: start..start + 1,
+                origin: None,
             }),
             '&' => out.push(Token {
                 kind: TokenKind::Align,
                 span: start..start + 1,
+                origin: None,
             }),
             '\'' => out.push(Token {
                 kind: TokenKind::Prime,
                 span: start..start + 1,
+                origin: None,
             }),
             _ => out.push(Token {
                 kind: TokenKind::Char(c),
                 span: start..start + c.len_utf8(),
+                origin: None,
             }),
         }
     }

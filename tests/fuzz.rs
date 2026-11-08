@@ -1414,6 +1414,12 @@ fn math_formula() -> impl Strategy<Value = String> {
                     let body = body.unwrap_or_default();
                     format!("\\newcommand{{\\{name}}}{{{body}}} \\{name} {a} \\{taker}\\{name}")
                 }),
+            // A macro with a parameter, its argument mixed into a text or
+            // a formula of the body (Task 350).
+            1 => ("[A-Z]{2,3}", i(), i(), any::<bool>()).prop_map(|(name, body, arg, in_text)| {
+                let body = if in_text { format!("\\text{{#1 {body}}}") } else { format!("#1 {body}") };
+                format!("\\newcommand{{\\{name}}}[1]{{{body}}} \\{name}{{{arg}}}")
+            }),
         ]
     })
 }

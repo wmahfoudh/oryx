@@ -861,6 +861,100 @@ fn restyle_field(field: &mut Field, name: &str) {
     }
 }
 
+/// The text of a `\text{...}` group, spaces included: each token's own
+/// text, and between two tokens the whitespace of the source between
+/// their places. A token a macro spliced in points at the definition's
+/// body, so a text written in a body reads where it is written; the
+/// arguments a macro mixed into its body point at the call, and around
+/// them the body's whitespace is kept. Between two arguments nothing is
+/// kept, their braces are not part of the text.
+fn text_between(
+    src: &str,
+    open: &crate::token::Token,
+    content: &[crate::token::Token],
+    close: Option<&crate::token::Token>,
+) -> String {
+    use crate::token::TokenKind as K;
+    let place = |t: &crate::token::Token| t.origin.clone().unwrap_or_else(|| t.span.clone());
+    let start = place(open).end;
+    let end = close.map(|t| place(t).start);
+    // The group's own tokens lie between its braces; any other place is
+    // a macro's argument.
+    let own = |r: &std::ops::Range<usize>| r.start >= start && end.map_or(true, |e| r.end <= e);
+    let mut out = String::new();
+    let mut cursor = start;
+    let mut prev_own = true;
+    for t in content {
+        let r = place(t);
+        let is_own = own(&r);
+        out.push_str(&text_gap(src, cursor, prev_own, r.start, is_own));
+        match &t.kind {
+            K::Char(c) => out.push(*c),
+            K::Command(name) => {
+                out.push('\\');
+                out.push_str(name);
+            }
+            K::BeginGroup => out.push('{'),
+            K::EndGroup => out.push('}'),
+            K::Sup => out.push('^'),
+            K::Sub => out.push('_'),
+            K::Align => out.push('&'),
+            K::Prime => out.push('\''),
+        }
+        cursor = r.end;
+        prev_own = is_own;
+    }
+    if let Some(end) = end {
+        out.push_str(&text_gap(src, cursor, prev_own, end, true));
+    }
+    out
+}
+
+/// The whitespace of a text between two of its tokens, the first ending
+/// at `a` and the second starting at `b` in the source, each in the
+/// group's own braces or in a macro's argument.
+fn text_gap(src: &str, a: usize, a_own: bool, b: usize, b_own: bool) -> String {
+    let ws = |c: char| c.is_whitespace();
+    match (a_own, b_own) {
+        // Both in the group: the source between them, without the `#k`
+        // of an argument that expanded to nothing.
+        (true, true) if a <= b => {
+            let gap = src.get(a..b).unwrap_or("");
+            let mut out = String::with_capacity(gap.len());
+            let mut chars = gap.chars().peekable();
+            while let Some(c) = chars.next() {
+                if c == '#' && chars.peek().is_some_and(|d| d.is_ascii_digit()) {
+                    chars.next();
+                    continue;
+                }
+                out.push(c);
+            }
+            out
+        }
+        // From the group to an argument: the whitespace before its `#k`.
+        (true, false) => {
+            let after = src.get(a..).unwrap_or("");
+            after[..after.len() - after.trim_start_matches(ws).len()].to_string()
+        }
+        // From an argument back to the group: the whitespace after the `#k`.
+        (false, true) => {
+            let before = src.get(..b).unwrap_or("");
+            before[before.trim_end_matches(ws).len()..].to_string()
+        }
+        // Inside one argument, its own whitespace; between two arguments,
+        // their braces, which are not part of the text.
+        (false, false) if a <= b => {
+            let gap = src.get(a..b).unwrap_or("");
+            if gap.chars().all(ws) {
+                gap.to_string()
+            } else {
+                String::new()
+            }
+        }
+        _ => String::new(),
+    }
+}
+
 fn classify_char(c: char) -> AtomClass {
     match c {
         '+' | '\u{2212}' | '-' | '*' => AtomClass::Bin,
@@ -1324,8 +1418,9 @@ impl Parser<'_> {
     }
 
     /// `\text{...}` and its upright kin: the braced source verbatim,
-    /// spaces and nested braces included, which the tokenizer's spans
-    /// recover from the source, a tie inside it a space and `\~` kept.
+    /// spaces and nested braces included, which the tokens' places in
+    /// the source recover, in a macro's body as at the top level, a tie
+    /// inside it a space and `\~` kept.
     /// Without a group the argument is the next token, TeX's reading: a
     /// character as itself, a tie as a space, a symbol command as its
     /// character, a macro expanded first. Any other token leaves the
@@ -1362,26 +1457,26 @@ impl Parser<'_> {
             _ => return literal_atom(format!("\\{name}"), start),
         }
         let open = self.next().expect("peeked");
-        let content_start = open.span.end;
-        let mut content_end = content_start;
         let mut depth = 1usize;
+        let mut content: Vec<crate::token::Token> = Vec::new();
+        let mut close = None;
         while let Some(tok) = self.next() {
             match tok.kind {
                 K::BeginGroup => depth += 1,
                 K::EndGroup => {
                     depth -= 1;
                     if depth == 0 {
-                        content_end = tok.span.start;
+                        close = Some(tok);
                         break;
                     }
                 }
                 _ => {}
             }
-            content_end = tok.span.end;
+            content.push(tok);
         }
+        let raw = text_between(self.src, &open, &content, close.as_ref());
         // TeX's tie is a space inside text as well; `\~`, the tilde
         // accent, keeps its tilde.
-        let raw = self.src.get(content_start..content_end).unwrap_or("");
         let mut text = String::with_capacity(raw.len());
         let mut escaped = false;
         for c in raw.chars() {
@@ -1569,6 +1664,7 @@ impl Parser<'_> {
                         out.push(crate::token::Token {
                             kind: K::Char('#'),
                             span: span.clone(),
+                            origin: None,
                         });
                         i += 2;
                         continue;
@@ -1589,6 +1685,10 @@ impl Parser<'_> {
             out.push(crate::token::Token {
                 kind: mac.body[i].kind.clone(),
                 span: span.clone(),
+                origin: mac.body[i]
+                    .origin
+                    .clone()
+                    .or_else(|| Some(mac.body[i].span.clone())),
             });
             i += 1;
         }
@@ -3288,6 +3388,37 @@ mod tests {
         assert_eq!(a.len(), 1);
         assert!(matches!(a[0].nucleus, Field::Radical { .. }));
         assert_eq!(a[0].sup, Some(MathList::default()));
+    }
+
+    #[test]
+    fn a_text_command_inside_a_macro_body_keeps_its_text() {
+        // The tokens a macro splices carry the call's span; the text is
+        // read where the body is in the source, spaces included.
+        let a = atoms("\\newcommand{\\iff}{\\text{if and only if}}\\iff");
+        assert_eq!(a[0].nucleus, Field::Text("if and only if".into()));
+        let a = atoms("\\newcommand{\\g}{{ab}}\\text\\g");
+        assert_eq!(a[0].nucleus, Field::Text("ab".into()));
+        // The call's span stays the atom's.
+        assert_eq!(a[0].span, 21..28);
+        // An argument mixed into the body's text keeps the body's spaces
+        // around it and its own inside; an empty one leaves its space.
+        let a = atoms("\\newcommand{\\t}[1]{\\text{#1 is}}\\t{x}");
+        assert_eq!(a[0].nucleus, Field::Text("x is".into()));
+        let a = atoms("\\newcommand{\\t}[1]{\\text{is #1}}\\t{x}");
+        assert_eq!(a[0].nucleus, Field::Text("is x".into()));
+        let a = atoms("\\newcommand{\\t}[1]{\\text{ #1 }}\\t{m s}");
+        assert_eq!(a[0].nucleus, Field::Text(" m s ".into()));
+        let a = atoms("\\newcommand{\\t}[2]{\\text{#1#2 and #1 #2}}\\t{a}{b}");
+        assert_eq!(a[0].nucleus, Field::Text("ab and ab".into()));
+        let a = atoms("\\newcommand{\\t}[1]{\\text{#1 is}}\\t{}");
+        assert_eq!(a[0].nucleus, Field::Text(" is".into()));
+        // TeX's `##` in a body is one `#`.
+        let a = atoms("\\newcommand{\\t}{\\text{a ## b}}\\t");
+        assert_eq!(a[0].nucleus, Field::Text("a # b".into()));
+        // A body used twice reads the same text twice.
+        let a = atoms("\\newcommand{\\m}{\\mathrm{d}x}\\m + \\m");
+        assert_eq!(a[0].nucleus, Field::Text("d".into()));
+        assert_eq!(a[3].nucleus, Field::Text("d".into()));
     }
 
     #[test]
