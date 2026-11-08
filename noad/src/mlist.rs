@@ -157,9 +157,10 @@ impl MathList {
         })
     }
 
-    /// The TeX the parser did not understand, in source order: the text
-    /// of every `Field::Literal` through every field and script. Empty
-    /// means the whole formula typesets.
+    /// The TeX the parser did not understand: the text of every
+    /// `Field::Literal` through every field and script, in the order of
+    /// the list, a superscript before a subscript. Empty means the whole
+    /// formula typesets.
     pub fn literals(&self) -> Vec<String> {
         let mut out = Vec::new();
         self.collect_literals(&mut out);

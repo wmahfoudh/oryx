@@ -103,7 +103,7 @@ pub const VOCABULARY: &[(&str, char, AtomClass)] = &[
     ("angle", '\u{2220}', AtomClass::Ord),
     ("approx", '\u{2248}', AtomClass::Rel),
     ("approxeq", '\u{224A}', AtomClass::Rel),
-    ("arrowvert", '\u{23D0}', AtomClass::Ord),
+    ("arrowvert", '|', AtomClass::Ord),
     ("ast", '\u{2217}', AtomClass::Bin),
     ("asymp", '\u{224D}', AtomClass::Rel),
     ("backepsilon", '\u{220D}', AtomClass::Rel),
@@ -141,7 +141,7 @@ pub const VOCABULARY: &[(&str, char, AtomClass)] = &[
     ("boxminus", '\u{229F}', AtomClass::Bin),
     ("boxplus", '\u{229E}', AtomClass::Bin),
     ("boxtimes", '\u{22A0}', AtomClass::Bin),
-    ("bracevert", '\u{23AA}', AtomClass::Ord),
+    ("bracevert", '|', AtomClass::Ord),
     ("bull", '\u{2219}', AtomClass::Bin),
     ("bullet", '\u{2219}', AtomClass::Bin),
     ("bumpeq", '\u{224F}', AtomClass::Rel),
@@ -456,7 +456,6 @@ pub const VOCABULARY: &[(&str, char, AtomClass)] = &[
     ("sim", '\u{223C}', AtomClass::Rel),
     ("simeq", '\u{2243}', AtomClass::Rel),
     ("smallfrown", '\u{2322}', AtomClass::Rel),
-    ("smallint", '\u{222B}', AtomClass::Op),
     ("smallsetminus", '\u{2216}', AtomClass::Bin),
     ("smallsmile", '\u{2323}', AtomClass::Rel),
     ("smile", '\u{2323}', AtomClass::Rel),
@@ -587,10 +586,11 @@ pub const DELIMITERS: &[(&str, char)] = &[
     ("Uparrow", '\u{21D1}'),
     ("Updownarrow", '\u{21D5}'),
     ("Vert", '\u{2016}'),
-    ("arrowvert", '\u{23D0}'),
+    ("arrowvert", '|'),
     ("backslash", '\\'),
-    ("bracevert", '\u{23AA}'),
+    ("bracevert", '|'),
     ("downarrow", '\u{2193}'),
+    ("gt", '\u{27E9}'),
     ("lVert", '\u{2016}'),
     ("lang", '\u{27E8}'),
     ("langle", '\u{27E8}'),
@@ -602,6 +602,7 @@ pub const DELIMITERS: &[(&str, char)] = &[
     ("llcorner", '\u{231E}'),
     ("lmoustache", '\u{23B0}'),
     ("lrcorner", '\u{231F}'),
+    ("lt", '\u{27E8}'),
     ("lvert", '|'),
     ("rVert", '\u{2016}'),
     ("rang", '\u{27E9}'),
@@ -759,12 +760,13 @@ pub(crate) fn map_alphabet(name: &str, c: char) -> char {
             'a'..='z' => 0x1D44E + (a - 'a' as u32),
             _ => a,
         },
-        // Bold italic letters and Greek, bold digits: `\boldsymbol`.
+        // `\boldsymbol`: bold italic letters and small Greek, bold digits,
+        // and bold upright Greek capitals, upright as `\Gamma` is.
         "boldsymbol" => match c {
             'A'..='Z' => 0x1D468 + (a - 'A' as u32),
             'a'..='z' => 0x1D482 + (a - 'a' as u32),
             '0'..='9' => 0x1D7CE + (a - '0' as u32),
-            '\u{0391}'..='\u{03A9}' => 0x1D71C + (a - 0x0391),
+            '\u{0391}'..='\u{03A9}' => 0x1D6A8 + (a - 0x0391),
             '\u{03B1}'..='\u{03C9}' => 0x1D736 + (a - 0x03B1),
             '\u{2207}' => 0x1D735,
             '\u{2202}' => 0x1D74F,
@@ -1308,20 +1310,31 @@ impl Parser<'_> {
 
     /// `\text{...}` and its upright kin: the braced source verbatim,
     /// spaces and nested braces included, which the tokenizer's spans
-    /// recover from the source. Without a group the command degrades to
-    /// a literal under its own name.
+    /// recover from the source, a tie inside it a space and `\~` kept.
+    /// Without a group the argument is the next token, TeX's reading: a
+    /// character as itself, a tie as a space, a symbol command as its
+    /// character, a macro expanded first. Any other token leaves the
+    /// command a literal under its own name.
     fn text(&mut self, start: std::ops::Range<usize>, name: &str) -> Atom {
         use crate::token::TokenKind as K;
         match self.peek().map(|t| t.kind.clone()) {
             Some(K::BeginGroup) => {}
-            // TeX's reading of an argument with no brace: the next token
-            // alone, a character as itself, a symbol command as its
-            // character. Any other token leaves the command a literal.
+            Some(K::Char('~')) => {
+                self.pos += 1;
+                return self.construct(start, Field::Text(" ".into()), AtomClass::Ord);
+            }
             Some(K::Char(c)) => {
                 self.pos += 1;
                 return self.construct(start, Field::Text(c.to_string()), AtomClass::Ord);
             }
             Some(K::Command(command)) => {
+                if self.macros.contains_key(&command) {
+                    let span = self.peek().map(|t| t.span.clone()).unwrap_or(start.clone());
+                    if self.expand(&command, span) {
+                        return self.text(start, name);
+                    }
+                    return literal_atom(format!("\\{name}"), start);
+                }
                 let Some((ch, _)) = vocabulary_lookup(&command) else {
                     return literal_atom(format!("\\{name}"), start);
                 };
@@ -1348,23 +1361,36 @@ impl Parser<'_> {
             }
             content_end = tok.span.end;
         }
-        // TeX's tie is a space inside text as well.
-        let text = self
-            .src
-            .get(content_start..content_end)
-            .unwrap_or("")
-            .replace('~', " ");
+        // TeX's tie is a space inside text as well; `\~`, the tilde
+        // accent, keeps its tilde.
+        let raw = self.src.get(content_start..content_end).unwrap_or("");
+        let mut text = String::with_capacity(raw.len());
+        let mut escaped = false;
+        for c in raw.chars() {
+            text.push(if c == '~' && !escaped { ' ' } else { c });
+            escaped = c == '\\' && !escaped;
+        }
         self.construct(start, Field::Text(text), AtomClass::Ord)
     }
 
-    /// `\mathop{x}` and its kin: the operand reclassed for spacing, one
-    /// atom as itself, a longer group as one atom holding it. `\mathop`
-    /// stacks its scripts in display style as an operator does.
+    /// `\mathop{x}` and its kin: the operand reclassed for spacing, a
+    /// plain atom as itself, any other group as one atom holding it.
+    /// `\mathop` stacks its scripts in display style as an operator does.
     fn classed(&mut self, start: std::ops::Range<usize>, class: AtomClass) -> Atom {
+        use crate::token::TokenKind as K;
+        let braced = matches!(self.peek().map(|t| &t.kind), Some(K::BeginGroup));
         let mut operand = self.script_operand();
         let end = self.consumed_end(start.end);
         let span = start.start..end;
-        let mut atom = if operand.0.len() == 1 {
+        // TeX's rule for a braced operand: a group of one Ord atom with no
+        // scripts is the atom itself; any other group stays a list, so its
+        // scripts stay inside and an operator in it keeps its size. A bare
+        // token is the atom itself.
+        let plain = operand.0.len() == 1
+            && (!braced
+                || matches!(&operand.0[0], Noad::Atom(a)
+                    if a.class == AtomClass::Ord && a.sup.is_none() && a.sub.is_none()));
+        let mut atom = if plain {
             let Noad::Atom(atom) = operand.0.pop().expect("one noad");
             atom
         } else {
@@ -1941,6 +1967,17 @@ impl Parser<'_> {
     /// none, or a delimiter command. Anything else answers none and stays.
     fn delimiter(&mut self) -> Option<char> {
         use crate::token::TokenKind as K;
+        // A user macro expands first, as everywhere else.
+        if let Some(K::Command(name)) = self.peek().map(|t| &t.kind) {
+            if self.macros.contains_key(name) {
+                let name = name.clone();
+                let span = self.peek().map(|t| t.span.clone()).unwrap_or_default();
+                if self.expand(&name, span) {
+                    return self.delimiter();
+                }
+                return None;
+            }
+        }
         let resolved = match self.peek().map(|t| &t.kind) {
             Some(K::Char('.')) => Some(None),
             Some(K::Char(c)) => Some(Some(*c)),
@@ -2912,6 +2949,24 @@ mod tests {
         assert_eq!(atoms("\\Lleftarrow")[0].class, AtomClass::Rel);
         assert_eq!(atoms("\\gt")[0].nucleus, Field::Symbol('>'));
         assert_eq!(atoms("\\lt")[0].class, AtomClass::Rel);
+        // \smallint stays out: noad grows every operator in display.
+        assert_eq!(
+            atoms("\\smallint")[0].nucleus,
+            Field::Literal("\\smallint".into())
+        );
+        // The extension pieces of TeX draw as a bar, which the font stretches.
+        assert_eq!(atoms("\\arrowvert")[0].nucleus, Field::Symbol('|'));
+        assert_eq!(atoms("\\bracevert")[0].nucleus, Field::Symbol('|'));
+        // After \left, \lt and \gt are the angle brackets, as KaTeX reads them.
+        let a = atoms("\\left\\lt x \\right\\gt");
+        assert!(matches!(
+            a[0].nucleus,
+            Field::LeftRight {
+                open: Some('\u{27E8}'),
+                close: Some('\u{27E9}'),
+                ..
+            }
+        ));
         // The delimiters after \left and \right.
         let a = atoms("\\left\\lang x \\right\\rang");
         assert!(matches!(
@@ -2926,7 +2981,7 @@ mod tests {
         assert!(matches!(
             a[0].nucleus,
             Field::LeftRight {
-                open: Some('\u{23AA}'),
+                open: Some('|'),
                 close: Some('\u{2016}'),
                 ..
             }
@@ -2946,7 +3001,7 @@ mod tests {
         );
         assert_eq!(
             atoms("\\boldsymbol{\\Gamma}")[0].nucleus,
-            Field::Symbol('\u{1D71E}')
+            Field::Symbol('\u{1D6AA}')
         );
         assert_eq!(
             atoms("\\boldsymbol{\\nabla}")[0].nucleus,
@@ -3047,6 +3102,63 @@ mod tests {
             parse("\\theta \\not\\equiv 0 \\pmod{2\\pi}.").literals(),
             ["\\not"]
         );
+    }
+
+    #[test]
+    fn a_text_command_and_a_delimiter_expand_a_macro_first() {
+        let a = atoms("\\newcommand{\\C}{x}\\mathrm\\C");
+        assert_eq!(a[0].nucleus, Field::Text("x".into()));
+        let a = atoms("\\renewcommand{\\alpha}{\\beta}\\mathrm\\alpha");
+        assert_eq!(a[0].nucleus, Field::Text("\u{03B2}".into()));
+        // A macro that expands to one character reads it.
+        let a = atoms("\\newcommand{\\g}{y}\\text\\g");
+        assert_eq!(a[0].nucleus, Field::Text("y".into()));
+        // The delimiter after \left expands a macro too.
+        let a = atoms("\\newcommand{\\lang}{[}\\left\\lang x \\right]");
+        assert!(matches!(
+            a[0].nucleus,
+            Field::LeftRight {
+                open: Some('['),
+                close: Some(']'),
+                ..
+            }
+        ));
+        // TeX's tilde accent inside text keeps its tilde; a tie is a space.
+        let a = atoms("\\text{a~b\\~c}");
+        assert_eq!(a[0].nucleus, Field::Text("a b\\~c".into()));
+        // The tie as the one token is a space too.
+        let a = atoms("\\mathrm~x");
+        assert_eq!(a[0].nucleus, Field::Text(" ".into()));
+        assert_eq!(a[1].nucleus, Field::Symbol('x'));
+    }
+
+    #[test]
+    fn a_class_setter_keeps_a_group_unless_it_is_one_plain_atom() {
+        // TeX's rule: a group of one Ord atom without scripts is the atom
+        // itself; any other group stays a list under the new class, so
+        // its scripts stay inside and an operator in it keeps its size.
+        let a = atoms("\\mathop{x^2}");
+        let Field::List(inner) = &a[0].nucleus else {
+            panic!("{:?}", a[0].nucleus)
+        };
+        assert!(a[0].sup.is_none());
+        assert!(inner.atoms().next().unwrap().sup.is_some());
+        assert_eq!(a[0].class, AtomClass::Op);
+        let a = atoms("\\mathord{\\sum}");
+        let Field::List(inner) = &a[0].nucleus else {
+            panic!("{:?}", a[0].nucleus)
+        };
+        assert_eq!(inner.atoms().next().unwrap().class, AtomClass::Op);
+        assert_eq!(a[0].class, AtomClass::Ord);
+        let a = atoms("\\mathrel{R}");
+        assert_eq!(a[0].nucleus, Field::Symbol('R'));
+        // One token without braces is the atom itself, reclassed.
+        let a = atoms("a \\mathbin\\sum b");
+        assert_eq!(a[1].nucleus, Field::Symbol('\u{2211}'));
+        assert_eq!(a[1].class, AtomClass::Bin);
+        let a = atoms("\\mathop =");
+        assert_eq!(a[0].nucleus, Field::Symbol('='));
+        assert_eq!(a[0].class, AtomClass::Op);
     }
 
     #[test]

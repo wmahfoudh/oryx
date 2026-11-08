@@ -184,7 +184,11 @@ impl Ctx<'_> {
             if let Field::Kern(ems) = atom.nucleus {
                 cursor += ems * self.em(style);
                 prev = None;
-                continue;
+                if atom.sup.is_none() && atom.sub.is_none() {
+                    continue;
+                }
+                // A script on a kern (`~^2`, `\,^2`) sits on an empty nucleus
+                // after the gap, TeX's `\nobreakspace{}^2`.
             }
             if let Some(p) = prev {
                 cursor += self.space(p, atom.class, style);
@@ -722,7 +726,10 @@ impl Ctx<'_> {
     /// Whether an operator's `Limits::Default` resolves to stacked limits
     /// in display style: TeX's convention, everything except integrals.
     fn op_defaults_to_limits(nucleus: &Field) -> bool {
-        !matches!(nucleus, Field::Symbol(c) if matches!(*c, '\u{222B}'..='\u{2233}'))
+        !matches!(
+            nucleus,
+            Field::Symbol(c) if matches!(*c, '\u{222B}'..='\u{2233}' | '\u{2A0B}'..='\u{2A1C}')
+        )
     }
 
     /// Rule 13a: limits centered above and below the operator, the gap and
@@ -861,8 +868,12 @@ impl Ctx<'_> {
         cramped: bool,
     ) -> LaidBox {
         // A forced style (\tfrac, \dfrac, \cfrac) replaces the style
-        // around the fraction, scripts included: TeX's {\displaystyle ...}.
-        let style = forced.unwrap_or(style);
+        // around the fraction, scripts included, and is never cramped:
+        // TeX's {\displaystyle ...} sets the style whole.
+        let (style, cramped) = match forced {
+            Some(forced) => (forced, false),
+            None => (style, cramped),
+        };
         let c = self.font.constants();
         let u = self.unit(style);
         let display = style == MathStyle::Display;
@@ -1717,7 +1728,7 @@ mod tests {
         assert_eq!(shape(&dfrac_text), shape(&frac_display));
         assert!((dfrac_text.ascent - frac_display.ascent).abs() < EPS);
         // The style holds inside a script too: a \dfrac in a superscript
-        // is a display fraction at the script's size.
+        // is a display fraction at the text size, TeX's {\displaystyle}.
         let in_script = lay("x^{\\dfrac{1}{2}}");
         let plain_script = lay("x^{\\frac{1}{2}}");
         assert!(in_script.ascent > plain_script.ascent + 1.0);
@@ -1771,6 +1782,67 @@ mod tests {
         // The same spacing as an operator name the font already knew.
         let gap = |l: &MathLayout| l.glyphs[3].x - l.glyphs[2].x;
         assert!((gap(&l) - gap(&plain)).abs() < EPS);
+    }
+
+    #[test]
+    fn a_kern_s_scripts_land_after_the_gap() {
+        // `~^2` is TeX's `\nobreakspace{}^2`: the script sits on an empty
+        // nucleus after the gap, for the tie and the spacing commands.
+        let l = lay("a~^2 b");
+        let chars: String = l.glyphs.iter().filter_map(|g| g.ch).collect();
+        assert_eq!(chars, "\u{1D44E}2\u{1D44F}");
+        let two = l.glyphs.iter().find(|g| g.ch == Some('2')).unwrap();
+        assert!(two.y < -1.0, "a superscript, got y {}", two.y);
+        assert!(
+            two.x >= adv('\u{1D44E}') + 0.25 * SIZE - EPS,
+            "after the tie's gap, got x {}",
+            two.x
+        );
+        let l = lay("\\,^2");
+        assert_eq!(l.glyphs.len(), 1);
+    }
+
+    #[test]
+    fn a_forced_style_is_not_cramped() {
+        // A \dfrac in a denominator is TeX's {\displaystyle ...}, which is
+        // never cramped: its superscript rises as at the top level.
+        let f = font();
+        let top = layout("\\dfrac{x^2}{2}", MathStyle::Display, SIZE, &f);
+        let inside = layout("\\frac{1}{\\dfrac{x^2}{2}}", MathStyle::Display, SIZE, &f);
+        let rise = |l: &MathLayout| {
+            let x = l.glyphs.iter().find(|g| g.ch == Some('\u{1D465}')).unwrap();
+            let two = l.glyphs.iter().find(|g| g.ch == Some('2')).unwrap();
+            x.y - two.y
+        };
+        assert!(
+            (rise(&top) - rise(&inside)).abs() < EPS,
+            "{} at the top level, {} in the denominator",
+            rise(&top),
+            rise(&inside)
+        );
+    }
+
+    #[test]
+    fn a_quadruple_integral_keeps_its_limits_at_the_side() {
+        let f = font();
+        let l = layout("\\iiiint_V f", MathStyle::Display, SIZE, &f);
+        let v = l
+            .glyphs
+            .iter()
+            .find(|g| g.ch == Some('\u{1D449}'))
+            .expect("V");
+        let plain = layout("\\iiint_V f", MathStyle::Display, SIZE, &f);
+        let pv = plain
+            .glyphs
+            .iter()
+            .find(|g| g.ch == Some('\u{1D449}'))
+            .expect("V");
+        assert!(
+            (v.y - pv.y).abs() < EPS,
+            "the V at the side as for \\iiint: {} against {}",
+            v.y,
+            pv.y
+        );
     }
 
     #[test]
