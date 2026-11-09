@@ -126,7 +126,7 @@ fn every_command_noad_knows_is_on_the_page() {
 #[test]
 fn the_two_parts_have_their_anchors() {
     let doc = parse(PAGE.to_string());
-    for slug in ["lessons", "reference"] {
+    for slug in ["tutorial", "reference"] {
         assert!(
             doc.blocks.iter().any(|b| {
                 matches!(&b.kind, BlockKind::Heading { level: 2, anchor, .. } if anchor == slug)
@@ -134,5 +134,5 @@ fn the_two_parts_have_their_anchors() {
             "no level-two heading with the anchor {slug}"
         );
     }
-    assert!(PAGE.contains("[Lessons](#lessons)") && PAGE.contains("[Reference](#reference)"));
+    assert!(PAGE.contains("[Tutorial](#tutorial)") && PAGE.contains("[Reference](#reference)"));
 }

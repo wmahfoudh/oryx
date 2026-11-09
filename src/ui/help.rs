@@ -695,6 +695,11 @@ pub const TIPS: &[Tip] = &[
     Tip {
         kind: TipKind::Tip,
         area: Area::Markdown,
+        text: r#"Formulas accept the commands of TeX, LaTeX, AMS and MediaWiki, the math of Wikipedia. Press `F1` and follow the Math link on the first line to learn the notation and see every command, as written and as rendered."#,
+    },
+    Tip {
+        kind: TipKind::Tip,
+        area: Area::Markdown,
         text: r#"A YAML block between two `---` lines at the top of a file shows as a small metadata panel above the document."#,
     },
     Tip {
@@ -800,7 +805,7 @@ pub const TIPS: &[Tip] = &[
     Tip {
         kind: TipKind::Tip,
         area: Area::Help,
-        text: r#"`F1` opens the quick reference on a page of its own: every shortcut, then every markdown construct Oryx understands, as written and as rendered. Press `F1` again, or `Escape`, to close it."#,
+        text: r#"`F1` opens the quick reference: every shortcut, then every markdown construct Oryx understands, as written and as rendered. Press `F1` again, or `Escape`, to close it."#,
     },
     Tip {
         kind: TipKind::Note,
@@ -1527,14 +1532,14 @@ mod tests {
             "the page's sentences moved: {OPEN_IN_ORYX:?}"
         );
         assert!(!text.contains("open it there"), "{text}");
-        assert!(text.contains("\n## Lessons\n") && text.contains("\n## Reference\n"));
+        assert!(text.contains("\n## Tutorial\n") && text.contains("\n## Reference\n"));
     }
 
     /// The page's own links jump within it, as the quick reference's do.
     #[test]
     fn the_math_page_s_two_parts_resolve_to_headings() {
         let doc = crate::doc::markdown::parse(math_page());
-        for slug in ["lessons", "reference"] {
+        for slug in ["tutorial", "reference"] {
             assert!(
                 doc.blocks.iter().any(
                     |b| matches!(&b.kind, BlockKind::Heading { anchor, .. } if anchor == slug)

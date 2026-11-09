@@ -2,11 +2,11 @@
 
 Oryx typesets the TeX formulas of a markdown file with the STIX Two Math font. This page shows every command it knows. It is written for Oryx: open it there, or press `F1` and follow the Math link. GitHub does not render every command on it.
 
-The page has two parts. The [Lessons](#lessons) go from the first formula to the advanced ones. The [Reference](#reference) lists the commands by family.
+The page has two parts. The [Tutorial](#tutorial) goes from the first formula to the advanced ones. The [Reference](#reference) lists the commands by family.
 
-## Lessons
+## Tutorial
 
-Each lesson shows the markdown first, then what Oryx renders from it. The commands are those of TeX. Most of them also work in LaTeX, on Wikipedia and on GitHub.
+Each section shows the markdown first, then what Oryx renders from it. The commands are those of TeX. Most of them also work in LaTeX, on Wikipedia and on GitHub.
 
 ### Writing a formula
 
@@ -42,7 +42,7 @@ $$- \frac{a}{b} + c$$
 
 $$- \frac{a}{b} + c$$
 
-In the examples of this page, `\quad` and `\qquad` are wide spaces that separate the formulas on one line. The Spacing lesson has the others.
+In the examples of this page, `\quad` and `\qquad` are wide spaces that separate the formulas on one line. The Spacing section has the others.
 
 ### Letters and Greek
 
