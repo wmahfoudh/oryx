@@ -795,7 +795,7 @@ pub const TIPS: &[Tip] = &[
     Tip {
         kind: TipKind::Tip,
         area: Area::Books,
-        text: r#"The examples folder installed with Oryx has sample documents, a math sample, *The Adventures of Sherlock Holmes* to try the book reader, and an 8 MB markdown file to try a big one."#,
+        text: r#"The examples folder installed with Oryx has sample documents, *The Adventures of Sherlock Holmes* to try the book reader, and an 8 MB markdown file to try a big one."#,
     },
     Tip {
         kind: TipKind::Tip,
