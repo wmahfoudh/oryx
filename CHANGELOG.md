@@ -18,6 +18,8 @@
 - Formulas now accept `\big`, `\Big`, `\bigg` and `\Bigg` before a delimiter, with their `l`, `r` and `m` forms, as in `\bigl( x \bigr)`. Before, these words were shown as written.
 - Formulas now accept TeX's `\over`, `\atop`, `\choose`, `\brace` and `\brack` between the two halves of a group, as in `{n \choose k}`, and the switches `\bf`, `\rm`, `\it`, `\sf`, `\tt`, `\cal`, `\displaystyle`, `\textstyle`, `\scriptstyle` and `\scriptscriptstyle` over the rest of a group. Before, these words were shown as written.
 - Formulas now accept `\overline` and `\underline`, `\overbrace` and `\underbrace` with their limits, `\stackrel`, `\overset` and `\underset`, `\xrightarrow` and its kin with a text above and below, `\not` before a symbol, `\phantom`, `\vphantom` and `\hphantom`, and `\color` and `\textcolor` with xcolor's names or a `#rgb` or `#rrggbb` value. Before, these commands were shown as written.
+- A new page, `MATH.md`, teaches the math notation from the first formula to the advanced ones, then lists every command Oryx knows with how it renders and where it comes from. `F1` opens it from the Math link on the first line of the quick reference. Before, the syntax page had a short math section, and the examples folder a math sample.
+- The example file `markdown-challenge.md` now has the math of its Wikipedia articles as Wikipedia writes it, 2,949 formulas. Before, the formulas Oryx could not typeset were rewritten, or left out, when the file was made.
 
 #### Selection
 
