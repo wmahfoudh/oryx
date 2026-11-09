@@ -3732,6 +3732,7 @@ impl App {
     /// under an ending that skips the save question. The save dialog
     /// remembers the folder of the file open before.
     fn open_note(&mut self) {
+        self.close_path_ask();
         let Some(root) = notes_root() else {
             self.show_notice("No folder for a note");
             return;
@@ -5066,6 +5067,11 @@ impl App {
     /// back to the home folder, then to the working directory.
     fn open_path_ask(&mut self, ask: Ask, folder: Option<PathBuf>, name: Option<&str>, why: &str) {
         eprintln!("oryx: no file dialog ({why}); asking for the path in the window");
+        // The same chord again keeps what was typed.
+        if self.path_ask.as_ref().is_some_and(|state| state.ask == ask) {
+            self.wake_field_caret();
+            return;
+        }
         let folder = folder
             .or_else(config::home_dir)
             .or_else(|| std::env::current_dir().ok())
@@ -5110,7 +5116,7 @@ impl App {
     /// a character types, and the field's own editing keys act on it.
     /// Everything else falls through to the app-wide commands, never to
     /// the document.
-    fn path_key(&mut self, key: &Key, ctrl: bool, shift: bool, alt: bool) -> bool {
+    fn path_key(&mut self, key: &Key, ctrl: bool, shift: bool, alt: bool, repeat: bool) -> bool {
         if self.path_ask.is_none() || alt {
             return false;
         }
@@ -5119,8 +5125,12 @@ impl App {
                 self.close_path_ask();
                 true
             }
+            // A held Enter is one Enter: its repeats must not pass for
+            // the second Enter that replaces a file.
             Key::Named(NamedKey::Enter) => {
-                self.path_enter();
+                if !repeat {
+                    self.path_enter();
+                }
                 true
             }
             Key::Named(NamedKey::Tab) => true,
@@ -5180,7 +5190,9 @@ impl App {
             return;
         };
         let ask = state.ask;
-        let exists = state.path().is_some_and(|path| path.exists());
+        // A folder at the path is no file to replace: the write fails
+        // with its own notice, and an open is refused below.
+        let exists = state.path().is_some_and(|path| path.is_file());
         match state.enter(exists) {
             pathfield::Verdict::Nothing => {}
             pathfield::Verdict::Exists(path) => {
@@ -5192,6 +5204,10 @@ impl App {
             }
             pathfield::Verdict::Go(path) => match ask {
                 Ask::Open => {
+                    if path.is_dir() {
+                        self.show_notice("This path is a folder: add the file's name");
+                        return;
+                    }
                     if !path.exists() {
                         self.show_notice("Nothing is at this path");
                         return;
@@ -7376,6 +7392,9 @@ impl App {
     /// message instead and the app stays up. Dialog opens re-root the
     /// sidebar; sidebar clicks keep the tree in place.
     fn open_file(&mut self, path: &Path, reroot: bool) {
+        // A path asked for the outgoing document would name the incoming
+        // one: the field goes with the swap, as the export does.
+        self.close_path_ask();
         // An in-flight export steps against the document it was built
         // for; it cannot survive the swap. Its progress overlay dies
         // with it, since nothing would ever advance it again.
@@ -7804,6 +7823,9 @@ impl App {
     /// document is stashed whole, edits, undo and layout included, and
     /// nothing touches the disk in either direction.
     fn toggle_help(&mut self) {
+        // The help page is another document under the field, which would
+        // save or export it under the file's name.
+        self.close_path_ask();
         if self.help_stash.is_some() {
             self.help_return();
             return;
@@ -9858,7 +9880,7 @@ impl ApplicationHandler for App {
                         let result = overlay.key(panel_key, ctrl, shift);
                         self.overlay_result(result);
                     }
-                    _ if self.path_key(key, ctrl, shift, alt) => {}
+                    _ if self.path_key(key, ctrl, shift, alt, repeat) => {}
                     // The path field has the keyboard, under the go to
                     // line field's rule below.
                     _ if self.path_ask.is_some() => {

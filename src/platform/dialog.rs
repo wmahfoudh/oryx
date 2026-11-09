@@ -3,10 +3,13 @@
 //! from one the reader cancelled. On Linux the library asks the desktop
 //! portal and falls back to the `zenity` program; a system with neither,
 //! a window manager without a desktop (GitHub issue 12), gets an empty
-//! answer, the same as a cancel. The library reports each such failure
-//! through the `log` crate as an error record and a cancel as none, so
-//! a small logger keeps the last error record of the library, and an
-//! empty answer with one means the dialog could not appear.
+//! answer, the same as a cancel. The library reports its failures
+//! through the `log` crate as error records and a cancel as none, and
+//! it tries zenity after every portal failure, so no dialog appeared
+//! exactly when zenity could not run: a small logger keeps the last
+//! error record of the library, and an empty answer whose last error is
+//! zenity's means the dialog could not appear. A portal error alone
+//! means zenity ran and was dismissed, a cancel.
 
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -59,14 +62,16 @@ pub enum Answer {
     NoDialog(String),
 }
 
-/// Reads an empty answer against what the library logged during the
-/// call: a failure means no dialog appeared, none means a cancel. A
-/// path is a path whatever was logged.
+/// Reads an empty answer against the last error the library logged
+/// during the call: zenity failing to run means no dialog appeared, any
+/// other error came before a dialog that did appear (the portal's, with
+/// zenity run after it; a bus warning before a real dialog), and none
+/// means a cancel. A path is a path whatever was logged.
 pub fn classify(answer: Option<PathBuf>, failure: Option<String>) -> Answer {
     match (answer, failure) {
         (Some(path), _) => Answer::Path(path),
-        (None, Some(why)) => Answer::NoDialog(why),
-        (None, None) => Answer::Cancel,
+        (None, Some(why)) if why.contains("zenity") => Answer::NoDialog(why),
+        (None, _) => Answer::Cancel,
     }
 }
 
@@ -117,19 +122,43 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_answer_is_a_cancel_unless_the_library_failed() {
+    fn an_empty_answer_is_a_cancel_unless_zenity_failed_to_run() {
         let path = PathBuf::from("/tmp/a.md");
         assert!(matches!(classify(Some(path.clone()), None), Answer::Path(p) if p == path));
         assert!(
             matches!(
-                classify(Some(path.clone()), Some("late".into())),
+                classify(
+                    Some(path.clone()),
+                    Some("Failed to pick file with zenity: x".into())
+                ),
                 Answer::Path(_)
             ),
             "a path answers whatever was logged"
         );
         assert!(matches!(classify(None, None), Answer::Cancel));
+        let zenity = "Failed to save file with zenity: No such file or directory (os error 2)";
         assert!(
-            matches!(classify(None, Some("no bus".into())), Answer::NoDialog(why) if why == "no bus")
+            matches!(classify(None, Some(zenity.into())), Answer::NoDialog(why) if why == zenity)
+        );
+        // The portal failed and the library went on to zenity, which ran
+        // and was dismissed: the last error is the portal's, and the
+        // answer is a cancel.
+        assert!(
+            matches!(
+                classify(
+                    None,
+                    Some("Failed to connect to session bus: no address".into())
+                ),
+                Answer::Cancel
+            ),
+            "a portal failure alone means zenity ran"
+        );
+        assert!(
+            matches!(
+                classify(None, Some("Failed to add match rule: x".into())),
+                Answer::Cancel
+            ),
+            "a dialog that appeared and was cancelled after a bus warning"
         );
     }
 }
