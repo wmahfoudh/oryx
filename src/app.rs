@@ -3384,14 +3384,17 @@ impl App {
             return false;
         };
         // A file deleted on disk while read: its own bytes go back whole,
-        // through the ledger the checkbox click arms the same way.
-        if self.ledger.is_none() && self.file_deleted && self.writable() {
+        // through the ledger the checkbox click arms the same way. A file
+        // not yet on disk, `oryx notes.md` on a name that did not exist,
+        // is created by its first save, with nothing typed too.
+        let on_disk = self.disk_seen.is_some();
+        if self.ledger.is_none() && (self.file_deleted || !on_disk) && self.writable() {
             self.ensure_ledger();
         }
         let Some(ledger) = self.ledger.as_ref() else {
             return false;
         };
-        if !self.edits_unsaved() {
+        if !self.edits_unsaved() && on_disk {
             self.show_notice("No unsaved changes");
             return true;
         }
@@ -3401,6 +3404,8 @@ impl App {
             Ok(()) => {
                 let receipt = if back {
                     "Saved, the file is back".to_string()
+                } else if !on_disk {
+                    "Saved, the file is created".to_string()
                 } else if lines == 1 {
                     "Saved, 1 line changed".to_string()
                 } else {

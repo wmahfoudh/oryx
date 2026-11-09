@@ -147,6 +147,7 @@ On Linux, the command is `oryx`. On Windows and macOS, Oryx is called by its ful
 
 ```sh
 oryx README.md          # open a file
+oryx new-notes.md       # a file that does not exist yet opens empty, created by Ctrl+S
 oryx notes/             # open the sidebar on a folder
 oryx main.rs:412        # open a file at line 412
 oryx main.rs:412:10     # at line 412, column 10

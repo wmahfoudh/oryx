@@ -213,6 +213,8 @@ Closing, quitting or reloading with unsaved changes asks first: `S` saves, `D` d
 
 `Ctrl+N` creates a new file. The save dialog opens first, so Oryx knows the type of the file and its syntax colors, then the empty page is ready for typing.
 
+From a terminal, `oryx notes.md` on a file that does not exist yet opens the editor on the empty file, with the type its name says. `Ctrl+S` creates it. Until then nothing is written.
+
 `Ctrl+M` opens an empty markdown note in the editor, with no dialog. You choose its name and place the first time you press `Ctrl+S`. Until then, the note counts as unsaved work, and Oryx asks before closing or opening another file.
 
 Oryx keeps a copy of the note while you type. If Oryx closes without asking, after a crash or a power cut, the next start offers the note back: `R` recovers it, `D` discards it, and `Escape` keeps it for later.

@@ -93,8 +93,10 @@ fn usage() -> String {
         "oryx {}\n\n{USAGE_LINE}\n\n\
          Opens a markdown, code or text file, or a book (EPUB, FB2, MOBI,\n\
          AZW3, CBZ, CBR). A folder opens the sidebar on it. Without an\n\
-         argument the window explains how to open a file. FILE:412 opens\n\
-         the file at line 412, and FILE:412:10 at column 10 of that line.\n\
+         argument the window explains how to open a file. A file that does\n\
+         not exist yet opens empty in the editor, and the first save\n\
+         creates it. FILE:412 opens the file at line 412, and FILE:412:10\n\
+         at column 10 of that line.\n\
          Text piped in is shown too, as in `git diff | oryx`; a lone - asks\n\
          for standard input outright. Save it under a name to keep it.\n\n\
          Options:\n\
@@ -377,7 +379,7 @@ mod tests {
         assert_eq!(
             launch(Some(missing.clone())),
             app::Launch::File(missing),
-            "a missing path goes to the loader, whose error names it"
+            "a missing path goes to the loader, which opens it as the empty file it will be"
         );
         let with = |tail: &str| {
             let mut name = file.clone().into_os_string();

@@ -7,6 +7,7 @@
 #### Editor
 
 - When you type in a code file or in the source of a markdown file, the syntax colors now follow each key. Before, they came about half a second after the last key.
+- `oryx notes.md` on a file that does not exist now opens the editor on the empty file, with the type its name says, and `Ctrl+S` creates it. Before, Oryx said the file could not be read.
 
 #### Linux
 

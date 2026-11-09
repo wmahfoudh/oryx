@@ -260,8 +260,11 @@ pub struct Opened {
 }
 
 pub fn open(path: &Path, deadline: Option<Instant>) -> anyhow::Result<Opened> {
-    let bytes =
-        std::fs::read(path).map_err(|e| anyhow::anyhow!("cannot open {}: {e}", path.display()))?;
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => new_file_bytes(path, &e)?,
+        Err(e) => anyhow::bail!("cannot open {}: {e}", path.display()),
+    };
     if detect(path) == FileKind::Undisplayable {
         anyhow::bail!(
             "{} is a PDF file; Oryx does not display PDF files",
@@ -417,6 +420,32 @@ pub fn open(path: &Path, deadline: Option<Instant>) -> anyhow::Result<Opened> {
 /// Every code block whose highlight prefix is incomplete, for restarting
 /// the highlight worker after the parse swap. Unlike `apply_budget` it
 /// leaves computed highlights alone.
+/// A file that does not exist yet, in a folder that does, opens as the
+/// empty file it will be at the first save, as the editors do, when its
+/// name says text: markdown, code, plain or unknown. A book, a comic or
+/// a PDF that does not exist is an error, since nothing can be typed
+/// into one, and so is a file in a folder that does not exist; that
+/// error names the folder.
+fn new_file_bytes(path: &Path, err: &std::io::Error) -> anyhow::Result<Vec<u8>> {
+    let folder = match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    if !folder.is_dir() {
+        anyhow::bail!(
+            "cannot open {}: the folder {} does not exist",
+            path.display(),
+            folder.display()
+        );
+    }
+    match detect(path) {
+        FileKind::Markdown | FileKind::Code(_) | FileKind::Text | FileKind::Unknown => {
+            Ok(Vec::new())
+        }
+        _ => anyhow::bail!("cannot open {}: {err}", path.display()),
+    }
+}
+
 pub fn pending(doc: &Document) -> Vec<PendingBlock> {
     let mut pending = Vec::new();
     for (index, block) in doc.blocks.iter().enumerate() {
@@ -1956,8 +1985,45 @@ mod tests {
     }
 
     #[test]
-    fn missing_file_is_an_error() {
-        assert!(open(Path::new("/nonexistent/oryx-missing.md"), None).is_err());
+    fn a_missing_file_in_a_missing_folder_is_an_error_naming_the_folder() {
+        let err = open(Path::new("/nonexistent/oryx-missing.md"), None)
+            .err()
+            .expect("no folder, no file");
+        let text = err.to_string();
+        assert!(
+            text.contains("folder") && text.contains("/nonexistent"),
+            "the message names the missing folder: {text}"
+        );
+    }
+
+    /// `oryx notes.md` on a file that does not exist yet opens the empty
+    /// file it will be at the first save, as the editors do (the user's
+    /// ask of 09/11/2026); a book or a comic that does not exist is an
+    /// error, since nothing can be typed into one.
+    #[test]
+    fn a_missing_file_in_an_existing_folder_opens_as_the_empty_file_it_will_be() {
+        let dir = std::env::temp_dir().join(format!("oryx-load-new-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in ["notes.md", "main.rs", "plain.txt", "odd.xxx", "noext"] {
+            let opened = open(&dir.join(name), None).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert!(opened.document.source.is_empty(), "{name}: empty");
+            assert!(!opened.lossy && !opened.streamed, "{name}: a file to edit");
+            assert!(opened.book.is_none() && opened.pending.is_empty(), "{name}");
+            assert!(
+                !dir.join(name).exists(),
+                "{name}: nothing written by the open"
+            );
+        }
+        for name in [
+            "book.epub",
+            "book.fb2",
+            "book.mobi",
+            "comic.cbz",
+            "paper.pdf",
+        ] {
+            assert!(open(&dir.join(name), None).is_err(), "{name}: no new book");
+        }
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
