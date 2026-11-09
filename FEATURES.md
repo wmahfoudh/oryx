@@ -25,7 +25,7 @@ Footnote markers are raised in the text and numbered in the order they are used.
 
 ### Images and badges
 
-Oryx shows PNG, JPEG, GIF, WebP and SVG images. Images linked by URL are downloaded in the background and saved on disk, so a file with badges opens immediately the second time and still shows them offline. A saved image older than a day is downloaded again the next time the file opens. When an image cannot be found, Oryx shows a placeholder with its alt text, or its file name when there is no alt text.
+Oryx shows PNG, JPEG, GIF, WebP and SVG images. Images linked by URL are downloaded in the background and saved on disk, so a file with badges opens immediately the second time and still shows them offline. A saved image older than a day is downloaded again the next time the file opens. When an image cannot be found, Oryx shows a placeholder with its alt text, or its file name when there is no alt text. An image alone in its paragraph is centered, as in a book; `align="left"` or `align="right"` on an `<img>` tag places it, and an image with text on its line stays with the text.
 
 ### Embedded HTML
 

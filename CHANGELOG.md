@@ -21,6 +21,11 @@
 - A new page, `MATH.md`, teaches the math notation from the first formula to the advanced ones, then lists every command Oryx knows with how it renders and where it comes from. `F1` opens it from the Math link on the first line of the quick reference. Before, the syntax page had a short math section, and the examples folder a math sample.
 - The example file `markdown-challenge.md` now has the math of its Wikipedia articles as Wikipedia writes it, 2,949 formulas. Before, the formulas Oryx could not typeset were rewritten, or left out, when the file was made.
 
+#### Reader
+
+- An image alone in its paragraph is now centered, as a book's is, with or without a link around it. An image with text on its line, a line of badges and an image in a list item stay where they were. Before, a lone image stood at the left.
+- `align="left"`, `align="right"` or `align="center"` on an `<img>` tag alone in its paragraph now places the image. Before, the attribute was ignored.
+
 #### Selection
 
 - When you select with the mouse and drag above or below the window, the page now scrolls and the selection grows while you hold the button. The farther the pointer, the faster. Before, the page did not move.

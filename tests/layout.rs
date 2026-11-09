@@ -5798,21 +5798,210 @@ fn a_raised_pill_on_the_line_below_the_kept_one_is_not_kept() {
     }
 }
 
-#[test]
-fn a_lone_image_in_markdown_stays_at_the_left() {
-    // The standard reading of markdown: a book centers its lone images,
-    // a markdown page does not.
-    let dir = std::env::temp_dir().join(format!("oryx-laytest-left-{}", std::process::id()));
+/// A document with a small picture beside it, laid out under a
+/// direction: the picture is 100 by 50, in a folder of its own.
+fn lay_lone(source: &str, width: f32, direction: DirectionMode) -> (Document, LayoutDoc) {
+    let dir = std::env::temp_dir().join(format!(
+        "oryx-laytest-lone-{}-{}",
+        std::process::id(),
+        source.len()
+    ));
     std::fs::create_dir_all(&dir).unwrap();
     let img = image::RgbaImage::from_pixel(100, 50, image::Rgba([10, 20, 30, 255]));
     img.save(dir.join("small.png")).unwrap();
+    let doc = markdown::parse(source);
+    let mut media = MediaCache::offline(dir);
+    let c = ViewConfig { direction, ..cfg() };
+    let l = layout(
+        &doc,
+        &Theme::default_dark(),
+        &mut fonts(),
+        &mut media,
+        &c,
+        width,
+    );
+    (doc, l)
+}
+
+/// The middle of the content column at `width`, read from a centered
+/// paragraph of one letter.
+fn content_center(width: f32) -> f32 {
+    let run = &lay("<p align=\"center\">x</p>", width).runs[0];
+    run.x + run.width / 2.0
+}
+
+fn image_center(l: &LayoutDoc) -> f32 {
+    l.images[0].x + l.images[0].width / 2.0
+}
+
+#[test]
+fn a_lone_image_in_markdown_is_centered() {
+    // The user's ask of 09/11/2026: a picture alone in its paragraph is
+    // centered, as a book's is; the standard says nothing of placement.
+    let (_, l) = lay_lone("![small](small.png)", 800.0, DirectionMode::Auto);
+    assert_eq!(l.images.len(), 1);
+    assert!(
+        (image_center(&l) - content_center(800.0)).abs() < 0.5,
+        "the image's middle at {} against the column's {}",
+        image_center(&l),
+        content_center(800.0)
+    );
+    let (_, l) = lay_lone(
+        "<img src=\"small.png\" width=\"60\">",
+        800.0,
+        DirectionMode::Auto,
+    );
+    assert!(
+        (image_center(&l) - content_center(800.0)).abs() < 0.5,
+        "a sized image alone is centered too: {}",
+        image_center(&l)
+    );
+}
+
+#[test]
+fn a_lone_linked_image_is_centered_and_clickable_there() {
+    let (doc, l) = lay_lone(
+        "[![small](small.png)](https://z.tld)",
+        800.0,
+        DirectionMode::Auto,
+    );
+    assert!(
+        (image_center(&l) - content_center(800.0)).abs() < 0.5,
+        "the linked image's middle at {}",
+        image_center(&l)
+    );
+    let img = &l.images[0];
+    assert_eq!(
+        l.link_at(&doc, img.x + 5.0, img.y + 5.0),
+        Some("https://z.tld"),
+        "the hit area moved with the image"
+    );
+}
+
+#[test]
+fn an_image_with_text_on_its_line_stays_inline() {
     let margin = lay("text", 800.0).runs[0].x;
-    let l = lay_with_images("![small](small.png)", 800.0, dir);
+    let (_, l) = lay_lone(
+        "![small](small.png) and the words after it",
+        800.0,
+        DirectionMode::Auto,
+    );
+    assert!((l.images[0].x - margin).abs() < 0.5, "at {}", l.images[0].x);
+    // A picture taller than the line takes a row of its own under the
+    // word, at the left: the text is on its line, so nothing is centered.
+    let (_, l) = lay_lone("Before ![small](small.png)", 800.0, DirectionMode::Auto);
     assert!(
         (l.images[0].x - margin).abs() < 0.5,
-        "at {} with the margin at {margin}",
+        "under the word, at {}",
         l.images[0].x
     );
+    assert!(l.images[0].y > l.runs[0].y, "on its own row");
+}
+
+#[test]
+fn a_line_of_badges_stays_at_the_left() {
+    let margin = lay("text", 800.0).runs[0].x;
+    let (_, l) = lay_lone(
+        "![small](small.png) ![small](small.png)",
+        800.0,
+        DirectionMode::Auto,
+    );
+    assert_eq!(l.images.len(), 2);
+    assert!((l.images[0].x - margin).abs() < 0.5, "at {}", l.images[0].x);
+}
+
+#[test]
+fn an_image_placed_by_html_keeps_its_place() {
+    let margin = lay("text", 800.0).runs[0].x;
+    let (_, l) = lay_lone(
+        "<p align=\"left\"><img src=\"small.png\"></p>",
+        800.0,
+        DirectionMode::Auto,
+    );
+    assert!(
+        (l.images[0].x - margin).abs() < 0.5,
+        "left by the paragraph: {}",
+        l.images[0].x
+    );
+    let (_, l) = lay_lone(
+        "<img src=\"small.png\" align=\"left\">",
+        800.0,
+        DirectionMode::Auto,
+    );
+    assert!(
+        (l.images[0].x - margin).abs() < 0.5,
+        "left by the tag: {}",
+        l.images[0].x
+    );
+    let (_, l) = lay_lone(
+        "<p align=\"right\"><img src=\"small.png\"></p>",
+        800.0,
+        DirectionMode::Auto,
+    );
+    let right = 2.0 * content_center(800.0) - margin;
+    assert!(
+        (l.images[0].x + l.images[0].width - right).abs() < 0.5,
+        "right by the paragraph: {} wide at {}",
+        l.images[0].width,
+        l.images[0].x
+    );
+}
+
+#[test]
+fn a_lone_image_in_a_quote_is_centered_in_the_quote() {
+    // The reference is a letter centered by its own word inside a quote:
+    // the quote's content is narrower than the page's, so the middle
+    // stands right of the page's.
+    let run = &lay("> <p align=\"center\">x</p>", 800.0).runs[0];
+    let quote_center = run.x + run.width / 2.0;
+    assert!(
+        quote_center > content_center(800.0) + 5.0,
+        "the quote's middle at {quote_center}"
+    );
+    let (_, l) = lay_lone("> ![small](small.png)", 800.0, DirectionMode::Auto);
+    assert!(
+        (image_center(&l) - quote_center).abs() < 1.0,
+        "the image's middle at {} against the quote's {quote_center}",
+        image_center(&l)
+    );
+}
+
+#[test]
+fn a_lone_image_in_a_list_item_stays_at_the_item_s_text() {
+    let item_text = lay("- text", 800.0)
+        .runs
+        .iter()
+        .map(|r| r.x)
+        .fold(f32::MIN, f32::max);
+    let (_, l) = lay_lone("- ![small](small.png)", 800.0, DirectionMode::Auto);
+    assert!(
+        (l.images[0].x - item_text).abs() < 0.5,
+        "at {} against the item's text at {item_text}",
+        l.images[0].x
+    );
+}
+
+#[test]
+fn a_lone_image_in_a_right_to_left_paragraph_is_centered() {
+    let (_, l) = lay_lone("![small](small.png)", 800.0, DirectionMode::Rtl);
+    assert!(
+        (image_center(&l) - content_center(800.0)).abs() < 0.5,
+        "the image's middle at {}",
+        image_center(&l)
+    );
+}
+
+#[test]
+fn an_unloadable_lone_image_keeps_its_full_width_box() {
+    let margin = lay("text", 800.0).runs[0].x;
+    let right = 2.0 * content_center(800.0) - margin;
+    let (_, l) = lay_lone("![alt](missing.png)", 800.0, DirectionMode::Auto);
+    let outer = l
+        .rects
+        .iter()
+        .max_by(|a, b| a.width.total_cmp(&b.width))
+        .expect("the placeholder box");
+    assert!((outer.x - margin).abs() < 0.5 && (outer.x + outer.width - right).abs() < 1.0);
 }
 
 #[test]

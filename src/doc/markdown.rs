@@ -180,6 +180,11 @@ struct Builder {
     html_gap: bool,
     /// One entry per open `<p>`/`<div>`, true when it centers its content.
     html_divs: Vec<HtmlDiv>,
+    /// The `align` of the last `<img>` tag read, for a picture alone in
+    /// its paragraph, whose word it becomes.
+    image_align: Option<HtmlAlign>,
+    /// A word for the next block alone, ahead of the open divisions'.
+    block_align: Option<HtmlAlign>,
     html_code: u32,
     html_sub: u32,
     html_sup: u32,
@@ -589,6 +594,8 @@ impl Builder {
             html_tail: String::new(),
             html_gap: false,
             html_divs: Vec::new(),
+            image_align: None,
+            block_align: None,
             html_code: 0,
             html_sub: 0,
             html_sup: 0,
@@ -1393,6 +1400,7 @@ impl Builder {
                     width: html_attr(attrs, "width").and_then(|v| v.parse().ok()),
                     height: html_attr(attrs, "height").and_then(|v| v.parse().ok()),
                 }));
+                self.image_align = html_attr(attrs, "align").and_then(|a| HtmlAlign::parse(&a));
                 self.spans.push(span);
             }
             ("b" | "strong", false) => self.bold += 1,
@@ -1879,6 +1887,7 @@ impl Builder {
             return;
         }
         let spans = std::mem::take(&mut self.spans);
+        let image_word = self.image_align.take();
         if let Some(open) = self.footnote.as_mut() {
             let continued = std::mem::replace(&mut open.emitted, true);
             let (label, number) = (open.label.clone(), open.number);
@@ -1899,25 +1908,32 @@ impl Builder {
             }
         }
         // A paragraph that is one plain image and whitespace stays a block
-        // image; links, size attributes, or centering keep it inline.
-        if self.lists.is_empty() && self.html_divs.is_empty() {
-            let solo = spans
-                .iter()
-                .filter(|s| s.image.is_none())
-                .all(|s| s.raw_text().trim().is_empty());
-            let images: Vec<&Span> = spans.iter().filter(|s| s.image.is_some()).collect();
-            if solo && images.len() == 1 {
-                let span = images[0];
-                let image = span.image.as_ref().expect("image span");
-                if span.link.is_none() && image.width.is_none() && image.height.is_none() {
-                    let kind = BlockKind::Image {
-                        path: image.src.clone(),
-                        alt: span.raw_text().to_string(),
-                    };
-                    self.emit(kind);
-                    return;
-                }
+        // image; links, size attributes, or a word of the tag keep it
+        // inline, and the tag's `align` is the paragraph's word then.
+        let solo = spans
+            .iter()
+            .filter(|s| s.image.is_none())
+            .all(|s| s.raw_text().trim().is_empty());
+        let images: Vec<&Span> = spans.iter().filter(|s| s.image.is_some()).collect();
+        let lone = solo && images.len() == 1;
+        if lone && self.lists.is_empty() && self.html_divs.is_empty() {
+            let span = images[0];
+            let image = span.image.as_ref().expect("image span");
+            if span.link.is_none()
+                && image.width.is_none()
+                && image.height.is_none()
+                && image_word.is_none()
+            {
+                let kind = BlockKind::Image {
+                    path: image.src.clone(),
+                    alt: span.raw_text().to_string(),
+                };
+                self.emit(kind);
+                return;
             }
+        }
+        if lone && self.lists.is_empty() {
+            self.block_align = image_word;
         }
         if !self.lists.is_empty() {
             let depth = (self.lists.len() - 1) as u8;
@@ -1980,8 +1996,12 @@ impl Builder {
             BlockKind::Summary { group, .. } => self.details[*group as usize].parent,
             _ => self.details_stack.last().copied(),
         };
-        // The innermost open block that names a side decides.
-        let align = self.html_divs.iter().rev().find_map(|d| d.align);
+        // The block's own word first, then the innermost open block
+        // that names a side.
+        let align = self
+            .block_align
+            .take()
+            .or_else(|| self.html_divs.iter().rev().find_map(|d| d.align));
         self.blocks.push(Block {
             quote_depth: self.quote_depth,
             alert: self.alerts.iter().rev().find_map(|a| *a),
@@ -2747,6 +2767,25 @@ mod tests {
     /// `align="right"` on a p or div puts its blocks against the right
     /// edge, as GitHub does; center keeps working, and a plain block
     /// carries neither.
+    #[test]
+    fn an_image_tag_s_align_is_the_word_of_its_lone_paragraph() {
+        let d = parse("<img src=\"a.png\" align=\"right\">\n\nplain\n");
+        let image = &d.blocks[0];
+        assert!(
+            matches!(image.kind, BlockKind::Paragraph { .. }),
+            "a word on the tag keeps the image inline"
+        );
+        assert!(image.right && !image.centered && !image.left);
+        assert!(!d.blocks[1].right, "the word is the one paragraph's");
+        let d = parse("<img src=\"a.png\" align=\"left\"> and words\n");
+        assert!(!d.blocks[0].left, "an image among text keeps no word");
+        let d = parse("<img src=\"a.png\">\n");
+        assert!(
+            matches!(d.blocks[0].kind, BlockKind::Image { .. }),
+            "no word, the block image"
+        );
+    }
+
     #[test]
     fn html_align_right_marks_the_blocks_inside() {
         let d = parse("<p align=\"right\">\n\n[More tips...](tip:next)\n\n</p>\n\nplain\n");

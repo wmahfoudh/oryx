@@ -3183,7 +3183,7 @@ fn replay_position(
             }
         }
     }
-    if let Some(factor) = block.align_factor() {
+    if let Some(factor) = block_factor(block, &doc.source) {
         align_lines(
             out, run_mark, rect_mark, image_mark, math_mark, x_base, avail, factor,
         );
@@ -3295,7 +3295,7 @@ fn finish_block(
     pass: &mut LayoutPass,
     source: &str,
 ) {
-    if let Some(factor) = block.align_factor() {
+    if let Some(factor) = block_factor(block, source) {
         align_lines(
             out,
             frame.marks.runs,
@@ -5709,6 +5709,34 @@ fn close_line(line: &mut Option<FlowLine>, y: &mut f32, size: f32) {
         if l.row {
             *y = l.top + l.height + 0.25 * size;
         }
+    }
+}
+
+/// Where a block's lines go in the room the content width leaves them:
+/// the block's own word when it has one (`<p align="center">`, a book's
+/// stylesheet), else the middle for a picture alone in its paragraph,
+/// which the page centers as a book does (the user's ask of 09/11/2026),
+/// else nothing. A list item or a footnote keeps its picture after the
+/// marker, which stands on the same line and would move with it.
+fn block_factor(block: &Block, source: &str) -> Option<f32> {
+    block
+        .align_factor()
+        .or_else(|| lone_image(block, source).then_some(0.5))
+}
+
+/// A paragraph that is one picture and nothing else, whatever its link
+/// or size, or the block the reader makes of a plain one.
+fn lone_image(block: &Block, source: &str) -> bool {
+    match &block.kind {
+        BlockKind::Image { .. } => true,
+        BlockKind::Paragraph { spans } => {
+            spans.iter().filter(|s| s.image.is_some()).count() == 1
+                && spans
+                    .iter()
+                    .filter(|s| s.image.is_none())
+                    .all(|s| s.text(source).trim().is_empty())
+        }
+        _ => false,
     }
 }
 
