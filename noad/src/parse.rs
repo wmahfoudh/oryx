@@ -684,7 +684,7 @@ pub const NEGATIONS: &[(char, char)] = &[
 
 /// xcolor's base colors, the names `\color` and `\textcolor` take beside
 /// the `#rgb` and `#rrggbb` forms; sorted.
-const COLORS: &[(&str, [u8; 3])] = &[
+pub const COLORS: &[(&str, [u8; 3])] = &[
     ("black", [0, 0, 0]),
     ("blue", [0, 0, 255]),
     ("brown", [191, 128, 64]),
@@ -798,28 +798,159 @@ pub const OP_NAMES: &[(&str, bool)] = &[
     ("tanh", false),
 ];
 
-/// The explicit spacing commands, in ems of the current style.
+/// The explicit spacing commands and their widths in ems of the current
+/// style, sorted for binary search: TeX's seven, then KaTeX's macros.
+pub const SPACING_WORDS: &[(&str, f32)] = &[
+    (" ", 0.25),
+    ("!", -3.0 / 18.0),
+    (",", 3.0 / 18.0),
+    (":", 4.0 / 18.0),
+    (";", 5.0 / 18.0),
+    ("enspace", 0.5),
+    ("medspace", 4.0 / 18.0),
+    ("negmedspace", -4.0 / 18.0),
+    ("negthickspace", -5.0 / 18.0),
+    ("negthinspace", -3.0 / 18.0),
+    ("nobreakspace", 0.25),
+    ("qquad", 2.0),
+    ("quad", 1.0),
+    ("space", 0.25),
+    ("thickspace", 5.0 / 18.0),
+    ("thinspace", 3.0 / 18.0),
+];
+
 fn spacing_ems(name: &str) -> Option<f32> {
-    Some(match name {
-        "," => 3.0 / 18.0,
-        ":" => 4.0 / 18.0,
-        ";" => 5.0 / 18.0,
-        "!" => -3.0 / 18.0,
-        " " => 0.25,
-        "quad" => 1.0,
-        "qquad" => 2.0,
-        // KaTeX's spacing macros.
-        "enspace" => 0.5,
-        "thinspace" => 3.0 / 18.0,
-        "medspace" => 4.0 / 18.0,
-        "thickspace" => 5.0 / 18.0,
-        "negthinspace" => -3.0 / 18.0,
-        "negmedspace" => -4.0 / 18.0,
-        "negthickspace" => -5.0 / 18.0,
-        "nobreakspace" | "space" => 0.25,
-        _ => return None,
-    })
+    SPACING_WORDS
+        .binary_search_by(|row| row.0.cmp(name))
+        .ok()
+        .map(|i| SPACING_WORDS[i].1)
 }
+
+/// The command words the parser handles outside its tables: the arms of
+/// the dispatch in `atom`, the words of `Marker::of`, `\color`, the
+/// macro definitions and the limits words read after an operator, each
+/// with its family, sorted. The example `tables`
+/// prints them for the math reference page, and a test parses each word
+/// with an argument of its family. A word added to the dispatch or to
+/// `Marker::of` is added here too, or the page does not list it.
+pub const COMMANDS: &[(&str, &str)] = &[
+    ("Bbb", "alphabet"),
+    ("Big", "sized"),
+    ("Bigg", "sized"),
+    ("Biggl", "sized"),
+    ("Biggm", "sized"),
+    ("Biggr", "sized"),
+    ("Bigl", "sized"),
+    ("Bigm", "sized"),
+    ("Bigr", "sized"),
+    ("atop", "infix"),
+    ("begin", "environment"),
+    ("bf", "font"),
+    ("big", "sized"),
+    ("bigg", "sized"),
+    ("biggl", "sized"),
+    ("biggm", "sized"),
+    ("biggr", "sized"),
+    ("bigl", "sized"),
+    ("bigm", "sized"),
+    ("bigr", "sized"),
+    ("binom", "fraction"),
+    ("bm", "alphabet"),
+    ("bmod", "modulo"),
+    ("bold", "alphabet"),
+    ("boldsymbol", "alphabet"),
+    ("brace", "infix"),
+    ("brack", "infix"),
+    ("cal", "font"),
+    ("cfrac", "fraction"),
+    ("choose", "infix"),
+    ("color", "color"),
+    ("dbinom", "fraction"),
+    ("dfrac", "fraction"),
+    ("displaystyle", "style"),
+    ("end", "environment"),
+    ("frac", "fraction"),
+    ("frak", "alphabet"),
+    ("hbox", "text"),
+    ("hphantom", "phantom"),
+    ("it", "font"),
+    ("left", "delimiter"),
+    ("limits", "limits"),
+    ("mathbb", "alphabet"),
+    ("mathbf", "alphabet"),
+    ("mathbin", "class"),
+    ("mathcal", "alphabet"),
+    ("mathclose", "class"),
+    ("mathfrak", "alphabet"),
+    ("mathinner", "class"),
+    ("mathit", "alphabet"),
+    ("mathnormal", "alphabet"),
+    ("mathop", "class"),
+    ("mathopen", "class"),
+    ("mathord", "class"),
+    ("mathpunct", "class"),
+    ("mathrel", "class"),
+    ("mathrm", "alphabet"),
+    ("mathscr", "alphabet"),
+    ("mathsf", "alphabet"),
+    ("mathtt", "alphabet"),
+    ("mbox", "text"),
+    ("mod", "modulo"),
+    ("newcommand", "macro"),
+    ("nolimits", "limits"),
+    ("not", "negation"),
+    ("operatorname", "text"),
+    ("over", "infix"),
+    ("overbrace", "decoration"),
+    ("overline", "decoration"),
+    ("overset", "decoration"),
+    ("phantom", "phantom"),
+    ("pmod", "modulo"),
+    ("renewcommand", "macro"),
+    ("right", "delimiter"),
+    ("rm", "font"),
+    ("scr", "alphabet"),
+    ("scriptscriptstyle", "style"),
+    ("scriptstyle", "style"),
+    ("sf", "font"),
+    ("sqrt", "root"),
+    ("stackrel", "decoration"),
+    ("tbinom", "fraction"),
+    ("text", "text"),
+    ("textcolor", "color"),
+    ("textnormal", "text"),
+    ("textrm", "text"),
+    ("textstyle", "style"),
+    ("textup", "text"),
+    ("tfrac", "fraction"),
+    ("tt", "font"),
+    ("underbrace", "decoration"),
+    ("underline", "decoration"),
+    ("underset", "decoration"),
+    ("vphantom", "phantom"),
+    ("xLeftarrow", "arrow"),
+    ("xLeftrightarrow", "arrow"),
+    ("xRightarrow", "arrow"),
+    ("xleftarrow", "arrow"),
+    ("xleftrightarrow", "arrow"),
+    ("xmapsto", "arrow"),
+    ("xrightarrow", "arrow"),
+];
+
+/// The environments `\begin` accepts, the arms of `environment`, sorted.
+/// A name added there is added here too, or the page does not list it.
+pub const ENVIRONMENTS: &[&str] = &[
+    "Bmatrix",
+    "Vmatrix",
+    "aligned",
+    "array",
+    "bmatrix",
+    "cases",
+    "matrix",
+    "pmatrix",
+    "smallmatrix",
+    "vmatrix",
+];
 
 /// One letter-style command's codepoint remap into the Mathematical
 /// Alphanumeric block, Letterlike Symbols holes included. A character
@@ -3033,6 +3164,65 @@ mod tests {
         }
         for pair in COLORS.windows(2) {
             assert!(pair[0].0 < pair[1].0, "{} before {}", pair[0].0, pair[1].0);
+        }
+        for pair in SPACING_WORDS.windows(2) {
+            assert!(pair[0].0 < pair[1].0, "{} before {}", pair[0].0, pair[1].0);
+        }
+        for pair in COMMANDS.windows(2) {
+            assert!(pair[0].0 < pair[1].0, "{} before {}", pair[0].0, pair[1].0);
+        }
+        for pair in ENVIRONMENTS.windows(2) {
+            assert!(pair[0] < pair[1], "{} before {}", pair[0], pair[1]);
+        }
+    }
+
+    /// Every word the dispatch and the markers handle is in `COMMANDS`,
+    /// and each parses without a literal when given an argument of its
+    /// family: a word dropped from the parser fails here by name, and a
+    /// family without a sample fails at once.
+    #[test]
+    fn every_command_word_parses_without_a_literal() {
+        for &(name, family) in COMMANDS {
+            let tex = match family {
+                "fraction" => format!("\\{name}{{a}}{{b}}"),
+                "infix" => format!("{{a \\{name} b}}"),
+                "root" | "phantom" | "arrow" | "alphabet" | "class" | "text" => {
+                    format!("\\{name}{{a}}")
+                }
+                "delimiter" => "\\left( a \\right)".to_string(),
+                "sized" => format!("\\{name}("),
+                "modulo" if name == "bmod" => "a \\bmod b".to_string(),
+                "modulo" => format!("a \\{name}{{b}}"),
+                "decoration" if matches!(name, "stackrel" | "overset" | "underset") => {
+                    format!("\\{name}{{a}}{{b}}")
+                }
+                "decoration" => format!("\\{name}{{a}}"),
+                "negation" => "\\not=".to_string(),
+                "color" if name == "color" => "\\color{red} a".to_string(),
+                "color" => format!("\\{name}{{red}}{{a}}"),
+                "environment" => "\\begin{matrix} a \\end{matrix}".to_string(),
+                "font" | "style" => format!("{{\\{name} a}}"),
+                "limits" => format!("\\sum\\{name}_a^b"),
+                "macro" => format!("\\{name}{{\\z}}{{a}}\\z"),
+                other => panic!("\\{name}: the family {other} has no sample"),
+            };
+            let literals = parse(&tex).literals();
+            assert!(
+                literals.is_empty(),
+                "\\{name} ({family}): {tex} left {literals:?}"
+            );
+        }
+    }
+
+    /// Every environment of the list parses to a table, `array` with its
+    /// column specification.
+    #[test]
+    fn every_environment_of_the_list_parses_to_a_table() {
+        for &name in ENVIRONMENTS {
+            let spec = if name == "array" { "{cc}" } else { "" };
+            let tex = format!("\\begin{{{name}}}{spec} a & b \\\\ c & d \\end{{{name}}}");
+            let literals = parse(&tex).literals();
+            assert!(literals.is_empty(), "{name}: {tex} left {literals:?}");
         }
     }
 

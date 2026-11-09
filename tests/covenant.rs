@@ -51,6 +51,12 @@ fn corpus() -> Vec<(String, Vec<u8>)> {
             }
         }
     }
+    // The math reference page at the root: hundreds of formulas in table
+    // cells, the widest math the covenant sees.
+    let page = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("MATH.md");
+    if let Ok(bytes) = std::fs::read(&page) {
+        files.push((page.display().to_string(), bytes));
+    }
     files.push((
         "synthetic: crlf".into(),
         b"first\r\nsecond\r\nthird\r\n".to_vec(),
