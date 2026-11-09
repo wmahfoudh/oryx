@@ -1160,6 +1160,11 @@ fn markdown_help() -> Document {
     oryx::doc::markdown::parse(help::page())
 }
 
+/// The math page of the help, `MATH.md` with its way back.
+fn markdown_math() -> Document {
+    oryx::doc::markdown::parse(help::math_page())
+}
+
 /// The viewer's justification for a document: the book preference on a
 /// book, the markdown preference on other prose, never on code and
 /// text files.
@@ -7619,16 +7624,21 @@ impl App {
             reopen,
             seams,
         }));
-        self.document = markdown_help();
-        // The page's code blocks get the exact sweep a file gets at
-        // open. Left cold, they are colored by the guess of the band in
-        // view alone, and two of them near the view keep the guess
-        // running without end (issue #9).
+        self.show_help_document(markdown_help(), "Oryx quick reference");
+    }
+
+    /// A page of the help on the screen, the quick reference or the math
+    /// page, the document set aside kept in the stash. The page's code
+    /// blocks get the exact sweep a file gets at open. Left cold, they
+    /// are colored by the guess of the band in view alone, and two of
+    /// them near the view keep the guess running without end (issue #9).
+    fn show_help_document(&mut self, document: Document, title: &str) {
+        self.document = document;
         self.start_highlight(load::pending(&self.document));
         self.outline = OutlineTree::build(&self.document);
         self.cfg.justify = justify_pref(&self.config, &self.document);
-        // The help page opens in automatic direction. The direction of
-        // the document set aside is its own: the stash keeps it, and
+        // The help opens in automatic direction. The direction of the
+        // document set aside is its own: the stash keeps it, and
         // `help_return` gives it back.
         self.cfg.direction = DirectionMode::Auto;
         self.scroll_y = 0.0;
@@ -7640,9 +7650,30 @@ impl App {
         self.pending_recolor.clear();
         self.bottom_hold.clear();
         if let Some(gfx) = self.gfx.as_ref() {
-            gfx.window.set_title("Oryx quick reference");
+            gfx.window.set_title(title);
         }
         self.request_redraw();
+    }
+
+    /// From one page of the help to the other, on a `help:` link: the
+    /// page shown goes with its layout, its seams, its selection, its
+    /// search and its places. The stash is not touched, so the return
+    /// is the same from either page. Outside the help the link does
+    /// nothing.
+    fn swap_help_page(&mut self, document: Document, title: &str) {
+        if self.help_stash.is_none() {
+            return;
+        }
+        self.start_highlight(Vec::new());
+        self.rehighlight_at = None;
+        self.seams.clear();
+        self.close_search();
+        self.sel_anchor = None;
+        self.selection = None;
+        std::mem::take(&mut self.history);
+        self.layout = None;
+        self.pass = None;
+        self.show_help_document(document, title);
     }
 
     /// Back from the help page: the stashed document returns as it
@@ -8262,6 +8293,10 @@ impl App {
             self.scroll_to(anchor);
         } else if target == help::NEXT_TIP_LINK {
             self.next_tip();
+        } else if target == help::MATH_LINK {
+            self.swap_help_page(markdown_math(), "Oryx math reference");
+        } else if target == help::QUICK_LINK {
+            self.swap_help_page(markdown_help(), "Oryx quick reference");
         } else if let Some(rest) = target.strip_prefix("book:") {
             // An internal book link: the whole model first, so a forward
             // reference resolves, then the anchor map answers.
