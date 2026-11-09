@@ -343,27 +343,7 @@ $$
 
 All four GitHub notations typeset through the same TeX engine in STIX Two Math. Oryx infers whether a dollar sign is a currency or a math delimiter: a digit right after a closing dollar, as in `$5-$10`, keeps it text. A backslash before `%`, `#`, `&`, `$` or `_` shows the character, as in KaTeX. A bare `%` starts a comment, as in TeX.
 
-```latex
-x_i^2 \quad \frac{a}{b} \quad \binom{n}{k} \quad \sqrt[3]{x^3+y^3}
-\left( \frac{a}{b} \right)^2 \quad \sum_{n=1}^{\infty} \quad \oint_0^1
-\hat{x} \quad \widehat{abc} \quad \vec{v} \quad \overrightarrow{AB}
-\mathbb{R} \quad \mathbf{v} \quad \mathcal{L} \quad \mathfrak{g}
-\text{if } \quad \mathrm{d}x \quad \operatorname{Var}(X) \quad \lim_{x \to 0}
-\alpha \quad \Omega \quad \hbar \quad \forall \quad \nleq \quad \hookrightarrow
-a\,b \quad c\;d \quad e\!f \quad g \qquad h
-\begin{pmatrix} a & b \\ c & d \end{pmatrix}
-\begin{cases} x & x \geq 0 \\ -x & x < 0 \end{cases}
-\begin{aligned} x &= y \\ z &= w \end{aligned}
-\newcommand{\avg}[1]{\left\langle #1 \right\rangle} \avg{x^2}
-```
-
-A few of these, rendered:
-
-$$
-\begin{pmatrix} a & b \\ c & d \end{pmatrix} \quad \sqrt[3]{x^3+y^3} \quad \begin{cases} x & x \geq 0 \\ -x & x < 0 \end{cases} \quad \mathbb{R} \quad \hat{x}
-$$
-
-The command vocabulary follows KaTeX's: Greek letters with their variants, binary operators, relations and their negations, arrows, big operators, delimiters, the seven math alphabets, accents, operator names, spacing, and the environments `matrix`, `pmatrix`, `bmatrix`, `Bmatrix`, `vmatrix`, `Vmatrix`, `smallmatrix`, `cases`, `aligned` and `array`. `\newcommand` and `\renewcommand` define macros with up to nine parameters and one optional default. Anything the engine does not recognize renders as its literal source in place, and runaway macro definitions degrade the same way.
+[MATH.md](MATH.md) teaches the math from the first formula to the advanced ones and lists every command Oryx knows, with how it renders and where it comes from.
 
 ## Frontmatter
 

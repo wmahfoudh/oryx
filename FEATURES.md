@@ -39,7 +39,7 @@ Oryx typesets math written in TeX with the STIX Two Math font: fractions, roots,
 
 The commands are compatible with KaTeX: Greek letters, operators, relations and their negations, arrows, accents, the math alphabets, operator names, spacing, the matrix environments, and `\newcommand` macros. An unknown command is shown as written, and the rest of the formula renders normally. A formula wider than the window is reduced to fit, within a limit.
 
-Math is included in the PDF export, and text copied from the PDF reads back as the formula's characters. The supported commands are listed in [SYNTAX.md](SYNTAX.md#math), and [examples/sample-math.md](examples/sample-math.md) shows many of them in one document.
+Math is included in the PDF export, and text copied from the PDF reads back as the formula's characters. [MATH.md](MATH.md) teaches the math from the first formula to the advanced ones and lists every command, with how it renders and where it comes from. `F1` opens the same page from the quick reference.
 
 ## Text and code
 

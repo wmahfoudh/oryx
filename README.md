@@ -57,7 +57,7 @@ Oryx opens files fast enough that it does not need tabs: you save, click another
 
 Oryx reads CommonMark and GitHub Flavored Markdown: tables, task lists, strikethrough, footnotes, alerts and math. It also renders the HTML that GitHub allows in a README, like centered blocks, badges and collapsible sections, so a README looks in Oryx the way it looks on GitHub. Remote images and badges are saved on disk: they still show when you are offline.
 
-Oryx also reads the extended syntax of the Markdown Guide, which GitHub does not: highlight, subscript and superscript, definition lists and abbreviations. Math written in TeX is typeset with the STIX Two Math font, and it looks the same in the PDF. [SYNTAX.md](SYNTAX.md) shows every supported construct. `F1` opens a mini help that shows the same reference and Oryx shortcuts.
+Oryx also reads the extended syntax of the Markdown Guide, which GitHub does not: highlight, subscript and superscript, definition lists and abbreviations. Math written in TeX is typeset with the STIX Two Math font, and it looks the same in the PDF. [SYNTAX.md](SYNTAX.md) shows every supported construct, and [MATH.md](MATH.md) teaches the math and lists every command. `F1` opens a mini help with the same reference, the math page and Oryx shortcuts.
 
 <p align="center"><img src="images/markdown.png" alt="Oryx rendering an alert, a table and typeset math" width="800"></p>
 

@@ -1,6 +1,6 @@
 # Oryx shortcuts
 
-Oryx has no menus: you use it with the keys of this page, and with the mouse. The same list opens inside Oryx with `F1`, together with the markdown syntax.
+Oryx has no menus: you use it with the keys of this page, and with the mouse. The same list opens inside Oryx with `F1`, together with the markdown syntax and the math page.
 
 On macOS, use `Cmd` where this page says `Ctrl`, and `Cmd+[` / `Cmd+]` in place of `Alt+Left` / `Alt+Right`. The `Alt` key is the Option key: a shortcut with `Alt` holds by the key printed on the keycap, and `Alt+1` and `Alt+.` by the place of their key as well. Option with Shift, or with a key that types a plain character, types it as usual. `Alt+R` works in the search bar only: elsewhere, Option+R gives ®.
 
@@ -119,7 +119,7 @@ With text selected, typing a bracket, a quote, `*`, `_` or a backtick wraps the 
 
 | Key | What it does |
 |---|---|
-| `F1` | Open and close the help page: every shortcut and the markdown syntax |
+| `F1` | Open and close the help page: every shortcut, the markdown syntax and the math page |
 | `Escape` | Close what is open, clear the selection, leave editing, quit |
 
 ## Mouse and touch
