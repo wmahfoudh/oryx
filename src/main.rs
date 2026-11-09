@@ -305,6 +305,9 @@ fn main() -> ExitCode {
                 eprintln!("oryx: {message}");
                 return ExitCode::FAILURE;
             }
+            // The file dialogs' failures are read from here on, so a
+            // dialog that cannot appear gets the path field instead.
+            oryx::platform::dialog::install();
             use std::io::IsTerminal;
             let second_window = second || recover.is_some();
             let terminal = std::io::stdin().is_terminal();

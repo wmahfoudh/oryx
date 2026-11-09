@@ -7,6 +7,7 @@ pub mod notice;
 pub mod occurrences;
 pub mod outline;
 pub mod overlay;
+pub mod pathfield;
 pub mod scrollbar;
 pub mod search;
 pub mod selection;

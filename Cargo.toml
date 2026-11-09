@@ -25,6 +25,9 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 # The X11 keyboard libraries, loaded before winit does, for a plain line
 # when one is missing.
 libloading = "0.8"
+# The records of the file dialog library, read to tell a dialog that could
+# not appear from a cancel; already in the tree through rfd.
+log = "0.4"
 miniz_oxide = "0.8"
 noad = { path = "noad" }
 open = "5"

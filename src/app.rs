@@ -31,6 +31,7 @@ use oryx::paint;
 use oryx::paint::painter::Painter;
 use oryx::paint::scroll::{self, BandCache};
 use oryx::platform::config::{self, Config, WindowState};
+use oryx::platform::dialog::{self, Answer};
 use oryx::platform::notes;
 use oryx::platform::save;
 #[cfg(target_os = "linux")]
@@ -48,6 +49,7 @@ use oryx::ui::notice::{self, Notice};
 use oryx::ui::occurrences::{self, Occurrences};
 use oryx::ui::outline::{entry_offset, heading_anchor, heading_by_anchor, OutlineTree};
 use oryx::ui::overlay::{Action, Overlay, OverlayResult};
+use oryx::ui::pathfield::{self, Ask, PathState};
 use oryx::ui::scrollbar;
 use oryx::ui::search::{self, BarHit, ReplaceRow, SearchState};
 use oryx::ui::selection::{self, window_rects, ModelPos, Selection};
@@ -368,6 +370,8 @@ pub fn run(
         occurrences: None,
         occurrences_at: None,
         goto: None,
+        path_ask: None,
+        pending_export: None,
         pending_goto: launch_target,
         search_canvas: None,
         last_query: String::new(),
@@ -1278,7 +1282,7 @@ fn live_caret(owner: KeyOwner, editing: bool, focused: bool) -> Option<CaretAt> 
     }
     match owner {
         KeyOwner::Question | KeyOwner::Dialog { field: false } => None,
-        KeyOwner::Dialog { field: true } | KeyOwner::GoTo | KeyOwner::Search => {
+        KeyOwner::Dialog { field: true } | KeyOwner::Path | KeyOwner::GoTo | KeyOwner::Search => {
             Some(CaretAt::Field)
         }
         KeyOwner::Text => editing.then_some(CaretAt::Text),
@@ -1676,6 +1680,12 @@ struct App {
     /// The go to line field while it is open; never beside the search
     /// bar, since both stand in the same corner and take the keys.
     goto: Option<GotoState>,
+    /// The path field while it is open: a file dialog that could not
+    /// appear asks for the path in the window instead. Never beside the
+    /// search bar or the go to line field, which take the same corner.
+    path_ask: Option<PathState>,
+    /// The export whose target the path field asks for, until it answers.
+    pending_export: Option<ExportSettings>,
     /// A line asked for while the file's text was still arriving, from
     /// the command line or the field: the jump waits for the whole
     /// source, since a line is counted from the top of it.
@@ -2517,6 +2527,8 @@ impl App {
             KeyOwner::Dialog {
                 field: overlay.field_has_keys(),
             }
+        } else if self.path_ask.is_some() {
+            KeyOwner::Path
         } else if self.goto.is_some() {
             KeyOwner::GoTo
         } else if self.search.is_some() {
@@ -3512,36 +3524,57 @@ impl App {
         if self.ledger.is_none() && self.writable() {
             self.ensure_ledger();
         }
-        let Some(ledger) = self.ledger.as_ref() else {
+        if self.ledger.is_none() {
             if self.document.book_id.is_some() {
                 self.show_notice("A book cannot be saved as a text file");
             } else if self.path.is_some() {
                 self.show_notice("This file did not read cleanly, so Oryx will not write it back");
             }
             return false;
-        };
-        let bytes = ledger.emit();
-        let mut dialog = rfd::FileDialog::new();
+        }
         let home = config::home_dir();
-        if let Some(dir) = save_dialog_dir(
+        let folder = save_dialog_dir(
             self.unnamed(),
             self.note_from.as_deref(),
             self.path.as_deref(),
             home.as_deref(),
-        ) {
-            dialog = dialog.set_directory(dialog_start(dir));
-        }
-        if let Some(name) = self
+        )
+        .map(dialog_start);
+        let name = self
             .path
             .as_deref()
             .and_then(Path::file_name)
             .and_then(|n| n.to_str())
-        {
+            .map(str::to_string);
+        let mut dialog = rfd::FileDialog::new();
+        if let Some(dir) = folder.clone() {
+            dialog = dialog.set_directory(dir);
+        }
+        if let Some(name) = name.as_deref() {
             dialog = dialog.set_file_name(name);
         }
-        let Some(target) = dialog.save_file() else {
+        let target = match dialog::save_file(dialog) {
+            Answer::Path(target) => target,
+            Answer::Cancel => return false,
+            Answer::NoDialog(why) => {
+                self.open_path_ask(Ask::SaveAs, folder, name.as_deref(), &why);
+                return false;
+            }
+        };
+        self.save_as_to(target)
+    }
+
+    /// The current text written to `target`, which becomes the open
+    /// file, as `save_as` says; the ledger is read here, at the moment
+    /// of the write, since the path field answers later than the key.
+    fn save_as_to(&mut self, target: PathBuf) -> bool {
+        if self.ledger.is_none() && self.writable() {
+            self.ensure_ledger();
+        }
+        let Some(ledger) = self.ledger.as_ref() else {
             return false;
         };
+        let bytes = ledger.emit();
         match save::write_atomic(&target, &bytes) {
             Ok(()) => {
                 let editing = self.mode == edit::Mode::Edit;
@@ -3589,19 +3622,31 @@ impl App {
     /// type, then the empty file created, opened with the sidebar moved
     /// to its folder, and edit mode entered on the blank page.
     fn new_file(&mut self) {
-        let mut dialog = rfd::FileDialog::new().set_file_name("untitled.txt");
         // The document's folder, which for the note and piped text is
         // the one they came from, never Oryx's own folder that goes at
         // quit with anything saved into it.
-        if let Some(dir) = self.document_dir() {
-            dialog = dialog.set_directory(dialog_start(dir));
+        let folder = self.document_dir().map(dialog_start);
+        let mut dialog = rfd::FileDialog::new().set_file_name("untitled.txt");
+        if let Some(dir) = folder.clone() {
+            dialog = dialog.set_directory(dir);
         }
-        let Some(target) = dialog.save_file() else {
-            return;
+        let target = match dialog::save_file(dialog) {
+            Answer::Path(target) => target,
+            Answer::Cancel => return,
+            Answer::NoDialog(why) => {
+                self.open_path_ask(Ask::New, folder, Some("untitled.txt"), &why);
+                return;
+            }
         };
+        self.create_new_file(target);
+    }
+
+    /// The empty file created at `target` and opened in the editor, the
+    /// sidebar on its folder. False when the file could not be written.
+    fn create_new_file(&mut self, target: PathBuf) -> bool {
         if let Err(err) = save::write_atomic(&target, b"") {
             self.show_notice(&format!("Could not create the file: {err}"));
-            return;
+            return false;
         }
         self.open_file(&target, true);
         // An empty file lands in the editor by `open_file`'s own rule; a
@@ -3609,6 +3654,7 @@ impl App {
         if self.mode != edit::Mode::Edit {
             self.toggle_edit();
         }
+        true
     }
 
     /// True while the open file is the untitled note.
@@ -4915,6 +4961,7 @@ impl App {
     /// typing replaces it; Ctrl+F on an open bar reselects the same way.
     fn open_search(&mut self) {
         self.close_goto();
+        self.close_path_ask();
         if let Some(state) = self.search.as_mut() {
             state.query.select_all();
             if let Some(row) = state.replace.as_mut() {
@@ -5008,8 +5055,169 @@ impl App {
             return;
         }
         self.close_search();
+        self.close_path_ask();
         self.goto = Some(GotoState::new(goto::line_count(&self.document.source)));
         self.request_redraw();
+    }
+
+    /// A file dialog could not appear: the path field opens in its
+    /// place, on the folder and the name the dialog would have offered,
+    /// and the library's reason goes to the terminal. The folder falls
+    /// back to the home folder, then to the working directory.
+    fn open_path_ask(&mut self, ask: Ask, folder: Option<PathBuf>, name: Option<&str>, why: &str) {
+        eprintln!("oryx: no file dialog ({why}); asking for the path in the window");
+        let folder = folder
+            .or_else(config::home_dir)
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_default();
+        self.close_search();
+        self.close_goto();
+        self.path_ask = Some(PathState::new(ask, folder, name));
+        self.wake_field_caret();
+        self.request_redraw();
+    }
+
+    fn close_path_ask(&mut self) {
+        if self.path_ask.take().is_some() {
+            self.pending_export = None;
+            self.search_mouse = false;
+            self.request_redraw();
+        }
+    }
+
+    /// A press on the path field puts its caret under the pointer; the
+    /// press is the field's, so the page under it stays as it was.
+    fn path_bar_press(&mut self) -> bool {
+        let Some(width) = self.logical_width() else {
+            return false;
+        };
+        let (x, y) = self.ui_cursor();
+        let Some(state) = self
+            .path_ask
+            .as_mut()
+            .filter(|_| pathfield::bar_hit(width, x, y))
+        else {
+            return false;
+        };
+        let (left, offsets) = (state.view.left, state.view.offsets.clone());
+        state.field.click(x - left, &offsets, Instant::now());
+        self.search_mouse = true;
+        self.request_redraw();
+        true
+    }
+
+    /// Keys the open path field consumes: Enter answers, Escape closes,
+    /// a character types, and the field's own editing keys act on it.
+    /// Everything else falls through to the app-wide commands, never to
+    /// the document.
+    fn path_key(&mut self, key: &Key, ctrl: bool, shift: bool, alt: bool) -> bool {
+        if self.path_ask.is_none() || alt {
+            return false;
+        }
+        match key {
+            Key::Named(NamedKey::Escape) => {
+                self.close_path_ask();
+                true
+            }
+            Key::Named(NamedKey::Enter) => {
+                self.path_enter();
+                true
+            }
+            Key::Named(NamedKey::Tab) => true,
+            Key::Character(s) if ctrl && s.eq_ignore_ascii_case("v") => {
+                if self.clipboard.is_none() {
+                    self.clipboard = arboard::Clipboard::new()
+                        .map_err(|err| eprintln!("oryx: no clipboard: {err}"))
+                        .ok();
+                }
+                let text = self.clipboard.as_mut().and_then(|c| c.get_text().ok());
+                let state = self.path_ask.as_mut().expect("path field open");
+                if let Some(text) = text
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|t| pathfield::accepts(t))
+                {
+                    state.field.insert(text);
+                    self.request_redraw();
+                }
+                true
+            }
+            Key::Character(s)
+                if ctrl
+                    && (s.eq_ignore_ascii_case("c") || s.eq_ignore_ascii_case("x"))
+                    && !shift =>
+            {
+                let state = self.path_ask.as_mut().expect("path field open");
+                let text = state.field.selected_text().to_string();
+                if !text.is_empty() {
+                    if s.eq_ignore_ascii_case("x") {
+                        state.field.delete_selection();
+                    }
+                    self.set_clipboard(text);
+                    self.request_redraw();
+                }
+                true
+            }
+            key => {
+                let state = self.path_ask.as_mut().expect("path field open");
+                match state.field.key(key, ctrl, shift) {
+                    Edit::Ignored => false,
+                    Edit::Handled | Edit::Changed => {
+                        self.request_redraw();
+                        true
+                    }
+                }
+            }
+        }
+    }
+
+    /// Enter on the path field: the flow that asked goes on with the
+    /// path. An existing file is named once and replaced on the next
+    /// Enter; a path that leads nowhere for an open, or a write that
+    /// fails, gets the flow's notice and the field stays open.
+    fn path_enter(&mut self) {
+        let Some(state) = self.path_ask.as_mut() else {
+            return;
+        };
+        let ask = state.ask;
+        let exists = state.path().is_some_and(|path| path.exists());
+        match state.enter(exists) {
+            pathfield::Verdict::Nothing => {}
+            pathfield::Verdict::Exists(path) => {
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                self.show_notice(&format!("{name} exists. Press Enter again to replace it"));
+            }
+            pathfield::Verdict::Go(path) => match ask {
+                Ask::Open => {
+                    if !path.exists() {
+                        self.show_notice("Nothing is at this path");
+                        return;
+                    }
+                    self.close_path_ask();
+                    self.open_chosen(path);
+                }
+                Ask::SaveAs => {
+                    if self.save_as_to(path) {
+                        self.close_path_ask();
+                    }
+                }
+                Ask::New => {
+                    if self.create_new_file(path) {
+                        self.close_path_ask();
+                    }
+                }
+                Ask::Export => {
+                    let settings = self.pending_export.take();
+                    self.close_path_ask();
+                    if let Some(settings) = settings {
+                        self.export_to(settings, path);
+                    }
+                }
+            },
+        }
     }
 
     /// A press on the go to line field puts its caret under the
@@ -5944,13 +6152,14 @@ impl App {
             );
             let result = overlay.click(x, y);
             self.overlay_result(result);
-        } else if self.search_bar_press() || self.goto_bar_press() {
+        } else if self.search_bar_press() || self.goto_bar_press() || self.path_bar_press() {
         } else {
             // A click anywhere off the bar closes it, the panels' own
             // outside-click manner; the click still acts on what it hit,
             // and the document owns every key again.
             self.close_search();
             self.close_goto();
+            self.close_path_ask();
             if self.sidebar_edge_press() {
             } else if (self.cursor.x as f32) < self.inset() && self.sidebar.is_some() {
                 let (x, y) = self.ui_cursor();
@@ -7448,10 +7657,6 @@ impl App {
 
     /// Asks where the file goes, then starts the pass that writes it.
     fn start_export(&mut self, settings: ExportSettings) {
-        // The export steps against the document it is built for; a
-        // prefix would write a truncated file.
-        self.finish_parse();
-        let (theme, fell_back) = export::resolve_theme(&theme_dirs(), &settings.theme, &self.theme);
         let stem = self
             .path
             .as_ref()
@@ -7464,14 +7669,30 @@ impl App {
             self.remembered_dir(),
             config::home_dir(),
         ]);
-        let target = rfd::FileDialog::new()
-            .set_file_name(format!("{stem}.pdf"))
-            .set_directory(dialog_start(start))
-            .add_filter("PDF", &["pdf"])
-            .save_file();
-        let Some(target) = target else {
-            return;
+        let folder = dialog_start(start);
+        let name = format!("{stem}.pdf");
+        let dialog = rfd::FileDialog::new()
+            .set_file_name(&name)
+            .set_directory(&folder)
+            .add_filter("PDF", &["pdf"]);
+        let target = match dialog::save_file(dialog) {
+            Answer::Path(target) => target,
+            Answer::Cancel => return,
+            Answer::NoDialog(why) => {
+                self.pending_export = Some(settings);
+                self.open_path_ask(Ask::Export, Some(folder), Some(&name), &why);
+                return;
+            }
         };
+        self.export_to(settings, target);
+    }
+
+    /// The pass that writes the PDF at `target`, its progress shown.
+    fn export_to(&mut self, settings: ExportSettings, target: PathBuf) {
+        // The export steps against the document it is built for; a
+        // prefix would write a truncated file.
+        self.finish_parse();
+        let (theme, fell_back) = export::resolve_theme(&theme_dirs(), &settings.theme, &self.theme);
         let pass = ExportPass::new(&settings, theme, target)
             .with_toc(self.book_toc.clone())
             .with_direction(self.cfg.direction);
@@ -7545,11 +7766,20 @@ impl App {
             self.remembered_dir(),
             config::home_dir(),
         ]);
-        dialog = dialog.set_directory(dialog_start(start));
-        if let Some(path) = dialog.pick_file() {
-            if self.guard_unsaved(confirm::Pending::Open(path.clone(), true)) {
-                self.open_file(&path, true);
-            }
+        let folder = dialog_start(start);
+        dialog = dialog.set_directory(&folder);
+        match dialog::pick_file(dialog) {
+            Answer::Path(path) => self.open_chosen(path),
+            Answer::Cancel => {}
+            Answer::NoDialog(why) => self.open_path_ask(Ask::Open, Some(folder), None, &why),
+        }
+    }
+
+    /// The file the open dialog or the path field named, opened with
+    /// the sidebar on its folder once any unsaved edits are settled.
+    fn open_chosen(&mut self, path: PathBuf) {
+        if self.guard_unsaved(confirm::Pending::Open(path.clone(), true)) {
+            self.open_file(&path, true);
         }
     }
 
@@ -9101,6 +9331,29 @@ impl App {
                 *stale = painter.dirty();
             }
         }
+        // The path field borrows the same canvas, for the same reason.
+        if let Some(state) = self.path_ask.as_mut() {
+            let fits = self
+                .search_canvas
+                .as_ref()
+                .is_some_and(|(p, _)| p.width() == size.width && p.height() == size.height);
+            if !fits {
+                self.search_canvas =
+                    tiny_skia::Pixmap::new(size.width, size.height).map(|pixmap| (pixmap, None));
+            }
+            if let Some((canvas, stale)) = self.search_canvas.as_mut() {
+                let mut painter = Painter::new(canvas, &mut self.fonts, stale.take(), self.scale);
+                pathfield::draw_bar(
+                    &mut painter,
+                    &self.theme,
+                    state,
+                    size.width as f32 / self.scale,
+                    field_lit && owner == KeyOwner::Path,
+                );
+                painter.composite(&mut buffer, size.width);
+                *stale = painter.dirty();
+            }
+        }
         // A notice takes the same corner for its two seconds.
         let noticed = self
             .notice
@@ -9604,6 +9857,14 @@ impl ApplicationHandler for App {
                         let overlay = self.overlay.as_mut().expect("overlay open");
                         let result = overlay.key(panel_key, ctrl, shift);
                         self.overlay_result(result);
+                    }
+                    _ if self.path_key(key, ctrl, shift, alt) => {}
+                    // The path field has the keyboard, under the go to
+                    // line field's rule below.
+                    _ if self.path_ask.is_some() => {
+                        if let Some(cmd) = resolved {
+                            self.run_command(cmd, event_loop);
+                        }
                     }
                     _ if self.goto_key(key, ctrl, shift, alt) => {}
                     // The go to line field has the keyboard, under the
@@ -11394,6 +11655,7 @@ mod tests {
             (KeyOwner::Question, None),
             (KeyOwner::Dialog { field: false }, None),
             (KeyOwner::Dialog { field: true }, Some(CaretAt::Field)),
+            (KeyOwner::Path, Some(CaretAt::Field)),
             (KeyOwner::GoTo, Some(CaretAt::Field)),
             (KeyOwner::Search, Some(CaretAt::Field)),
         ];

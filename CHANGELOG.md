@@ -75,6 +75,7 @@
 - A formula inside a table cell is now typeset like the formulas of a paragraph, and the row grows to its height. Before, the cell showed the formula's text.
 - A `$$` formula inside a table cell now stays in its cell, in display style. Before, it was shown as a block above the table, and its cell lost it.
 - An inline formula wider than its column or its cell now shrinks to fit, down to half its size, as a display formula does. Before, it ran past the right edge. The picture of such a formula in a copy is whole too. Before, it was cut at the right.
+- On Linux without a desktop portal and without zenity, such as a window manager alone on Wayland, `Ctrl+O`, `Ctrl+Shift+S`, `Ctrl+N`, `Ctrl+P` and `Ctrl+S` on a new note now ask for the path in a field at the top of the window. Enter opens, saves or exports to that path, and Escape cancels. Before, nothing happened and nothing was said.
 
 ## v1.2.2
 

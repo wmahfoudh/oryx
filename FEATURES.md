@@ -143,6 +143,8 @@ On a touch screen, a swipe scrolls the document, the sidebar and the dialogs, an
 
 A dialog closes with `Escape`, or with a click outside it.
 
+The file dialogs are the system's. On Linux they come from the desktop portal, or from zenity when there is no portal. On a system with neither, such as a window manager without a desktop, Oryx asks for the path in a field at the top of the window instead: Enter opens, saves or exports to that path, and Escape cancels. A save onto an existing file asks for a second Enter.
+
 ### What Oryx remembers
 
 The size and position of the window, the theme, the sidebar and the last folder are restored each time Oryx starts. While Oryx is open, each file you switch away from comes back as you left it: a file you were editing comes back in the editor, at the same spot, and a code file at the line you were reading.

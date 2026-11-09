@@ -160,6 +160,8 @@ pub enum KeyOwner {
     Dialog {
         field: bool,
     },
+    /// The path field, open when a file dialog could not appear.
+    Path,
     GoTo,
     Search,
     /// The editor, or the page in reading mode.
@@ -1859,6 +1861,7 @@ mod tests {
             KeyOwner::Question,
             KeyOwner::Dialog { field: false },
             KeyOwner::Dialog { field: true },
+            KeyOwner::Path,
             KeyOwner::GoTo,
             KeyOwner::Search,
             KeyOwner::Text,
