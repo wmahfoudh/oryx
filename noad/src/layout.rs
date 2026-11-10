@@ -1103,7 +1103,9 @@ impl Ctx<'_> {
         match nucleus {
             Field::Symbol(c) => Some(*c),
             Field::Colored { body, .. } => match body.0.as_slice() {
-                [Noad::Atom(a)] => Self::char_of(&a.nucleus),
+                // A character with scripts of its own is a box for the
+                // scripts around the color.
+                [Noad::Atom(a)] if a.sup.is_none() && a.sub.is_none() => Self::char_of(&a.nucleus),
                 _ => None,
             },
             _ => None,
@@ -3281,5 +3283,42 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_script_on_a_colored_group_with_a_script_is_raised_above_it() {
+        // As `{x^2}^3`: the outer script clears the inner one.
+        let plain = lay("{x^2}^3");
+        let colored = lay("\\textcolor{red}{x^2}^3");
+        let (two, three) = (glyph_by_ch(&plain, '2'), glyph_by_ch(&plain, '3'));
+        assert!(
+            three.y < two.y - 0.5,
+            "the model: {} above {}",
+            three.y,
+            two.y
+        );
+        let (c2, c3) = (glyph_by_ch(&colored, '2'), glyph_by_ch(&colored, '3'));
+        assert!(
+            (c3.y - three.y).abs() < 0.01,
+            "{} against {}",
+            c3.y,
+            three.y
+        );
+        assert!((c2.y - two.y).abs() < 0.01);
+        // A colored character alone keeps the character's rule.
+        let (a, b) = (lay("x^2"), lay("\\textcolor{red}{x}^2"));
+        assert!((glyph_by_ch(&a, '2').y - glyph_by_ch(&b, '2').y).abs() < 0.01);
+    }
+
+    #[test]
+    fn a_color_before_over_reaches_the_closing_delimiter() {
+        let l = lay("\\left( \\color{red} A \\over B \\right)");
+        assert_eq!(glyph_by_ch(&l, '(').color, None);
+        assert_eq!(glyph_by_ch(&l, '\u{1D434}').color, Some([255, 0, 0]));
+        assert_eq!(glyph_by_ch(&l, '\u{1D435}').color, Some([255, 0, 0]));
+        assert_eq!(glyph_by_ch(&l, ')').color, Some([255, 0, 0]));
+        // A color scoped by `\textcolor` ends with its group.
+        let l = lay("\\left( \\textcolor{red}{A} \\right)");
+        assert_eq!(glyph_by_ch(&l, ')').color, None);
     }
 }

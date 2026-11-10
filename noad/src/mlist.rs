@@ -202,46 +202,67 @@ impl MathList {
     /// formula typesets.
     pub fn literals(&self) -> Vec<String> {
         let mut out = Vec::new();
-        self.collect_literals(&mut out);
+        self.collect_literals(&mut out, false);
         out
     }
 
-    fn collect_literals(&self, out: &mut Vec<String>) {
+    /// What the page shows as written: the literals, and with them the
+    /// texts that hold a command (`\text{\alpha}`), which a text shows
+    /// by its name. The probe of a file and the test of the math page
+    /// read this.
+    pub fn shown_as_written(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        self.collect_literals(&mut out, true);
+        out
+    }
+
+    fn collect_literals(&self, out: &mut Vec<String>, texts: bool) {
         for atom in self.atoms() {
             // Exhaustive on purpose: a field added later must say where
             // its literals are.
             match &atom.nucleus {
                 Field::Literal(text) => out.push(text.clone()),
-                Field::List(list) => list.collect_literals(out),
+                Field::List(list) => list.collect_literals(out, texts),
                 Field::Fraction {
                     numerator,
                     denominator,
                     ..
                 } => {
-                    numerator.collect_literals(out);
-                    denominator.collect_literals(out);
+                    numerator.collect_literals(out, texts);
+                    denominator.collect_literals(out, texts);
                 }
                 Field::Radical { radicand, degree } => {
                     if let Some(degree) = degree {
-                        degree.collect_literals(out);
+                        degree.collect_literals(out, texts);
                     }
-                    radicand.collect_literals(out);
+                    radicand.collect_literals(out, texts);
                 }
                 Field::LeftRight { body, .. }
                 | Field::Phantom { body, .. }
-                | Field::Colored { body, .. } => body.collect_literals(out),
+                | Field::Colored { body, .. } => body.collect_literals(out, texts),
                 Field::Line { base, .. } | Field::Brace { base, .. } | Field::Negated { base } => {
-                    base.collect_literals(out)
+                    base.collect_literals(out, texts)
                 }
                 Field::Arrow { above, below, .. } => {
-                    above.collect_literals(out);
-                    below.collect_literals(out);
+                    above.collect_literals(out, texts);
+                    below.collect_literals(out, texts);
                 }
-                Field::Accent { base, .. } => base.collect_literals(out),
+                Field::Accent { base, .. } => base.collect_literals(out, texts),
                 Field::Table { rows, .. } => {
                     for row in rows {
                         for cell in row {
-                            cell.collect_literals(out);
+                            cell.collect_literals(out, texts);
+                        }
+                    }
+                }
+                // A text that holds a command shows it as written:
+                // `\text{\alpha}`, where TeX would typeset the letter.
+                Field::Text(text) if texts => {
+                    let mut chars = text.chars().peekable();
+                    while let Some(c) = chars.next() {
+                        if c == '\\' && chars.next().is_some_and(|d| d.is_ascii_alphabetic()) {
+                            out.push(text.clone());
+                            break;
                         }
                     }
                 }
@@ -252,10 +273,10 @@ impl MathList {
                 | Field::Empty => {}
             }
             if let Some(list) = &atom.sup {
-                list.collect_literals(out);
+                list.collect_literals(out, texts);
             }
             if let Some(list) = &atom.sub {
-                list.collect_literals(out);
+                list.collect_literals(out, texts);
             }
         }
     }

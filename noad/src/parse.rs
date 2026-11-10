@@ -574,6 +574,7 @@ pub fn parse(tex: &str) -> MathList {
         macros: std::collections::HashMap::new(),
         expansions: EXPANSION_CAP,
         spliced: 0,
+        depth: 0,
     };
     parser.list(true)
 }
@@ -1234,6 +1235,110 @@ fn delimiter_of(kind: &crate::token::TokenKind) -> Option<Option<char>> {
     }
 }
 
+/// The operator names written in two words with a thin space between
+/// them, as amsmath (`amsopn.sty`: `lim\,inf`) and KaTeX (`arg\,max`)
+/// define them.
+const SPACED_NAMES: &[(&str, &str, &str)] = &[
+    ("argmax", "arg", "max"),
+    ("argmin", "arg", "min"),
+    ("injlim", "inj", "lim"),
+    ("liminf", "lim", "inf"),
+    ("limsup", "lim", "sup"),
+    ("projlim", "proj", "lim"),
+];
+
+/// The nucleus of an operator name of two words: the words upright, a
+/// thin space between them.
+fn spaced_name(name: &str, span: &std::ops::Range<usize>) -> Option<Field> {
+    let (_, first, second) = SPACED_NAMES.iter().find(|row| row.0 == name)?;
+    let part = |nucleus: Field| {
+        Noad::Atom(Atom {
+            class: AtomClass::Ord,
+            nucleus,
+            sup: None,
+            sub: None,
+            limits: Limits::default(),
+            span: span.clone(),
+            nucleus_span: span.clone(),
+        })
+    };
+    Some(Field::List(MathList(vec![
+        part(Field::Text((*first).into())),
+        part(Field::Kern(3.0 / 18.0)),
+        part(Field::Text((*second).into())),
+    ])))
+}
+
+/// Joins the upright letters of `\mathrm{...}` read as math into words:
+/// neighbors without scripts become one text, shaped as a word, and a
+/// letter's scripts stay at the word's end.
+fn join_text(list: &mut MathList) {
+    let mut out: Vec<Noad> = Vec::with_capacity(list.0.len());
+    for noad in std::mem::take(&mut list.0) {
+        if let (Some(Noad::Atom(prev)), Noad::Atom(next)) = (out.last_mut(), &noad) {
+            let joins = prev.sup.is_none()
+                && prev.sub.is_none()
+                && prev.class == AtomClass::Ord
+                && next.class == AtomClass::Ord;
+            if let (true, Field::Text(a), Field::Text(b)) =
+                (joins, &mut prev.nucleus, &next.nucleus)
+            {
+                a.push_str(b);
+                prev.sup = next.sup.clone();
+                prev.sub = next.sub.clone();
+                prev.span.end = prev.span.end.max(next.span.end);
+                prev.nucleus_span.end = prev.nucleus_span.end.max(next.nucleus_span.end);
+                continue;
+            }
+        }
+        out.push(noad);
+    }
+    list.0 = out;
+}
+
+/// The text of a `\text{...}` as TeX reads its source: a `%` not
+/// escaped opens a comment that runs through the line's end and the
+/// blanks that open the next line, and a line break or a tab among
+/// blanks is one space.
+fn text_spaces(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut chars = raw.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => {
+                out.push(c);
+                if let Some(next) = chars.next() {
+                    out.push(next);
+                }
+            }
+            '%' => {
+                for skipped in chars.by_ref() {
+                    if skipped == '\n' {
+                        break;
+                    }
+                }
+                while chars.peek().is_some_and(|d| *d == ' ' || *d == '\t') {
+                    chars.next();
+                }
+            }
+            c if c.is_whitespace() => {
+                let mut run = String::from(c);
+                while let Some(d) = chars.peek().filter(|d| d.is_whitespace()) {
+                    run.push(*d);
+                    chars.next();
+                }
+                if run.contains(['\n', '\r', '\t']) {
+                    out.push(' ');
+                } else {
+                    out.push_str(&run);
+                }
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 /// The class an atom had on its own: a binary operator alone in its group
 /// reads as ordinary by TeX's rule 5, and `\overset`, `\textcolor` and
 /// kin, which take the operand's class for the whole, give it back. Any
@@ -1456,7 +1561,13 @@ impl Group {
             },
             None => atom,
         };
-        MathList(vec![Noad::Atom(atom)])
+        // The color holds to the group's end: the noad after the fraction
+        // says so to `\right`, which closes the group.
+        let mut list = vec![Noad::Atom(atom)];
+        if let Some(color) = color {
+            list.push(Noad::Color(color));
+        }
+        MathList(list)
     }
 }
 
@@ -1617,7 +1728,15 @@ struct Parser<'a> {
     macros: std::collections::HashMap<String, Macro>,
     expansions: usize,
     spliced: usize,
+    /// The atoms being read, one inside the other.
+    depth: usize,
 }
+
+/// The deepest nesting the parser follows, TeX's own order of size (its
+/// grouping levels end at 255). Each level is a frame of the parser and
+/// later of the layout, on a worker's stack: a group past the cap is a
+/// literal, shown as written.
+const MAX_DEPTH: usize = 100;
 
 impl Parser<'_> {
     fn peek(&self) -> Option<&crate::token::Token> {
@@ -1751,6 +1870,41 @@ impl Parser<'_> {
     /// every construct that reads atoms; whenever the stream is nonempty
     /// the call consumes at least one token.
     fn atom(&mut self) -> Option<Atom> {
+        if self.depth >= MAX_DEPTH {
+            return self.too_deep();
+        }
+        self.depth += 1;
+        let atom = self.atom_within();
+        self.depth -= 1;
+        atom
+    }
+
+    /// The token at the stream's head past the deepest nesting, with its
+    /// group when it opens one, as a literal.
+    fn too_deep(&mut self) -> Option<Atom> {
+        use crate::token::TokenKind as K;
+        let tok = self.next()?;
+        let start = tok.origin.clone().unwrap_or_else(|| tok.span.clone());
+        let mut end = start.end;
+        if matches!(tok.kind, K::BeginGroup) {
+            let mut depth = 1usize;
+            while let Some(inner) = self.next() {
+                match inner.kind {
+                    K::BeginGroup => depth += 1,
+                    K::EndGroup => depth -= 1,
+                    _ => {}
+                }
+                end = end.max(inner.origin.as_ref().unwrap_or(&inner.span).end);
+                if depth == 0 {
+                    break;
+                }
+            }
+        }
+        let text = self.src.get(start.start..end).unwrap_or("{").to_string();
+        Some(literal_atom(text, tok.span.start..tok.span.end.max(end)))
+    }
+
+    fn atom_within(&mut self) -> Option<Atom> {
         use crate::token::TokenKind as K;
         let mut expanded = false;
         let tok = loop {
@@ -1873,7 +2027,7 @@ impl Parser<'_> {
                         self.pos += 1;
                     }
                     let mut atom = self.text(tok.span, &name);
-                    if matches!(atom.nucleus, Field::Text(_)) {
+                    if matches!(atom.nucleus, Field::Text(_) | Field::List(_)) {
                         atom.class = AtomClass::Op;
                         atom.limits = if star {
                             Limits::Default
@@ -1930,7 +2084,8 @@ impl Parser<'_> {
                     {
                         Atom {
                             class: AtomClass::Op,
-                            nucleus: Field::Text(name.clone()),
+                            nucleus: spaced_name(&name, &tok.span)
+                                .unwrap_or_else(|| Field::Text(name.clone())),
                             sup: None,
                             sub: None,
                             limits: if OP_NAMES[i].1 {
@@ -2137,14 +2292,43 @@ impl Parser<'_> {
             }
             content.push(tok);
         }
-        let raw = text_between(self.src, &open, &content, close.as_ref());
+        // `\mathrm` and `\operatorname` are math in TeX: a group that holds
+        // a command, a script or a group is read as a formula and set
+        // upright, its letters joined into words. A group of characters
+        // alone stays the one text it is.
+        let math = matches!(name, "mathrm" | "operatorname")
+            && content.iter().any(|t| {
+                matches!(
+                    t.kind,
+                    K::Command(_) | K::Sup | K::Sub | K::BeginGroup | K::Prime
+                )
+            });
+        if math {
+            let mut list = self.sub_list(content);
+            restyle(&mut list, "mathrm");
+            join_text(&mut list);
+            return self.construct(start, Field::List(list), AtomClass::Ord);
+        }
+        let raw = text_spaces(&text_between(self.src, &open, &content, close.as_ref()));
         // TeX's tie is a space inside text as well; `\~`, the tilde
-        // accent, keeps its tilde.
+        // accent, keeps its tilde. An escaped character of TeX's syntax
+        // is the character, and `\ ` a space.
         let mut text = String::with_capacity(raw.len());
-        let mut escaped = false;
-        for c in raw.chars() {
-            text.push(if c == '~' && !escaped { ' ' } else { c });
-            escaped = c == '\\' && !escaped;
+        let mut chars = raw.chars().peekable();
+        while let Some(c) = chars.next() {
+            match (c, chars.peek().copied()) {
+                ('\\', Some(d)) if "%$&_#{} ".contains(d) => {
+                    text.push(d);
+                    chars.next();
+                }
+                ('\\', Some(d)) => {
+                    text.push(c);
+                    text.push(d);
+                    chars.next();
+                }
+                ('~', _) => text.push(' '),
+                _ => text.push(c),
+            }
         }
         self.construct(start, Field::Text(text), AtomClass::Ord)
     }
@@ -2265,13 +2449,16 @@ impl Parser<'_> {
     /// ordinary otherwise.
     fn stacked(&mut self, start: std::ops::Range<usize>, kind: Stack) -> Atom {
         let script = self.script_operand();
+        let from = self.pos;
         let base = self.script_operand();
+        let lone = self.lone_token(from);
         let end = self.consumed_end(start.end);
         let span = start.start..end;
         let single = match base.0.as_slice() {
-            [Noad::Atom(a)] if a.sup.is_none() && a.sub.is_none() => {
-                Some((a.nucleus.clone(), undemoted_class(a)))
-            }
+            [Noad::Atom(a)] if a.sup.is_none() && a.sub.is_none() => Some((
+                a.nucleus.clone(),
+                if lone { undemoted_class(a) } else { a.class },
+            )),
             _ => None,
         };
         let (nucleus, base_class) = single.unwrap_or((Field::List(base), AtomClass::Ord));
@@ -2398,12 +2585,27 @@ impl Parser<'_> {
         let Some(color) = self.color_argument() else {
             return literal_atom("\\textcolor", start);
         };
+        let from = self.pos;
         let body = self.script_operand();
+        let lone = self.lone_token(from);
         let class = match body.0.as_slice() {
-            [Noad::Atom(a)] => undemoted_class(a),
+            [Noad::Atom(a)] if lone => undemoted_class(a),
+            [Noad::Atom(a)] => a.class,
             _ => AtomClass::Ord,
         };
         self.construct(start, Field::Colored { color, body }, class)
+    }
+
+    /// Whether the operand read from the token at `from` was one token,
+    /// its braces apart: a binary operator alone in its group, which rule
+    /// 5 made ordinary, and not one a class word such as `\mathord` set.
+    fn lone_token(&self, from: usize) -> bool {
+        use crate::token::TokenKind as K;
+        self.tokens[from.min(self.pos)..self.pos]
+            .iter()
+            .filter(|t| !matches!(t.kind, K::BeginGroup | K::EndGroup))
+            .count()
+            == 1
     }
 
     /// The braced color after `\color` or `\textcolor`, consumed when it
@@ -2934,6 +3136,7 @@ impl Parser<'_> {
             macros: std::mem::take(&mut self.macros),
             expansions: self.expansions,
             spliced: self.spliced,
+            depth: self.depth,
         };
         let list = sub.list(true);
         self.macros = sub.macros;
@@ -5434,5 +5637,136 @@ mod tests {
         let _ = parse("\\begin{");
         let _ = parse("\\begin{pmatrix");
         let _ = parse("{\\begin{matrix} a}");
+    }
+
+    #[test]
+    fn a_command_inside_mathrm_or_an_operator_name_is_read_as_math() {
+        // No backslash reaches a text: the command is its symbol.
+        for tex in [
+            "\\operatorname{log\\Gamma}(z)",
+            "\\mathrm{\\partial}^{\\alpha}",
+            "\\operatorname{\\mathcal{Re} }",
+            "\\mathrm{H_2O}",
+            "\\mathrm{kg\\,m^{-1}}",
+            "\\operatorname*{arg\\,max}_x",
+        ] {
+            let list = parse(tex);
+            assert!(list.literals().is_empty(), "{tex}: {:?}", list.literals());
+            assert!(
+                !format!("{list:?}").contains("Text(\"\\\\"),
+                "{tex}: {list:?}"
+            );
+        }
+        // The letters are joined into upright words, the symbol between.
+        let a = atoms("\\operatorname{log\\Gamma}");
+        assert_eq!(a[0].class, AtomClass::Op);
+        let Field::List(inner) = &a[0].nucleus else {
+            panic!("{:?}", a[0].nucleus)
+        };
+        let inner: Vec<&Atom> = inner.atoms().collect();
+        assert_eq!(inner[0].nucleus, Field::Text("log".into()));
+        assert_eq!(inner[1].nucleus, Field::Symbol('\u{0393}'));
+        // A letter's script stays on its word.
+        let a = atoms("\\mathrm{H_2O}");
+        let Field::List(inner) = &a[0].nucleus else {
+            panic!("{:?}", a[0].nucleus)
+        };
+        let inner: Vec<&Atom> = inner.atoms().collect();
+        assert_eq!(inner[0].nucleus, Field::Text("H".into()));
+        assert!(inner[0].sub.is_some());
+        assert_eq!(inner[1].nucleus, Field::Text("O".into()));
+        // A group of characters alone is the one text it was.
+        assert_eq!(atoms("\\mathrm{Re}")[0].nucleus, Field::Text("Re".into()));
+        assert_eq!(
+            atoms("\\operatorname{sinc}")[0].nucleus,
+            Field::Text("sinc".into())
+        );
+    }
+
+    #[test]
+    fn a_text_over_two_lines_reads_as_tex_reads_its_source() {
+        assert_eq!(
+            atoms("\\text{first % remark\n  second}")[0].nucleus,
+            Field::Text("first second".into())
+        );
+        assert_eq!(
+            atoms("\\text{a\r\n  b}")[0].nucleus,
+            Field::Text("a b".into())
+        );
+        assert_eq!(
+            atoms("\\text{a\\_b \\& c\\ d \\{e\\} \\$5 \\#1}")[0].nucleus,
+            Field::Text("a_b & c d {e} $5 #1".into())
+        );
+        assert_eq!(
+            atoms("\\text{50\\% of  it}")[0].nucleus,
+            Field::Text("50% of  it".into()),
+            "an escaped percent is the sign and no comment, and blanks on a line stay"
+        );
+    }
+
+    #[test]
+    fn a_class_word_inside_a_color_or_a_stack_keeps_its_class() {
+        assert_eq!(
+            atoms("x \\textcolor{red}{\\mathord{+}} y")[1].class,
+            AtomClass::Ord
+        );
+        assert_eq!(atoms("x \\textcolor{red}{+} y")[1].class, AtomClass::Bin);
+        assert_eq!(
+            atoms("x \\overset{a}{\\mathord{+}} y")[1].class,
+            AtomClass::Ord
+        );
+        assert_eq!(atoms("x \\overset{a}{+} y")[1].class, AtomClass::Bin);
+    }
+
+    #[test]
+    fn the_operator_names_of_two_words_have_a_thin_space() {
+        for (name, first, second) in SPACED_NAMES {
+            let a = atoms(&format!("\\{name}_x"));
+            assert_eq!(a[0].class, AtomClass::Op, "{name}");
+            assert!(a[0].sub.is_some(), "{name}");
+            let Field::List(inner) = &a[0].nucleus else {
+                panic!("{name}: {:?}", a[0].nucleus)
+            };
+            let inner: Vec<&Atom> = inner.atoms().collect();
+            assert_eq!(inner[0].nucleus, Field::Text((*first).into()));
+            assert_eq!(inner[1].nucleus, Field::Kern(3.0 / 18.0));
+            assert_eq!(inner[2].nucleus, Field::Text((*second).into()));
+        }
+    }
+
+    #[test]
+    fn a_nesting_past_the_cap_is_a_literal_on_a_worker_s_stack() {
+        // The layout pool's workers run on 2 MiB: a formula of a hundred
+        // thousand nested groups, negations or bars must come back.
+        let run = |tex: String| {
+            std::thread::Builder::new()
+                .stack_size(2 * 1024 * 1024)
+                .spawn(move || {
+                    let list = parse(&tex);
+                    let font = crate::font::TtfMathFont::from_bytes(include_bytes!(
+                        "../fixtures/STIXTwoMath-Regular.otf"
+                    ))
+                    .unwrap();
+                    let laid =
+                        crate::layout::layout(&tex, crate::layout::MathStyle::Text, 16.0, &font);
+                    (list.literals().len(), laid.width)
+                })
+                .unwrap()
+                .join()
+                .expect("no overflow")
+        };
+        let n = 100_000;
+        let (literals, width) = run(format!("{}x{}", "{".repeat(n), "}".repeat(n)));
+        assert_eq!(literals, 1, "the group past the cap, whole");
+        assert!(width.is_finite());
+        let (literals, _) = run("\\not".repeat(n));
+        assert!(literals >= 1);
+        let (literals, _) = run(format!("{}x", "\\overline".repeat(n)));
+        assert!(literals >= 1);
+        let (literals, _) = run(format!("{}x{}", "\\frac{".repeat(n), "}{y}".repeat(n)));
+        assert!(literals >= 1);
+        // Under the cap nothing changes.
+        let (literals, _) = run(format!("{}x{}", "{".repeat(50), "}".repeat(50)));
+        assert_eq!(literals, 0);
     }
 }

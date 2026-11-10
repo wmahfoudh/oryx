@@ -1483,6 +1483,15 @@ fn math_formula() -> impl Strategy<Value = String> {
                 .prop_map(|(t, s)| format!("\\{t}{{{s}}}")),
             1 => "[a-z]".prop_map(|t| format!("\\mathrm {t}")),
             1 => "[a-z]{1,5}".prop_map(|t| format!("\\operatorname{{{t}}}")),
+            // Read as math since Task 368: a formula inside the upright
+            // alphabet and inside an operator's name, and the names of
+            // two words.
+            1 => i().prop_map(|a| format!("\\mathrm{{{a}}}")),
+            1 => (i(), any::<bool>()).prop_map(|(a, star)| {
+                format!("\\operatorname{}{{{a}}}", if star { "*" } else { "" })
+            }),
+            1 => (prop::sample::select(&["argmax", "argmin", "liminf", "limsup", "injlim", "projlim"][..]), i())
+                .prop_map(|(name, a)| format!("\\{name}_{{{a}}}")),
             1 => (prop::sample::select(MATH_CLASSES), i())
                 .prop_map(|(s, a)| format!("\\{s}{{{a}}}")),
             1 => (prop::sample::select(MATH_MODULO), i(), i())

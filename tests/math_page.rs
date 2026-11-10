@@ -64,7 +64,7 @@ fn every_formula_of_the_page_parses_without_a_literal() {
         if heading == LITERALS_ON_PURPOSE {
             continue;
         }
-        let literals = noad::parse::parse(tex).literals();
+        let literals = noad::parse::parse(tex).shown_as_written();
         if !literals.is_empty() {
             bad.push(format!("under {heading}: {tex} left {literals:?}"));
         }
@@ -77,7 +77,7 @@ fn the_section_of_unknown_commands_shows_one() {
     let shown = formulas()
         .iter()
         .filter(|(heading, _)| heading == LITERALS_ON_PURPOSE)
-        .any(|(_, tex)| !noad::parse::parse(tex).literals().is_empty());
+        .any(|(_, tex)| !noad::parse::parse(tex).shown_as_written().is_empty());
     assert!(
         shown,
         "the section {LITERALS_ON_PURPOSE:?} shows no literal"
