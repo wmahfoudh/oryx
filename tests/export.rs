@@ -1301,6 +1301,59 @@ fn pages_with_tall_images(source: &str) -> (Vec<oryx::export::paginate::Page>, P
     (paginate(&doc, &lay, &geometry), geometry)
 }
 
+/// Finding 4 of the read of Task 358: an image taller than the page is
+/// scaled to the page's height, and it stays where its paragraph places
+/// it: in the middle, at the right margin, or at the left.
+#[test]
+fn a_scaled_tall_image_stays_where_its_paragraph_places_it() {
+    let image_of = |source: &str| {
+        let (pages, geometry) = pages_with_tall_images(source);
+        let image = pages
+            .iter()
+            .flat_map(|p| p.images.iter())
+            .next()
+            .expect("the image on a page")
+            .clone();
+        assert!(
+            image.height <= geometry.content_height() + 0.5,
+            "{source}: scaled to the page"
+        );
+        (image, geometry)
+    };
+    for source in [
+        "Before.\n\n![t](tall.png)\n\nAfter.",
+        "Before.\n\n![w](wide.png)\n\nAfter.",
+        "Before.\n\n<p align=\"center\"><img src=\"tall.png\"></p>\n\nAfter.",
+    ] {
+        let (image, geometry) = image_of(source);
+        let middle = image.x + image.width / 2.0;
+        assert!(
+            (middle - geometry.width / 2.0).abs() < 1.0,
+            "{source}: the image's middle at {middle} on a page {} wide",
+            geometry.width
+        );
+    }
+    let (image, geometry) = image_of("Before.\n\n<img src=\"tall.png\" align=\"right\">\n\nAfter.");
+    assert!(
+        (image.x + image.width - (geometry.width - geometry.margin_x)).abs() < 1.0,
+        "placed right: the image ends at {} against the margin {}",
+        image.x + image.width,
+        geometry.width - geometry.margin_x
+    );
+    let (image, geometry) = image_of("Before.\n\n<img src=\"tall.png\" align=\"left\">\n\nAfter.");
+    assert!(
+        (image.x - geometry.margin_x).abs() < 1.0,
+        "placed left: the image starts at {}",
+        image.x
+    );
+    let (image, geometry) = image_of("Before.\n\n- ![t](tall.png)\n- second\n\nAfter.");
+    assert!(
+        image.x < geometry.width / 4.0,
+        "in a list item: the image starts at {}",
+        image.x
+    );
+}
+
 /// Found by the proof of Task 361: the export of a page with an image
 /// taller than the PDF page crashed, the streamed pagination reading an
 /// item past the last one. The pages of the streamed pass are the pages

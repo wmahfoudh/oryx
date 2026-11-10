@@ -84,6 +84,7 @@
 - On Linux without a desktop portal and without zenity, such as a bare window manager on Wayland, the file dialogs (open, save as, new file, export) now ask for the path in a field at the top of the window. Enter opens, saves, creates or exports to that path, and Escape cancels. Before, nothing happened.
 - Two footnote references next to each other, such as `[^1][^2]`, are now separated by a comma. Before, they looked like one number.
 - Exporting to PDF a page with an image taller than the PDF page no longer crashes Oryx.
+- In the PDF, a centered image taller than the page is now centered. Before, it was left of center.
 
 ## v1.2.2
 
