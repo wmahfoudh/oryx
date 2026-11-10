@@ -1271,3 +1271,74 @@ fn arabic_text_exports_in_the_arabic_face_and_extracts() {
         assert!(text.contains(ch), "{ch:?} extracts, got {text:?}");
     }
 }
+
+/// The pages of a markdown source laid out beside two tall pictures,
+/// `tall.png` (200 by 3000) and `wide.png` (1500 by 3000), and the
+/// geometry they were cut for.
+fn pages_with_tall_images(source: &str) -> (Vec<oryx::export::paginate::Page>, PageGeometry) {
+    let dir = std::env::temp_dir().join(format!("oryx-export-tall-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    for (name, width) in [("tall.png", 200), ("wide.png", 1500)] {
+        let path = dir.join(name);
+        if !path.exists() {
+            image::RgbaImage::from_pixel(width, 3000, image::Rgba([10, 20, 30, 255]))
+                .save(&path)
+                .unwrap();
+        }
+    }
+    let doc = markdown::parse(source);
+    let (geometry, cfg) = geometry_and_cfg();
+    let mut fonts = FontStore::new();
+    let mut media = MediaCache::offline(dir);
+    let lay = layout(
+        &doc,
+        &Theme::default_dark(),
+        &mut fonts,
+        &mut media,
+        &cfg,
+        geometry.width,
+    );
+    (paginate(&doc, &lay, &geometry), geometry)
+}
+
+/// Found by the proof of Task 361: the export of a page with an image
+/// taller than the PDF page crashed, the streamed pagination reading an
+/// item past the last one. The pages of the streamed pass are the pages
+/// of the one-shot pass.
+#[test]
+fn a_tall_image_paginates_in_slices_as_in_one_shot() {
+    let source = "A line before the image.\n\n![tall](tall.png)\n\nA line after the image.";
+    let (whole, geometry) = pages_with_tall_images(source);
+    let dir = std::env::temp_dir().join(format!("oryx-export-tall-{}", std::process::id()));
+    let doc = markdown::parse(source);
+    let (_, cfg) = geometry_and_cfg();
+    for stride in [1, 2, 64] {
+        let mut fonts = FontStore::new();
+        let mut media = MediaCache::offline(dir.clone());
+        let theme = Theme::default_dark();
+        let (mut lay, mut pass) = layout_begin(&doc, &cfg, geometry.width);
+        let mut paginator = Paginator::new();
+        let mut pages = Vec::new();
+        let mut done = false;
+        while !done {
+            for _ in 0..stride {
+                done = layout_step(
+                    &doc, &theme, &mut fonts, &mut media, &cfg, &mut lay, &mut pass,
+                );
+                if done {
+                    break;
+                }
+            }
+            pages.extend(paginator.advance(&doc, &lay, &geometry, done));
+        }
+        assert_eq!(pages.len(), whole.len(), "stride {stride}: the page count");
+        for (a, b) in pages.iter().zip(&whole) {
+            assert_eq!(a.runs, b.runs, "stride {stride}: the runs of a page");
+            assert_eq!(
+                a.images.len(),
+                b.images.len(),
+                "stride {stride}: the images"
+            );
+        }
+    }
+}

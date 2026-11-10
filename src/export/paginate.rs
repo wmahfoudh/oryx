@@ -598,9 +598,15 @@ impl Paginator {
             return None;
         }
         // An item taller than the whole content box is placed anyway.
-        if j == i {
+        // The forced break was read over an empty page, where its "none"
+        // is `i`: it follows the item, or the page would close empty and
+        // the pass would never leave it.
+        let forced = if j == i {
             j = i + 1;
-        }
+            forced.max(j)
+        } else {
+            forced
+        };
         if forced < j {
             // A chapter seam is always an acceptable break; the taste
             // rules never move it, but the page still waits until its
