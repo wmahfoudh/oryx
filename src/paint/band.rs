@@ -142,7 +142,8 @@ pub fn band_numbered(
         .iter()
         .chain(&layout.math_glyphs[math_tail])
     {
-        if g.y + 0.6 * g.size < y_top || g.y - 1.2 * g.size > band_bottom {
+        let (top, bottom) = g.ink();
+        if bottom < y_top || top > band_bottom {
             continue;
         }
         draw_math_glyph(&mut pixmap, fonts, g, y_top);

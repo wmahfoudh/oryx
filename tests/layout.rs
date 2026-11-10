@@ -47,6 +47,14 @@ fn lay2(source: &str, width: f32) -> (Document, LayoutDoc) {
     (doc, l)
 }
 
+/// As `find_text`, the run's text read without the blanks around it.
+fn find_word<'a>(l: &'a LayoutDoc, doc: &'a Document, word: &str) -> &'a TextRun {
+    l.runs
+        .iter()
+        .find(|r| l.run_text(doc, r).trim() == word)
+        .unwrap_or_else(|| panic!("no run with the word {word:?}"))
+}
+
 fn find_text<'a>(l: &'a LayoutDoc, doc: &'a Document, text: &str) -> &'a TextRun {
     l.runs
         .iter()
@@ -1134,6 +1142,111 @@ fn a_hard_break_before_a_formula_starts_a_new_line() {
 /// the right edge and the formula's row stands at the right too; under a
 /// center mark the text is centered, and the formula hangs on its line
 /// inside the cell, in the flow's order for right-to-left text.
+#[test]
+fn text_after_a_formula_and_a_hard_break_starts_the_next_line() {
+    let lh = metrics::LINE_HEIGHT * cfg().body_size;
+    // In a cell: the text below the formula, at the cell's left edge,
+    // inside its row.
+    let (doc, l) = lay2("| a |\n|---|\n| $x$<br>more |\n", 800.0);
+    let (x, more) = (glyph_of(&l, '\u{1D465}'), find_text(&l, &doc, "more"));
+    assert!(
+        (more.x - x.left).abs() < 1.0,
+        "at the left edge: {} against {}",
+        more.x,
+        x.left
+    );
+    assert!(more.y >= x.bottom - 0.01, "below the formula");
+    assert!(
+        more.y + lh <= l.table_rows[1].bottom + 0.01,
+        "inside the row: {} against {}",
+        more.y + lh,
+        l.table_rows[1].bottom
+    );
+
+    // In a paragraph: below its line, at the margin, above the next block.
+    let (doc, l) = lay2("Some $x^2$\\\nmore\n\nNext\n", 800.0);
+    let (some, more, next) = (
+        find_word(&l, &doc, "Some"),
+        find_word(&l, &doc, "more"),
+        find_word(&l, &doc, "Next"),
+    );
+    assert!((more.x - some.x).abs() < 1.0, "at the margin: {}", more.x);
+    assert!(more.y >= some.y + lh - 0.01, "below the first line");
+    assert!(
+        next.y >= more.y + lh - 0.01,
+        "the next paragraph below: {} against {}",
+        next.y,
+        more.y + lh
+    );
+}
+
+#[test]
+fn two_hard_breaks_between_two_formulas_leave_a_blank_line() {
+    let lh = metrics::LINE_HEIGHT * cfg().body_size;
+    let gap = |source: &str| {
+        let l = lay(source, 800.0);
+        glyph_of(&l, '\u{1D466}').y - glyph_of(&l, '\u{1D465}').y
+    };
+    let one = gap("| a |\n|---|\n| $x$<br>$y$ |\n");
+    let two = gap("| a |\n|---|\n| $x$<br><br>$y$ |\n");
+    assert!(
+        (two - one - lh).abs() < 0.2 * lh,
+        "a line more: {two} against {one}"
+    );
+    let two = gap("$x$<br><br>$y$\n");
+    let one = gap("$x$<br>$y$\n");
+    assert!(
+        (two - one - lh).abs() < 0.2 * lh,
+        "in a paragraph: {two} against {one}"
+    );
+}
+
+#[test]
+fn a_formula_in_a_footnote_definition_is_typeset() {
+    let (doc, l) = lay2("Text.[^1]\n\n[^1]: See $\\frac{a}{b}$ here.\n", 800.0);
+    assert!(
+        l.math_glyphs.iter().any(|g| g.ch == Some('\u{1D44E}')),
+        "the numerator is a math glyph"
+    );
+    assert!(
+        l.runs.iter().all(|r| !l.run_text(&doc, r).contains("frac")),
+        "no TeX text on the page"
+    );
+    let (see, here) = (find_word(&l, &doc, "See"), find_word(&l, &doc, "here."));
+    let a = glyph_of(&l, '\u{1D44E}');
+    assert!(a.x > see.x && a.x < here.x, "the formula between its words");
+}
+
+#[test]
+fn a_centered_line_counts_a_formula_s_leading_phantom() {
+    let x_of = |tex: &str| {
+        let l = lay(
+            &format!("<div align=\"center\">\n\n{tex} centered\n\n</div>\n"),
+            800.0,
+        );
+        glyph_of(&l, '\u{1D44E}').x
+    };
+    let (plain, phantom) = (x_of("$a$"), x_of("$\\hphantom{xxxxxxxx}a$"));
+    assert!(
+        phantom > plain + 10.0,
+        "the letter moves right by half the phantom: {phantom} against {plain}"
+    );
+}
+
+#[test]
+fn a_tall_delimiter_is_indexed_by_its_formula_s_box() {
+    let l = lay("$$\\Bigg( x \\Bigg)$$\n", 800.0);
+    let paren = glyph_of(&l, '(');
+    // A strip that only meets the top of the formula's box still finds
+    // the delimiter.
+    let (head, tail) = l.math_in(paren.top, paren.top + 0.5);
+    let found = l.math_glyphs[head]
+        .iter()
+        .chain(&l.math_glyphs[tail])
+        .any(|g| g.ch == Some('('));
+    assert!(found, "the delimiter is in the strip at its box's top");
+}
+
 #[test]
 fn a_right_to_left_cell_with_a_formula_follows_its_column_s_mark() {
     for mark in ["--:", "---", ":-:"] {

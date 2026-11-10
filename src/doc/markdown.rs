@@ -191,6 +191,10 @@ struct Builder {
     lone_image: bool,
     /// The `<dd>` elements open: a picture in a definition stays with it.
     html_dd: u32,
+    /// For each open `<dl>`, the count of `<dd>` open when it began: a
+    /// `<dd>` past that count is the list's own, which HTML closes at
+    /// the next `<dd>`, at a `<dt>` and at the list's end.
+    html_dl: Vec<u32>,
     html_code: u32,
     html_sub: u32,
     html_sup: u32,
@@ -604,6 +608,7 @@ impl Builder {
             block_align: None,
             lone_image: false,
             html_dd: 0,
+            html_dl: Vec::new(),
             html_code: 0,
             html_sub: 0,
             html_sup: 0,
@@ -1547,16 +1552,28 @@ impl Builder {
                 }
                 self.html_li_close();
             }
-            ("dl", _) => {
+            ("dl", false) => {
                 if self.html_table.is_some() {
                     return;
                 }
+                self.flush_spans();
+                self.html_dl.push(self.html_dd);
+            }
+            ("dl", true) => {
+                if self.html_table.is_some() {
+                    return;
+                }
+                self.html_dt_close();
+                self.html_dd_end();
+                self.html_dl.pop();
                 self.flush_spans();
             }
             ("dt", false) => {
                 if self.html_table.is_some() {
                     return;
                 }
+                self.html_dt_close();
+                self.html_dd_end();
                 self.flush_spans();
                 self.clear_spans();
                 self.html_dt = true;
@@ -1571,6 +1588,8 @@ impl Builder {
                 if self.html_table.is_some() {
                     return;
                 }
+                self.html_dt_close();
+                self.html_dd_end();
                 self.flush_spans();
                 self.clear_spans();
                 self.html_dd += 1;
@@ -1579,16 +1598,7 @@ impl Builder {
                 if self.html_table.is_some() {
                     return;
                 }
-                self.html_dd = self.html_dd.saturating_sub(1);
-                let mut spans = self.take_spans();
-                trim_cell(&mut spans);
-                if !spans.is_empty() {
-                    self.emit(BlockKind::ListItem {
-                        marker: Marker::None,
-                        depth: 0,
-                        spans,
-                    });
-                }
+                self.html_dd_close();
             }
             _ => {}
         }
@@ -1704,6 +1714,29 @@ impl Builder {
     }
 
     /// Emits the accumulated `<dt>` term as a bold paragraph.
+    /// Closes the `<dd>` the open `<dl>` holds, if any: the end tag is
+    /// optional in HTML.
+    fn html_dd_end(&mut self) {
+        let base = self.html_dl.last().copied().unwrap_or(0);
+        if !self.html_dl.is_empty() && self.html_dd > base {
+            self.html_dd_close();
+        }
+    }
+
+    /// Closes a `<dd>` into an indented item.
+    fn html_dd_close(&mut self) {
+        self.html_dd = self.html_dd.saturating_sub(1);
+        let mut spans = self.take_spans();
+        trim_cell(&mut spans);
+        if !spans.is_empty() {
+            self.emit(BlockKind::ListItem {
+                marker: Marker::None,
+                depth: 0,
+                spans,
+            });
+        }
+    }
+
     fn html_dt_close(&mut self) {
         if !self.html_dt {
             return;
@@ -2826,6 +2859,34 @@ mod tests {
             matches!(d.blocks[0].kind, BlockKind::Image { .. }),
             "no word, the block image"
         );
+    }
+
+    /// HTML closes a definition at the next `<dd>`, at a `<dt>` and at
+    /// the list's end: a picture alone in its paragraph after such a list
+    /// is centered, and the definition is the indented item a closed one
+    /// is.
+    #[test]
+    fn an_unclosed_definition_ends_with_its_list() {
+        for md in [
+            "<dl>\n<dt>T</dt>\n<dd>Meaning\n</dl>\n\n![a](a.png)\n",
+            "<dl><dt>T<dd>one<dd>two</dl>\n\n![a](a.png)\n",
+            "<dl><dt>T<dd>one<dt>U<dd>two</dl>\n\n![a](a.png)\n",
+        ] {
+            let d = parse(md);
+            let image = d
+                .blocks
+                .iter()
+                .find(|b| matches!(b.kind, BlockKind::Image { .. }))
+                .unwrap_or_else(|| panic!("no picture in {md}: {:?}", d.blocks));
+            assert!(image.centered, "{md}");
+            let definitions = d
+                .blocks
+                .iter()
+                .filter(|b| matches!(b.kind, BlockKind::ListItem { .. }))
+                .count();
+            let expected = md.matches("<dd>").count();
+            assert_eq!(definitions, expected, "{md}: {:?}", d.blocks);
+        }
     }
 
     /// The read of 10/11/2026: a picture in a list item, a table cell

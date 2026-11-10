@@ -67,6 +67,7 @@
 - A named pipe in a folder the sidebar shows no longer freezes Oryx. Before, the window froze until a program wrote to the pipe.
 - The sidebar no longer lists a link to a file that is gone. Before, a click on it did nothing.
 - A formula in a table cell now shows a command written as a superscript or a subscript, such as `e^\pi`, as its symbol. Before, the cell showed `e` with a raised `\p`, then `i`. The same is fixed in the copied text and in the search.
+- A formula in a footnote is now typeset. Before, the footnote showed it as its TeX text.
 - A zipped FB2 book whose inner file name is in an old Windows encoding, such as a Russian name in CP866, now opens. Before, it was refused as not readable.
 - A comic zipped on a Mac now shows only its pages. Before, the hidden `__MACOSX` entries showed as blank pages at the start.
 - A damaged book or comic whose header declares an impossible size is now refused as damaged. Before, Oryx could crash on it.

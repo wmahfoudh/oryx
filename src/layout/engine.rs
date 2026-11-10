@@ -656,11 +656,27 @@ pub struct MathGlyph {
     pub ch: Option<char>,
     pub top: f32,
     pub bottom: f32,
-    /// The right edge of the formula's box, as `top` and `bottom` are
-    /// its vertical edges: a table's measuring pass reads it.
+    /// The left and right edges of the formula's box, as `top` and
+    /// `bottom` are its vertical edges: a table's measuring pass and the
+    /// alignment of a line read them, a space or a phantom that opens or
+    /// ends the formula counted.
+    pub left: f32,
     pub right: f32,
     pub color: crate::style::theme::Rgba,
     pub block: usize,
+}
+
+impl MathGlyph {
+    /// The vertical extent the glyph's ink lies in, for the index and
+    /// the paint of a strip: its formula's box, which holds a sized
+    /// delimiter and a display operator whole, and a margin around the
+    /// baseline for a glyph whose ink passes the box.
+    pub fn ink(&self) -> (f32, f32) {
+        (
+            self.top.min(self.y - 1.2 * self.size),
+            self.bottom.max(self.y + 0.6 * self.size),
+        )
+    }
 }
 
 /// One table row's vertical band, stripe and padding included.
@@ -772,8 +788,8 @@ impl LayoutDoc {
         }
         index.images.indexed = self.images.len();
         for (i, g) in self.math_glyphs.iter().enumerate().skip(index.math.indexed) {
-            // Conservative extent around the baseline; buckets tolerate slack.
-            index.math.note(i, g.y - 1.2 * g.size, g.y + 0.6 * g.size);
+            let (top, bottom) = g.ink();
+            index.math.note(i, top, bottom);
         }
         index.math.indexed = self.math_glyphs.len();
     }
@@ -2552,6 +2568,7 @@ pub(crate) fn shape_kind(
             theme,
             cfg,
             source,
+            media,
             label,
             *number,
             *continued,
@@ -4707,6 +4724,7 @@ fn layout_table(
             }
             for mut g in tmp.math_glyphs {
                 g.x += dx;
+                g.left += dx;
                 g.right += dx;
                 g.y += dy;
                 g.top += dy;
@@ -4792,6 +4810,7 @@ fn shift_cell_right(cell: &mut LayoutDoc, dx: f32) {
     }
     for g in &mut cell.math_glyphs {
         g.x += dx;
+        g.left += dx;
         g.right += dx;
     }
     for image in &mut cell.images {
@@ -5285,6 +5304,7 @@ fn emit_math_layout(
             ch: g.ch,
             top,
             bottom,
+            left: x,
             right,
             color: color(g.color),
             block: block_index,
@@ -5390,6 +5410,7 @@ fn layout_footnote_def(
     theme: &Theme,
     cfg: &ViewConfig,
     source: &str,
+    media: &mut MediaCache,
     label: &str,
     number: u32,
     continued: bool,
@@ -5450,19 +5471,39 @@ fn layout_footnote_def(
         justify: false,
         align: None,
     };
-    let text_h = shape_block(
-        fonts,
-        theme,
-        cfg,
-        source,
-        spans,
-        true,
-        &base,
-        x0 + indent,
-        y0,
-        (avail - indent).max(40.0),
-        out,
-    );
+    let width = (avail - indent).max(40.0);
+    // A definition with a formula flows as a paragraph does, its
+    // pictures as their text, as in a table cell.
+    let text_h = if spans.iter().any(|s| s.math) {
+        let spans = cell_without_images(spans);
+        layout_flow(
+            fonts,
+            theme,
+            cfg,
+            source,
+            media,
+            &spans,
+            &base,
+            x0 + indent,
+            y0,
+            width,
+            out,
+        )
+    } else {
+        shape_block(
+            fonts,
+            theme,
+            cfg,
+            source,
+            spans,
+            true,
+            &base,
+            x0 + indent,
+            y0,
+            width,
+            out,
+        )
+    };
     text_h.max(metrics::LINE_HEIGHT * base_size)
 }
 
@@ -5735,6 +5776,23 @@ fn close_line(line: &mut Option<FlowLine>, y: &mut f32, size: f32) {
     }
 }
 
+/// A hard break in the flow: it closes the open line, and with no line
+/// open after another break it leaves a blank line.
+fn hard_break(
+    line: &mut Option<FlowLine>,
+    y: &mut f32,
+    size: f32,
+    line_height: f32,
+    broke: &mut bool,
+) {
+    if line.is_some() {
+        close_line(line, y, size);
+    } else if *broke {
+        *y += line_height;
+    }
+    *broke = true;
+}
+
 /// Where a box alone on its row sits in the room left: at the left, in
 /// the middle or at the right, by the block's alignment.
 fn align_factor(align: Option<Align>) -> f32 {
@@ -5768,10 +5826,20 @@ fn layout_flow(
     let gap = 8.0 * cfg.zoom;
     let mut y = y0;
     let mut line: Option<FlowLine> = None;
+    // The last thing the flow met was a hard break: the next one in a
+    // row is a blank line.
+    let mut broke = false;
+    let is_break = |s: &Span| s.image.is_none() && !s.math && s.text(source) == "\n";
 
     let mut i = 0;
     while i < spans.len() {
-        if spans[i].image.is_none() && !spans[i].math {
+        if is_break(&spans[i]) {
+            // A hard break that opens a piece of text is the flow's own:
+            // it closes the open line, so the text after it starts a line
+            // below at the margin and is no part of a formula's line.
+            hard_break(&mut line, &mut y, base.size, line_height, &mut broke);
+            i += 1;
+        } else if spans[i].image.is_none() && !spans[i].math {
             // The text chunk up to the next image or equation, masked into
             // a full-length span list so run span indices keep mapping to
             // the model.
@@ -5786,8 +5854,11 @@ fn layout_flow(
                 .iter()
                 .all(|s| s.text(source).trim().is_empty())
             {
-                if spans[start..i].iter().any(|s| s.text(source) == "\n") {
-                    close_line(&mut line, &mut y, base.size);
+                let breaks = spans[start..i].iter().filter(|s| is_break(s)).count();
+                for _ in 0..breaks {
+                    hard_break(&mut line, &mut y, base.size, line_height, &mut broke);
+                }
+                if breaks > 0 {
                 } else if let Some(l) = line.as_mut() {
                     // Whitespace between two placed boxes keeps its word gap.
                     if l.baseline.is_some() {
@@ -5826,8 +5897,9 @@ fn layout_flow(
                 if out.runs.len() == rm {
                     // The whole chunk joined the line, which stays open
                     // unless the chunk ended with a hard break.
+                    broke = false;
                     if ends_with_break {
-                        close_line(&mut line, &mut y, base.size);
+                        hard_break(&mut line, &mut y, base.size, line_height, &mut broke);
                     }
                     continue;
                 }
@@ -5911,10 +5983,12 @@ fn layout_flow(
                     },
                 });
             }
+            broke = false;
             if ends_with_break {
-                close_line(&mut line, &mut y, base.size);
+                hard_break(&mut line, &mut y, base.size, line_height, &mut broke);
             }
         } else if spans[i].math {
+            broke = false;
             let span = &spans[i];
             let font = OryxMathFont::new();
             let style = if span.display {
@@ -5996,6 +6070,7 @@ fn layout_flow(
             }
             i += 1;
         } else {
+            broke = false;
             let span = &spans[i];
             let image = span.image.as_ref().expect("image span");
             let (w, h, loaded) = image_size(fonts, media, span, image, cfg, source, avail);
@@ -6281,7 +6356,7 @@ fn align_lines(
                 2 => (out.images[item.3].x, out.images[item.3].width),
                 _ => {
                     let g = &out.math_glyphs[item.3];
-                    (g.x, g.right - g.x)
+                    (g.left, g.right - g.left)
                 }
             }
         };
@@ -6302,6 +6377,7 @@ fn align_lines(
                     2 => out.images[item.3].x += dx,
                     _ => {
                         out.math_glyphs[item.3].x += dx;
+                        out.math_glyphs[item.3].left += dx;
                         out.math_glyphs[item.3].right += dx;
                     }
                 }

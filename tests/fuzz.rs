@@ -1734,6 +1734,10 @@ const CELLS: &[&str] = &[
     "$\\not$",
     "$x\\_1 \\%$",
     "مرحبا $x^2$ بالعالم",
+    "$x$<br>more",
+    "$x$<br><br>$y$",
+    "t $\\frac{a}{b}$<br>a second line that wraps in a narrow column",
+    "$x$<br>",
 ];
 const MARKS: &[&str] = &["---", ":--", ":-:", "--:"];
 
@@ -1794,6 +1798,19 @@ fn fuzz_cells() {
             .filter(|r| r.stroke == 0.0 && r.width <= 1.5 && r.height > 20.0)
             .map(|r| r.x)
             .collect();
+        // The text of a cell is inside a row's band too: a line after a
+        // formula and a break is below it, not over the next row.
+        for r in &l.runs {
+            prop_assert!(
+                l.table_rows
+                    .iter()
+                    .any(|row| row.top - 0.01 <= r.y && r.y + r.size <= row.bottom + 0.01),
+                "a run at {} of size {} in a row of {:?}\n{md}",
+                r.y,
+                r.size,
+                l.table_rows
+            );
+        }
         for g in &l.math_glyphs {
             prop_assert!(
                 g.x.is_finite() && g.right.is_finite() && g.top.is_finite() && g.bottom.is_finite(),
