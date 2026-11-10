@@ -180,11 +180,15 @@ struct Builder {
     html_gap: bool,
     /// One entry per open `<p>`/`<div>`, true when it centers its content.
     html_divs: Vec<HtmlDiv>,
-    /// The `align` of the last `<img>` tag read, for a picture alone in
-    /// its paragraph, whose word it becomes.
+    /// The `align` of the last `<img>` tag among the pending spans, for
+    /// a picture alone in its paragraph, whose word it becomes. It leaves
+    /// with the spans: `take_spans` is the one place that takes them.
     image_align: Option<HtmlAlign>,
     /// A word for the next block alone, ahead of the open divisions'.
     block_align: Option<HtmlAlign>,
+    /// The next block is a picture alone in its paragraph: centered when
+    /// neither its tag nor a division around it names a side.
+    lone_image: bool,
     html_code: u32,
     html_sub: u32,
     html_sup: u32,
@@ -596,6 +600,7 @@ impl Builder {
             html_divs: Vec::new(),
             image_align: None,
             block_align: None,
+            lone_image: false,
             html_code: 0,
             html_sub: 0,
             html_sup: 0,
@@ -773,7 +778,7 @@ impl Builder {
             TagEnd::Paragraph => self.flush_spans(),
             TagEnd::Heading(_) => {
                 let level = self.heading.take().unwrap_or(1);
-                let spans = std::mem::take(&mut self.spans);
+                let spans = self.take_spans();
                 let anchor = match self.heading_id.take() {
                     Some(id) => self.explicit_anchor(id),
                     None => self.unique_anchor(&spans),
@@ -838,7 +843,7 @@ impl Builder {
                 }
             }
             TagEnd::TableCell => {
-                let cell = std::mem::take(&mut self.spans);
+                let cell = self.take_spans();
                 if let Some(t) = self.table.as_mut() {
                     t.row.push(cell);
                 }
@@ -1299,7 +1304,7 @@ impl Builder {
             ("tr", false) => {
                 if self.html_table.as_ref().is_some_and(|t| t.nested == 0) {
                     self.html_row_close();
-                    self.spans.clear();
+                    self.clear_spans();
                     let t = self.html_table.as_mut().expect("table is open");
                     t.row_open = true;
                     t.row_all_th = true;
@@ -1313,7 +1318,7 @@ impl Builder {
             ("th" | "td", false) => {
                 if self.html_table.as_ref().is_some_and(|t| t.nested == 0) {
                     self.html_cell_close();
-                    self.spans.clear();
+                    self.clear_spans();
                     let t = self.html_table.as_mut().expect("table is open");
                     if !t.row_open {
                         t.row_open = true;
@@ -1332,12 +1337,12 @@ impl Builder {
             }
             ("caption", false) => {
                 if self.html_table.as_ref().is_some_and(|t| t.nested == 0) {
-                    self.spans.clear();
+                    self.clear_spans();
                 }
             }
             ("caption", true) => {
                 if self.html_table.as_ref().is_some_and(|t| t.nested == 0) {
-                    let mut caption = std::mem::take(&mut self.spans);
+                    let mut caption = self.take_spans();
                     trim_cell(&mut caption);
                     if !caption.is_empty() {
                         let t = self.html_table.as_mut().expect("table is open");
@@ -1380,7 +1385,7 @@ impl Builder {
                     return;
                 }
                 self.in_summary = false;
-                let mut spans = std::mem::take(&mut self.spans);
+                let mut spans = self.take_spans();
                 trim_cell(&mut spans);
                 if let Some(&id) = self.details_stack.last() {
                     self.emit(BlockKind::Summary { spans, group: id });
@@ -1514,7 +1519,7 @@ impl Builder {
                     return;
                 }
                 self.html_li_close();
-                self.spans.clear();
+                self.clear_spans();
                 let top = self.html_lists.last_mut().expect("a list is open");
                 top.item_open = true;
             }
@@ -1535,7 +1540,7 @@ impl Builder {
                     return;
                 }
                 self.flush_spans();
-                self.spans.clear();
+                self.clear_spans();
                 self.html_dt = true;
             }
             ("dt", true) => {
@@ -1549,13 +1554,13 @@ impl Builder {
                     return;
                 }
                 self.flush_spans();
-                self.spans.clear();
+                self.clear_spans();
             }
             ("dd", true) => {
                 if self.html_table.is_some() {
                     return;
                 }
-                let mut spans = std::mem::take(&mut self.spans);
+                let mut spans = self.take_spans();
                 trim_cell(&mut spans);
                 if !spans.is_empty() {
                     self.emit(BlockKind::ListItem {
@@ -1613,7 +1618,7 @@ impl Builder {
         let Some(level) = self.html_heading.take() else {
             return;
         };
-        let mut spans = std::mem::take(&mut self.spans);
+        let mut spans = self.take_spans();
         trim_cell(&mut spans);
         let anchor = self.unique_anchor(&spans);
         self.emit(BlockKind::Heading {
@@ -1658,7 +1663,7 @@ impl Builder {
             return;
         }
         top.item_open = false;
-        let mut spans = std::mem::take(&mut self.spans);
+        let mut spans = self.take_spans();
         trim_cell(&mut spans);
         if spans.is_empty() {
             return;
@@ -1684,7 +1689,7 @@ impl Builder {
             return;
         }
         self.html_dt = false;
-        let mut spans = std::mem::take(&mut self.spans);
+        let mut spans = self.take_spans();
         trim_cell(&mut spans);
         for span in &mut spans {
             span.bold = true;
@@ -1697,7 +1702,7 @@ impl Builder {
     /// Closes an open HTML table cell into its row. Text outside any
     /// cell is discarded, the browser hoisting rule reduced to a drop.
     fn html_cell_close(&mut self) {
-        let spans = std::mem::take(&mut self.spans);
+        let spans = self.take_spans();
         let Some(t) = self.html_table.as_mut() else {
             return;
         };
@@ -1736,7 +1741,7 @@ impl Builder {
     /// paragraph. An empty accumulator emits nothing.
     fn html_table_close(&mut self) {
         self.html_row_close();
-        self.spans.clear();
+        self.clear_spans();
         let Some(t) = self.html_table.take() else {
             return;
         };
@@ -1881,13 +1886,26 @@ impl Builder {
         self.spans.push(span);
     }
 
+    /// The pending spans, and with them the word of an `<img>` tag among
+    /// them: a word left behind would place a later picture.
+    fn take_spans(&mut self) -> Vec<Span> {
+        self.image_align = None;
+        std::mem::take(&mut self.spans)
+    }
+
+    /// The pending spans dropped, and their tag's word with them.
+    fn clear_spans(&mut self) {
+        self.image_align = None;
+        self.spans.clear();
+    }
+
     fn flush_spans(&mut self) {
         self.flush_text();
         if self.spans.is_empty() {
             return;
         }
-        let spans = std::mem::take(&mut self.spans);
-        let image_word = self.image_align.take();
+        let image_word = self.image_align;
+        let spans = self.take_spans();
         if let Some(open) = self.footnote.as_mut() {
             let continued = std::mem::replace(&mut open.emitted, true);
             let (label, number) = (open.label.clone(), open.number);
@@ -1907,23 +1925,24 @@ impl Builder {
                 return;
             }
         }
-        // A paragraph that is one plain image and whitespace stays a block
-        // image; links, size attributes, or a word of the tag keep it
-        // inline, and the tag's `align` is the paragraph's word then.
+        // A picture alone in its paragraph takes its tag's `align` as the
+        // block's word, and the middle when no word is said. In a list
+        // item or a definition it stays with the marker or the term. A
+        // plain one, with no link and no size, is a block image.
         let solo = spans
             .iter()
             .filter(|s| s.image.is_none())
             .all(|s| s.raw_text().trim().is_empty());
         let images: Vec<&Span> = spans.iter().filter(|s| s.image.is_some()).collect();
         let lone = solo && images.len() == 1;
+        if lone && self.lists.is_empty() && !self.definition {
+            self.block_align = image_word;
+            self.lone_image = true;
+        }
         if lone && self.lists.is_empty() && self.html_divs.is_empty() {
             let span = images[0];
             let image = span.image.as_ref().expect("image span");
-            if span.link.is_none()
-                && image.width.is_none()
-                && image.height.is_none()
-                && image_word.is_none()
-            {
+            if span.link.is_none() && image.width.is_none() && image.height.is_none() {
                 let kind = BlockKind::Image {
                     path: image.src.clone(),
                     alt: span.raw_text().to_string(),
@@ -1931,9 +1950,6 @@ impl Builder {
                 self.emit(kind);
                 return;
             }
-        }
-        if lone && self.lists.is_empty() {
-            self.block_align = image_word;
         }
         if !self.lists.is_empty() {
             let depth = (self.lists.len() - 1) as u8;
@@ -1997,11 +2013,13 @@ impl Builder {
             _ => self.details_stack.last().copied(),
         };
         // The block's own word first, then the innermost open block
-        // that names a side.
+        // that names a side, then the middle for a lone picture.
+        let lone = std::mem::take(&mut self.lone_image);
         let align = self
             .block_align
             .take()
-            .or_else(|| self.html_divs.iter().rev().find_map(|d| d.align));
+            .or_else(|| self.html_divs.iter().rev().find_map(|d| d.align))
+            .or(lone.then_some(HtmlAlign::Center));
         self.blocks.push(Block {
             quote_depth: self.quote_depth,
             alert: self.alerts.iter().rev().find_map(|a| *a),
@@ -2772,8 +2790,8 @@ mod tests {
         let d = parse("<img src=\"a.png\" align=\"right\">\n\nplain\n");
         let image = &d.blocks[0];
         assert!(
-            matches!(image.kind, BlockKind::Paragraph { .. }),
-            "a word on the tag keeps the image inline"
+            matches!(image.kind, BlockKind::Image { .. }),
+            "a word on the tag leaves the block image"
         );
         assert!(image.right && !image.centered && !image.left);
         assert!(!d.blocks[1].right, "the word is the one paragraph's");

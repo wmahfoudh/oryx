@@ -6023,3 +6023,169 @@ fn a_formula_s_color_reaches_its_glyphs_and_rules() {
         "the fraction bar red"
     );
 }
+
+/// A book's chapter through the walker, laid out beside the 100 by 50
+/// picture `small.png`.
+fn lay_book(css: &str, xhtml: &str, width: f32) -> LayoutDoc {
+    let dir = std::env::temp_dir().join(format!(
+        "oryx-laytest-book-{}-{}",
+        std::process::id(),
+        css.len() * 1000 + xhtml.len()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let img = image::RgbaImage::from_pixel(100, 50, image::Rgba([10, 20, 30, 255]));
+    img.save(dir.join("small.png")).unwrap();
+    let mut walker = oryx::doc::html::Walker::new();
+    let mut table = oryx::doc::html::EmphasisTable::default();
+    table.add_css(css);
+    walker.set_emphasis(table);
+    walker.walk_chapter(xhtml);
+    let (blocks, source, details) = walker.finish();
+    let doc = Document {
+        blocks,
+        source: source.into(),
+        details,
+        ..Document::default()
+    };
+    let mut media = MediaCache::offline(dir);
+    layout(
+        &doc,
+        &Theme::default_dark(),
+        &mut fonts(),
+        &mut media,
+        &cfg(),
+        width,
+    )
+}
+
+/// The read of Task 358: a book that places its lone image keeps the
+/// image where the book put it; only a book that says nothing gets the
+/// middle.
+#[test]
+fn a_lone_image_a_book_places_is_not_centered() {
+    let middle = content_center(800.0);
+    let l = lay_book(
+        "",
+        "<html><body><p><img src=\"small.png\"/></p></body></html>",
+        800.0,
+    );
+    assert!(
+        (image_center(&l) - middle).abs() < 0.5,
+        "no word, the middle"
+    );
+    let placed = [
+        (
+            ".fig { text-align: left }",
+            "<html><body><p class=\"fig\"><img src=\"small.png\"/></p></body></html>",
+        ),
+        (
+            "p { text-align: left }",
+            "<html><body><p><img src=\"small.png\"/></p></body></html>",
+        ),
+        (
+            "",
+            "<html><body><div align=\"left\"><p><img src=\"small.png\"/></p></div></body></html>",
+        ),
+    ];
+    for (css, xhtml) in placed {
+        let l = lay_book(css, xhtml, 800.0);
+        assert!(
+            image_center(&l) < middle - 100.0,
+            "{css} {xhtml}: the image's middle at {} against the column's {middle}",
+            image_center(&l)
+        );
+    }
+}
+
+/// The read of Task 358: the `align` of a tag in a heading or a table
+/// cell is that picture's, and the next lone picture is centered.
+#[test]
+fn the_align_of_a_tag_elsewhere_does_not_place_the_next_lone_image() {
+    let middle = content_center(800.0);
+    for source in [
+        "# Title <img src=\"small.png\" align=\"right\">\n\n![s](small.png)",
+        "<h1><img src=\"small.png\" align=\"left\" width=\"20\"> Project</h1>\n\n![s](small.png)",
+        "| <img src=\"small.png\" align=\"left\"> | b |\n|---|---|\n| c | d |\n\n![s](small.png)",
+    ] {
+        let (_, l) = lay_lone(source, 800.0, DirectionMode::Auto);
+        let last = l.images.last().expect("the lone image");
+        let center = last.x + last.width / 2.0;
+        assert!(
+            (center - middle).abs() < 0.5,
+            "{source}: the lone image's middle at {center} against {middle}"
+        );
+    }
+}
+
+/// The read of Task 358: the title of an alert stays at the left when
+/// the alert opens with a lone picture, or with a centered paragraph.
+#[test]
+fn an_alert_s_title_stays_at_the_left_above_a_centered_block() {
+    let title_x = |l: &LayoutDoc| l.runs.first().expect("the title").x;
+    let (_, text) = lay_lone("> [!NOTE]\n> words", 800.0, DirectionMode::Auto);
+    let (_, image) = lay_lone("> [!NOTE]\n> ![s](small.png)", 800.0, DirectionMode::Auto);
+    assert!(
+        (title_x(&image) - title_x(&text)).abs() < 0.5,
+        "the title above a lone image at {} against {}",
+        title_x(&image),
+        title_x(&text)
+    );
+    let (_, centered) = lay_lone(
+        "> [!NOTE]\n> <p align=\"center\">words</p>",
+        800.0,
+        DirectionMode::Auto,
+    );
+    assert!(
+        (title_x(&centered) - title_x(&text)).abs() < 0.5,
+        "the title above a centered paragraph at {} against {}",
+        title_x(&centered),
+        title_x(&text)
+    );
+    let (_, l) = lay_lone("> [!NOTE]\n> ![s](small.png)", 800.0, DirectionMode::Auto);
+    assert!(
+        image_center(&l) > title_x(&text) + 150.0,
+        "the image itself is still centered in the alert"
+    );
+}
+
+/// The read of Task 358: a lone `<img>` tag with a word and no file
+/// keeps the box the width of the column, as a markdown image does.
+#[test]
+fn an_unloadable_lone_image_tag_with_a_word_keeps_its_full_width_box() {
+    let margin = lay("text", 800.0).runs[0].x;
+    let right = 2.0 * content_center(800.0) - margin;
+    let (_, l) = lay_lone(
+        "<img src=\"missing.png\" align=\"center\">",
+        800.0,
+        DirectionMode::Auto,
+    );
+    let outer = l
+        .rects
+        .iter()
+        .max_by(|a, b| a.width.total_cmp(&b.width))
+        .expect("the placeholder box");
+    assert!(
+        (outer.x - margin).abs() < 0.5 && (outer.x + outer.width - right).abs() < 1.0,
+        "the box from {} wide {}",
+        outer.x,
+        outer.width
+    );
+}
+
+/// The read of Task 358: a picture alone in a definition stays with the
+/// definition, as one in a list item stays with its marker.
+#[test]
+fn a_lone_image_in_a_definition_is_not_centered() {
+    let middle = content_center(800.0);
+    for source in [
+        "Term\n: ![s](small.png)",
+        "<dl><dt><img src=\"small.png\"></dt><dd>words</dd></dl>",
+    ] {
+        let (_, l) = lay_lone(source, 800.0, DirectionMode::Auto);
+        assert!(
+            image_center(&l) < middle - 100.0,
+            "{source}: the image's middle at {}",
+            image_center(&l)
+        );
+    }
+}

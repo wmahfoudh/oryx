@@ -389,7 +389,12 @@ impl Writer<'_> {
                 self.enter(block);
                 match self.picture(path) {
                     Some(picture) => {
-                        let _ = write!(self.out, "<p>{}</p>", img(&picture, alt, "", (None, None)));
+                        let _ = write!(
+                            self.out,
+                            "<p{}>{}</p>",
+                            align(block),
+                            img(&picture, alt, "", (None, None))
+                        );
                     }
                     None => {
                         let _ = write!(self.out, "<p><em>{}</em></p>", escape(alt));

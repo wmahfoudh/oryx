@@ -905,3 +905,32 @@ fn a_nested_alert_marks_the_inner_quote() {
     );
     assert_eq!(html.texts("strong"), ["Note"]);
 }
+
+/// A picture alone in its paragraph is centered on the page, and the
+/// copy places it the same way, plain, linked or placed by its tag.
+#[test]
+fn a_lone_image_keeps_its_place_in_the_copy() {
+    let doc = markdown::parse(
+        "![a](a.png)\n\n[![b](b.png)](https://example.org)\n\n<img src=\"c.png\" align=\"right\">\n\n![d](d.png) and words\n",
+    );
+    let sel = selection::all(&doc).expect("something to select");
+    let mut pictures = Counting { asked: Vec::new() };
+    let page = Page::parse(selection_html(
+        &sel,
+        &doc,
+        &Theme::default_dark(),
+        &mut pictures,
+    ));
+    let styles: Vec<String> = page
+        .elements("p")
+        .iter()
+        .map(|p| attr(p, "style").unwrap_or_default())
+        .collect();
+    assert!(styles[0].contains("text-align:center"), "plain: {styles:?}");
+    assert!(
+        styles[1].contains("text-align:center"),
+        "linked: {styles:?}"
+    );
+    assert!(styles[2].contains("text-align:right"), "placed: {styles:?}");
+    assert!(!styles[3].contains("text-align"), "with words: {styles:?}");
+}

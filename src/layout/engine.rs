@@ -1089,6 +1089,7 @@ impl LayoutPass {
         };
         open.counts.runs = moved(open.counts.runs);
         open.frame.marks.runs = moved(open.frame.marks.runs);
+        open.frame.lines.runs = moved(open.frame.lines.runs);
         open.counts.families = open.counts.families.max(lay.families.len());
     }
 
@@ -1602,6 +1603,9 @@ struct Marks {
 #[derive(Clone, Copy)]
 struct Frame {
     marks: Marks,
+    /// Where the block's own lines start, after the title of an alert
+    /// it opens: the block's alignment moves these and leaves the title.
+    lines: Marks,
     x_base: f32,
     avail: f32,
     gap: f32,
@@ -2259,9 +2263,16 @@ fn place_block(
         out.splice(&mut scratch, pass.cursor);
         pass.cursor += title_h + 0.25 * base_size;
     }
+    let lines = Marks {
+        rects: out.rects.len(),
+        runs: out.runs.len(),
+        images: out.images.len(),
+        math: out.math_glyphs.len(),
+    };
 
     let frame = Frame {
         marks,
+        lines,
         x_base,
         avail,
         gap,
@@ -3113,10 +3124,7 @@ fn replay_position(
         block_metrics(block, cfg, doc.plain_file).expect("a non-silent entry has metrics");
     let (x_base, avail) =
         block_geometry(block, table.margin, table.content_width, cfg, &doc.source);
-    let run_mark = out.runs.len();
     let rect_mark = out.rects.len();
-    let image_mark = out.images.len();
-    let math_mark = out.math_glyphs.len();
     let mut scratch = LayoutDoc::default();
     if entry.flags & ENTRY_ALERT_TITLE != 0 {
         let kind = block.alert.expect("an alert title has a kind");
@@ -3133,6 +3141,14 @@ fn replay_position(
         );
         out.splice(&mut scratch, entry.y);
     }
+    // The block's own lines start here, after the title of an alert it
+    // opens: the alignment moves them and leaves the title.
+    let lines_mark = Marks {
+        rects: out.rects.len(),
+        runs: out.runs.len(),
+        images: out.images.len(),
+        math: out.math_glyphs.len(),
+    };
     let mut lines = 0..0;
     if entry.flags & ENTRY_CODE != 0 {
         if code_framed(doc) {
@@ -3183,9 +3199,16 @@ fn replay_position(
             }
         }
     }
-    if let Some(factor) = block_factor(block, &doc.source) {
+    if let Some(factor) = block.align_factor() {
         align_lines(
-            out, run_mark, rect_mark, image_mark, math_mark, x_base, avail, factor,
+            out,
+            lines_mark.runs,
+            lines_mark.rects,
+            lines_mark.images,
+            lines_mark.math,
+            x_base,
+            avail,
+            factor,
         );
     }
     if entry.deco_top.is_finite() {
@@ -3295,13 +3318,13 @@ fn finish_block(
     pass: &mut LayoutPass,
     source: &str,
 ) {
-    if let Some(factor) = block_factor(block, source) {
+    if let Some(factor) = block.align_factor() {
         align_lines(
             out,
-            frame.marks.runs,
-            frame.marks.rects,
-            frame.marks.images,
-            frame.marks.math,
+            frame.lines.runs,
+            frame.lines.rects,
+            frame.lines.images,
+            frame.lines.math,
             frame.x_base,
             frame.avail,
             factor,
@@ -5709,34 +5732,6 @@ fn close_line(line: &mut Option<FlowLine>, y: &mut f32, size: f32) {
         if l.row {
             *y = l.top + l.height + 0.25 * size;
         }
-    }
-}
-
-/// Where a block's lines go in the room the content width leaves them:
-/// the block's own word when it has one (`<p align="center">`, a book's
-/// stylesheet), else the middle for a picture alone in its paragraph,
-/// which the page centers as a book does (the user's ask of 09/11/2026),
-/// else nothing. A list item or a footnote keeps its picture after the
-/// marker, which stands on the same line and would move with it.
-fn block_factor(block: &Block, source: &str) -> Option<f32> {
-    block
-        .align_factor()
-        .or_else(|| lone_image(block, source).then_some(0.5))
-}
-
-/// A paragraph that is one picture and nothing else, whatever its link
-/// or size, or the block the reader makes of a plain one.
-fn lone_image(block: &Block, source: &str) -> bool {
-    match &block.kind {
-        BlockKind::Image { .. } => true,
-        BlockKind::Paragraph { spans } => {
-            spans.iter().filter(|s| s.image.is_some()).count() == 1
-                && spans
-                    .iter()
-                    .filter(|s| s.image.is_none())
-                    .all(|s| s.text(source).trim().is_empty())
-        }
-        _ => false,
     }
 }
 
