@@ -220,6 +220,11 @@ pub const TIPS: &[Tip] = &[
     Tip {
         kind: TipKind::Tip,
         area: Area::Files,
+        text: r#"If `notes.md` does not exist, `oryx notes.md` opens it as a new file in editing mode."#,
+    },
+    Tip {
+        kind: TipKind::Tip,
+        area: Area::Files,
         text: r#"Start Oryx with `oryx --theme nord file.md` to use a theme for this session only. Your usual theme stays as it is."#,
     },
     Tip {
