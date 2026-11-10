@@ -934,3 +934,14 @@ fn a_lone_image_keeps_its_place_in_the_copy() {
     assert!(styles[2].contains("text-align:right"), "placed: {styles:?}");
     assert!(!styles[3].contains("text-align"), "with words: {styles:?}");
 }
+
+/// Two footnote references that touch are parted by a raised comma in
+/// the copy too.
+#[test]
+fn footnote_references_that_touch_are_parted_in_the_copy() {
+    let html = html_of_markdown("word[^a][^b]\n\n[^a]: one\n\n[^b]: two\n");
+    assert!(
+        html.contains("<sup>1</sup><sup>,</sup><sup>2</sup>"),
+        "{html}"
+    );
+}

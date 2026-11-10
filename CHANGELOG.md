@@ -82,6 +82,7 @@
 - A `$$` formula inside a table cell now stays in its cell, in display style. Before, it was shown as a block above the table, and its cell lost it.
 - An inline formula wider than its column or its cell now shrinks to fit, down to half its size, as a display formula does. Before, it ran past the right edge. The picture of such a formula in a copy is whole too. Before, it was cut at the right.
 - On Linux without a desktop portal and without zenity, such as a bare window manager on Wayland, the file dialogs (open, save as, new file, export) now ask for the path in a field at the top of the window. Enter opens, saves, creates or exports to that path, and Escape cancels. Before, nothing happened.
+- Two footnote references next to each other, such as `[^1][^2]`, are now separated by a comma. Before, they looked like one number.
 
 ## v1.2.2
 

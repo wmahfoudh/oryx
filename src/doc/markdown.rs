@@ -666,6 +666,21 @@ impl Builder {
             }
             Event::FootnoteReference(label) => {
                 let number = self.footnote_number(&label);
+                // Two references that touch would read as one number: a
+                // raised comma parts them, as in print. It is no link.
+                let touches = self.spans.last().is_some_and(|last| {
+                    last.link
+                        .as_deref()
+                        .is_some_and(|l| l.starts_with("footnote:"))
+                });
+                if touches {
+                    let mut comma = self.style();
+                    comma.set_text(",");
+                    comma.range = 0..0;
+                    comma.link = None;
+                    comma.script = SpanScript::Sup;
+                    self.push(comma);
+                }
                 let mut span = self.style();
                 span.set_text(number.to_string());
                 span.link = Some(format!("footnote:{label}"));
@@ -3837,6 +3852,64 @@ mod tests {
         };
         assert_eq!(label, "1");
         assert_eq!(spans[0].text(&d.source), "the note");
+    }
+
+    /// The user's ask of 10/11/2026: two footnote references that touch
+    /// read as one number, so a raised comma parts them, as in print.
+    #[test]
+    fn footnote_references_that_touch_are_parted_by_a_comma() {
+        let texts = |md: &str| -> Vec<(String, bool, SpanScript)> {
+            let d = parse(md);
+            let spans = match &d.blocks[0].kind {
+                BlockKind::Paragraph { spans } => spans.clone(),
+                BlockKind::Heading { spans, .. } => spans.clone(),
+                BlockKind::Table { rows, .. } => rows[0][0].clone(),
+                other => panic!("{other:?}"),
+            };
+            spans
+                .iter()
+                .map(|s| (s.text(&d.source).to_string(), s.link.is_some(), s.script))
+                .collect()
+        };
+        let notes = "\n\n[^a]: one\n\n[^b]: two\n\n[^c]: three";
+        let plain = |text: &str| (text.to_string(), false, SpanScript::None);
+        let reference = |text: &str| (text.to_string(), true, SpanScript::None);
+        let comma = (",".to_string(), false, SpanScript::Sup);
+        assert_eq!(
+            texts(&format!("w[^a][^b]{notes}")),
+            [plain("w"), reference("1"), comma.clone(), reference("2")]
+        );
+        assert_eq!(
+            texts(&format!("w[^a][^b][^c]{notes}")),
+            [
+                plain("w"),
+                reference("1"),
+                comma.clone(),
+                reference("2"),
+                comma.clone(),
+                reference("3")
+            ]
+        );
+        assert_eq!(
+            texts(&format!("w[^a][^a]{notes}")),
+            [plain("w"), reference("1"), comma.clone(), reference("1")]
+        );
+        assert_eq!(
+            texts(&format!("w[^a] [^b]{notes}")),
+            [plain("w"), reference("1"), plain(" "), reference("2")]
+        );
+        assert_eq!(
+            texts(&format!("w[^a]x[^b]{notes}")),
+            [plain("w"), reference("1"), plain("x"), reference("2")]
+        );
+        assert_eq!(
+            texts(&format!("# w[^a][^b]{notes}"))[1..],
+            [reference("1"), comma.clone(), reference("2")]
+        );
+        assert_eq!(
+            texts(&format!("| h |\n|---|\n| w[^a][^b] |{notes}"))[1..],
+            [reference("1"), comma, reference("2")]
+        );
     }
 
     /// `$$` inside a table cell is the cell's own formula, in display

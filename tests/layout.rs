@@ -6189,3 +6189,33 @@ fn a_lone_image_in_a_definition_is_not_centered() {
         );
     }
 }
+
+/// The user's ask of 10/11/2026: two footnote references that touch are
+/// drawn apart, a raised comma between them.
+#[test]
+fn footnote_references_that_touch_are_drawn_apart() {
+    let (doc, l) = lay2("word[^a][^b]\n\n[^a]: one\n\n[^b]: two", 800.0);
+    let run_of = |link: &str| {
+        l.runs
+            .iter()
+            .find(|r| l.run_link(&doc, r) == Some(link))
+            .unwrap_or_else(|| panic!("no run for {link}"))
+    };
+    let (first, second) = (run_of("footnote:a"), run_of("footnote:b"));
+    let comma = l
+        .runs
+        .iter()
+        .find(|r| l.run_text(&doc, r) == ",")
+        .expect("the comma between them");
+    assert!(
+        second.x >= first.x + first.width + comma.width - 0.5 && comma.width > 1.0,
+        "the second number at {} after the first's end {} and a comma {} wide",
+        second.x,
+        first.x + first.width,
+        comma.width
+    );
+    assert!(
+        (comma.size - first.size).abs() < 0.1 && (comma.baseline - first.baseline).abs() < 0.1,
+        "the comma is raised and sized as the numbers"
+    );
+}
