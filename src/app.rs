@@ -215,9 +215,10 @@ pub fn run(
                 false,
             ),
         };
-    // Absolute from here on, for a file that does not exist yet too: a
-    // bare relative name like `README.md` has the empty string as
-    // parent, which breaks the sidebar root and the dialog.
+    // Absolute from here on, for a file that does not exist yet in a
+    // folder that does: a bare relative name like `README.md` has the
+    // empty string as parent, which breaks the sidebar root and the
+    // dialog. A path the loader will refuse stays as given.
     let path = path.map(|p| load::canonical(&p));
     let doc_dir = path
         .as_ref()

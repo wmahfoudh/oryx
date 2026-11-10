@@ -422,28 +422,54 @@ pub fn open(path: &Path, deadline: Option<Instant>) -> anyhow::Result<Opened> {
 /// have once saved, its folder's canonical form and its name: `oryx
 /// notes.md` on a new name must not key the file one way before its
 /// first save and another way after. A path with no folder to resolve
-/// is returned as given, and so is a missing name that ends with a
-/// separator, a folder's own, which the loader refuses by that mark.
+/// is returned as given, and so are an empty path and a missing name
+/// written as a folder's, which the loader refuses by that mark. A link
+/// whose target does not exist yet is the file its target will be: the
+/// save then creates the target and leaves the link.
 pub fn canonical(path: &Path) -> PathBuf {
+    canonical_within(path, LINK_HOPS)
+}
+
+/// The links followed from a link whose end does not exist, before the
+/// path is taken as it stands: a chain longer than this is a loop.
+const LINK_HOPS: u8 = 8;
+
+fn canonical_within(path: &Path, hops: u8) -> PathBuf {
     if let Ok(found) = path.canonicalize() {
         return found;
     }
-    if names_a_folder(path) {
+    if path.as_os_str().is_empty() || names_a_folder(path) {
         return path.to_path_buf();
     }
     let folder = match path.parent() {
         Some(p) if !p.as_os_str().is_empty() => p,
         _ => Path::new("."),
     };
+    if hops > 0 {
+        if let Ok(target) = std::fs::read_link(path) {
+            let target = canonical_within(&folder.join(target), hops - 1);
+            let creatable = target.parent().is_some_and(Path::is_dir) && !is_link(&target);
+            if creatable {
+                return target;
+            }
+        }
+    }
     match (folder.canonicalize(), path.file_name()) {
         (Ok(folder), Some(name)) => folder.join(name),
         _ => path.to_path_buf(),
     }
 }
 
-/// A path written with a separator at its end: a folder's name.
+/// Whether a path is a symbolic link, whatever it leads to.
+fn is_link(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink())
+}
+
+/// A path written as a folder's name: a separator at its end, or the
+/// folder's own `.` after one.
 fn names_a_folder(path: &Path) -> bool {
     let text = path.to_string_lossy();
+    let text = text.strip_suffix('.').unwrap_or(&text);
     text.ends_with('/') || text.ends_with(std::path::MAIN_SEPARATOR)
 }
 
@@ -452,9 +478,20 @@ fn names_a_folder(path: &Path) -> bool {
 /// name says text: markdown, code, plain or unknown. A book, a comic or
 /// a PDF that does not exist is an error, since nothing can be typed
 /// into one, and so is a file in a folder that does not exist; that
-/// error names the folder. A name that ends with a separator is a
-/// folder's own, and missing too.
+/// error names the folder. A name written as a folder's is a missing
+/// folder too. An empty path names nothing. A link that `canonical`
+/// could not follow to a file that can be created is refused: a save
+/// would replace the link itself.
 fn new_file_bytes(path: &Path, err: &std::io::Error) -> anyhow::Result<Vec<u8>> {
+    if path.as_os_str().is_empty() {
+        anyhow::bail!("cannot open a file with no name");
+    }
+    if is_link(path) {
+        anyhow::bail!(
+            "cannot open {}: the link leads to a place that does not exist",
+            path.display()
+        );
+    }
     if names_a_folder(path) {
         anyhow::bail!(
             "cannot open {}: the folder {} does not exist",
@@ -2050,6 +2087,58 @@ mod tests {
             text.contains("folder") && text.contains("newdir"),
             "the message names the missing folder: {text}"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The read of 10/11/2026: `newdir/.` names a folder as `newdir/`
+    /// does, and an empty path names nothing.
+    #[test]
+    fn a_missing_folder_named_with_a_final_dot_and_an_empty_path_are_refused() {
+        let dir = std::env::temp_dir().join(format!("oryx-load-dot-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let named = format!("{}/newdir/.", dir.display());
+        assert_eq!(
+            canonical(Path::new(&named)).to_string_lossy(),
+            named,
+            "the folder's name is kept as given"
+        );
+        assert!(open(Path::new(&named), None).is_err(), "a folder, no file");
+        assert!(open(Path::new(""), None).is_err(), "an empty path");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The read of 10/11/2026: a link whose target does not exist yet
+    /// opens as the new file its target will be, so a save creates the
+    /// target and leaves the link; a link to a folder that does not
+    /// exist is refused.
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_link_is_the_new_file_its_target_will_be() {
+        let dir = std::env::temp_dir().join(format!("oryx-load-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let real = dir.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = dir.join("link.md");
+        std::os::unix::fs::symlink(real.join("target.md"), &link).unwrap();
+        let relative = dir.join("relative.md");
+        std::os::unix::fs::symlink("real/other.md", &relative).unwrap();
+        assert_eq!(
+            canonical(&link),
+            real.canonicalize().unwrap().join("target.md")
+        );
+        assert_eq!(
+            canonical(&relative),
+            real.canonicalize().unwrap().join("other.md"),
+            "a relative target is read from the link's folder"
+        );
+        let nowhere = dir.join("nowhere.md");
+        std::os::unix::fs::symlink("/nonexistent/oryx/x.md", &nowhere).unwrap();
+        assert_eq!(canonical(&nowhere), nowhere, "no folder to resolve");
+        let err = open(&nowhere, None).err().expect("a link to nowhere");
+        assert!(err.to_string().contains("link"), "{err}");
+        let looped = dir.join("loop.md");
+        std::os::unix::fs::symlink(&looped, &looped).unwrap();
+        assert!(open(&canonical(&looped), None).is_err(), "a link to itself");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

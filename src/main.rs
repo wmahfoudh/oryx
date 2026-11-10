@@ -244,6 +244,8 @@ fn parse_args(args: impl Iterator<Item = OsString>) -> Cli {
             Some(flag) if flag.starts_with("--") => {
                 return Cli::Refused(format!("unknown option {flag}"));
             }
+            // An empty argument names no file: the welcome page.
+            _ if arg.is_empty() => {}
             _ => path = Some(PathBuf::from(&arg)),
         }
     }
