@@ -172,8 +172,9 @@ pub fn run(
     // it, the edit marks, the resume note, the disk identity, has to
     // match what `open_file` stores for every later file, and that is
     // the canonical form; a path as typed on the command line would
-    // key the first file differently from the same file reopened.
-    let path = path.map(|p| p.canonicalize().unwrap_or(p));
+    // key the first file differently from the same file reopened. A
+    // file that does not exist yet takes the form it will have.
+    let path = path.map(|p| load::canonical(&p));
     let mut config = config::load();
     let mut refused_at_start = false;
     let (document, pending, streamed, book, book_toc, lossy, opened_crlf, opened_cr, opened_bom) =
@@ -214,9 +215,10 @@ pub fn run(
                 false,
             ),
         };
-    // Absolute from here on: a bare relative name like `README.md` has the
-    // empty string as parent, which breaks the sidebar root and the dialog.
-    let path = path.map(|p| p.canonicalize().unwrap_or(p));
+    // Absolute from here on, for a file that does not exist yet too: a
+    // bare relative name like `README.md` has the empty string as
+    // parent, which breaks the sidebar root and the dialog.
+    let path = path.map(|p| load::canonical(&p));
     let doc_dir = path
         .as_ref()
         .and_then(|p| p.parent().map(|d| d.to_path_buf()))
@@ -404,6 +406,7 @@ pub fn run(
         note_from: None,
         pending_row: None,
         disk_seen: None,
+        new_file: false,
         disk_conflict: false,
         disk_check_at: Instant::now(),
         disk_misses: 0,
@@ -1144,6 +1147,7 @@ struct Stash {
     media: MediaCache,
     book_toc: Vec<epub::TocEntry>,
     disk_seen: Option<(std::time::SystemTime, u64)>,
+    new_file: bool,
     /// The selection anchors on the model, which returns untouched, so
     /// it survives the trip whole.
     selection: Option<Selection>,
@@ -1784,6 +1788,11 @@ struct App {
     /// The open file's on-disk identity at last read or write, for the
     /// external-change check.
     disk_seen: Option<(std::time::SystemTime, u64)>,
+    /// The open file was not on disk at its open and is not saved yet:
+    /// `oryx notes.md` on a name that did not exist. Its first save
+    /// creates it, and the disk check watches its path for a file that
+    /// someone else puts there first.
+    new_file: bool,
     /// The file changed on disk under unsaved edits and the reader was
     /// told. Autosave holds while this stands; a write or a read of our
     /// own clears it.
@@ -3387,7 +3396,18 @@ impl App {
         // through the ledger the checkbox click arms the same way. A file
         // not yet on disk, `oryx notes.md` on a name that did not exist,
         // is created by its first save, with nothing typed too.
-        let on_disk = self.disk_seen.is_some();
+        // A file that appeared at the path of a new file meanwhile: with
+        // nothing typed the page takes it, and nothing is written. Over
+        // typed text Ctrl+S is the reader's word, as over any file that
+        // changed on disk.
+        if self.new_file && matches!(disk_state(&path), Ok(Some(_))) {
+            if !self.edits_unsaved() {
+                self.new_file_arrived(&path);
+                return false;
+            }
+            self.new_file = false;
+        }
+        let on_disk = !self.new_file;
         if self.ledger.is_none() && (self.file_deleted || !on_disk) && self.writable() {
             self.ensure_ledger();
         }
@@ -3474,6 +3494,7 @@ impl App {
             note: self.unnamed(),
             deleted: self.file_deleted,
             conflict: self.disk_conflict,
+            new: self.new_file,
             seen: self.disk_seen,
             now,
         };
@@ -3483,6 +3504,7 @@ impl App {
                 // A deleted file has its own notice and its own question
                 // at the quit; a change found here first is told once.
                 if !self.disk_conflict && !self.file_deleted && now.is_some() {
+                    self.new_file = false;
                     self.disk_seen = now;
                     self.tell_disk_conflict();
                 }
@@ -3938,6 +3960,32 @@ impl App {
             let meta = std::fs::metadata(path).ok()?;
             Some((meta.modified().ok()?, meta.len()))
         });
+        // Not there, said by the disk itself: a disk that cannot tell
+        // is no news, and such a file is not a new one.
+        self.new_file = self.writable()
+            && self
+                .path
+                .as_deref()
+                .is_some_and(|path| matches!(disk_state(path), Ok(None)));
+    }
+
+    /// A file stands at the path of a new file before its first save:
+    /// someone else put it there. With nothing typed the page takes it,
+    /// as a file changed on disk is reloaded; over typed text the reader
+    /// is told, and Ctrl+S is their word. True when one was found.
+    fn new_file_arrived(&mut self, path: &Path) -> bool {
+        let Ok(Some(state)) = disk_state(path) else {
+            return false;
+        };
+        self.new_file = false;
+        self.disk_misses = 0;
+        self.disk_seen = Some(state);
+        if self.edits_unsaved() {
+            self.tell_disk_conflict();
+        } else {
+            self.reload_now();
+        }
+        true
     }
 
     /// The external-change check, run on focus and rate-limited on
@@ -3958,10 +4006,14 @@ impl App {
         {
             self.request_redraw();
         }
-        let Some(seen) = self.disk_seen else {
+        let Some(path) = self.path.clone() else {
             return;
         };
-        let Some(path) = self.path.clone() else {
+        if self.new_file {
+            self.new_file_arrived(&path);
+            return;
+        }
+        let Some(seen) = self.disk_seen else {
             return;
         };
         let Ok(state) = disk_state(&path) else {
@@ -7430,7 +7482,7 @@ impl App {
         self.undo = None;
         self.rehighlight_at = None;
         self.notice = None;
-        let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let path = load::canonical(path);
         let landing = self.history_at_open(step, here, &path);
         // The note left for another file is done with; reopened, it is
         // the fresh note `open_note` just wrote.
@@ -7875,6 +7927,7 @@ impl App {
             media: std::mem::replace(&mut self.media, MediaCache::new(PathBuf::from("."))),
             book_toc: std::mem::take(&mut self.book_toc),
             disk_seen: self.disk_seen.take(),
+            new_file: std::mem::take(&mut self.new_file),
             selection: self.selection.take(),
             cfg: self.cfg.clone(),
             theme: self.theme.clone(),
@@ -7968,6 +8021,7 @@ impl App {
         self.media = stash.media;
         self.book_toc = stash.book_toc;
         self.disk_seen = stash.disk_seen;
+        self.new_file = stash.new_file;
         // The document takes its direction and its justification back
         // before its kept layout is weighed against the settings of the
         // moment.

@@ -1,7 +1,7 @@
 //! File loading and type detection by extension.
 
 use std::ops::Range;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -417,16 +417,51 @@ pub fn open(path: &Path, deadline: Option<Instant>) -> anyhow::Result<Opened> {
     })
 }
 
-/// Every code block whose highlight prefix is incomplete, for restarting
-/// the highlight worker after the parse swap. Unlike `apply_budget` it
-/// leaves computed highlights alone.
+/// The canonical form of a path, the key every memory of a file is
+/// filed under. A file that does not exist yet has the form it will
+/// have once saved, its folder's canonical form and its name: `oryx
+/// notes.md` on a new name must not key the file one way before its
+/// first save and another way after. A path with no folder to resolve
+/// is returned as given, and so is a missing name that ends with a
+/// separator, a folder's own, which the loader refuses by that mark.
+pub fn canonical(path: &Path) -> PathBuf {
+    if let Ok(found) = path.canonicalize() {
+        return found;
+    }
+    if names_a_folder(path) {
+        return path.to_path_buf();
+    }
+    let folder = match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    match (folder.canonicalize(), path.file_name()) {
+        (Ok(folder), Some(name)) => folder.join(name),
+        _ => path.to_path_buf(),
+    }
+}
+
+/// A path written with a separator at its end: a folder's name.
+fn names_a_folder(path: &Path) -> bool {
+    let text = path.to_string_lossy();
+    text.ends_with('/') || text.ends_with(std::path::MAIN_SEPARATOR)
+}
+
 /// A file that does not exist yet, in a folder that does, opens as the
 /// empty file it will be at the first save, as the editors do, when its
 /// name says text: markdown, code, plain or unknown. A book, a comic or
 /// a PDF that does not exist is an error, since nothing can be typed
 /// into one, and so is a file in a folder that does not exist; that
-/// error names the folder.
+/// error names the folder. A name that ends with a separator is a
+/// folder's own, and missing too.
 fn new_file_bytes(path: &Path, err: &std::io::Error) -> anyhow::Result<Vec<u8>> {
+    if names_a_folder(path) {
+        anyhow::bail!(
+            "cannot open {}: the folder {} does not exist",
+            path.display(),
+            path.display()
+        );
+    }
     let folder = match path.parent() {
         Some(p) if !p.as_os_str().is_empty() => p,
         _ => Path::new("."),
@@ -446,6 +481,9 @@ fn new_file_bytes(path: &Path, err: &std::io::Error) -> anyhow::Result<Vec<u8>> 
     }
 }
 
+/// Every code block whose highlight prefix is incomplete, for restarting
+/// the highlight worker after the parse swap. Unlike `apply_budget` it
+/// leaves computed highlights alone.
 pub fn pending(doc: &Document) -> Vec<PendingBlock> {
     let mut pending = Vec::new();
     for (index, block) in doc.blocks.iter().enumerate() {
@@ -1994,6 +2032,49 @@ mod tests {
             text.contains("folder") && text.contains("/nonexistent"),
             "the message names the missing folder: {text}"
         );
+    }
+
+    /// The read of Task 359: a name that ends with a separator is a
+    /// folder's, and a folder that does not exist is refused; an empty
+    /// editor under that name could never be saved.
+    #[test]
+    fn a_missing_name_that_ends_with_a_separator_is_a_missing_folder() {
+        let dir = std::env::temp_dir().join(format!("oryx-load-slash-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let named = format!("{}/newdir/", dir.display());
+        let err = open(Path::new(&named), None)
+            .err()
+            .expect("a folder's name, no file");
+        let text = err.to_string();
+        assert!(
+            text.contains("folder") && text.contains("newdir"),
+            "the message names the missing folder: {text}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The read of Task 359: a file that does not exist yet has the
+    /// canonical form it will have once saved, its folder's canonical
+    /// form and its name, so the open and the later opens agree.
+    #[test]
+    fn a_missing_file_has_the_canonical_form_it_will_have_once_saved() {
+        let dir = std::env::temp_dir().join(format!("oryx-load-canon-{}", std::process::id()));
+        let sub = dir.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        let typed = sub.join("..").join("sub").join("notes.md");
+        let early = canonical(&typed);
+        std::fs::write(&typed, "x").unwrap();
+        assert_eq!(early, typed.canonicalize().unwrap());
+        assert_eq!(canonical(&typed), early, "the same once it exists");
+        let nowhere = Path::new("/nonexistent/oryx/notes.md");
+        assert_eq!(canonical(nowhere), nowhere, "no folder, the path as given");
+        let folder = format!("{}/newdir/", sub.display());
+        assert_eq!(
+            canonical(Path::new(&folder)).to_string_lossy(),
+            folder,
+            "a folder's name keeps its separator"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// `oryx notes.md` on a file that does not exist yet opens the empty

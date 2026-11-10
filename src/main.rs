@@ -62,7 +62,8 @@ fn missing_keyboard_library() -> Option<String> {
 
 /// What the positional argument asks for: a folder opens the sidebar
 /// there over the welcome page; anything else, existing or not, goes
-/// to the loader as a file, whose error names a missing one.
+/// to the loader as a file, which opens a missing one as a new file
+/// and refuses what cannot be one.
 fn launch(path: Option<PathBuf>) -> app::Launch {
     match path {
         None => app::Launch::Empty,

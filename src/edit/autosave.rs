@@ -45,6 +45,9 @@ pub struct Facts {
     pub deleted: bool,
     /// The reader was already told the file changed on disk.
     pub conflict: bool,
+    /// The file was not on disk at its open and has not been saved yet:
+    /// `oryx notes.md` on a name that did not exist.
+    pub new: bool,
     pub seen: Option<(SystemTime, u64)>,
     pub now: Option<(SystemTime, u64)>,
 }
@@ -56,7 +59,13 @@ pub fn verdict(facts: Facts) -> Verdict {
     if !facts.unsaved || facts.note {
         return Verdict::Nothing;
     }
-    let untouched = facts.seen.is_some() && facts.seen == facts.now;
+    // A new file is untouched while nothing stands at its path: the
+    // write creates it. One that appeared there is someone else's.
+    let untouched = if facts.new {
+        facts.now.is_none()
+    } else {
+        facts.seen.is_some() && facts.seen == facts.now
+    };
     if facts.deleted || facts.conflict || !untouched {
         return Verdict::Hold;
     }
@@ -139,9 +148,34 @@ mod tests {
             note: false,
             deleted: false,
             conflict: false,
+            new: false,
             seen: state(100, 12),
             now: state(100, 12),
         }
+    }
+
+    /// The read of Task 359: a new file is a named file, kept by
+    /// autosave as any other, so its first automatic save creates it. A
+    /// file that appeared on disk meanwhile is someone else's: held.
+    #[test]
+    fn a_new_file_is_created_by_its_first_automatic_save() {
+        let new = Facts {
+            new: true,
+            seen: None,
+            now: None,
+            ..clean_edit()
+        };
+        assert_eq!(verdict(new), Verdict::Write);
+        let appeared = Facts {
+            now: state(100, 12),
+            ..new
+        };
+        assert_eq!(verdict(appeared), Verdict::Hold);
+        let nothing_typed = Facts {
+            unsaved: false,
+            ..new
+        };
+        assert_eq!(verdict(nothing_typed), Verdict::Nothing);
     }
 
     #[test]
