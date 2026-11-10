@@ -433,10 +433,18 @@ impl Ledger {
     pub fn touched_lines(&self) -> usize {
         let mut count = 0;
         let mut last: Option<usize> = None;
-        let (spans, _) = self.spans();
-        for (splice, span) in self.splices.iter().zip(spans) {
-            let start = self.newlines_before(span.start);
-            let end = start + splice.text.matches('\n').count();
+        // The line breaks of the current text before the walk's place,
+        // counted once over the pieces: a line command leaves a splice
+        // per line, and a count from the start for each cost the square
+        // of their number.
+        let mut line = 0;
+        let mut base = 0;
+        for splice in &self.splices {
+            line += self.base[base..splice.range.start].matches('\n').count();
+            let start = line;
+            line += splice.text.matches('\n').count();
+            let end = line;
+            base = splice.range.end;
             let from = match last {
                 Some(l) if l >= start => l + 1,
                 _ => start,
@@ -1014,5 +1022,39 @@ mod tests {
         let (base, crlf) = led.into_base();
         assert_eq!(&*base, "x\nab\ncd\n", "after a save, the saved text");
         assert_eq!(crlf, vec![1, 4, 7], "with the record the save wrote");
+    }
+
+    #[test]
+    fn the_touched_lines_of_many_splices_cost_their_count() {
+        let old = "let v = 1;\n".repeat(20_000);
+        let new = "// let v = 1;\n".repeat(20_000);
+        let mut led = ledger(&old);
+        let pieces = line_pieces(&old, &new, 0).expect("the same line count");
+        assert_eq!(pieces.len(), 20_000);
+        let (range, joined) = combine(&old, &pieces).expect("some pieces");
+        led.edit_each(range, &joined, &pieces);
+        let slow: usize = {
+            // The count as it was, a walk from the start per splice.
+            let (spans, _) = led.spans();
+            let mut count = 0;
+            let mut last: Option<usize> = None;
+            for (splice, span) in led.splices.iter().zip(spans).take(200) {
+                let start = led.newlines_before(span.start);
+                let end = start + splice.text.matches('\n').count();
+                let from = match last {
+                    Some(l) if l >= start => l + 1,
+                    _ => start,
+                };
+                count += (end + 1).saturating_sub(from);
+                last = Some(end.max(last.unwrap_or(0)));
+            }
+            count
+        };
+        assert_eq!(slow, 200, "the first 200 splices, counted the old way");
+        let start = std::time::Instant::now();
+        assert_eq!(led.touched_lines(), 20_000);
+        let took = start.elapsed();
+        println!("the touched lines of 20,000 splices: {took:?}");
+        assert!(took < std::time::Duration::from_secs(1), "{took:?}");
     }
 }
