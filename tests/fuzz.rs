@@ -372,6 +372,8 @@ fn fuzz_ledger() {
 enum Shape {
     Spans(Vec<SpanShape>),
     Math(String),
+    /// A code block, fenced or indented: its source.
+    Code(String),
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -406,6 +408,9 @@ fn shapes(doc: &Document) -> Option<Vec<Shape>> {
                 spans.iter().map(|s| span_shape(s, &doc.source)).collect(),
             )),
             BlockKind::MathBlock { tex } => Some(Shape::Math(tex.clone())),
+            BlockKind::CodeBlock { .. } => {
+                Some(Shape::Code(doc.source[b.range.clone()].to_string()))
+            }
             _ => None,
         })
         .collect()
@@ -448,6 +453,9 @@ fn check_case(text: &str) -> Result<(), TestCaseError> {
                 (Shape::Math(x), Shape::Math(y)) => {
                     prop_assert_eq!(x, y, "a formula block changed")
                 }
+                (Shape::Code(x), Shape::Code(y)) => {
+                    prop_assert_eq!(x, y, "a code block changed: {:?}", current)
+                }
                 (Shape::Spans(x), Shape::Spans(y)) => {
                     prop_assert_eq!(x.len(), y.len(), "the spans of a block: {:?}", current);
                     for (s, u) in x.iter().zip(y) {
@@ -486,7 +494,7 @@ fn check_case(text: &str) -> Result<(), TestCaseError> {
         Shape::Spans(v) => v
             .iter()
             .any(|s| !s.kept && s.text.bytes().any(|b| b.is_ascii_lowercase())),
-        Shape::Math(_) => false,
+        Shape::Math(_) | Shape::Code(_) => false,
     });
     if has_text {
         prop_assert!(
@@ -511,6 +519,41 @@ fn fuzz_case() {
         check_case(&text)?;
     });
 }
+
+/// The case key against the page on the lines that open and close
+/// code: fences, list items and the paragraphs indented under them.
+#[test]
+#[ignore]
+fn fuzz_case_blocks() {
+    let config = ProptestConfig {
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    };
+    proptest!(config, |(lines in prop::collection::vec(prop::sample::select(CASE_LINES), 0..12))| {
+        check_case(&lines.join("\n"))?;
+    });
+}
+
+const CASE_LINES: &[&str] = &[
+    "",
+    "",
+    "plain words here",
+    "- an item",
+    "1. a numbered item",
+    "  - a nested item",
+    "    four spaces in",
+    "  two spaces in",
+    "      six spaces in",
+    "\tone tab in",
+    "```",
+    "```rust",
+    "~~~",
+    "````",
+    "let x = 1;",
+    "# a heading",
+    "---",
+    "a `code span` here",
+];
 
 /// The patterns of the search fuzzer: greedy runs that would cross the
 /// blocks, anchors, word boundaries, and patterns that match empty.

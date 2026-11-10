@@ -40,6 +40,7 @@
 - `Ctrl+U` no longer changes the case of a display formula written on separate lines, or of the inline code, link addresses and tags between two prices such as `$5` and `$6`.
 - `Ctrl+U` now reads formulas the way the page does. Text between two dollar signs that the page shows as text changes case. A formula with another formula inside braces is unaffected. A dollar sign above a quote, a list or a heading is not paired with a dollar sign below it. Before, the key and the page disagreed in these cases.
 - `Ctrl+U` now changes text between angle brackets that is not an HTML tag, such as `<Hello, World!>`. Before, this text was unchanged.
+- `Ctrl+U` no longer changes the case of the code in a code block. Before, the code changed case in an indented block, and in a fenced block that had a blank line.
 - A selection dragged from the end of a paragraph into the next now highlights the other occurrences of its word. Before, it did not.
 - The word keys, Ctrl+Backspace, Ctrl+Delete and a double click now take a joined emoji such as 👩‍💻 whole, on the page and in the search field. Before, Ctrl+Backspace deleted one part of it and left an invisible joiner behind.
 - When the search bar or a dialog is open, the cursor in the text is now hidden. Before, it kept blinking, for example after Replace All. What you typed then went into the search field.
