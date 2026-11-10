@@ -164,8 +164,12 @@ pub enum KeyOwner {
     Path,
     GoTo,
     Search,
-    /// The editor, or the page in reading mode.
+    /// The editor on markdown source, or the page in reading mode.
     Text,
+    /// The editor on a code or a plain text file, where the markdown
+    /// commands (the lists, the quote, the headings, the marks, the
+    /// link) have nothing to act on.
+    Code,
 }
 
 impl Command {
@@ -182,12 +186,33 @@ impl Command {
         match (self, owner) {
             (Command::Regex, _) => owner == KeyOwner::Search,
             (_, KeyOwner::Text) => true,
+            (cmd, KeyOwner::Code) => !cmd.markdown_only(),
             _ => match section_of(self) {
                 Some("Edit") => self == Command::Edit,
                 Some("Selection") => false,
                 _ => true,
             },
         }
+    }
+}
+
+impl Command {
+    /// Whether the command acts on markdown source alone: in a code or
+    /// a text file it has no receiver, and its key is no chord there.
+    pub fn markdown_only(self) -> bool {
+        matches!(
+            self,
+            Command::BulletList
+                | Command::NumberedList
+                | Command::TaskList
+                | Command::Quote
+                | Command::Heading(_)
+                | Command::TaskToggle
+                | Command::Bold
+                | Command::Italic
+                | Command::Code
+                | Command::Link
+        )
     }
 }
 
@@ -1462,6 +1487,13 @@ mod tests {
                     "{cmd:?} under {owner:?}"
                 );
             }
+            // In a code or a text file the lists and the quote have
+            // nothing to act on: Option types its character there too.
+            assert_eq!(
+                option_on(typed, keycap, code, false, KeyOwner::Code),
+                None,
+                "{cmd:?} in a code file"
+            );
             assert!(
                 alt_typing(&chr(typed), false, true, false, true),
                 "{typed} is typing, for the search field"
@@ -1831,6 +1863,11 @@ mod tests {
             Command::DeleteLines,
         ] {
             assert!(cmd.live(KeyOwner::Text), "{cmd:?} acts on the text");
+            assert_eq!(
+                cmd.live(KeyOwner::Code),
+                !cmd.markdown_only(),
+                "{cmd:?} in a code file"
+            );
             assert!(
                 !cmd.live(KeyOwner::Search),
                 "{cmd:?} edits or selects in the document"

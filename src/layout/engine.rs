@@ -1122,14 +1122,35 @@ impl LayoutPass {
     }
 
     /// Shifts the indices the pass holds into the layout's vectors
-    /// after a consumer drained emitted geometry from their front. The
-    /// open code block's panel is never part of what such a consumer
-    /// may drop.
-    pub(crate) fn rebase(&mut self, rects: usize) {
+    /// after a consumer drained emitted geometry from their front: the
+    /// open code block's panel, which is never part of what such a
+    /// consumer may drop, and the places the block noted at its start
+    /// (its marks and its counts), which its end reads again to align
+    /// its lines and to insert a quote's decoration. A place the drain
+    /// passed is the front of what remains.
+    pub(crate) fn rebase(
+        &mut self,
+        runs: usize,
+        rects: usize,
+        images: usize,
+        math: usize,
+        code: usize,
+    ) {
         if let Some(open) = &mut self.open {
             if open.framed {
                 open.panel -= rects;
             }
+            for marks in [&mut open.frame.marks, &mut open.frame.lines] {
+                marks.runs = marks.runs.saturating_sub(runs);
+                marks.rects = marks.rects.saturating_sub(rects);
+                marks.images = marks.images.saturating_sub(images);
+                marks.math = marks.math.saturating_sub(math);
+            }
+            open.counts.runs = open.counts.runs.saturating_sub(runs);
+            open.counts.rects = open.counts.rects.saturating_sub(rects);
+            open.counts.images = open.counts.images.saturating_sub(images);
+            open.counts.math = open.counts.math.saturating_sub(math);
+            open.counts.code = open.counts.code.saturating_sub(code);
         }
     }
 
@@ -2860,8 +2881,15 @@ impl LayoutDoc {
     /// Drops emitted geometry from the vectors' front: the fused
     /// export's drain behind its pagination cursor. Code line records
     /// fully behind the run frontier go with it, the rest shift. The
-    /// caller rebases everything of its own that indexes the vectors.
-    pub(crate) fn drain_front(&mut self, runs: usize, rects: usize, images: usize, math: usize) {
+    /// caller rebases everything of its own that indexes the vectors;
+    /// the answer is the count of code line records that went.
+    pub(crate) fn drain_front(
+        &mut self,
+        runs: usize,
+        rects: usize,
+        images: usize,
+        math: usize,
+    ) -> usize {
         debug_assert!(self.window.is_none(), "the drain and the window exclude");
         let code = self.code_lines.partition_point(|c| c.runs.end <= runs);
         self.runs.drain(..runs);
@@ -2873,6 +2901,7 @@ impl LayoutDoc {
             record.runs = record.runs.start - runs..record.runs.end - runs;
         }
         self.index = YIndex::default();
+        code
     }
 
     /// Rebuilds the side buffer over the live references once evictions

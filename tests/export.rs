@@ -1395,3 +1395,53 @@ fn a_tall_image_paginates_in_slices_as_in_one_shot() {
         }
     }
 }
+
+/// The export drains what it has paged from the front of the layout
+/// while the pass is still inside a long code block. The block's own
+/// marks into the layout move with the drain: a code block in a quote,
+/// after a page of text with marks, once ended the export in a panic.
+#[test]
+fn a_long_code_block_in_a_quote_exports() {
+    let mut source = String::new();
+    for i in 0..300 {
+        source.push_str(&format!(
+            "Paragraph {i} with `code {i}` and ==mark== here.\n\n"
+        ));
+    }
+    source.push_str("> A quote opens.\n>\n> ```rust\n");
+    for i in 0..6000 {
+        source.push_str(&format!("> let line_{i} = {i};\n"));
+    }
+    source.push_str("> ```\n>\n> The quote ends.\n\n<div align=\"center\">\n\n```\ncentered code\n```\n\n</div>\n\nAfter.\n");
+    let doc = markdown::parse(source.as_str());
+    let target = std::env::temp_dir().join(format!("oryx-export-quote-{}.pdf", std::process::id()));
+    let settings = ExportSettings {
+        body_size: 11.0,
+        code_size: 9.0,
+        page: PageSize::A4,
+        ..ExportSettings::default()
+    };
+    // Short slices, alone and with the app's pool of shaping workers,
+    // which places a code block's lines step by step: the drain then
+    // falls inside the block.
+    for workers in [0, 4] {
+        let mut fonts = FontStore::new();
+        let mut media = MediaCache::offline(PathBuf::from("tests/fixtures"));
+        let pool = (workers > 0)
+            .then(|| std::sync::Arc::new(oryx::layout::ShapePool::new(workers, &fonts.seed())));
+        let mut pass = ExportPass::new(&settings, Theme::default_dark(), target.clone());
+        while !pass.is_done() {
+            pass.step(
+                Instant::now() + Duration::from_millis(2),
+                &doc,
+                &mut fonts,
+                &mut media,
+                false,
+                pool.as_ref(),
+            );
+        }
+        let pages = pass.finish(&doc, &fonts).expect("the export lands");
+        std::fs::remove_file(&target).ok();
+        assert!(pages > 50, "{pages} pages");
+    }
+}

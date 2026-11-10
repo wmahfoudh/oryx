@@ -33,6 +33,23 @@ pub struct Occurrences {
     pub rects_scroll: f32,
     /// The rectangles no longer fit the layout.
     pub stale: bool,
+    /// The rectangles were built while the layout held the view alone,
+    /// under a live gesture such as a scrollbar drag: the matches around
+    /// the view had no place yet and have no rectangle.
+    pub partial: bool,
+}
+
+impl Occurrences {
+    /// Whether the rectangles are to be built again, and whether the
+    /// places they were built on changed: the layout moved, or it holds
+    /// its full band again after rectangles built on the view alone
+    /// (`partial_window` says what it holds now). A scroll past a view
+    /// from where they were built asks for them again too, on the same
+    /// places.
+    pub fn rects_due(&self, scroll: f32, view: f32, partial_window: bool) -> (bool, bool) {
+        let relaid = self.stale || (self.partial && !partial_window);
+        (relaid || (scroll - self.rects_scroll).abs() > view, relaid)
+    }
 }
 
 /// The length a selection may have and still light, in characters:
@@ -135,6 +152,7 @@ pub fn find(doc: &Document, selection: Selection, matched: Match) -> Option<Occu
         matches,
         rects: Vec::new(),
         rects_scroll: 0.0,
+        partial: false,
         stale: true,
     })
 }
@@ -394,5 +412,40 @@ mod tests {
         assert_eq!(selection::plain_text(&clicked, &doc), "count");
         let found = find(&doc, clicked, Match::Word).expect("two others");
         assert_eq!(found.matches.len(), 2, "not recount, not count_all");
+    }
+
+    #[test]
+    fn rectangles_built_on_the_view_alone_are_built_again_on_the_full_band() {
+        let mut found = Occurrences {
+            word: Selection {
+                start: ModelPos {
+                    block: 0,
+                    span: 0,
+                    byte: 0,
+                },
+                end: ModelPos {
+                    block: 0,
+                    span: 0,
+                    byte: 3,
+                },
+            },
+            matched: Match::Text,
+            matches: Vec::new(),
+            rects: Vec::new(),
+            rects_scroll: 1000.0,
+            stale: false,
+            partial: true,
+        };
+        // Still under the gesture: nothing to do within a view.
+        assert_eq!(found.rects_due(1200.0, 600.0, true), (false, false));
+        // The gesture ended, the layout holds its band: built again, and
+        // the band painted over them is old.
+        assert_eq!(found.rects_due(1200.0, 600.0, false), (true, true));
+        found.partial = false;
+        assert_eq!(found.rects_due(1200.0, 600.0, false), (false, false));
+        // A scroll past a view asks for them on the same places.
+        assert_eq!(found.rects_due(1700.0, 600.0, false), (true, false));
+        found.stale = true;
+        assert_eq!(found.rects_due(1000.0, 600.0, false), (true, true));
     }
 }

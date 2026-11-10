@@ -1290,7 +1290,7 @@ fn live_caret(owner: KeyOwner, editing: bool, focused: bool) -> Option<CaretAt> 
         KeyOwner::Dialog { field: true } | KeyOwner::Path | KeyOwner::GoTo | KeyOwner::Search => {
             Some(CaretAt::Field)
         }
-        KeyOwner::Text => editing.then_some(CaretAt::Text),
+        KeyOwner::Text | KeyOwner::Code => editing.then_some(CaretAt::Text),
     }
 }
 
@@ -2543,6 +2543,8 @@ impl App {
             KeyOwner::GoTo
         } else if self.search.is_some() {
             KeyOwner::Search
+        } else if self.mode == edit::Mode::Edit && !self.markdown_source() {
+            KeyOwner::Code
         } else {
             KeyOwner::Text
         }
@@ -5897,7 +5899,7 @@ impl App {
     /// it, and while the search bar is open, so two sets of matches
     /// never tint the same text. Its rectangles are rebuilt when the
     /// layout moved under them or the view scrolled past their window.
-    fn sync_occurrences(&mut self) {
+    fn sync_occurrences(&mut self, partial_window: bool) {
         let Some(found) = self.occurrences.as_ref() else {
             return;
         };
@@ -5908,8 +5910,8 @@ impl App {
         }
         let vh = self.viewport_h();
         let scroll = self.scroll_y;
-        let moved = found.stale;
-        if !moved && (scroll - found.rects_scroll).abs() <= vh {
+        let (due, moved) = found.rects_due(scroll, vh, partial_window);
+        if !due {
             return;
         }
         let (lo, hi) = (scroll - 2.0 * vh, scroll + 3.0 * vh);
@@ -5922,6 +5924,7 @@ impl App {
             .collect();
         found.rects_scroll = scroll;
         found.stale = false;
+        found.partial = partial_window;
         // A band painted before the layout moved holds the old places.
         // A scroll past the window needs no repaint of its own: the band
         // covers the same five views the rectangles did.
@@ -9149,7 +9152,7 @@ impl App {
         if slid || stepped || drifted {
             self.refresh_search_rects();
         }
-        self.sync_occurrences();
+        self.sync_occurrences(interactive);
         // The page paints at one whole pixel per frame, read once here
         // by the direct paint, the band, its slice and the caret: a
         // keystroke's direct frame and the band frame after it would

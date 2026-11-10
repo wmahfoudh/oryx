@@ -456,16 +456,19 @@ impl ExportPass {
                         || consumed.images > 0
                         || consumed.math > 0
                     {
-                        self.layout.drain_front(
+                        let code = self.layout.drain_front(
                             consumed.runs,
                             consumed.rects,
                             consumed.images,
                             consumed.math,
                         );
-                        self.pass
-                            .as_mut()
-                            .expect("emission has a pass")
-                            .rebase(consumed.rects);
+                        self.pass.as_mut().expect("emission has a pass").rebase(
+                            consumed.runs,
+                            consumed.rects,
+                            consumed.images,
+                            consumed.math,
+                            code,
+                        );
                     }
                 }
                 if complete && self.queue.is_empty() {
