@@ -88,6 +88,10 @@ In a sentence: $\frac{1}{2} + \dfrac{1}{3}$ and $\sqrt{2} \approx 1.414$.
 
 The quadratic formula, with `\pm` for the plus or minus sign:
 
+```latex
+x = \frac{-b \pm \sqrt{b^2 - 4ac}}{2a}
+```
+
 $$
 x = \frac{-b \pm \sqrt{b^2 - 4ac}}{2a}
 $$
@@ -114,6 +118,10 @@ $$
 
 Two definitions from set theory:
 
+```latex
+A \cap B = \{ x : x \in A \land x \in B \}, \qquad A \setminus B = \{ x \in A : x \notin B \}
+```
+
 $$
 A \cap B = \{ x : x \in A \land x \in B \}, \qquad A \setminus B = \{ x \in A : x \notin B \}
 $$
@@ -134,13 +142,17 @@ In a sentence: $\sum_{i=1}^{n} i$ and $\lim_{x \to 0} f(x)$. With `\displaystyle
 
 The Basel problem, and the Gaussian integral. Printed books put a thin space, `\,`, before `dx`.
 
+```latex
+\sum_{n=1}^{\infty} \frac{1}{n^2} = \frac{\pi^2}{6}, \qquad \int_{-\infty}^{\infty} e^{-x^2} \, dx = \sqrt{\pi}
+```
+
 $$
 \sum_{n=1}^{\infty} \frac{1}{n^2} = \frac{\pi^2}{6}, \qquad \int_{-\infty}^{\infty} e^{-x^2} \, dx = \sqrt{\pi}
 $$
 
 ### Functions and text
 
-`\sin`, `\cos`, `\tan`, `\log`, `\ln`, `\exp`, `\det`, `\gcd`, `\arg` and the other function names are upright, with the right space after them. `\operatorname{Var}` makes any other name a function. `\text{...}` puts words in a formula, with their spaces. `\mathrm{d}` is an upright letter, the d of `dx` in many books. `a \equiv b \pmod{n}` adds (mod n) at the end, and `a \bmod n` writes mod between two values.
+`\sin`, `\cos`, `\tan`, `\log`, `\ln`, `\exp`, `\det`, `\gcd`, `\arg` and the other function names are upright, with the right space after them. `\operatorname{Var}` makes any other name a function. `\text{...}` puts words in a formula, with their spaces. `\mathrm{d}` is an upright letter, the d of `dx` in many books. A whole group can go inside it, with its commands and its scripts, as for a unit: `\mathrm{m\,s^{-2}}`. `a \equiv b \pmod{n}` adds (mod n) at the end, and `a \bmod n` writes mod between two values.
 
 ```latex
 \sin^2 \theta + \cos^2 \theta = 1 \qquad \ln(xy) = \ln x + \ln y \qquad \operatorname{Var}(X) = E[X^2] - E[X]^2 \qquad a \equiv b \pmod{n}
@@ -150,15 +162,19 @@ $$
 \sin^2 \theta + \cos^2 \theta = 1 \qquad \ln(xy) = \ln x + \ln y \qquad \operatorname{Var}(X) = E[X^2] - E[X]^2 \qquad a \equiv b \pmod{n}
 $$
 
-Conditional probability, and the derivative of the exponential:
+Conditional probability, the derivative of the exponential, and a value with its unit:
+
+```latex
+P(A \mid B) = \frac{P(A \cap B)}{P(B)} \quad \text{if } P(B) > 0, \qquad \frac{\mathrm{d}}{\mathrm{d}x} e^{x} = e^{x} \qquad g = 9.81\,\mathrm{m\,s^{-2}}
+```
 
 $$
-P(A \mid B) = \frac{P(A \cap B)}{P(B)} \quad \text{if } P(B) > 0, \qquad \frac{\mathrm{d}}{\mathrm{d}x} e^{x} = e^{x}
+P(A \mid B) = \frac{P(A \cap B)}{P(B)} \quad \text{if } P(B) > 0, \qquad \frac{\mathrm{d}}{\mathrm{d}x} e^{x} = e^{x} \qquad g = 9.81\,\mathrm{m\,s^{-2}}
 $$
 
 ### Spacing
 
-TeX sets the spaces of a formula itself. The spaces you type are ignored. To add room: `\,` is a thin space, `\:` a medium one, `\;` a thick one, `\quad` a space as wide as the font size (1 em) and `\qquad` twice that. `\!` is a negative thin space. `~` and `\ ` add the space between two words. Inside `\text{...}`, the spaces you type are kept.
+TeX sets the spaces of a formula itself. The spaces you type are ignored. To add room: `\,` is a thin space, `\:` a medium one, `\;` a thick one, `\quad` a space as wide as the font size (1 em) and `\qquad` twice that. `\!` is a negative thin space. `~` and `\ ` add the space between two words. Inside `\text{...}`, the spaces you type are kept, and a line break counts as one space.
 
 ```latex
 \int f(x) dx \quad \int f(x) \, dx \qquad ab \quad a\,b \quad a\:b \quad a\;b \quad a\ b \quad a \quad b \qquad \sqrt{2}\,x \quad \sqrt{2}\!x
@@ -169,6 +185,10 @@ $$
 $$
 
 A definition in two parts:
+
+```latex
+f(x) = x^2 \quad \text{for } x \geq 0, \qquad f(x) = -x^2 \quad \text{otherwise}
+```
 
 $$
 f(x) = x^2 \quad \text{for } x \geq 0, \qquad f(x) = -x^2 \quad \text{otherwise}
@@ -187,6 +207,10 @@ $$
 $$
 
 The inequality of Cauchy and Schwarz:
+
+```latex
+\left( \sum_{k=1}^n a_k b_k \right)^2 \leq \left( \sum_{k=1}^n a_k^2 \right) \left( \sum_{k=1}^n b_k^2 \right)
+```
 
 $$
 \left( \sum_{k=1}^n a_k b_k \right)^2 \leq \left( \sum_{k=1}^n a_k^2 \right) \left( \sum_{k=1}^n b_k^2 \right)
@@ -214,6 +238,10 @@ $$
 
 The Schrödinger equation:
 
+```latex
+i\hbar \frac{\partial}{\partial t} \Psi(x, t) = \hat{H} \Psi(x, t)
+```
+
 $$
 i\hbar \frac{\partial}{\partial t} \Psi(x, t) = \hat{H} \Psi(x, t)
 $$
@@ -231,6 +259,10 @@ $$
 $$
 
 The norm of a vector:
+
+```latex
+f \colon \mathbb{R}^n \to \mathbb{R}, \qquad \mathbf{x} \mapsto \lVert \mathbf{x} \rVert = \sqrt{x_1^2 + \cdots + x_n^2}
+```
 
 $$
 f \colon \mathbb{R}^n \to \mathbb{R}, \qquad \mathbf{x} \mapsto \lVert \mathbf{x} \rVert = \sqrt{x_1^2 + \cdots + x_n^2}
@@ -259,6 +291,10 @@ $$
 $$
 
 The rotation matrix:
+
+```latex
+R(\theta) = \begin{pmatrix} \cos\theta & -\sin\theta \\ \sin\theta & \cos\theta \end{pmatrix}
+```
 
 $$
 R(\theta) = \begin{pmatrix} \cos\theta & -\sin\theta \\ \sin\theta & \cos\theta \end{pmatrix}
@@ -1115,7 +1151,7 @@ The sized commands set one delimiter at a fixed size. The suffix l, r or m says 
 | `\mbox` | `x \mbox{ if } y` | $x \mbox{ if } y$ | another name for `\text` | LaTeX |
 | `\hbox` | `x \hbox{ if } y` | $x \hbox{ if } y$ | another name for `\text` | TeX |
 | `\operatorname` | `\operatorname{rank} A` | $\operatorname{rank} A$ | a function name set upright | AMS |
-| `\operatorname*` | `\operatorname*{argmax}_x f(x)` | $\operatorname*{argmax}_x f(x)$ | a function name with its bounds below and above | AMS |
+| `\operatorname*` | `\operatorname*{arg\,max}_x f(x)` | $\operatorname*{arg\,max}_x f(x)$ | a function name with its bounds below and above | AMS |
 
 ### Modulo
 

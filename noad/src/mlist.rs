@@ -207,8 +207,8 @@ impl MathList {
     }
 
     /// What the page shows as written: the literals, and with them the
-    /// texts that hold a command (`\text{\alpha}`), which a text shows
-    /// by its name. The probe of a file and the test of the math page
+    /// texts that hold a backslash (`\text{\alpha}`), which a text shows
+    /// as written. The probe of a file and the test of the math page
     /// read this.
     pub fn shown_as_written(&self) -> Vec<String> {
         let mut out = Vec::new();
@@ -255,17 +255,9 @@ impl MathList {
                         }
                     }
                 }
-                // A text that holds a command shows it as written:
-                // `\text{\alpha}`, where TeX would typeset the letter.
-                Field::Text(text) if texts => {
-                    let mut chars = text.chars().peekable();
-                    while let Some(c) = chars.next() {
-                        if c == '\\' && chars.next().is_some_and(|d| d.is_ascii_alphabetic()) {
-                            out.push(text.clone());
-                            break;
-                        }
-                    }
-                }
+                // A backslash left in a text is shown: `\text{\alpha}`,
+                // `\text{G\"odel}`, where TeX would typeset the letter.
+                Field::Text(text) if texts && text.contains('\\') => out.push(text.clone()),
                 Field::Symbol(_)
                 | Field::Sized { .. }
                 | Field::Text(_)

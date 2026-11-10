@@ -71,7 +71,7 @@
 - A command inside `\mathrm{...}` or `\operatorname{...}` is now typeset, as in `\mathrm{kg\,m^{-1}}` and `\operatorname{log\Gamma}`. Before, the command was shown as written.
 - `\liminf`, `\limsup`, `\injlim` and `\projlim` now have the thin space between their two words. Before, they were written as one word.
 - `\text{...}` written over two lines now reads as one line of text, and `\%`, `\$`, `\&`, `\_` and `\#` inside it are the characters. Before, the line break and the backslashes were shown.
-- A formula with thousands of nested braces no longer crashes Oryx. It is shown as written past 100 levels.
+- A formula with thousands of nested braces, superscripts or subscripts no longer crashes Oryx. Past a limit, the inner part is shown as written.
 - A zipped FB2 book whose inner file name is in an old Windows encoding, such as a Russian name in CP866, now opens. Before, it was refused as not readable.
 - A comic zipped on a Mac now shows only its pages. Before, the hidden `__MACOSX` entries showed as blank pages at the start.
 - A damaged book or comic whose header declares an impossible size is now refused as damaged. Before, Oryx could crash on it.

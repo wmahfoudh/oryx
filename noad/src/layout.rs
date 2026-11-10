@@ -3317,6 +3317,11 @@ mod tests {
         assert_eq!(glyph_by_ch(&l, '\u{1D434}').color, Some([255, 0, 0]));
         assert_eq!(glyph_by_ch(&l, '\u{1D435}').color, Some([255, 0, 0]));
         assert_eq!(glyph_by_ch(&l, ')').color, Some([255, 0, 0]));
+        // A color set after the word is the one the group ends in.
+        let l = lay("\\left( \\color{red} A \\over B \\color{blue} C \\right)");
+        assert_eq!(glyph_by_ch(&l, ')').color, Some([0, 0, 255]));
+        let l = lay("\\left( A \\over B \\color{blue} C \\right)");
+        assert_eq!(glyph_by_ch(&l, ')').color, Some([0, 0, 255]));
         // A color scoped by `\textcolor` ends with its group.
         let l = lay("\\left( \\textcolor{red}{A} \\right)");
         assert_eq!(glyph_by_ch(&l, ')').color, None);
