@@ -189,6 +189,8 @@ struct Builder {
     /// The next block is a picture alone in its paragraph: centered when
     /// neither its tag nor a division around it names a side.
     lone_image: bool,
+    /// The `<dd>` elements open: a picture in a definition stays with it.
+    html_dd: u32,
     html_code: u32,
     html_sub: u32,
     html_sup: u32,
@@ -601,6 +603,7 @@ impl Builder {
             image_align: None,
             block_align: None,
             lone_image: false,
+            html_dd: 0,
             html_code: 0,
             html_sub: 0,
             html_sup: 0,
@@ -1570,11 +1573,13 @@ impl Builder {
                 }
                 self.flush_spans();
                 self.clear_spans();
+                self.html_dd += 1;
             }
             ("dd", true) => {
                 if self.html_table.is_some() {
                     return;
                 }
+                self.html_dd = self.html_dd.saturating_sub(1);
                 let mut spans = self.take_spans();
                 trim_cell(&mut spans);
                 if !spans.is_empty() {
@@ -1942,17 +1947,21 @@ impl Builder {
         }
         // A picture alone in its paragraph takes its tag's `align` as the
         // block's word, and the middle when no word is said. In a list
-        // item or a definition it stays with the marker or the term. A
-        // plain one, with no link and no size, is a block image.
+        // item, a definition or a table cell, markdown's or HTML's, it
+        // takes no middle and stays with the marker, the term or the
+        // cell. A plain one, with no link and no size, is a block image.
         let solo = spans
             .iter()
             .filter(|s| s.image.is_none())
             .all(|s| s.raw_text().trim().is_empty());
         let images: Vec<&Span> = spans.iter().filter(|s| s.image.is_some()).collect();
         let lone = solo && images.len() == 1;
-        if lone && self.lists.is_empty() && !self.definition {
+        if lone && self.lists.is_empty() {
             self.block_align = image_word;
-            self.lone_image = true;
+            self.lone_image = !self.definition
+                && self.html_dd == 0
+                && self.html_lists.is_empty()
+                && self.html_table.is_none();
         }
         if lone && self.lists.is_empty() && self.html_divs.is_empty() {
             let span = images[0];
@@ -2816,6 +2825,46 @@ mod tests {
         assert!(
             matches!(d.blocks[0].kind, BlockKind::Image { .. }),
             "no word, the block image"
+        );
+    }
+
+    /// The read of 10/11/2026: a picture in a list item, a table cell
+    /// or a definition is not centered, in the HTML forms too, and the
+    /// word of a lone tag in a definition is still the block's.
+    #[test]
+    fn a_picture_in_an_html_item_cell_or_definition_is_not_centered() {
+        let image = |md: &str| -> (bool, bool, bool) {
+            let d = parse(md);
+            let block = d
+                .blocks
+                .iter()
+                .find(|b| match &b.kind {
+                    BlockKind::Image { .. } => true,
+                    BlockKind::Paragraph { spans } | BlockKind::ListItem { spans, .. } => {
+                        spans.iter().any(|s| s.image.is_some())
+                    }
+                    _ => false,
+                })
+                .unwrap_or_else(|| panic!("no picture in {md}: {:?}", d.blocks));
+            (block.left, block.centered, block.right)
+        };
+        for md in [
+            "<ul>\n<li>\n\n![a](a.png)\n\n</li>\n</ul>\n",
+            "<table>\n<tr>\n<td>\n\n![a](a.png)\n\n</td>\n</tr>\n</table>\n",
+            "<dl><dt>T</dt><dd>\n\n![a](a.png)\n\n</dd></dl>\n",
+            "Term\n: ![a](a.png)\n",
+        ] {
+            assert_eq!(image(md), (false, false, false), "{md}");
+        }
+        assert_eq!(
+            image("Term\n: <img src=\"a.png\" align=\"right\">\n"),
+            (false, false, true),
+            "the tag's word in a definition"
+        );
+        assert_eq!(
+            image("<div>\n\n![a](a.png)\n\n</div>\n"),
+            (false, true, false),
+            "a division with no word leaves the middle"
         );
     }
 

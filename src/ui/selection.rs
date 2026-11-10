@@ -324,9 +324,27 @@ fn source_edge(doc: &Document, pos: &ModelPos, edge: Edge) -> usize {
     let Some(spans) = kind_spans(&block.kind) else {
         return whole(edge);
     };
-    let Some(span) = spans.get(pos.span).filter(|s| !s.range.is_empty()) else {
+    let Some(span) = spans.get(pos.span) else {
         return whole(edge);
     };
+    // A span the reader made, with no source of its own (the comma
+    // between two footnote references, the glyphs of a `<q>`): the edge
+    // is the nearest source beside it, after it for a start and before
+    // it for an end.
+    if span.range.is_empty() {
+        let beside = match edge {
+            Edge::Start => spans[pos.span..]
+                .iter()
+                .find(|s| !s.range.is_empty())
+                .map(|s| s.range.start as usize),
+            Edge::End => spans[..pos.span]
+                .iter()
+                .rev()
+                .find(|s| !s.range.is_empty())
+                .map(|s| s.range.end as usize),
+        };
+        return beside.unwrap_or_else(|| whole(edge));
+    }
     let text_len = span.text(&doc.source).len();
     let at_block_edge = match edge {
         Edge::Start => pos.span == 0 && pos.byte == 0,
@@ -2426,6 +2444,58 @@ mod tests {
             y0 + h0
         );
         assert!((w1 - w0).abs() < 0.6);
+    }
+
+    /// The read of 10/11/2026: the raised comma between two footnote
+    /// references has no source of its own, and a selection that starts
+    /// or ends on it takes the reference beside it, not the paragraph.
+    #[test]
+    fn a_markdown_copy_from_the_footnote_comma_takes_the_reference_beside_it() {
+        let doc = crate::doc::markdown::parse(
+            "first line words here\nsecond line w[^a][^b] tail words\nthird line end\n\n[^a]: one\n\n[^b]: two\n",
+        );
+        let BlockKind::Paragraph { spans } = &doc.blocks[0].kind else {
+            panic!("{:?}", doc.blocks[0].kind)
+        };
+        let comma = spans
+            .iter()
+            .position(|s| s.text(&doc.source) == ",")
+            .expect("the comma");
+        let tail = comma + 2;
+        let from_comma = Selection {
+            start: ModelPos {
+                block: 0,
+                span: comma,
+                byte: 0,
+            },
+            end: ModelPos {
+                block: 0,
+                span: tail,
+                byte: 3,
+            },
+        };
+        // The text after the reference holds a line break, so its end
+        // rounds out to the span, as for any such span.
+        assert_eq!(
+            markdown(&from_comma, &doc),
+            "[^b] tail words\nthird line end"
+        );
+        let to_comma = Selection {
+            start: ModelPos {
+                block: 0,
+                span: 0,
+                byte: 22,
+            },
+            end: ModelPos {
+                block: 0,
+                span: comma,
+                byte: 1,
+            },
+        };
+        assert_eq!(
+            markdown(&to_comma, &doc),
+            "first line words here\nsecond line w[^a]"
+        );
     }
 
     #[test]
