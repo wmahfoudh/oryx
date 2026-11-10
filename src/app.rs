@@ -5270,6 +5270,10 @@ impl App {
                         self.show_notice("Nothing is at this path");
                         return;
                     }
+                    if load::not_a_file(&path) {
+                        self.show_notice("This path is not a file");
+                        return;
+                    }
                     self.close_path_ask();
                     self.open_chosen(path);
                 }
@@ -7490,7 +7494,15 @@ impl App {
         if self.on_note() && self.note_file.as_deref() != Some(path.as_path()) {
             self.remove_note();
         }
-        let loaded = load::open(&path, Some(Instant::now() + load::OPEN_BUDGET));
+        // A missing name is a new file at the launch and at the reload
+        // of the new file already open; anywhere else the file is gone.
+        let budget = Some(Instant::now() + load::OPEN_BUDGET);
+        let still_new = self.new_file && self.path.as_deref() == Some(path.as_path());
+        let loaded = if still_new {
+            load::open(&path, budget)
+        } else {
+            load::open_existing(&path, budget)
+        };
         let opened = loaded.is_ok();
         self.open_failed = !opened;
         // A refused file is a page that says why, in the file's place.
@@ -7855,6 +7867,10 @@ impl App {
     /// The file the open dialog or the path field named, opened with
     /// the sidebar on its folder once any unsaved edits are settled.
     fn open_chosen(&mut self, path: PathBuf) {
+        if load::not_a_file(&path) {
+            self.show_notice("This path is not a file");
+            return;
+        }
         if self.guard_unsaved(confirm::Pending::Open(path.clone(), true)) {
             self.open_file(&path, true);
         }

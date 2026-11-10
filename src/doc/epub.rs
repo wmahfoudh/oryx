@@ -2,7 +2,7 @@
 //! whole-book assembly into a Document. The XHTML walking lives in
 //! `doc::html`; nothing here knows about layout or paint.
 
-use std::io::{Cursor, Read};
+use std::io::Cursor;
 use std::sync::Arc;
 
 use crate::doc::model::Document;
@@ -60,10 +60,8 @@ impl Archive {
     /// The entry's bytes, or None when no entry has that name. The buffer
     /// grows with the read; the header's size is not trusted.
     pub fn read(&mut self, path: &str) -> Option<Vec<u8>> {
-        let mut file = self.zip.by_name(path).ok()?;
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes).ok()?;
-        Some(bytes)
+        let file = self.zip.by_name(path).ok()?;
+        super::read_capped(file, CEILING).ok()?
     }
 
     fn has(&self, path: &str) -> bool {

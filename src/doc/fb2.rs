@@ -4,7 +4,6 @@
 //! here knows about layout or paint.
 
 use std::collections::HashMap;
-use std::io::Read;
 use std::sync::Arc;
 
 use base64::Engine;
@@ -261,10 +260,11 @@ fn unwrap_zip(bytes: Vec<u8>) -> anyhow::Result<Vec<u8>> {
     // Russian Windows) comes back decoded as CP437, which finds nothing.
     // The buffer grows with the read; the header's size is not trusted.
     let index = found.ok_or(Refusal::NotFb2)?;
-    let mut file = zip.by_index(index).map_err(|_| Refusal::NotFb2)?;
-    let mut inner = Vec::new();
-    file.read_to_end(&mut inner).map_err(|_| Refusal::NotFb2)?;
-    Ok(inner)
+    let file = zip.by_index(index).map_err(|_| Refusal::NotFb2)?;
+    match super::read_capped(file, CEILING).map_err(|_| Refusal::NotFb2)? {
+        Some(inner) => Ok(inner),
+        None => Err(Refusal::TooLarge.into()),
+    }
 }
 
 /// Bytes to text: UTF-16 by BOM, then the declared encoding when it is

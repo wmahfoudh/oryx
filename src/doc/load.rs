@@ -259,6 +259,28 @@ pub struct Opened {
     pub bom: bool,
 }
 
+/// Whether something that is neither a file nor a folder is at the
+/// path: a pipe, a device, a socket. A read of one can wait without
+/// end or never finish, so the window's own ways to open (the path
+/// field, the dialog) refuse it. The command line reads one, as `cat`
+/// does: `oryx <(command)` is a pipe.
+pub fn not_a_file(path: &Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|meta| !meta.is_file() && !meta.is_dir())
+}
+
+/// As `open`, for a file that must exist: a name with nothing at it is
+/// an error. The launch alone opens a missing name as the new file it
+/// will be; a sidebar row, a link or a place of the history whose file
+/// is gone says so.
+pub fn open_existing(path: &Path, deadline: Option<Instant>) -> anyhow::Result<Opened> {
+    if let Err(e) = std::fs::symlink_metadata(path) {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            anyhow::bail!("cannot open {}: the file does not exist", path.display());
+        }
+    }
+    open(path, deadline)
+}
+
 pub fn open(path: &Path, deadline: Option<Instant>) -> anyhow::Result<Opened> {
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
@@ -2259,5 +2281,33 @@ mod tests {
             FileKind::Code("Python"),
             "the kind with the text at hand, for the editor's round trip"
         );
+    }
+
+    #[test]
+    fn a_missing_file_is_new_at_the_launch_alone() {
+        let dir = std::env::temp_dir().join(format!("oryx-open-existing-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let gone = dir.join("gone.md");
+        assert!(open(&gone, None).is_ok(), "the launch's new file");
+        let err = match open_existing(&gone, None) {
+            Ok(_) => panic!("a missing file opened"),
+            Err(err) => err.to_string(),
+        };
+        assert!(err.contains("does not exist"), "{err}");
+        std::fs::write(&gone, b"# back\n").unwrap();
+        assert!(open_existing(&gone, None).is_ok());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_device_is_not_a_file() {
+        assert!(not_a_file(Path::new("/dev/null")));
+        assert!(!not_a_file(Path::new("/")));
+        assert!(!not_a_file(Path::new("/nonexistent/name.md")));
+        let file = std::env::temp_dir().join(format!("oryx-not-a-file-{}", std::process::id()));
+        std::fs::write(&file, b"x").unwrap();
+        assert!(!not_a_file(&file));
+        std::fs::remove_file(&file).ok();
     }
 }

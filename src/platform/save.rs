@@ -6,7 +6,11 @@
 //! then filled: one whose folder refuses a new file, one with another
 //! hard link, which a rename would break, and one owned by someone
 //! else, which a rename would hand to the writer (the last two on
-//! Unix, where links and owners are).
+//! Unix, where links and owners are). When the system refuses to open
+//! one of the last two for writing, the save replaces it after all: a
+//! file that cannot be saved is worse than a link or an owner lost. A
+//! symbolic link is written through: the bytes go to the file it leads
+//! to, and the link stays.
 
 use std::fs::Metadata;
 use std::io;
@@ -15,6 +19,21 @@ use std::path::Path;
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     use std::io::Write;
     use std::sync::atomic::{AtomicU64, Ordering};
+    // A rename over a symbolic link would replace the link itself. The
+    // write goes to its target; a target that does not exist yet is
+    // created through the link.
+    let through;
+    let path = if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
+        match std::fs::canonicalize(path) {
+            Ok(target) => {
+                through = target;
+                through.as_path()
+            }
+            Err(_) => return write_in_place(path, bytes),
+        }
+    } else {
+        path
+    };
     // The temp name is unique per process and per call, so two writes
     // into one folder at the same moment never rename each other's
     // bytes over their targets.
@@ -44,9 +63,16 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
             }
         };
         if keeps_its_inode(target, &ours) {
-            drop(file);
-            std::fs::remove_file(&temp).ok();
-            return write_in_place(path, bytes);
+            match write_in_place(path, bytes) {
+                // The system refuses the file itself (another owner's,
+                // or read-only): the temp file replaces it, below.
+                Err(err) if err.kind() == io::ErrorKind::PermissionDenied => {}
+                done => {
+                    drop(file);
+                    std::fs::remove_file(&temp).ok();
+                    return done;
+                }
+            }
         }
     }
     let written = file.write_all(bytes).and_then(|()| file.sync_all());
@@ -195,6 +221,67 @@ mod tests {
             !keeps_its_inode(&std::fs::metadata(&target).unwrap(), &ours),
             "one name, the same owner: the rename path"
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A target that must keep its inode and that the system refuses to
+    /// open for writing (a file of another owner, here a read-only file
+    /// with a second name) is replaced, as before the in-place rule: the
+    /// save lands.
+    #[cfg(unix)]
+    #[test]
+    fn a_target_the_system_refuses_in_place_is_replaced() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("oryx-save-refused-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("a.txt");
+        let other = dir.join("b.txt");
+        std::fs::write(&target, b"old contents").unwrap();
+        std::fs::hard_link(&target, &other).unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o444)).unwrap();
+        write_atomic(&target, b"new contents").expect("the save lands");
+        assert_eq!(std::fs::read(&target).unwrap(), b"new contents");
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o444,
+            "the mode travels"
+        );
+        let entries = std::fs::read_dir(&dir).unwrap().count();
+        assert_eq!(entries, 2, "no temp file left");
+        std::fs::set_permissions(&other, std::fs::Permissions::from_mode(0o644)).ok();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A save through a symbolic link writes the file the link leads to,
+    /// and the link stays: a settings file kept in a dotfiles folder.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_is_written_through() {
+        let dir = std::env::temp_dir().join(format!("oryx-save-symlink-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("dotfiles")).unwrap();
+        let real = dir.join("dotfiles").join("config.toml");
+        let link = dir.join("config.toml");
+        std::fs::write(&real, b"old").unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        write_atomic(&link, b"new").expect("the write lands");
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the link stays"
+        );
+        assert_eq!(std::fs::read(&real).unwrap(), b"new");
+        // A link whose target does not exist yet: the target is created.
+        let missing = dir.join("dotfiles").join("positions.toml");
+        let link2 = dir.join("positions.toml");
+        std::os::unix::fs::symlink(&missing, &link2).unwrap();
+        write_atomic(&link2, b"born").expect("the write lands");
+        assert!(std::fs::symlink_metadata(&link2)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(std::fs::read(&missing).unwrap(), b"born");
         std::fs::remove_dir_all(&dir).ok();
     }
 }
