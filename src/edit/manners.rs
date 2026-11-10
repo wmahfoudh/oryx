@@ -1458,9 +1458,9 @@ fn paragraphs(text: &str) -> Vec<std::ops::Range<usize>> {
     // code, which ends at the first line indented less.
     let (mut in_quote, mut in_list, mut in_code) = (false, false, false);
     for line in text.split_inclusive('\n') {
-        let body = line.trim_start_matches([' ', '\t']);
-        let indent = line.len() - body.len();
-        let blank = body.trim().is_empty();
+        let indent = indent_of(line);
+        let body = &line[indent..];
+        let blank = is_blank(body);
         let quoted = body.starts_with('>');
         if let Some(s) = start {
             let lazy = in_quote && !quoted;
@@ -1487,6 +1487,24 @@ fn paragraphs(text: &str) -> Vec<std::ops::Range<usize>> {
         out.push(s..text.len());
     }
     out
+}
+
+/// The length of a line's indent, its leading spaces and tabs.
+fn indent_of(line: &str) -> usize {
+    line.bytes()
+        .position(|b| b != b' ' && b != b'\t')
+        .unwrap_or(line.len())
+}
+
+/// Whether a line holds nothing but whitespace. The first byte past the
+/// indent settles a line of text at once, which is what a press on a
+/// long paragraph reads two hundred thousand times.
+fn is_blank(line: &str) -> bool {
+    match line.as_bytes().get(indent_of(line)) {
+        None => true,
+        Some(b) if b.is_ascii_graphic() => false,
+        Some(_) => line.trim().is_empty(),
+    }
 }
 
 /// Whether a line is a list item with text: a bullet, or a number of
@@ -1540,7 +1558,6 @@ fn starts_block(indent: usize, body: &str, lazy: bool) -> bool {
     let Some(first) = body.bytes().next() else {
         return false;
     };
-    let l = body.trim_end();
     if indent > 3
         || !matches!(
             first,
@@ -1549,6 +1566,7 @@ fn starts_block(indent: usize, body: &str, lazy: bool) -> bool {
     {
         return false;
     }
+    let l = body.trim_end();
     let item_after =
         |marker: usize| l[marker..].starts_with([' ', '\t']) && !l[marker..].trim().is_empty();
     match first {
@@ -1585,7 +1603,7 @@ fn paragraphs_around(source: &str, range: &std::ops::Range<usize>) -> std::ops::
     while start > 0 {
         let line_end = start - 1;
         let line_start = source[..line_end].rfind('\n').map_or(0, |i| i + 1);
-        if source[line_start..line_end].trim().is_empty() {
+        if is_blank(&source[line_start..line_end]) {
             break;
         }
         start = line_start;
@@ -1595,7 +1613,7 @@ fn paragraphs_around(source: &str, range: &std::ops::Range<usize>) -> std::ops::
         .map_or(source.len(), |i| range.end + i + 1);
     while end < source.len() {
         let line_end = source[end..].find('\n').map_or(source.len(), |i| end + i);
-        if source[end..line_end].trim().is_empty() {
+        if is_blank(&source[end..line_end]) {
             break;
         }
         end = (line_end + 1).min(source.len());
@@ -1640,7 +1658,8 @@ fn kept_pieces(text: &str) -> Vec<std::ops::Range<usize>> {
         let mut i = para.start;
         while i < para.end {
             let rest = &text[i..para.end];
-            if line_start {
+            // A definition opens with `[` after three spaces at most.
+            if line_start && matches!(rest.as_bytes()[0], b' ' | b'[') {
                 if let Some(address) = definition_address(rest) {
                     kept.push(i + address.start..i + address.end);
                     i += address.end;
@@ -1736,6 +1755,16 @@ fn kept_pieces(text: &str) -> Vec<std::ops::Range<usize>> {
                 brackets = brackets.saturating_sub(1);
                 i += 1;
             } else if c == '<' {
+                // A `<` before whitespace, or last in its paragraph,
+                // opens neither a tag nor an autolink: `a < b`.
+                if !rest
+                    .as_bytes()
+                    .get(1)
+                    .is_some_and(|b| !b.is_ascii_whitespace())
+                {
+                    i += 1;
+                    continue;
+                }
                 if let Some(len) = html_tag_len(rest) {
                     kept.push(i..i + len);
                     i += len;
@@ -1762,7 +1791,14 @@ fn kept_pieces(text: &str) -> Vec<std::ops::Range<usize>> {
                     None => i += 1,
                 }
             } else {
-                i += c.len_utf8();
+                // Plain text, stepped over to the next byte the scan
+                // reads. Each is ASCII, so the step ends on a character
+                // boundary, and `c` is none of them, so it advances.
+                let plain = &text.as_bytes()[i..para.end];
+                i += plain
+                    .iter()
+                    .position(|b| matches!(b, b'\n' | b'\\' | b'`' | b'$' | b'[' | b']' | b'<'))
+                    .unwrap_or(plain.len());
             }
         }
     }
