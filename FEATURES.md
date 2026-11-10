@@ -21,7 +21,7 @@ Lists nest as deep as needed, and a wrapped line lines up with the text above it
 
 The five GitHub alerts (note, tip, important, warning, caution) each have their own color and title. A YAML front matter block at the top of a file is shown as a small panel above the document.
 
-Footnote markers are raised in the text and numbered in the order they are used. A click on a marker goes to its note at the end of the document, and a click on the note's number comes back. `Alt+Left` also comes back to where you were reading.
+Footnote markers are raised in the text and numbered in the order they are used. Two markers next to each other are separated by a comma. A click on a marker goes to its note at the end of the document, and a click on the note's number comes back. `Alt+Left` also comes back to where you were reading.
 
 ### Images and badges
 
