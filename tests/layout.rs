@@ -1181,6 +1181,34 @@ fn text_after_a_formula_and_a_hard_break_starts_the_next_line() {
 }
 
 #[test]
+fn a_break_that_opens_a_paragraph_leaves_a_blank_line_before_a_formula_too() {
+    let lh = metrics::LINE_HEIGHT * cfg().body_size;
+    // How far the word "Line" is below the paragraph before it.
+    let drop = |source: &str| {
+        let (doc, l) = lay2(source, 800.0);
+        let y = |word: &str| {
+            l.runs
+                .iter()
+                .find(|r| l.run_text(&doc, r).contains(word))
+                .unwrap_or_else(|| panic!("no run with {word:?}"))
+                .y
+        };
+        y("Line") - y("Before")
+    };
+    let plain = drop("Before\n\n<br>Line one\n");
+    let formula = drop("Before\n\n<br>Line one $x$\n");
+    assert!(
+        (formula - plain).abs() < 0.2 * lh,
+        "as the paragraph without a formula: {formula} against {plain}"
+    );
+    let two = drop("Before\n\n<br><br>Line one $x$\n");
+    assert!(
+        (two - formula - lh).abs() < 0.2 * lh,
+        "a second break, a second blank line: {two} against {formula}"
+    );
+}
+
+#[test]
 fn two_hard_breaks_between_two_formulas_leave_a_blank_line() {
     let lh = metrics::LINE_HEIGHT * cfg().body_size;
     let gap = |source: &str| {

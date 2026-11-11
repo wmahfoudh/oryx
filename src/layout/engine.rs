@@ -5856,8 +5856,10 @@ fn layout_flow(
     let mut y = y0;
     let mut line: Option<FlowLine> = None;
     // The last thing the flow met was a hard break: the next one in a
-    // row is a blank line.
-    let mut broke = false;
+    // row is a blank line. The paragraph's start counts as one, so a
+    // break that opens the paragraph leaves a blank line, as it does in
+    // a paragraph of text alone.
+    let mut broke = true;
     let is_break = |s: &Span| s.image.is_none() && !s.math && s.text(source) == "\n";
 
     let mut i = 0;
