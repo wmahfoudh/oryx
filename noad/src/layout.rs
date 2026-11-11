@@ -1112,6 +1112,19 @@ impl Ctx<'_> {
         }
     }
 
+    /// Whether the atom's nucleus is an operator's sign, alone or as
+    /// the one atom inside a color.
+    fn op_sign(atom: &Atom) -> bool {
+        atom.class == AtomClass::Op
+            || match &atom.nucleus {
+                Field::Colored { body, .. } => match body.0.as_slice() {
+                    [Noad::Atom(a)] => Self::op_sign(a),
+                    _ => false,
+                },
+                _ => false,
+            }
+    }
+
     fn op_defaults_to_limits(nucleus: &Field) -> bool {
         match nucleus {
             Field::Symbol(c) => !matches!(*c, '\u{222B}'..='\u{2233}' | '\u{2A0B}'..='\u{2A1C}'),
@@ -1467,7 +1480,10 @@ impl Ctx<'_> {
         // Shifts are positive: sup up, sub down. Rule 18a: a character
         // nucleus takes the style constants alone; a box nucleus carries
         // its scripts with its own extent less the baseline drops.
-        let is_char = Self::char_of(&atom.nucleus).is_some();
+        // An operator's sign is a box (rule 13 sets it, centered on the
+        // axis, before rule 18 reads it): the limits of an integral go
+        // to its top and its bottom.
+        let is_char = Self::char_of(&atom.nucleus).is_some() && !Self::op_sign(atom);
         let mut sup_shift = 0.0f32;
         if let Some(s) = &sup {
             let plain = if cramped {
@@ -1687,6 +1703,52 @@ mod tests {
             expected_y
         );
         assert!(l.ascent > SIZE * 0.5);
+    }
+
+    #[test]
+    fn the_scripts_of_an_operator_sign_follow_its_height_and_depth() {
+        use crate::MathFont as _;
+        let c = font().constants();
+        let display = |tex: &str| layout(tex, MathStyle::Display, SIZE, &font());
+        // Rule 18a for a box: up by the height less the drop, down by the
+        // depth plus the drop. The sign alone gives the box.
+        for tex in [
+            "\\int",
+            "\\oint",
+            "\\sum\\nolimits",
+            "\\textcolor{red}{\\int}",
+        ] {
+            let sign = display(tex);
+            let l = display(&format!("{tex}_0^1"));
+            assert_eq!(l.glyphs.len(), 3, "{tex}");
+            let (sup, sub) = (&l.glyphs[1], &l.glyphs[2]);
+            let up = sign.ascent - c.superscript_baseline_drop_max * scale();
+            let down = sign.descent + c.subscript_baseline_drop_min * scale();
+            assert!(
+                (sup.y + up).abs() < EPS,
+                "{tex}: sup y {} vs {}",
+                sup.y,
+                -up
+            );
+            assert!(
+                (sub.y - down).abs() < EPS,
+                "{tex}: sub y {} vs {}",
+                sub.y,
+                down
+            );
+        }
+        // In a line of text the sign is small, and the rule is the same.
+        let sign = lay("\\int");
+        let l = lay("\\int_0^1");
+        let down = sign.descent + c.subscript_baseline_drop_min * scale();
+        assert!(
+            (l.glyphs[2].y - down).abs() < EPS,
+            "inline sub y {}",
+            l.glyphs[2].y
+        );
+        // A letter keeps the constants of its style.
+        let l = display("x_0^1");
+        assert!((l.glyphs[1].y + c.superscript_shift_up * scale()).abs() < EPS);
     }
 
     #[test]

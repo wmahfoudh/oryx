@@ -65,6 +65,7 @@
 - In a formula, `\left<` and `\right>` now draw angle brackets, as in TeX. Before, they drew the less-than and greater-than signs.
 - In a formula, a bar, a double bar or an arrow stretched with `\left` and `\right` now fits what it encloses. Before, it could be taller than needed.
 - In a formula, a plus or minus sign right before a closing bracket, a relation or a comma, as in `(a+)`, now has no space around it, as in TeX. Before, it had spaces.
+- In a formula, the limits of an integral are now at the top and at the bottom of the sign, as in TeX. Before, both were near the middle.
 - Typing in a plain text file no longer runs the syntax coloring on each key. Before, each key could cost a few milliseconds for nothing.
 - A key on a long markdown line with several code spans or links no longer freezes the editor while that line is parsed. The line is now colored in the background. Before, each key on such a line could cost 50 ms.
 - When the colors below a key are recomputed right after the cursor moved to a far line, they are now shown at once. Before, they could come up to half a second later.
