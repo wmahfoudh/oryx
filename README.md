@@ -142,10 +142,10 @@ The first table is about time. "First screen" is the time from reading the file 
 
 | File | First screen | Rest read | Rest laid out | Code colors | PDF export |
 |---|---|---|---|---|---|
-| 1 MB markdown | 40 ms | 31 ms | 0.19 s | 0.70 s | 0.97 s |
-| 1 MB source code | 40 ms | 0 ms | 0.11 s | 3.0 s | 0.87 s |
-| 8 MB markdown | 40 ms | 260 ms | 1.6 s | 6.0 s | 9.0 s |
-| 8 MB source code | 40 ms | 0 ms | 0.86 s | 25.4 s | 8.2 s |
+| 1 MB markdown | 40 ms | 29 ms | 0.18 s | 0.68 s | 1.0 s |
+| 1 MB source code | 40 ms | 0 ms | 0.11 s | 2.9 s | 0.88 s |
+| 8 MB markdown | 40 ms | 246 ms | 1.5 s | 5.9 s | 9.3 s |
+| 8 MB source code | 40 ms | 0 ms | 0.85 s | 24.5 s | 8.0 s |
 
 The second table is about memory. "Once loaded" is what the file takes once all of this is done. "Highest" is the most it takes on the way there. "PDF export" is what an export adds while it runs.
 
@@ -165,7 +165,7 @@ Books open the same way: the first chapters show at once, and the rest loads in 
 | *The Adventures of Sherlock Holmes* | EPUB | 5 ms |
 | A book of 300 chapters (1.6 MB) | FB2 | 15 ms |
 | A book of 300 chapters (1.6 MB) | MOBI | 9 ms |
-| A comic of 40 pages | CBZ | under 1 ms |
+| A comic of 40 pages | CBZ | 1 ms |
 | The same comic | CBR | 5 ms |
 
 The 211 pages of *The Adventures of Sherlock Holmes* export to PDF in 0.6 s.
