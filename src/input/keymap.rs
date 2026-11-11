@@ -589,7 +589,7 @@ pub const SHORTCUTS: &[Shortcut] = &[
     },
     Shortcut {
         keys: "Ctrl+U",
-        action: "Change the case of the selection or the word, in turn: lower case, a capital on each word, upper case (editing)",
+        action: "Change the case of the selection or the word: lower case, then Capitalized Words, then UPPER CASE (editing)",
         section: "Edit",
         bindings: &[(Binding::Ctrl("u"), Command::Case)],
     },

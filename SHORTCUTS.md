@@ -2,9 +2,9 @@
 
 Oryx has no menus: you use it with the keys of this page, and with the mouse. The same list opens inside Oryx with `F1`, together with the markdown syntax and the math page.
 
-On macOS, use `Cmd` where this page says `Ctrl`, and `Cmd+[` / `Cmd+]` in place of `Alt+Left` / `Alt+Right`. The `Alt` key is the Option key: a shortcut with `Alt` holds by the key printed on the keycap, and `Alt+1` and `Alt+.` by the place of their key as well. Option with Shift, or with a key that types a plain character, types it as usual. `Alt+R` works in the search bar only: elsewhere, Option+R gives ®. `Alt+-`, `Alt+1`, `Alt+X` and `Alt+.` work in a markdown file only: in a code or text file, Option gives its character.
+On macOS, use `Cmd` where this page says `Ctrl`, and `Cmd+[` / `Cmd+]` in place of `Alt+Left` / `Alt+Right`. The `Alt` key is the Option key. A shortcut with `Alt` uses the key printed on the keycap. `Alt+1` and `Alt+.` also work by the place of their key. Option with Shift, or with a key that types a plain character, types it as usual. `Alt+R` works in the search bar only: elsewhere, Option+R gives ®. `Alt+-`, `Alt+1`, `Alt+X` and `Alt+.` work in a markdown file only: in a code or text file, Option gives its character.
 
-On a keyboard layout that types another script, such as Cyrillic or Greek, or an accented letter on a letter key, such as BÉPO, a letter shortcut holds by the place of its key: `Ctrl` with the key of C is `Ctrl+C`. The shortcuts with a digit or a punctuation key (the zoom, the headings, the lists, the quote, the comment, the code span and the settings) hold by the place of their key as well.
+On a non-Latin keyboard layout, such as Cyrillic or Greek, or a layout with accented letters on letter keys, such as BÉPO, a letter shortcut works by the place of its key: `Ctrl` with the key at the place of C is `Ctrl+C`. The shortcuts with a digit or a punctuation key (the zoom, the headings, the lists, the quote, the comment, the code span and the settings) work by the place of their key too.
 
 ## Files
 
@@ -71,7 +71,7 @@ On a keyboard layout that types another script, such as Cyrillic or Greek, or an
 | `Ctrl+Shift+D` | Duplicate the line or the selected lines |
 | `Ctrl+Shift+K` | Delete the line or the selected lines |
 | `Ctrl+/` | Comment or uncomment the line or the selected lines, in the style of the language |
-| `Ctrl+U` | Change the case of the selection or the word, in turn: lower case, a capital on each word, upper case |
+| `Ctrl+U` | Change the case of the selection or the word: lower case, then Capitalized Words, then UPPER CASE |
 | `Tab` / `Shift+Tab` | Indent / remove an indent, on every selected line |
 
 Closing, quitting or reloading with unsaved changes asks first: `S` saves, `D` discards, `Escape` goes back to editing.
@@ -119,7 +119,7 @@ With text selected, typing a bracket, a quote, `*`, `_` or a backtick wraps the 
 
 | Key | What it does |
 |---|---|
-| `F1` | Open and close the help page: every shortcut, the markdown syntax and the math page |
+| `F1` | Open and close the help page: the shortcuts, the markdown syntax and the math page |
 | `Escape` | Close what is open, clear the selection, leave editing, quit |
 
 ## Mouse and touch
@@ -129,10 +129,10 @@ With text selected, typing a bracket, a quote, `*`, `_` or a backtick wraps the 
 | Drop a file on the window | Open it |
 | Drop a folder on the window | Show it in the sidebar |
 | Drop a picture on a markdown file you are editing | Add it to the file |
-| Double click | Select a word and highlight every other place it appears |
+| Double click | Select a word and highlight its other occurrences |
 | Triple click | Select the paragraph, the line of code or the table cell |
 | `Shift` + click | Extend the selection to the click |
-| Drag over several words on one line | Select them and highlight every other place the text appears |
+| Drag over several words on one line | Select them and highlight the other occurrences of the text |
 | Drag past the top or the bottom of the window | Scroll the page and keep selecting while you hold the button |
 | Click on a task box | Tick or untick it, without entering the editor |
 | Middle click on a file in the sidebar | Open it in a second window |

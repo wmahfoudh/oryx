@@ -68,7 +68,7 @@ The Linux packages, the AppImage and the tarball need glibc 2.35 and OpenSSL 3. 
 
 Oryx uses OpenSSL to download remote images, such as the badges at the top of a README. On a system without OpenSSL 3, Oryx does not start.
 
-On X11, Oryx also needs the keyboard library `libxkbcommon-x11`. The deb and the rpm install it, and the AppImage carries its own copy. With the tarball, install the package yourself: `libxkbcommon-x11-0` on Debian and Ubuntu, `libxkbcommon-x11` on Fedora and Arch. Without it, Oryx says so and does not start.
+On X11, Oryx also needs the keyboard library `libxkbcommon-x11`. The deb and the rpm install it, and the AppImage includes it. With the tarball, install the package yourself: `libxkbcommon-x11-0` on Debian and Ubuntu, `libxkbcommon-x11` on Fedora and Arch. Without it, Oryx says so and does not start.
 
 ## Building from source
 

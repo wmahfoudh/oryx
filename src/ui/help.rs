@@ -455,7 +455,7 @@ pub const TIPS: &[Tip] = &[
     Tip {
         kind: TipKind::Tip,
         area: Area::Editing,
-        text: r#"`Ctrl+U` changes the case of the selected text, or of the word the caret is on: lower case, then a capital on each word, then upper case. The address of a link, inline code, an HTML tag and a formula keep their letters."#,
+        text: r#"`Ctrl+U` changes the case of the selected text, or of the word under the cursor: lower case, then Capitalized Words, then UPPER CASE. Link addresses, inline code, HTML tags and formulas are unaffected."#,
     },
     Tip {
         kind: TipKind::Tip,
@@ -635,7 +635,7 @@ pub const TIPS: &[Tip] = &[
     Tip {
         kind: TipKind::Tip,
         area: Area::Export,
-        text: r#"To force a page break in the PDF, write `\newpage` on a line of its own. On screen it shows as a dashed line. `<div style="page-break-after: always"></div>` does the same."#,
+        text: r#"To force a page break in the PDF, write `\newpage` on its own line. On screen it shows as a dashed line. `<div style="page-break-after: always"></div>` does the same."#,
     },
     Tip {
         kind: TipKind::Note,

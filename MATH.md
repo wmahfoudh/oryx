@@ -10,7 +10,7 @@ Each section shows the markdown first, then what Oryx renders from it. The comma
 
 ### Writing a formula
 
-A formula goes between dollar signs. With one dollar on each side, the formula is part of the sentence. Two dollars on each side, or a `math` code block, put it on a line of its own, centered. GitHub's form, `` $`...`$ ``, works too.
+A formula goes between dollar signs. With one dollar on each side, the formula is part of the sentence. Two dollars on each side, or a `math` code block, put it on its own line, centered. GitHub's form, `` $`...`$ ``, works too.
 
 ````markdown
 The area of a disk is $A = \pi r^2$, and $`e^{i\pi} = -1`$ renders the same way.
@@ -74,7 +74,7 @@ Euler's identity: $e^{i\pi} + 1 = 0$.
 
 ### Fractions, roots and binomials
 
-`\frac{a}{b}` is a fraction: full size on a line of its own, small in a sentence. `\dfrac` is full size everywhere and `\tfrac` small everywhere. `\sqrt{x}` is a square root and `\sqrt[3]{x}` a cube root. `\binom{n}{k}` is a binomial coefficient. TeX's older forms `{a \over b}` and `{n \choose k}` work too.
+`\frac{a}{b}` is a fraction: full size on its own line, small in a sentence. `\dfrac` is full size everywhere and `\tfrac` small everywhere. `\sqrt{x}` is a square root and `\sqrt[3]{x}` a cube root. `\binom{n}{k}` is a binomial coefficient. TeX's older forms `{a \over b}` and `{n \choose k}` work too.
 
 ```latex
 \frac{a}{b} \quad \dfrac{a}{b} \quad \tfrac{a}{b} \quad \sqrt{2} \quad \sqrt[3]{x^3 + 1} \quad \binom{n}{k} \quad {a \over b} \quad {n \choose k}
@@ -128,7 +128,7 @@ $$
 
 ### Sums, integrals and limits
 
-The big operators, `\sum`, `\prod`, `\int`, `\oint`, `\bigcup`, `\bigcap`, take their bounds with `_` and `^`. On a line of its own, a sum has its bounds below and above. In a sentence, they are beside it. An integral has them beside it in both cases. `\lim`, `\max`, `\min`, `\sup` and `\inf` take their condition below in the same way. `\displaystyle` at the start of a formula in a sentence makes it full size, with the bounds below and above.
+The big operators, `\sum`, `\prod`, `\int`, `\oint`, `\bigcup`, `\bigcap`, take their bounds with `_` and `^`. On its own line, a sum has its bounds below and above. In a sentence, they are beside it. An integral has them beside it in both cases. `\lim`, `\max`, `\min`, `\sup` and `\inf` take their condition below in the same way. `\displaystyle` at the start of a formula in a sentence makes it full size, with the bounds below and above.
 
 ```latex
 \sum_{i=1}^{n} i = \frac{n(n+1)}{2} \qquad \prod_{k=1}^{n} k = n! \qquad \int_a^b f(x) \, dx \qquad \lim_{x \to 0} \frac{\sin x}{x} = 1
@@ -1359,7 +1359,7 @@ These change the style, and so the size, until the end of the group.
 
 | Command | Example | Shows | Meaning | From |
 |---|---|---|---|---|
-| `\displaystyle` | `{\displaystyle \sum_i x_i}` | ${\displaystyle \sum_i x_i}$ | full size, as on a line of its own | TeX |
+| `\displaystyle` | `{\displaystyle \sum_i x_i}` | ${\displaystyle \sum_i x_i}$ | full size, as on its own line | TeX |
 | `\textstyle` | `{\textstyle \sum_i x_i}` | ${\textstyle \sum_i x_i}$ | the size of a formula in a sentence | TeX |
 | `\scriptstyle` | `{\scriptstyle \sum_i x_i}` | ${\scriptstyle \sum_i x_i}$ | the size of an exponent | TeX |
 | `\scriptscriptstyle` | `{\scriptscriptstyle \sum_i x_i}` | ${\scriptscriptstyle \sum_i x_i}$ | the size of an exponent's exponent | TeX |
