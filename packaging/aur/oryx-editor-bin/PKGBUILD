@@ -1,6 +1,6 @@
 # Maintainer: Walid Mahfoudh <walid.mahfoudh@gmail.com>
 pkgname=oryx-editor-bin
-pkgver=1.2.2
+pkgver=1.3.0
 pkgrel=1
 pkgdesc='Fast editor for markdown and code, reader for ebooks and comics'
 arch=('x86_64')
@@ -23,9 +23,9 @@ source=("$url/releases/download/v$pkgver/oryx-$pkgver-linux-$CARCH.tar.gz"
         "$pkgname-$pkgver.svg::https://raw.githubusercontent.com/wmahfoudh/oryx/v$pkgver/assets/icon/oryx.svg"
         "$pkgname-$pkgver.stage-linux.sh::https://raw.githubusercontent.com/wmahfoudh/oryx/v$pkgver/packaging/stage-linux.sh")
 # Written by packaging/channels.sh once the release is published.
-sha256sums=('395379ad3790c8af006f664abb7fc65d12a6d0f82d7467fa7b2add9f4e3c6333'
+sha256sums=('2a7c8ae21c53f90fabf8113bef9a7fb8368e19f32cb8b59cb7ba88055f810f1d'
             '0885c988e89e659d9429b8154a41b1310fb43115b7f1d209c1e4485a3d635193'
-            '4d2ea402659cad54b38b746284059e6bcc218492ad66e68f9a86cb91bc038c98'
+            '62205b58ed417e5a707a30fc7d757a54e9f2bac1874614913d78b7b339658b9b'
             '4a18393ce9d317508b6002214d9b3cef677ddc5fa631d47ccf53daf9e7bb65e9'
             'aafa7be3fb4850bed38f395de4235d7c88d7b191ec33134c757148128008b625')
 
