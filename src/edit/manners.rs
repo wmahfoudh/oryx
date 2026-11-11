@@ -1448,8 +1448,10 @@ const CASE_CYCLE: [CaseForm; 3] = [CaseForm::Lower, CaseForm::Title, CaseForm::U
 /// whether it is code inside a fence or text under a list item.
 #[derive(Debug, Clone, Default)]
 struct Blocks {
-    /// The open fence: its character and the length of its run.
-    fence: Option<(u8, usize)>,
+    /// The open fence: its character, the length of its run, and the
+    /// column of its container, the margin or the text of the list item
+    /// it is in.
+    fence: Option<(u8, usize, usize)>,
     /// The column of the text of each open list item, the outermost
     /// first.
     items: Vec<usize>,
@@ -1476,14 +1478,22 @@ impl Blocks {
     fn read(&mut self, line: &str) -> Line {
         let (cols, bytes) = indent_span(line);
         let body = &line[bytes..];
-        if let Some((ch, run)) = self.fence {
+        if let Some((ch, run, base)) = self.fence {
             let l = body.trim_end();
-            let closing = l.bytes().take_while(|b| *b == ch).count();
-            if closing >= run && closing == l.len() {
-                self.fence = None;
+            // The page's parser ends a fence with its list item, at the
+            // first line with text left of the item's text. That line
+            // is read below as any line after the list.
+            if l.is_empty() || cols >= base {
+                // A closer is indented less than four columns past the
+                // container; deeper, the line is code.
+                let closing = l.bytes().take_while(|b| *b == ch).count();
+                if closing >= run && closing == l.len() && cols - base < 4 {
+                    self.fence = None;
+                }
+                self.blank_before = false;
+                return Line::Fence;
             }
-            self.blank_before = false;
-            return Line::Fence;
+            self.fence = None;
         }
         let Some(first) = body.bytes().next().filter(|b| !b.is_ascii_whitespace()) else {
             if !body.trim().is_empty() {
@@ -1522,9 +1532,9 @@ impl Blocks {
             self.in_para = true;
             return Line::Text;
         }
-        if let Some(fence) = fence_open(body) {
+        if let Some((ch, run)) = fence_open(body) {
             self.items.retain(|c| *c <= cols);
-            self.fence = Some(fence);
+            self.fence = Some((ch, run, base));
             self.in_para = false;
             return Line::Fence;
         }
@@ -1667,14 +1677,16 @@ fn paragraphs(text: &str, mut blocks: Blocks) -> Vec<(std::ops::Range<usize>, bo
             in_fence = false;
         }
         let code = kind == Line::Code;
-        let indent = indent_of(line);
+        // The columns, not the bytes: a tab before a fence is four
+        // columns, and the line continues the paragraph.
+        let (cols, indent) = indent_span(line);
         let body = &line[indent..];
         let blank = is_blank(body);
         let quoted = body.starts_with('>');
         if let Some((s, was_code)) = start {
             let lazy = in_quote && !quoted;
             if blank
-                || starts_block(indent, body, lazy)
+                || starts_block(cols, body, lazy)
                 || (quoted && !in_quote)
                 || (lazy && (is_item(line) || marker_alone(body)))
                 || (in_list && is_item(line))
@@ -1752,7 +1764,7 @@ fn marker_alone(body: &str) -> bool {
 /// fence, a thematic break, a setext underline of `=` or `-`, or a
 /// list item with text (a bullet, or `1.` and `1)`), indented three
 /// spaces at most. `body` is the line past its indent of `indent`
-/// bytes. An unquoted line of a block quote's paragraph (`lazy`) that
+/// columns. An unquoted line of a block quote's paragraph (`lazy`) that
 /// is `=` or two `-` is the quote's own text, not an underline, as the
 /// parser reads it; the quote itself is read by `paragraphs`. The
 /// first byte settles most lines at once: a press on two hundred
@@ -4446,6 +4458,71 @@ mod tests {
             "fn main() {}\n```\nSome `x` Text",
             "a fence with no closer is code to the end, as the page shows it"
         );
+    }
+
+    #[test]
+    fn a_fence_line_indented_four_columns_does_not_close_its_block() {
+        assert_eq!(
+            case_of("```\n    ```\nlet Code = 1;\n```\n\nafter The Text"),
+            "```\n    ```\nlet Code = 1;\n```\n\nafter the text",
+            "the indented fence line is code"
+        );
+        assert_eq!(
+            case_of("```\n\t```\nlet Code = 1;\n```\n\nafter The Text"),
+            "```\n\t```\nlet Code = 1;\n```\n\nafter the text",
+            "a tab is four columns"
+        );
+        assert_eq!(
+            case_of("```\nlet A = 1;\n   ```\n\nafter The Text"),
+            "```\nlet A = 1;\n   ```\n\nafter the text",
+            "three columns still close"
+        );
+        assert_eq!(
+            case_of("- an Item\n  ```\n  One\n      ```\n  Two\n  ```\n  more Text"),
+            "- an item\n  ```\n  One\n      ```\n  Two\n  ```\n  more text",
+            "the four columns are counted from the item's text"
+        );
+        let md = "```\n    ```\n```\n\nText\n\n```\nlet Code = 1;\n```\n";
+        let at = md.find("Code").unwrap() + 1;
+        assert!(
+            case_edit(md, None, at, true).is_none(),
+            "the word under the caret is code"
+        );
+    }
+
+    #[test]
+    fn a_tab_before_a_fence_line_continues_the_paragraph() {
+        assert_eq!(
+            case_of("a Word\n    ```\n    Four Spaces In\n\t```"),
+            "a word\n    ```\n    Four Spaces In\n\t```",
+            "the two runs of backticks are one code span, as on the page"
+        );
+    }
+
+    #[test]
+    fn a_fence_left_open_in_a_list_item_ends_with_the_item() {
+        assert_eq!(
+            case_of("- a Step One:\n  ```\n  make Install\n\nafter The List"),
+            "- a step one:\n  ```\n  make Install\n\nafter the list"
+        );
+        assert_eq!(
+            case_of("- an Item\n  ```\n  One\n\n  Two\n  ```\n\nafter The End"),
+            "- an item\n  ```\n  One\n\n  Two\n  ```\n\nafter the end",
+            "a blank line stays in the item's fence"
+        );
+        assert_eq!(
+            case_of("- an Item\n  ```\n  Code\n```\nMore Code\n```\nafter The End"),
+            "- an item\n  ```\n  Code\n```\nMore Code\n```\nafter the end",
+            "a fence line at the margin ends the item and opens a block"
+        );
+        assert_eq!(
+            case_of("- an Item\n  - a Nested\n    ```\n    Code\n  back In The Item"),
+            "- an item\n  - a nested\n    ```\n    Code\n  back in the item",
+            "the nested item's fence ends where the nested item does"
+        );
+        let md = "- Step one:\n  ```\n  make\n\nAfter The List\n";
+        let at = md.find("After").unwrap() + 1;
+        assert!(case_edit(md, None, at, true).is_some());
     }
 
     #[test]
