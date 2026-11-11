@@ -74,6 +74,7 @@
 - The sidebar no longer lists a link to a file that is gone. Before, a click on it did nothing.
 - A formula in a table cell now shows a command written as a superscript or a subscript, such as `e^\pi`, as its symbol. Before, the cell showed `e` with a raised `\p`, then `i`. The same is fixed in the copied text and in the search.
 - A formula in a footnote is now typeset. Before, the footnote showed it as its TeX text.
+- A code block, a quote, a heading or a table written right under the text of a list item, with no blank line between them, is now shown after that text. Before, the code block was shown above the item, and the quote, the heading or the table was joined to the item's text.
 - A command inside `\mathrm{...}` or `\operatorname{...}` is now typeset, as in `\mathrm{kg\,m^{-1}}` and `\operatorname{log\Gamma}`. Before, the command was shown as written.
 - `\liminf`, `\limsup`, `\injlim` and `\projlim` now have the thin space between their two words. Before, they were written as one word.
 - `\text{...}` written over two lines now reads as one line of text, and `\%`, `\$`, `\&`, `\_` and `\#` inside it are the characters. Before, the line break and the backslashes were shown.

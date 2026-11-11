@@ -704,7 +704,10 @@ impl Builder {
             }
             Event::SoftBreak => self.text(" "),
             Event::HardBreak => self.push(Span::plain("\n")),
-            Event::Rule => self.emit(BlockKind::Rule),
+            Event::Rule => {
+                self.flush_item_text();
+                self.emit(BlockKind::Rule)
+            }
             Event::Html(html) | Event::InlineHtml(html) => self.html(&html),
         }
     }
@@ -713,6 +716,7 @@ impl Builder {
         match tag {
             Tag::Paragraph => {}
             Tag::Heading { level, id, .. } => {
+                self.flush_item_text();
                 self.heading = Some(heading_level(level));
                 self.heading_id = id.map(|id| id.into_string());
             }
@@ -737,10 +741,12 @@ impl Builder {
                 }
             }
             Tag::BlockQuote(kind) => {
+                self.flush_item_text();
                 self.quote_depth = self.quote_depth.saturating_add(1);
                 self.alerts.push(kind.map(alert_kind));
             }
             Tag::CodeBlock(kind) => {
+                self.flush_item_text();
                 let language = match kind {
                     CodeBlockKind::Fenced(lang) if !lang.is_empty() => Some(
                         lang.split_whitespace()
@@ -769,6 +775,7 @@ impl Builder {
                 self.item_markers.push(Some(marker));
             }
             Tag::Table(aligns) => {
+                self.flush_item_text();
                 self.table = Some(TableAcc {
                     aligns: aligns.iter().map(column_align).collect(),
                     ..TableAcc::default()
@@ -791,7 +798,10 @@ impl Builder {
                 });
             }
             Tag::MetadataBlock(_) => self.in_metadata = true,
-            Tag::HtmlBlock => self.html_block = true,
+            Tag::HtmlBlock => {
+                self.flush_item_text();
+                self.html_block = true
+            }
             _ => {}
         }
     }
@@ -1952,6 +1962,16 @@ impl Builder {
         self.spans.clear();
     }
 
+    /// Writes out the text of the open list item before a block that
+    /// opens right under it. In a list with no blank lines the parser
+    /// gives an item's text with no paragraph around it, so nothing else
+    /// ends it before the block.
+    fn flush_item_text(&mut self) {
+        if !self.item_markers.is_empty() {
+            self.flush_spans();
+        }
+    }
+
     fn flush_spans(&mut self) {
         self.flush_text();
         if self.spans.is_empty() {
@@ -2726,6 +2746,53 @@ mod tests {
         let (_, text) = d.flip_task(block).expect("and flips back");
         assert_eq!(text, " ");
         assert!(d.flip_task(0).is_none(), "a heading refuses");
+    }
+
+    /// The kinds of a page's blocks, in order, a quoted block with `>`.
+    fn kinds(source: &str) -> Vec<String> {
+        parse(source)
+            .blocks
+            .iter()
+            .map(|b| {
+                let kind = match &b.kind {
+                    BlockKind::ListItem { .. } => "item",
+                    BlockKind::CodeBlock { .. } => "code",
+                    BlockKind::Paragraph { .. } => "text",
+                    BlockKind::Heading { .. } => "heading",
+                    BlockKind::Rule => "rule",
+                    BlockKind::Table { .. } => "table",
+                    _ => "other",
+                };
+                format!("{}{kind}", ">".repeat(b.quote_depth as usize))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_block_right_under_a_list_items_text_comes_after_it() {
+        assert_eq!(kinds("- one:\n  ```\n  code\n  ```\n"), ["item", "code"]);
+        assert_eq!(
+            kinds("1. one:\n   ```\n   code\n   ```\n"),
+            ["item", "code"]
+        );
+        assert_eq!(
+            kinds("- one:\n  ```\n  a\n  ```\n- two:\n  ```\n  b\n  ```\n"),
+            ["item", "code", "item", "code"]
+        );
+        assert_eq!(kinds("- one:\n\n      code\n"), ["item", "code"]);
+        // A quote's paragraph inside an item is an item in the model, as
+        // it is after a blank line.
+        assert_eq!(kinds("- one:\n  > quoted\n"), ["item", ">item"]);
+        assert_eq!(kinds("- one:\n\n  > quoted\n"), ["item", ">item"]);
+        assert_eq!(kinds("- one:\n  # Title\n"), ["item", "heading"]);
+        assert_eq!(kinds("- one:\n  ***\n"), ["item", "rule"]);
+        assert_eq!(
+            kinds("- one:\n  | a | b |\n  |---|---|\n  | c | d |\n"),
+            ["item", "table"]
+        );
+        // A nested list and a block after a blank line, as before.
+        assert_eq!(kinds("- one:\n  - two\n"), ["item", "item"]);
+        assert_eq!(kinds("- one:\n\n  ```\n  code\n  ```\n"), ["item", "code"]);
     }
 
     #[test]
