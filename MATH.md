@@ -150,6 +150,26 @@ $$
 \sum_{n=1}^{\infty} \frac{1}{n^2} = \frac{\pi^2}{6}, \qquad \int_{-\infty}^{\infty} e^{-x^2} \, dx = \sqrt{\pi}
 $$
 
+`\iint` and `\iiint` are the double and the triple integral. `\oint` is the integral around a closed curve.
+
+```latex
+\int_0^1 x^2 \, dx \qquad \iint_D f(x,y) \, dx \, dy \qquad \iiint_V \rho \, dV \qquad \oint_C \mathbf{F} \cdot d\mathbf{r}
+```
+
+$$
+\int_0^1 x^2 \, dx \qquad \iint_D f(x,y) \, dx \, dy \qquad \iiint_V \rho \, dV \qquad \oint_C \mathbf{F} \cdot d\mathbf{r}
+$$
+
+`\limits` after the sign puts the bounds below and above. `\nolimits` puts the bounds of a sum beside it. A bound can be written alone. `\left.` and `\right|` draw the bar of a value taken between two bounds.
+
+```latex
+\int\limits_0^1 f \qquad \int_a f \qquad \int^b f \qquad \sum\nolimits_{i=1}^{n} i \qquad \int_0^1 x^2 \, dx = \left. \frac{x^3}{3} \right|_0^1 = \frac{1}{3}
+```
+
+$$
+\int\limits_0^1 f \qquad \int_a f \qquad \int^b f \qquad \sum\nolimits_{i=1}^{n} i \qquad \int_0^1 x^2 \, dx = \left. \frac{x^3}{3} \right|_0^1 = \frac{1}{3}
+$$
+
 ### Functions and text
 
 `\sin`, `\cos`, `\tan`, `\log`, `\ln`, `\exp`, `\det`, `\gcd`, `\arg` and the other function names are upright, with the right space after them. `\operatorname{Var}` makes any other name a function. `\text{...}` puts words in a formula, with their spaces. `\mathrm{d}` is an upright letter, the d of `dx` in many books. A whole group can go inside it, with its commands and its scripts, as for a unit: `\mathrm{m\,s^{-2}}`. `a \equiv b \pmod{n}` adds (mod n) at the end, and `a \bmod n` writes mod between two values.
