@@ -3404,10 +3404,23 @@ mod tests {
 
     /// The reader slices the source at a definition's start, so the
     /// parser must give a start on a character boundary (pulldown-cmark
-    /// issue 1142: a tab before the colon, after a combining accent).
+    /// issue 1142: a tab before the colon, after a definition that ends
+    /// with a character of several bytes).
     #[test]
     fn a_tabbed_definition_after_a_combining_accent_opens() {
-        let d = parse("%\n:\u{301}\n\t:");
+        for page in [
+            "%\n:\u{301}\n\t:",
+            "Term\n:é\n\t: x\n",
+            "Term\n:日本\n\t: x\n",
+        ] {
+            assert!(!parse(page).blocks.is_empty(), "{page:?}");
+        }
+    }
+
+    /// pulldown-cmark 0.13.4 panicked on this page (its issue 1084).
+    #[test]
+    fn a_link_definition_in_a_list_item_before_a_line_of_spaces_opens() {
+        let d = parse("- [a]: /url\n      \n- b\n");
         assert!(!d.blocks.is_empty());
     }
 
