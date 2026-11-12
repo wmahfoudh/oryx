@@ -557,6 +557,10 @@ const CASE_LINES: &[&str] = &[
     "# a heading",
     "---",
     "a `code span` here",
+    "text[^n] here",
+    "[^n]: a footnote",
+    "    ",
+    "  ",
 ];
 
 /// The patterns of the search fuzzer: greedy runs that would cross the

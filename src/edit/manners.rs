@@ -2509,10 +2509,10 @@ fn html_tag_len(text: &str, at: usize, limit: usize, tags: &mut TagScan) -> Opti
 
 /// The address of a reference definition at the start of a line,
 /// `[label]: address`, as its range in the line. None for any other
-/// line.
+/// line, a footnote's `[^label]: text` among them.
 fn definition_address(line: &str) -> Option<std::ops::Range<usize>> {
     let indent = line.len() - line.trim_start_matches(' ').len();
-    if indent > 3 || !line[indent..].starts_with('[') {
+    if indent > 3 || !line[indent..].starts_with('[') || line[indent + 1..].starts_with('^') {
         return None;
     }
     let label_end = indent + 1 + line[indent + 1..].find([']', '\n'])?;
@@ -4422,6 +4422,12 @@ mod tests {
             case_of("[Ref]: https://x.y/Path"),
             "[REF]: https://x.y/Path"
         );
+    }
+
+    #[test]
+    fn a_footnote_definition_is_text_from_its_first_word() {
+        let out = case_of("[^n]: hello words");
+        assert!(out.ends_with(": Hello Words"), "{out:?}");
     }
 
     #[test]
