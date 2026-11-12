@@ -1459,6 +1459,33 @@ fn winget(name: &str) -> String {
     packaging(&format!("winget/Steerania.Oryx.{name}.yaml"))
 }
 
+/// winget compares the schema a manifest's first line names with its
+/// `ManifestVersion`, and the three files of a version must declare the
+/// same one. The schema check of `channels.sh` sees neither: the first
+/// line is a comment, and the schemas accept any version number.
+#[test]
+fn the_winget_templates_name_one_schema_version_in_their_header_and_their_field() {
+    let mut versions = Vec::new();
+    for (name, kind) in [
+        ("installer", "installer"),
+        ("locale.en-US", "defaultLocale"),
+        ("version", "version"),
+    ] {
+        let text = winget(name);
+        let field = text
+            .lines()
+            .find_map(|line| line.strip_prefix("ManifestVersion: "))
+            .unwrap_or_else(|| panic!("{name}: no ManifestVersion"));
+        let header = format!(
+            "# yaml-language-server: $schema=https://aka.ms/winget-manifest.{kind}.{field}.schema.json"
+        );
+        assert_eq!(text.lines().next(), Some(header.as_str()), "{name}");
+        versions.push(field.to_string());
+    }
+    versions.dedup();
+    assert_eq!(versions.len(), 1, "{versions:?}");
+}
+
 #[test]
 fn the_winget_installer_template_describes_the_msi_at_machine_scope() {
     let text = winget("installer");
@@ -1474,7 +1501,7 @@ fn the_winget_installer_template_describes_the_msi_at_machine_scope() {
         "  ProductCode: '@PRODUCT_CODE@'\n",
         "  - UpgradeCode: '{8EA2EE23-91F8-46EC-9310-6DFBF39A04C9}'\n",
         "ManifestType: installer\n",
-        "ManifestVersion: 1.12.0\n",
+        "ManifestVersion: 1.28.0\n",
     ] {
         assert!(text.contains(line), "{line:?} missing");
     }
@@ -1511,7 +1538,7 @@ fn the_winget_locale_template_carries_the_two_texts_and_the_links() {
         "ReleaseNotesUrl: https://github.com/wmahfoudh/oryx/releases/tag/v@VERSION@\n",
         "Moniker: oryx\n",
         "ManifestType: defaultLocale\n",
-        "ManifestVersion: 1.12.0\n",
+        "ManifestVersion: 1.28.0\n",
     ] {
         assert!(text.contains(line), "{line:?} missing");
     }
@@ -1539,7 +1566,7 @@ fn the_winget_version_template_names_the_default_locale() {
     let text = winget("version");
     assert_eq!(
         text,
-        "# yaml-language-server: $schema=https://aka.ms/winget-manifest.version.1.12.0.schema.json\nPackageIdentifier: Steerania.Oryx\nPackageVersion: \"@VERSION@\"\nDefaultLocale: en-US\nManifestType: version\nManifestVersion: 1.12.0\n"
+        "# yaml-language-server: $schema=https://aka.ms/winget-manifest.version.1.28.0.schema.json\nPackageIdentifier: Steerania.Oryx\nPackageVersion: \"@VERSION@\"\nDefaultLocale: en-US\nManifestType: version\nManifestVersion: 1.28.0\n"
     );
 }
 

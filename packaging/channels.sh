@@ -2,17 +2,18 @@
 # Rewrites the recipes for a published release: the two AUR PKGBUILDs
 # and their .SRCINFO, and the winget manifests. Run after the tag is
 # pushed and the release created with its files attached; running it
-# twice for a version changes nothing the second time.
+# twice for a version changes nothing the second time, as long as the
+# templates did not change in between: a run for a past version writes
+# its manifests again from today's templates.
 #
 # Usage: channels.sh <version>
 #
 # Needs the tag v<version> on GitHub (its tarball is downloaded and
 # hashed, since GitHub makes it), the MSI and the Linux tarball in
 # release/ as make release left them and as they were attached, msiinfo
-# (the ProductCode is read from the MSI), makepkg, python3 with aiohttp
-# and toml, and flatpak-builder-tools cloned beside the repository. The
-# winget manifests are checked against Microsoft's schemas when python3
-# has jsonschema and yaml; otherwise the check is skipped with a note.
+# (the ProductCode is read from the MSI) and makepkg. The winget
+# manifests are checked against Microsoft's schemas when python3 has
+# jsonschema and yaml; otherwise the check is skipped with a note.
 set -e
 here="$(cd "$(dirname "$0")" && pwd)"
 root="$(cd "$here/.." && pwd)"
@@ -112,7 +113,7 @@ fill "$here/winget/Steerania.Oryx.locale.en-US.yaml" "$out/Steerania.Oryx.locale
 fill "$here/winget/Steerania.Oryx.version.yaml" "$out/Steerania.Oryx.yaml"
 if python3 -c 'import jsonschema, yaml' 2>/dev/null; then
     for kind in installer defaultLocale version; do
-        curl -fsSL -o "$work/$kind.schema.json" "https://aka.ms/winget-manifest.$kind.1.12.0.schema.json" \
+        curl -fsSL -o "$work/$kind.schema.json" "https://aka.ms/winget-manifest.$kind.1.28.0.schema.json" \
             || refuse "cannot download the winget $kind schema"
     done
     python3 - "$out" "$work" <<'PY'
@@ -132,7 +133,7 @@ for name, kind in pairs:
     schema = json.load(open(f"{work}/{kind}.schema.json"))
     data = yaml.load(open(f"{out}/{name}"), Loader=Loader)
     jsonschema.validate(data, schema, format_checker=jsonschema.FormatChecker())
-    print(f"{name}: valid against the {kind} 1.12.0 schema")
+    print(f"{name}: valid against the {kind} 1.28.0 schema")
 PY
 else
     echo "channels.sh: winget schema check skipped, python3 has no jsonschema or yaml"
