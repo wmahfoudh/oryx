@@ -332,6 +332,11 @@ pub(crate) struct BlockTable {
     /// line height, in placement order: the exceptions that keep every
     /// line's y exact.
     tall: Vec<(u32, u32, f32)>,
+    /// Beside each entry of `tall`, the extra height of its position's
+    /// wrapped lines up to and including it: the sum a walk from the
+    /// position's first entry would reach, added in the same order, so
+    /// a line's top is one lookup and equal to the walk bit for bit.
+    tall_extra: Vec<f32>,
     /// The footnote rule's order position and y, once placed.
     notes_rule: Option<(usize, f32)>,
     /// The pass geometry blocks were placed against, for re-shaping.
@@ -356,6 +361,79 @@ impl BlockTable {
         entry.deco_top = deco_top;
     }
 
+    /// Records a code line taller than its block's line height. The
+    /// lines of a position arrive in order.
+    fn push_tall(&mut self, position: usize, line: u32, height: f32) {
+        let before = match self.tall.last() {
+            Some(&(p, _, _)) if p as usize == position => {
+                self.tall_extra.last().copied().unwrap_or(0.0)
+            }
+            _ => 0.0,
+        };
+        let extra = before + (height - self.entries[position].line_height);
+        self.tall.push((position as u32, line, height));
+        self.tall_extra.push(extra);
+    }
+
+    /// The sums of `tall_extra` again from entry `from` of the list to
+    /// the end of that entry's position, after the entries moved.
+    fn resum_tall(&mut self, from: usize) {
+        let Some(&(position, _, _)) = self.tall.get(from) else {
+            return;
+        };
+        let line_height = self.entries[position as usize].line_height;
+        let mut extra = match from.checked_sub(1) {
+            Some(prev) if self.tall[prev].0 == position => self.tall_extra[prev],
+            _ => 0.0,
+        };
+        for k in from..self.tall.len() {
+            if self.tall[k].0 != position {
+                break;
+            }
+            extra += self.tall[k].2 - line_height;
+            self.tall_extra[k] = extra;
+        }
+    }
+
+    /// Whether each stored sum equals the walk from its position's
+    /// first entry, bit for bit, and the lines of a position rise.
+    fn tall_sums_hold(&self) -> bool {
+        if self.tall.len() != self.tall_extra.len() {
+            return false;
+        }
+        let mut extra = 0.0_f32;
+        let mut prev: Option<(u32, u32)> = None;
+        for (k, &(position, line, height)) in self.tall.iter().enumerate() {
+            match prev {
+                Some((p, l)) if p == position => {
+                    if l >= line {
+                        return false;
+                    }
+                }
+                _ => extra = 0.0,
+            }
+            extra += height - self.entries[position as usize].line_height;
+            if extra.to_bits() != self.tall_extra[k].to_bits() {
+                return false;
+            }
+            prev = Some((position, line));
+        }
+        true
+    }
+
+    /// The extra height of the wrapped lines of `position` above
+    /// `line`, and how many of the position's entries they are.
+    fn extra_above(&self, position: usize, line: usize) -> (f32, usize) {
+        let p = position as u32;
+        let lo = self.tall.partition_point(|&(tp, _, _)| tp < p);
+        let above = self.tall[lo..].partition_point(|&(tp, l, _)| tp == p && (l as usize) < line);
+        let extra = match above {
+            0 => 0.0,
+            n => self.tall_extra[lo + n - 1],
+        };
+        (extra, above)
+    }
+
     /// This position's slice of the tall-line exceptions.
     fn tall_of(&self, position: usize) -> &[(u32, u32, f32)] {
         let position = position as u32;
@@ -366,16 +444,10 @@ impl BlockTable {
 
     /// The recorded top of line `line`, reproducing the placement
     /// arithmetic bit for bit: the shared advance in closed form, plus
-    /// the wrapped lines' extra heights accumulated in order.
+    /// the wrapped lines' extra heights as the pass accumulated them.
     fn code_line_top(&self, position: usize, line: usize) -> f32 {
         let entry = &self.entries[position];
-        let mut extra = 0.0_f32;
-        for &(_, l, height) in self.tall_of(position) {
-            if l as usize >= line {
-                break;
-            }
-            extra += height - entry.line_height;
-        }
+        let (extra, _) = self.extra_above(position, line);
         code_line_y(entry.content_y + entry.pad, line, entry.line_height, extra)
     }
 }
@@ -3308,12 +3380,7 @@ fn replay_code_lines(
     let size = code_face(doc.plain_file, cfg).1 * cfg.zoom;
     let base = entry.content_y + entry.pad;
     let tall = table.tall_of(position);
-    let mut next_tall = 0;
-    let mut extra = 0.0_f32;
-    while next_tall < tall.len() && (tall[next_tall].1 as usize) < lines.start {
-        extra += tall[next_tall].2 - entry.line_height;
-        next_tall += 1;
-    }
+    let (mut extra, mut next_tall) = table.extra_above(position, lines.start);
     let empty: Vec<(Range<usize>, SyntaxRole)> = Vec::new();
     let mut scratch = LayoutDoc::default();
     for line in lines {
@@ -3672,8 +3739,7 @@ fn place_code_line(
         advance = shaped;
         if advance != open.line_height {
             out.table
-                .tall
-                .push((open.position as u32, open.line as u32, advance));
+                .push_tall(open.position, open.line as u32, advance);
         }
     }
     // A line outside the retention bound was measured and drops; one
@@ -6696,10 +6762,13 @@ pub fn edit_code_lines(
     // What the touched lines measured before the edit: the shared
     // advance plus their tall exceptions.
     let mut old_h = old_lines.len() as f32 * line_height;
-    for &(_, l, h) in lay.table.tall_of(position) {
-        if old_lines.contains(&(l as usize)) {
-            old_h += h - line_height;
+    let tall = lay.table.tall_of(position);
+    let first = tall.partition_point(|&(_, l, _)| (l as usize) < old_lines.start);
+    for &(_, l, h) in &tall[first..] {
+        if l as usize >= old_lines.end {
+            break;
         }
+        old_h += h - line_height;
     }
 
     // Shape the new touched lines once, for their heights alone; the
@@ -6762,7 +6831,13 @@ pub fn edit_code_lines(
     for t in &mut tall[hi..pos_end] {
         t.1 = t.1.wrapping_add_signed(line_delta as i32);
     }
+    let added = new_tall.len();
     tall.splice(lo..hi, new_tall);
+    lay.table
+        .tall_extra
+        .splice(lo..hi, std::iter::repeat_n(0.0, added));
+    lay.table.resum_tall(lo);
+    debug_assert!(lay.table.tall_sums_hold());
 
     // The heights follow arithmetically: this entry grows, everything
     // recorded below it slides.
@@ -7227,6 +7302,77 @@ mod tests {
     use crate::style::fonts::FontStore;
     use crate::style::theme::Theme;
     use std::path::PathBuf;
+
+    /// A code position of `lines` lines where every other line wrapped
+    /// into a row more, as a playlist of long lines does.
+    fn table_of_wrapped_lines(lines: u32) -> BlockTable {
+        let mut table = BlockTable::default();
+        table.push(
+            0,
+            BlockEntry {
+                block: 0,
+                y: 0.0,
+                content_y: 12.5,
+                height: 0.0,
+                deco_top: f32::NAN,
+                line_height: 30.3,
+                pad: 14.0,
+                x0: 0.0,
+                flags: ENTRY_CODE,
+            },
+        );
+        for line in (0..lines).step_by(2) {
+            let rows = 2 + (line / 2) % 3;
+            table.push_tall(0, line, rows as f32 * 30.3);
+        }
+        table
+    }
+
+    /// The top of a line as the pass adds it up: the extra height of
+    /// each wrapped line above, one by one from the first.
+    fn top_by_walk(table: &BlockTable, line: usize) -> f32 {
+        let entry = &table.entries[0];
+        let mut extra = 0.0_f32;
+        for &(_, l, height) in table.tall_of(0) {
+            if l as usize >= line {
+                break;
+            }
+            extra += height - entry.line_height;
+        }
+        code_line_y(entry.content_y + entry.pad, line, entry.line_height, extra)
+    }
+
+    #[test]
+    fn a_line_top_is_the_walk_of_the_wrapped_lines_to_the_bit() {
+        let table = table_of_wrapped_lines(20_000);
+        for line in (0..20_001)
+            .step_by(7)
+            .chain([0, 1, 2, 19_998, 19_999, 20_000])
+        {
+            assert_eq!(
+                table.code_line_top(0, line).to_bits(),
+                top_by_walk(&table, line).to_bits(),
+                "line {line}"
+            );
+        }
+        assert!(table.tall_sums_hold());
+    }
+
+    #[test]
+    fn a_line_top_far_down_does_not_walk_the_wrapped_lines_above() {
+        let lines = 1_400_000;
+        let table = table_of_wrapped_lines(lines);
+        let start = std::time::Instant::now();
+        let mut sum = 0.0_f64;
+        for k in 0..2_000 {
+            sum += table.code_line_top(0, lines as usize - 1 - k) as f64;
+        }
+        let spent = start.elapsed();
+        assert!(sum > 0.0);
+        // 2,000 lookups at the end of 700,000 wrapped lines: a walk is
+        // seconds, a lookup microseconds.
+        assert!(spent.as_millis() < 100, "2,000 tops took {spent:?}");
+    }
 
     fn seg(text: &str, script: Script) -> (String, Script) {
         (text.to_string(), script)
