@@ -66,7 +66,7 @@ use winit::event::{
     ElementState, KeyEvent, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent,
 };
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::keyboard::{Key, ModifiersState, NamedKey};
+use winit::keyboard::{Key, ModifiersState, NamedKey, PhysicalKey};
 use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 use winit::window::{CursorIcon, Window, WindowId};
 
@@ -324,6 +324,7 @@ pub fn run(
         landing_settle: None,
         history: History::default(),
         pending_step: None,
+        held: Vec::new(),
         search_origin: None,
         book_toc,
         positions: config::Positions::load(),
@@ -1566,6 +1567,10 @@ struct App {
     /// A step into another file that is waiting on the unsaved question:
     /// the history moves only once that file really opens.
     pending_step: Option<bool>,
+    /// The keys that are down, each with what had the keys at its
+    /// first press: the owner, the mode, and whether the help page was
+    /// open. A repeat that arrives under another is dropped.
+    held: Vec<(PhysicalKey, (KeyOwner, edit::Mode, bool))>,
     /// Where the reader stood when the search bar opened, filed as a
     /// place at the first hit taken with Enter.
     search_origin: Option<history::Entry>,
@@ -9905,8 +9910,10 @@ impl ApplicationHandler for App {
             }
             WindowEvent::Focused(false) => {
                 // The caret goes with the focus, as in a native text box.
-                // The button's release goes elsewhere too.
+                // The button's release goes elsewhere too, and so do
+                // the releases of the keys that are down.
                 self.focused = false;
+                self.held.clear();
                 self.left_held = false;
                 self.drop_grab();
                 self.request_redraw();
@@ -9937,6 +9944,24 @@ impl ApplicationHandler for App {
                 // exactly so when the window regains focus, and acting
                 // on it quit the app.
                 if is_synthetic {
+                    return;
+                }
+                // The repeats of a held key go to what had the keys at
+                // its first press. Once that press closed a field or a
+                // dialog, or changed the mode, they are dropped until
+                // the key is pressed again: the Enter that closed the
+                // go to line field went on as line breaks in the text.
+                // Each key keeps its own record, so a Shift pressed
+                // while Enter is held does not renew Enter's.
+                let owner = (self.key_owner(), self.mode, self.help_stash.is_some());
+                if !repeat {
+                    self.held.retain(|(key, _)| *key != physical_key);
+                    self.held.push((physical_key, owner));
+                } else if self
+                    .held
+                    .iter()
+                    .any(|(key, at_press)| *key == physical_key && *at_press != owner)
+                {
                     return;
                 }
                 // On a layout that types another script, a chord is
@@ -10080,6 +10105,9 @@ impl ApplicationHandler for App {
                     None => {}
                 }
                 self.wake_field_caret();
+            }
+            WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Released => {
+                self.held.retain(|(key, _)| *key != event.physical_key);
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 self.fling = None;
