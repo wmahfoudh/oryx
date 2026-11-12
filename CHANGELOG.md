@@ -2,6 +2,11 @@
 
 ## v1.4.0
 
+### Fixes
+
+- A definition list with a tab before its colon no longer crashes Oryx. Before, Oryx crashed when the tab came after a combining accent.
+- A line of spaces after a link definition is now read as a blank line. Before, the paragraph after it started with an empty line.
+
 ## v1.3.0
 
 This is a feature release, about the editor and the math. New in this release: the syntax colors now follow each key when you type, where they came about half a second later. Formulas accept the TeX commands Wikipedia uses, and a new page teaches the math notation and lists the commands. An image alone in its paragraph is centered. The page scrolls when you select with the mouse past the top or the bottom of the window. You can create a file from the command line, and update the AppImage in place. Formulas are now typeset in table cells and in footnotes. Several crashes are fixed: in the PDF export, in formulas and in the editor. On Linux, the file dialogs now work on a system without a desktop environment.

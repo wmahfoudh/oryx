@@ -3402,6 +3402,29 @@ mod tests {
         );
     }
 
+    /// The reader slices the source at a definition's start, so the
+    /// parser must give a start on a character boundary (pulldown-cmark
+    /// issue 1142: a tab before the colon, after a combining accent).
+    #[test]
+    fn a_tabbed_definition_after_a_combining_accent_opens() {
+        let d = parse("%\n:\u{301}\n\t:");
+        assert!(!d.blocks.is_empty());
+    }
+
+    #[test]
+    fn a_line_of_spaces_after_a_link_definition_is_blank() {
+        let d = parse("[a]: /url\n    \ntext\n");
+        let texts: Vec<String> = d
+            .blocks
+            .iter()
+            .map(|b| match &b.kind {
+                BlockKind::Paragraph { spans } => spans.iter().map(|s| s.text(&d.source)).collect(),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(texts, ["text".to_string()]);
+    }
+
     #[test]
     fn a_definition_of_two_paragraphs_keeps_both_indented() {
         let d = parse("Term\n: definition\n\n    more indented\n\nAfter.\n");
