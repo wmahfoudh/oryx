@@ -4147,7 +4147,13 @@ impl App {
         let Some(confirm) = self.confirm.take() else {
             return;
         };
-        match confirm.into_pending() {
+        self.run_pending(confirm.into_pending(), event_loop);
+    }
+
+    /// Runs a step the unsaved-changes question held, once nothing is
+    /// left unsaved or the edits are given up.
+    fn run_pending(&mut self, pending: confirm::Pending, event_loop: &ActiveEventLoop) {
+        match pending {
             confirm::Pending::Quit => self.quit(event_loop),
             confirm::Pending::Reload => self.reload_now(),
             confirm::Pending::Refetch => self.refetch_now(),
@@ -4189,8 +4195,30 @@ impl App {
             // gives the place back to a recovery question it covered:
             // the close button can raise the quit's question over one.
             confirm::Decision::Save => {
+                // An unnamed note is saved through `save_as`. With no
+                // dialog of the system that opens the path field and
+                // answers at once: the field then holds the step, which
+                // follows its save.
+                if let Some(state) = self.path_ask.as_mut() {
+                    state.asked = false;
+                }
                 if self.save() {
                     self.resolve_confirm(event_loop);
+                } else if self
+                    .path_ask
+                    .as_ref()
+                    .is_some_and(|state| state.asked && state.ask == Ask::SaveAs)
+                {
+                    // The history step goes with the open it waits on,
+                    // so that no other open takes it meanwhile. A
+                    // recovery question the quit's question covered
+                    // comes back now, as after any answer.
+                    let step = self.pending_step.take();
+                    let pending = self.confirm.take().map(confirm::Confirm::into_pending);
+                    if let Some(state) = self.path_ask.as_mut() {
+                        state.then = pending.map(|pending| (pending, step));
+                    }
+                    self.ask_next_leftover();
                 } else {
                     // The open the question held does not happen, so a
                     // step that waited on it is given up, as on Cancel:
@@ -5138,7 +5166,8 @@ impl App {
     fn open_path_ask(&mut self, ask: Ask, folder: Option<PathBuf>, name: Option<&str>, why: &str) {
         eprintln!("oryx: no file dialog ({why}); asking for the path in the window");
         // The same chord again keeps what was typed.
-        if self.path_ask.as_ref().is_some_and(|state| state.ask == ask) {
+        if let Some(state) = self.path_ask.as_mut().filter(|state| state.ask == ask) {
+            state.asked = true;
             self.wake_field_caret();
             return;
         }
@@ -5186,7 +5215,15 @@ impl App {
     /// a character types, and the field's own editing keys act on it.
     /// Everything else falls through to the app-wide commands, never to
     /// the document.
-    fn path_key(&mut self, key: &Key, ctrl: bool, shift: bool, alt: bool, repeat: bool) -> bool {
+    fn path_key(
+        &mut self,
+        key: &Key,
+        ctrl: bool,
+        shift: bool,
+        alt: bool,
+        repeat: bool,
+        event_loop: &ActiveEventLoop,
+    ) -> bool {
         if self.path_ask.is_none() || alt {
             return false;
         }
@@ -5199,7 +5236,7 @@ impl App {
             // the second Enter that replaces a file.
             Key::Named(NamedKey::Enter) => {
                 if !repeat {
-                    self.path_enter();
+                    self.path_enter(event_loop);
                 }
                 true
             }
@@ -5255,7 +5292,7 @@ impl App {
     /// path. An existing file is named once and replaced on the next
     /// Enter; a path that leads nowhere for an open, or a write that
     /// fails, gets the flow's notice and the field stays open.
-    fn path_enter(&mut self) {
+    fn path_enter(&mut self, event_loop: &ActiveEventLoop) {
         let Some(state) = self.path_ask.as_mut() else {
             return;
         };
@@ -5290,8 +5327,18 @@ impl App {
                     self.open_chosen(path);
                 }
                 Ask::SaveAs => {
+                    // The step leaves the field before the save, which
+                    // may close the field itself, and goes back to it
+                    // when the write fails.
+                    let then = self.path_ask.as_mut().and_then(|state| state.then.take());
                     if self.save_as_to(path) {
                         self.close_path_ask();
+                        if let Some((pending, step)) = then {
+                            self.pending_step = step;
+                            self.run_pending(pending, event_loop);
+                        }
+                    } else if let Some(state) = self.path_ask.as_mut() {
+                        state.then = then;
                     }
                 }
                 Ask::New => {
@@ -9969,7 +10016,7 @@ impl ApplicationHandler for App {
                         let result = overlay.key(panel_key, ctrl, shift);
                         self.overlay_result(result);
                     }
-                    _ if self.path_key(key, ctrl, shift, alt, repeat) => {}
+                    _ if self.path_key(key, ctrl, shift, alt, repeat, event_loop) => {}
                     // The path field has the keyboard, under the go to
                     // line field's rule below.
                     _ if self.path_ask.is_some() => {

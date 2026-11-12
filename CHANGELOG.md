@@ -8,6 +8,7 @@
 - A list item that holds a link definition, followed by a line of spaces, no longer crashes Oryx.
 - A line of spaces or tabs after a link definition is now read as a blank line. Before, it was read as text, and the paragraph after it started with an empty line.
 - `Alt+Escape` in the Go to line field, or in the field that asks for a file's path, now closes the field as `Escape` does. Before, it quit Oryx or left the editor.
+- On Linux without a desktop portal and without zenity, the Save of the unsaved-changes question on a note or on piped text is now followed by what the question announced, once you have given the path: Oryx quits, opens the file, or starts the new file or note. Before, the text was saved and nothing followed.
 
 ## v1.3.0
 

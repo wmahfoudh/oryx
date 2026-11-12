@@ -49,6 +49,15 @@ pub struct PathState {
     pub view: FieldView,
     pub folder: PathBuf,
     armed: Option<PathBuf>,
+    /// Set each time a flow with no dialog asks through this field. The
+    /// unsaved-changes question clears it before its save and reads it
+    /// after, to know that this save is the one that asked.
+    pub asked: bool,
+    /// The step the unsaved-changes question held when its Save asked
+    /// through this field, with the history step that waited on it. It
+    /// runs after a save from the field; a field closed or replaced
+    /// otherwise drops both.
+    pub then: Option<(super::confirm::Pending, Option<bool>)>,
 }
 
 impl PathState {
@@ -72,6 +81,8 @@ impl PathState {
             view: FieldView::default(),
             folder,
             armed: None,
+            asked: true,
+            then: None,
         }
     }
 
