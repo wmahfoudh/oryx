@@ -167,7 +167,7 @@ An empty file opens directly in the editor. Books cannot be edited, and neither 
 
 ### Writing
 
-The usual keys work: typing, selecting, `Ctrl+X` and `Ctrl+V`, `Ctrl+Z` to undo, `Ctrl+Shift+Z` or `Ctrl+Y` to redo. Typing stays instant in very large files.
+The usual keys work: typing, selecting, `Ctrl+X` and `Ctrl+V`, `Ctrl+Z` to undo, `Ctrl+Shift+Z` or `Ctrl+Y` to redo. Typing stays instant in a file of several megabytes.
 
 `Ctrl+Left` and `Ctrl+Right` move by word, `Ctrl+Home` and `Ctrl+End` go to the start and the end of the file, and `Ctrl+Backspace` and `Ctrl+Delete` delete a word. `Up` on the first line goes to its start, and `Down` on the last line goes to its end.
 
