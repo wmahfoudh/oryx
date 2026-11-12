@@ -6360,3 +6360,60 @@ fn footnote_references_that_touch_are_drawn_apart() {
         "the comma is raised and sized as the numbers"
     );
 }
+
+/// A long code file whose lines are measured past the kept ones: the
+/// plain ASCII lines are counted without shaping, and each line stands
+/// where a full shaping of the file puts it, to the bit. The file mixes
+/// what the count takes with what it leaves to the shaper.
+#[test]
+fn a_long_code_file_counted_stands_where_the_shaped_one_does() {
+    let mut text = String::new();
+    for i in 0..4500 {
+        match i % 11 {
+            0 => text.push_str(&format!(
+                "let value_{i} = \"{}\";\n",
+                "word ".repeat(i % 40)
+            )),
+            1 => text.push_str(&format!("\tindented(with, a, tab, {i});\n")),
+            2 => text.push_str(&format!(
+                "// caf\u{e9} {i} {}\n",
+                "\u{e9}t\u{e9} ".repeat(i % 30)
+            )),
+            3 => text.push('\n'),
+            4 => text.push_str(&format!(
+                "{}/{}-{}\n",
+                "a".repeat(i % 200),
+                "b".repeat(90),
+                i
+            )),
+            5 => text.push_str(&format!("x{}   \n", " y".repeat(i % 60))),
+            _ => text.push_str(&format!("fn f{i}() {{ call({i}, {}); }}\n", i * 7)),
+        }
+    }
+    let dir = std::env::temp_dir().join("oryx-counted-file");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("counted.rs");
+    std::fs::write(&path, &text).unwrap();
+    let doc = load::open(&path, None).unwrap().document;
+    let mut fonts = fonts();
+    for width in [1000.0, 520.0] {
+        let full = lay_doc(&doc, width, &mut fonts);
+        let lines = text.lines().count();
+        let far = full.approx_top(0, lines - 40).unwrap();
+        for scroll in [0.0, far] {
+            let counted = windowed_doc(&doc, width, &mut fonts, scroll, 600.0);
+            assert_eq!(
+                counted.height.to_bits(),
+                full.height.to_bits(),
+                "width {width}"
+            );
+            for line in 0..=lines {
+                assert_eq!(
+                    counted.approx_top(0, line).map(f32::to_bits),
+                    full.approx_top(0, line).map(f32::to_bits),
+                    "width {width} scroll {scroll} line {line}"
+                );
+            }
+        }
+    }
+}

@@ -1132,6 +1132,28 @@ pub struct LayoutPass {
     /// Retention bound: scroll position and viewport height. None keeps
     /// every placed block, the export's and the tests' full layout.
     retain: Option<(f32, f32)>,
+    /// The character widths of the code face, once a long code block's
+    /// lines are measured past the kept ones: such a line of plain
+    /// ASCII is counted, not shaped (`rows`). None in a face that
+    /// cannot be counted and before a block asks.
+    counter: Option<super::rows::Widths>,
+    /// The order position whose lines are counted from here on, so the
+    /// pool is not fed the lines the count answers.
+    counting: Option<usize>,
+}
+
+/// A code block is counted once this many of its lines are left when
+/// the pass moves past the kept ones. A shorter block is shaped whole,
+/// as before: reading a face's table costs more than it saves there.
+const COUNT_FROM: usize = 2048;
+
+/// Whether a code line's styled ranges all draw in the regular face.
+/// A markdown source asks for bold and italic, which the count's table
+/// does not hold.
+fn regular_face(segments: &[(Range<usize>, SyntaxRole)]) -> bool {
+    segments
+        .iter()
+        .all(|(_, role)| crate::style::highlight::role_face(*role) == (false, false))
 }
 
 impl LayoutPass {
@@ -1827,6 +1849,8 @@ pub fn layout_begin(
         seed_position: 0,
         seed_line: 0,
         retain: None,
+        counter: None,
+        counting: None,
     };
     let mut out = LayoutDoc::default();
     out.table.margin = margin;
@@ -2079,6 +2103,14 @@ fn pool_top_up(doc: &Document, pass: &mut LayoutPass) {
             pass.seed_line += 1;
             let line = lines.line(&doc.source, line_index);
             if line.is_empty() {
+                continue;
+            }
+            // A line the assembler counts needs no shaping.
+            if pass.counting == Some(pass.seed_position)
+                && pass.counter.is_some()
+                && super::rows::countable(line)
+                && highlights.get(line_index).is_none_or(|s| regular_face(s))
+            {
                 continue;
             }
             // Mirrors open_code: the pad and wrap width the assembler
@@ -3703,7 +3735,58 @@ fn place_code_line(
     let runs_mark = out.runs.len();
     let code_mark = out.code_lines.len();
     let mut advance = open.line_height;
-    if !line.is_empty() {
+    // A line of plain ASCII past the kept lines of a long block: its
+    // height by the count, with no shaping.
+    let counted = match (&pass.counter, pass.retain) {
+        (Some(widths), Some((scroll, viewport_h)))
+            if pass.counting == Some(open.position)
+                && !line.is_empty()
+                && widths.is_for(open.size)
+                && super::rows::countable(line)
+                && highlights.get(open.line).is_none_or(|s| regular_face(s)) =>
+        {
+            let height = widths.height(line, open.wrap_width, open.line_height);
+            let range = retain_range(scroll, viewport_h);
+            let inside = top <= range.end && top + height >= range.start;
+            let contiguous = open.kept.as_ref().is_none_or(|kept| kept.end == open.line);
+            (!(inside && contiguous)).then_some(height)
+        }
+        _ => None,
+    };
+    if let Some(height) = counted {
+        #[cfg(debug_assertions)]
+        {
+            let empty: Vec<(Range<usize>, SyntaxRole)> = Vec::new();
+            let segments = highlights.get(open.line).unwrap_or(&empty);
+            let mut scratch = LayoutDoc::default();
+            let shaped = shape_code_line_step(
+                fonts,
+                theme,
+                cfg,
+                line,
+                segments,
+                open.block,
+                open.line,
+                open.frame.x_base + open.pad,
+                open.size,
+                open.line_height,
+                open.wrap_width,
+                doc.plain_file,
+                &mut scratch,
+            );
+            debug_assert_eq!(
+                height.to_bits(),
+                shaped.to_bits(),
+                "line {} counted {height}, shaped {shaped}",
+                open.line
+            );
+        }
+        advance = height;
+        if advance != open.line_height {
+            out.table
+                .push_tall(open.position, open.line as u32, advance);
+        }
+    } else if !line.is_empty() {
         let key = StepKey::step(open.position, open.line);
         let pooled = pass
             .pool
@@ -3759,6 +3842,21 @@ fn place_code_line(
             out.code_lines.truncate(code_mark);
             if out.index.runs.indexed > runs_mark {
                 out.index.runs.clear();
+            }
+            // A line of a long block was measured and dropped: from
+            // here the block's lines in the code face are counted where
+            // a line allows it.
+            if pass.counting != Some(open.position)
+                && !doc.plain_file
+                && lines.len() - open.line >= COUNT_FROM
+            {
+                if !pass.counter.as_ref().is_some_and(|w| w.is_for(open.size)) {
+                    let face = code_face(doc.plain_file, cfg).0;
+                    pass.counter = super::rows::Widths::of(fonts, face, open.size);
+                }
+                if pass.counter.is_some() {
+                    pass.counting = Some(open.position);
+                }
             }
         }
     }
@@ -7135,6 +7233,34 @@ fn shape_code_chunk(
         }
     }
     height
+}
+
+/// The height the shaper gives a code line drawn in one plain range,
+/// for the tests of the count.
+#[cfg(test)]
+pub(crate) fn shaped_code_line_height(
+    fonts: &mut FontStore,
+    line: &str,
+    size: f32,
+    line_height: f32,
+    wrap_width: f32,
+) -> f32 {
+    let mut scratch = LayoutDoc::default();
+    shape_code_line_step(
+        fonts,
+        &Theme::default_dark(),
+        &ViewConfig::default(),
+        line,
+        &[],
+        0,
+        0,
+        0.0,
+        size,
+        line_height,
+        wrap_width,
+        false,
+        &mut scratch,
+    )
 }
 
 pub(crate) fn role_color(theme: &Theme, role: SyntaxRole) -> Rgba {

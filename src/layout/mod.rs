@@ -1,6 +1,7 @@
 mod engine;
 pub mod metrics;
 pub mod pool;
+mod rows;
 
 pub use pool::{ShapeCtx, ShapePool, StepKey};
 
