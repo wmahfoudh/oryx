@@ -2897,8 +2897,10 @@ impl LayoutDoc {
         self.images.drain(..images);
         self.math_glyphs.drain(..math);
         self.code_lines.drain(..code);
+        // The frontier can fall between the rows of one wrapped line:
+        // its record stays, with the runs that remain.
         for record in &mut self.code_lines {
-            record.runs = record.runs.start - runs..record.runs.end - runs;
+            record.runs = record.runs.start.saturating_sub(runs)..record.runs.end - runs;
         }
         self.index = YIndex::default();
         code

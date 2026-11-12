@@ -691,11 +691,19 @@ impl Paginator {
             .unwrap_or(self.rects_seen);
         let items_done = self.next_item.min(self.close_at);
         self.items.drain(..items_done);
-        for item in &mut self.items {
-            item.runs = item.runs.start - runs..item.runs.end - runs;
-            item.math = item.math.start - math..item.math.end - math;
+        // An item already on a page can stay, for its place alone: its
+        // ranges are behind the cursor, and they stop at zero. An item
+        // still to place starts at the cursor or after it.
+        let placed = self.next_item - items_done;
+        for (index, item) in self.items.iter_mut().enumerate() {
+            debug_assert!(
+                index < placed || (item.runs.start >= runs && item.math.start >= math),
+                "an item still to place starts behind the cursor"
+            );
+            item.runs = item.runs.start.saturating_sub(runs)..item.runs.end.saturating_sub(runs);
+            item.math = item.math.start.saturating_sub(math)..item.math.end.saturating_sub(math);
             for image in &mut item.images {
-                *image -= images;
+                *image = image.saturating_sub(images);
             }
         }
         self.next_item -= items_done;

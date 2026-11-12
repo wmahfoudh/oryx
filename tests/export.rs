@@ -1445,3 +1445,58 @@ fn a_long_code_block_in_a_quote_exports() {
         assert!(pages > 50, "{pages} pages");
     }
 }
+
+/// A page of the streamed export can end between the rows of one
+/// wrapped code line: the drain then cuts that line's record, which
+/// keeps the runs that remain. The subtraction once went below zero,
+/// a panic in the debug build.
+#[test]
+fn a_code_block_of_wrapped_lines_exports() {
+    for (lines, width, code_size, lead) in
+        [(2000usize, 300usize, 9.0f32, 0usize), (150, 2500, 8.0, 2)]
+    {
+        let mut source = String::new();
+        for i in 0..lead {
+            source.push_str(&format!("Paragraph {i} with `code` and ==mark== here.\n\n"));
+        }
+        source.push_str("```rust\n");
+        for i in 0..lines {
+            let mut line = format!("let line_{i} = ");
+            while line.len() < width {
+                line.push_str(&format!("value_{i} + "));
+            }
+            source.push_str(&line);
+            source.push('\n');
+        }
+        source.push_str("```\n\nAfter.\n");
+        let doc = markdown::parse(source.as_str());
+        let target =
+            std::env::temp_dir().join(format!("oryx-export-wrapped-{}.pdf", std::process::id()));
+        let settings = ExportSettings {
+            body_size: 11.0,
+            code_size,
+            page: PageSize::A4,
+            ..ExportSettings::default()
+        };
+        for workers in [0, 4] {
+            let mut fonts = FontStore::new();
+            let mut media = MediaCache::offline(PathBuf::from("tests/fixtures"));
+            let pool = (workers > 0)
+                .then(|| std::sync::Arc::new(oryx::layout::ShapePool::new(workers, &fonts.seed())));
+            let mut pass = ExportPass::new(&settings, Theme::default_dark(), target.clone());
+            while !pass.is_done() {
+                pass.step(
+                    Instant::now() + Duration::from_millis(2),
+                    &doc,
+                    &mut fonts,
+                    &mut media,
+                    false,
+                    pool.as_ref(),
+                );
+            }
+            let pages = pass.finish(&doc, &fonts).expect("the export lands");
+            std::fs::remove_file(&target).ok();
+            assert!(pages > 20, "{pages} pages");
+        }
+    }
+}
