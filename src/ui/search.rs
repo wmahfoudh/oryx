@@ -5,7 +5,7 @@
 use std::borrow::Cow;
 use std::ops::Range;
 
-use crate::doc::model::Document;
+use crate::doc::model::{BlockKind, CodeBody, Document};
 use crate::edit::caret::word_char;
 use crate::paint::painter::Painter;
 use crate::style::fonts::CODE_FAMILY;
@@ -708,6 +708,22 @@ pub fn matches(doc: &Document, query: &str) -> Vec<Selection> {
     if query.is_empty() {
         return Vec::new();
     }
+    if let Some(lines) = sole_code_lines(doc, query) {
+        return if smart_case_sensitive(query) {
+            let finder = memchr::memmem::Finder::new(query);
+            line_matches(doc, lines, |line, out| exact_in_line(line, &finder, out))
+        } else {
+            let needle: String = query.chars().map(fold).collect();
+            line_matches(doc, lines, |line, out| {
+                folded_in_line(line, query, &needle, out)
+            })
+        };
+    }
+    matches_by_haystack(doc, query)
+}
+
+/// `matches` through the flattened text of the page.
+fn matches_by_haystack(doc: &Document, query: &str) -> Vec<Selection> {
     let hay = Haystack::build(doc);
     let found = if smart_case_sensitive(query) {
         find_exact(&hay.text, query)
@@ -728,6 +744,29 @@ pub fn word_matches(doc: &Document, word: &str) -> Vec<Selection> {
     if word.is_empty() {
         return Vec::new();
     }
+    if let Some(lines) = sole_code_lines(doc, word) {
+        let finder = memchr::memmem::Finder::new(word);
+        return line_matches(doc, lines, |line, out| {
+            let from = out.len();
+            exact_in_line(line, &finder, out);
+            // A line's neighbour is a line break, never a word character.
+            let mut kept = from;
+            for i in from..out.len() {
+                let range = out[i].clone();
+                let before = line[..range.start].chars().next_back();
+                let after = line[range.end..].chars().next();
+                if !before.is_some_and(word_char) && !after.is_some_and(word_char) {
+                    out[kept] = range;
+                    kept += 1;
+                }
+            }
+            out.truncate(kept);
+        });
+    }
+    word_matches_by_haystack(doc, word)
+}
+
+fn word_matches_by_haystack(doc: &Document, word: &str) -> Vec<Selection> {
     let hay = Haystack::build(doc);
     find_exact(&hay.text, word)
         .into_iter()
@@ -748,11 +787,128 @@ pub fn text_matches(doc: &Document, text: &str) -> Vec<Selection> {
     if text.is_empty() {
         return Vec::new();
     }
+    if let Some(lines) = sole_code_lines(doc, text) {
+        let finder = memchr::memmem::Finder::new(text);
+        return line_matches(doc, lines, |line, out| exact_in_line(line, &finder, out));
+    }
+    text_matches_by_haystack(doc, text)
+}
+
+fn text_matches_by_haystack(doc: &Document, text: &str) -> Vec<Selection> {
     let hay = Haystack::build(doc);
     find_exact(&hay.text, text)
         .into_iter()
         .filter_map(|range| hay.selection(range))
         .collect()
+}
+
+/// The lines of a document that is one code block (a code file, a text
+/// file, the source view), when `needle` holds no line break. The
+/// flattened text of such a document is its lines joined by line
+/// breaks, so a needle without one matches inside a line or not at all,
+/// and the lines can be searched where they are: no copy of the file,
+/// and a match's line is the line it was found in.
+fn sole_code_lines<'a>(doc: &'a Document, needle: &str) -> Option<&'a CodeBody> {
+    if needle.contains('\n') {
+        return None;
+    }
+    match &doc.blocks[..] {
+        [block] => match &block.kind {
+            BlockKind::CodeBlock { lines, .. } => Some(lines),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Whether the document is one code block: a code file, a text file,
+/// the source view of the editor.
+pub fn sole_code_block(doc: &Document) -> bool {
+    sole_code_lines(doc, "").is_some()
+}
+
+/// The matches `find` reports in each line of a one-block document, in
+/// document order. `find` appends the byte ranges of a line's matches.
+fn line_matches(
+    doc: &Document,
+    lines: &CodeBody,
+    mut find: impl FnMut(&str, &mut Vec<Range<usize>>),
+) -> Vec<Selection> {
+    let mut out = Vec::new();
+    let mut found: Vec<Range<usize>> = Vec::new();
+    for span in 0..lines.len() {
+        let line = lines.line(&doc.source, span);
+        if line.is_empty() {
+            continue;
+        }
+        found.clear();
+        find(line, &mut found);
+        out.extend(found.iter().map(|range| Selection {
+            start: ModelPos {
+                block: 0,
+                span,
+                byte: range.start,
+            },
+            end: ModelPos {
+                block: 0,
+                span,
+                byte: range.end,
+            },
+        }));
+    }
+    out
+}
+
+/// `find_exact` on one line, appended to `out`: the occurrences in
+/// order, the scan resuming at each match's end.
+fn exact_in_line(line: &str, query: &memchr::memmem::Finder, out: &mut Vec<Range<usize>>) {
+    let len = query.needle().len();
+    out.extend(
+        query
+            .find_iter(line.as_bytes())
+            .map(|start| start..start + len),
+    );
+}
+
+/// `find_folded` on one line, appended to `out`. A line of ASCII folds
+/// byte for byte, so it is compared where it is; any other line goes
+/// through the fold and its offset table.
+fn folded_in_line(line: &str, query: &str, needle: &str, out: &mut Vec<Range<usize>>) {
+    if !line.is_ascii() {
+        out.extend(find_folded(line, query));
+        return;
+    }
+    // A folded character outside ASCII is in no ASCII line.
+    if !needle.is_ascii() {
+        return;
+    }
+    let (hay, needle) = (line.as_bytes(), needle.as_bytes());
+    let Some((&first, rest)) = needle.split_first() else {
+        return;
+    };
+    // The folded needle is lowercase: its first byte stands in the
+    // line as itself or as its capital.
+    let capital = first.to_ascii_uppercase();
+    let mut at = 0;
+    while at + needle.len() <= hay.len() {
+        let Some(step) = memchr::memchr2(first, capital, &hay[at..]) else {
+            return;
+        };
+        at += step;
+        if at + needle.len() > hay.len() {
+            return;
+        }
+        if hay[at + 1..at + needle.len()]
+            .iter()
+            .zip(rest)
+            .all(|(h, n)| h.to_ascii_lowercase() == *n)
+        {
+            out.push(at..at + needle.len());
+            at += needle.len();
+        } else {
+            at += 1;
+        }
+    }
 }
 
 /// Every regex match in document order, or `None` when the pattern does
@@ -1688,6 +1844,83 @@ mod tests {
 
     fn code_doc(text: &str) -> Document {
         crate::doc::load::code_document(None, text)
+    }
+
+    /// A code file with what a fold can trip on: capitals, letters
+    /// whose lowercase is longer or shorter in bytes, empty lines,
+    /// matches at both ends of a line and matches that touch.
+    fn mixed_code_text(lines: usize) -> String {
+        let mut text = String::new();
+        for i in 0..lines {
+            match i % 9 {
+                0 => text.push_str(&format!("let Count_{i} = count + recount; // COUNT count\n")),
+                1 => text.push('\n'),
+                2 => text.push_str("caf\u{e9} CAF\u{c9} \u{130}stanbul stra\u{df}e \u{212a}elvin \u{3a3}\u{3c3}\u{3c2} count\n"),
+                3 => text.push_str("aaaa AAAA aAaA countcount\n"),
+                4 => text.push_str("count\n"),
+                5 => text.push_str(&format!("  http://example.org:80/Series/{i}/x-count.mkv  \n")),
+                6 => text.push_str("\u{627}\u{644}\u{639}\u{631}\u{628}\u{64a}\u{629} count \u{5e2}\u{5d1}\u{5e8}\u{5d9}\u{5ea}\n"),
+                _ => text.push_str(&format!("fn f{i}() {{ call({i}); }}\n")),
+            }
+        }
+        text
+    }
+
+    const QUERIES: [&str; 16] = [
+        "count",
+        "Count",
+        "COUNT",
+        "aa",
+        "a",
+        "e",
+        " ",
+        "caf\u{e9}",
+        "\u{e9}",
+        "i",
+        "k",
+        "ss",
+        "\u{3c3}",
+        "://",
+        "x-count.mkv  ",
+        "\u{639}\u{631}",
+    ];
+
+    #[test]
+    fn a_code_file_searched_line_by_line_finds_what_the_flattened_text_finds() {
+        for text in [
+            mixed_code_text(400),
+            "count".to_string(),
+            "\n\ncount\n\n".to_string(),
+            String::new(),
+        ] {
+            let doc = code_doc(&text);
+            for query in QUERIES {
+                assert_eq!(
+                    matches(&doc, query),
+                    matches_by_haystack(&doc, query),
+                    "{query:?}"
+                );
+                assert_eq!(
+                    word_matches(&doc, query),
+                    word_matches_by_haystack(&doc, query),
+                    "word {query:?}"
+                );
+                assert_eq!(
+                    text_matches(&doc, query),
+                    text_matches_by_haystack(&doc, query),
+                    "text {query:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_query_with_a_line_break_goes_through_the_flattened_text() {
+        let doc = code_doc("count\ncount\n");
+        assert!(sole_code_lines(&doc, "count").is_some());
+        assert!(sole_code_lines(&doc, "t\nc").is_none());
+        assert_eq!(matches(&doc, "t\nc"), matches_by_haystack(&doc, "t\nc"));
+        assert_eq!(matches(&doc, "t\nc").len(), 1);
     }
 
     fn sel(a: (usize, usize, usize), b: (usize, usize, usize)) -> Selection {

@@ -5918,7 +5918,26 @@ impl App {
             state.current = index;
         } else {
             let document = &self.document;
-            let tops = selection::match_tops(lay, &self.document, &state.matches);
+            // The first match at the view's top or below it. In a file
+            // that is one code block the tops never decrease down the
+            // matches, so a binary search finds it; a page's matches
+            // (two cells of a table row) need each top.
+            let below = |matches: &[Selection]| {
+                if search::sole_code_block(document) {
+                    let found = selection::first_match_from(lay, document, matches, scroll);
+                    debug_assert_eq!(
+                        found,
+                        selection::match_tops(lay, document, matches)
+                            .iter()
+                            .position(|top| *top >= scroll)
+                    );
+                    found
+                } else {
+                    selection::match_tops(lay, document, matches)
+                        .iter()
+                        .position(|top| *top >= scroll)
+                }
+            };
             state.current = match seek {
                 Some(offset) => state
                     .matches
@@ -5928,7 +5947,7 @@ impl App {
                             .is_some_and(|at| at >= offset)
                     })
                     .unwrap_or(0),
-                None => tops.iter().position(|top| *top >= scroll).unwrap_or(0),
+                None => below(&state.matches).unwrap_or(0),
             };
             self.scroll_match_into_view();
         }

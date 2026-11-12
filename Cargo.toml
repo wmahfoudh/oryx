@@ -19,6 +19,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 cosmic-text = "0.17.0"
 directories = "6"
 fancy-regex = "0.16.2"
+memchr = "2.8"
 html5ever = "0.39"
 markup5ever_rcdom = "0.39"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "rayon"] }

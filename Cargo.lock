@@ -2349,6 +2349,7 @@ dependencies = [
  "log",
  "lopdf",
  "markup5ever_rcdom",
+ "memchr",
  "miniz_oxide",
  "noad",
  "open",

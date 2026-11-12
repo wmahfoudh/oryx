@@ -805,6 +805,22 @@ pub fn match_tops(lay: &LayoutDoc, doc: &Document, matches: &[Selection]) -> Vec
         .collect()
 }
 
+/// The first match whose top is at `y` or below it, by a binary search:
+/// for a document that is one code block, where the matches follow the
+/// lines and the lines follow each other down the page, so the tops
+/// never decrease. It answers what `match_tops` scanned for, with a
+/// handful of tops computed.
+pub fn first_match_from(
+    lay: &LayoutDoc,
+    doc: &Document,
+    matches: &[Selection],
+    y: f32,
+) -> Option<usize> {
+    let index =
+        matches.partition_point(|m| match_spans(lay, doc, std::slice::from_ref(m))[0].0 < y);
+    (index < matches.len()).then_some(index)
+}
+
 /// The height each match covers: the y of the first and of the last
 /// placed run it overlaps, in one walk over the runs with a binary
 /// search into the sorted matches. A match with no placed run answers
