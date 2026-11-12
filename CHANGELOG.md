@@ -7,6 +7,7 @@
 - A definition list with a tab before its colon no longer crashes Oryx. Before, Oryx crashed when the definition above it ended with an accented letter or a non-Latin character.
 - A list item that holds a link definition, followed by a line of spaces, no longer crashes Oryx.
 - A line of spaces or tabs after a link definition is now read as a blank line. Before, it was read as text, and the paragraph after it started with an empty line.
+- `Alt+Escape` in the Go to line field, or in the field that asks for a file's path, now closes the field as `Escape` does. Before, it quit Oryx or left the editor.
 
 ## v1.3.0
 

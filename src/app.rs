@@ -2173,10 +2173,20 @@ impl App {
             Command::Quit => {
                 let act = edit::escape(
                     self.mode,
+                    self.path_ask.is_some() || self.goto.is_some(),
                     self.search.is_some(),
                     self.selection.is_some_and(|s| !s.is_empty()),
                 );
                 match act {
+                    // The dispatch gives the path field the keys before
+                    // the go to line field, so it is the inner of the two.
+                    edit::EscapeAct::CloseField => {
+                        if self.path_ask.is_some() {
+                            self.close_path_ask();
+                        } else {
+                            self.close_goto();
+                        }
+                    }
                     edit::EscapeAct::CloseFind => self.close_search(),
                     edit::EscapeAct::ClearSelection => {
                         self.selection = None;

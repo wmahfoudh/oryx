@@ -402,18 +402,25 @@ pub fn splice_document(
 /// What one Escape press closes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EscapeAct {
+    CloseField,
     CloseFind,
     ClearSelection,
     LeaveEdit,
     Quit,
 }
 
-/// The Escape ladder, innermost out, one press each: the find bar,
-/// then the selection, then the mode while editing, then the app. The
+/// The Escape ladder, innermost out, one press each: the path field
+/// or the go to line field, then the find bar, then the selection,
+/// then the mode while editing, then the app. A field closes its own
+/// plain Escape; its rung is for a press it returns, Escape with Alt
+/// held, which must not reach the rungs under an open field. The
 /// sidebar is not a rung: Escape leaves it as it stands, and hiding
 /// belongs to Ctrl+Shift+B alone. Overlays intercept upstream and
 /// never reach here.
-pub fn escape(mode: Mode, find_open: bool, has_selection: bool) -> EscapeAct {
+pub fn escape(mode: Mode, field_open: bool, find_open: bool, has_selection: bool) -> EscapeAct {
+    if field_open {
+        return EscapeAct::CloseField;
+    }
     if find_open {
         return EscapeAct::CloseFind;
     }
@@ -1224,10 +1231,31 @@ mod tests {
     }
 
     #[test]
+    fn an_open_field_is_the_first_rung_of_the_escape_ladder() {
+        for mode in [Mode::Edit, Mode::Read] {
+            for find in [false, true] {
+                for selection in [false, true] {
+                    assert_eq!(
+                        escape(mode, true, find, selection),
+                        EscapeAct::CloseField,
+                        "{mode:?} find {find} selection {selection}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn escape_layers_innermost_out_while_editing() {
-        assert_eq!(escape(Mode::Edit, true, true), EscapeAct::CloseFind);
-        assert_eq!(escape(Mode::Edit, false, true), EscapeAct::ClearSelection);
-        assert_eq!(escape(Mode::Edit, false, false), EscapeAct::LeaveEdit);
+        assert_eq!(escape(Mode::Edit, false, true, true), EscapeAct::CloseFind);
+        assert_eq!(
+            escape(Mode::Edit, false, false, true),
+            EscapeAct::ClearSelection
+        );
+        assert_eq!(
+            escape(Mode::Edit, false, false, false),
+            EscapeAct::LeaveEdit
+        );
     }
 
     // The sidebar is not a rung: Escape quits with the panel as it
@@ -1235,12 +1263,12 @@ mod tests {
     // Hiding belongs to Ctrl+Shift+B alone.
     #[test]
     fn escape_layers_innermost_out_while_reading_and_leaves_the_sidebar_alone() {
-        assert_eq!(escape(Mode::Read, true, true), EscapeAct::CloseFind);
+        assert_eq!(escape(Mode::Read, false, true, true), EscapeAct::CloseFind);
         assert_eq!(
-            escape(Mode::Read, false, true),
+            escape(Mode::Read, false, false, true),
             EscapeAct::ClearSelection,
             "a selection is cleared before the window closes"
         );
-        assert_eq!(escape(Mode::Read, false, false), EscapeAct::Quit);
+        assert_eq!(escape(Mode::Read, false, false, false), EscapeAct::Quit);
     }
 }
