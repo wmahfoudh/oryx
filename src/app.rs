@@ -322,6 +322,7 @@ pub fn run(
         pending_anchor: None,
         pending_offset: None,
         landing_settle: None,
+        preview: None,
         history: History::default(),
         pending_step: None,
         held: Vec::new(),
@@ -839,6 +840,65 @@ impl Kept {
 /// when its rows grew taller and the bottom edge would cut it.
 fn kept_caret_height(below: f32, view_h: f32, row_h: f32) -> f32 {
     below.min((view_h - row_h).max(0.0)).max(0.0)
+}
+
+/// What a preview shows: the landing that waits, as `resolve_pending`
+/// will spend it.
+enum Wanted {
+    /// A line of the editor, `pending_row`.
+    Row(Place),
+    /// An offset, `pending_offset`.
+    Offset(Place),
+    /// The line at the top of the view, kept across a new layout or
+    /// read from the scroll.
+    Top(scroll::TopPlace),
+    /// The caret's row at its height in the window.
+    Caret(usize, f32),
+    /// The end of the file, a held `Ctrl+End`.
+    Bottom,
+}
+
+/// A preview and its picture, kept while the view asks for the same
+/// lines at the same place.
+struct PreviewFrame {
+    preview: paint::preview::Preview,
+    /// The colored lines the preview was built with, so that colors
+    /// that arrive show.
+    colored: usize,
+    width: u32,
+    /// The scroll and the height of `pixels`.
+    painted: Option<(u32, u32)>,
+    pixels: Vec<u32>,
+}
+
+/// The top of the editor row holding `offset`: the row the layout drew,
+/// else the line's place in the block table.
+fn row_y(lay: &LayoutDoc, doc: &Document, offset: usize) -> Option<f32> {
+    if let Some(y) = caret::row_top(lay, doc, offset) {
+        return Some(y);
+    }
+    let block = doc.block_at_offset(offset)?;
+    lay.approx_top(block, scroll::source_row(doc, block, offset))
+}
+
+/// The scroll that shows the source line at `offset` with its row
+/// `below` the top of a view `view_h` tall (`App::line_landing`).
+fn line_landing(
+    lay: &LayoutDoc,
+    doc: &Document,
+    offset: usize,
+    below: f32,
+    view_h: f32,
+) -> Option<f32> {
+    let row = caret::line_top(lay, doc, offset).or_else(|| scroll::line_estimate(lay, doc, offset));
+    if let Some(y) = row {
+        return Some(caret::seated(y, below));
+    }
+    if let Some(end) = caret::tall_block_end(lay, doc, offset, view_h) {
+        return Some(caret::seated(end, below));
+    }
+    let below = scroll::fitted_below(lay, doc, offset, below, view_h);
+    scroll::offset_top(lay, doc, offset).map(|y| caret::seated(y, below))
 }
 
 /// Whether the first row of a caret's line stands whole in the view.
@@ -1561,6 +1621,9 @@ struct App {
     /// A line landing made this frame, whose exact row `settle_landing`
     /// finds once the slide has drawn the rows around it.
     landing_settle: Option<Place>,
+    /// The picture shown in the page's place while a big file is
+    /// measured (`preview_frame`).
+    preview: Option<PreviewFrame>,
     /// The places jumps left behind, in this file and in the ones open
     /// before it; Alt+Left and Alt+Right walk them as a browser does.
     history: History,
@@ -2387,12 +2450,7 @@ impl App {
     /// whole file is that case, so the block table answers by line
     /// index, which is how a source view is indexed.
     fn editor_row_y(&self, offset: usize) -> Option<f32> {
-        let lay = self.layout.as_ref()?;
-        if let Some(y) = caret::row_top(lay, &self.document, offset) {
-            return Some(y);
-        }
-        let block = self.document.block_at_offset(offset)?;
-        lay.approx_top(block, scroll::source_row(&self.document, block, offset))
+        row_y(self.layout.as_ref()?, &self.document, offset)
     }
 
     /// Rebuilds the page held behind the editor from the buffer, which
@@ -8873,6 +8931,9 @@ impl App {
         self.pending_recolor.clear();
         self.layout = Some(out);
         self.pass = Some(pass);
+        // A new pass is a new document, a new width, a new size or a
+        // new theme: a preview of the last one shows none of them.
+        self.preview = None;
         self.pass_spent = Duration::ZERO;
         self.layout_width = avail;
         self.band = None;
@@ -8974,17 +9035,151 @@ impl App {
     /// the view, or from its top when taller. A blank line after a
     /// block taller than the view stands at the end of that block.
     fn line_landing(&self, lay: &LayoutDoc, offset: usize, below: f32) -> Option<f32> {
+        line_landing(lay, &self.document, offset, below, self.viewport_h())
+    }
+
+    /// The picture of the place the view is going to, while the layout
+    /// of a big code or text file cannot show the view: the pass is
+    /// still measuring, and the lines at the scroll are among those it
+    /// measured and dropped. A view the layout does show is left alone,
+    /// whatever landing waits: the page under the picture takes the
+    /// clicks and the keys, so the picture stands only where that page
+    /// is empty. The place shown is the landing that waits, in the
+    /// order `resolve_pending` spends them, then a jump to the end that
+    /// is held, then the scroll's own place; during a gesture of the
+    /// pointer, the scroll's place alone, since the view follows the
+    /// hand. The lines around it are laid out as a preview
+    /// (`paint::preview`) and painted where the landing will put them.
+    /// None in any other case: the frame is then the layout's, as it is
+    /// without this function.
+    fn preview_frame(&mut self, width: u32, height: u32) -> Option<Vec<u32>> {
+        let found = self.preview_wanted(height as f32);
+        if found.is_none() {
+            self.preview = None;
+        }
+        let (wanted, row, total) = found?;
+        let view_h = height as f32;
+        let row_h = self.row_h();
         let doc = &self.document;
-        let row =
-            caret::line_top(lay, doc, offset).or_else(|| scroll::line_estimate(lay, doc, offset));
-        if let Some(y) = row {
-            return Some(caret::seated(y, below));
+        let rows = paint::preview::rows_around(total, row, view_h, row_h);
+        // The colored lines among the preview's rows: colors that
+        // arrive above them change nothing in it.
+        let colored = match &doc.blocks[0].kind {
+            BlockKind::CodeBlock { highlights, .. } => highlights.len().clamp(rows.start, rows.end),
+            _ => 0,
+        };
+        let fresh = self.preview.as_ref().is_some_and(|frame| {
+            frame.preview.rows == rows && frame.colored == colored && frame.width == width
+        });
+        if !fresh {
+            let preview = paint::preview::build(
+                &self.document,
+                &self.theme,
+                &mut self.fonts,
+                &mut self.media,
+                &self.cfg,
+                width as f32,
+                rows,
+            )?;
+            self.preview = Some(PreviewFrame {
+                preview,
+                colored,
+                width,
+                painted: None,
+                pixels: Vec::new(),
+            });
         }
-        if let Some(end) = caret::tall_block_end(lay, doc, offset, self.viewport_h()) {
-            return Some(caret::seated(end, below));
+        let frame = self.preview.as_mut()?;
+        let (lay, doc) = (&frame.preview.lay, &frame.preview.doc);
+        let y = match wanted {
+            Wanted::Row(place) => {
+                row_y(lay, doc, place.offset).map(|y| caret::seated(y, place.below))
+            }
+            Wanted::Offset(place) if place.line => {
+                line_landing(lay, doc, place.offset, place.below, view_h)
+            }
+            Wanted::Offset(place) => {
+                scroll::offset_top(lay, doc, place.offset).map(|y| caret::seated(y, place.below))
+            }
+            Wanted::Top(place) => place.scroll(lay, doc),
+            Wanted::Caret(offset, below) => row_y(lay, doc, offset)
+                .map(|y| caret::seated(y, kept_caret_height(below, view_h, row_h))),
+            Wanted::Bottom => Some(lay.height),
+        }?;
+        let y = scroll::frame_offset(scroll::clamp(y, lay.height, view_h));
+        let key = (y.to_bits(), height);
+        if frame.painted != Some(key) {
+            frame.pixels = paint::band_numbered(
+                lay,
+                doc,
+                &self.theme,
+                &mut self.fonts,
+                &mut self.media,
+                &[],
+                // The page has no line numbers while its block is
+                // measured, and the preview stands in for that page.
+                None,
+                y,
+                width,
+                height,
+            );
+            frame.painted = Some(key);
         }
-        let below = scroll::fitted_below(lay, doc, offset, below, self.viewport_h());
-        scroll::offset_top(lay, doc, offset).map(|y| caret::seated(y, below))
+        Some(frame.pixels.clone())
+    }
+
+    /// What a preview would show now, the row of the file it names and
+    /// the file's line count. None when the layout shows the view, when
+    /// no pass runs, and for a document that is not one block of lines.
+    fn preview_wanted(&self, view_h: f32) -> Option<(Wanted, usize, usize)> {
+        if !self.pass_active() || self.export.is_some() || self.parse_pending {
+            return None;
+        }
+        let doc = &self.document;
+        let total = match doc.blocks.first().map(|block| &block.kind) {
+            Some(BlockKind::CodeBlock { lines, .. }) if doc.blocks.len() == 1 => lines.len(),
+            _ => 0,
+        };
+        if total == 0 || !(doc.code_file || doc.plain_file) {
+            return None;
+        }
+        let lay = self.layout.as_ref()?;
+        let kept = self.pass.as_ref()?.kept_lines()?;
+        // A view that reaches past what is placed is the pass's own
+        // first frames.
+        if lay.height < self.scroll_y + view_h {
+            return None;
+        }
+        let row_of = |offset: usize| scroll::source_row(doc, 0, offset).min(total - 1);
+        // The first and the last line of the view, which the block
+        // table answers exactly: the lines above them are measured.
+        // `top_offset` reads one pixel under what it is given.
+        let top = row_of(scroll::top_offset(lay, doc, self.scroll_y));
+        let bottom = row_of(scroll::top_offset(lay, doc, self.scroll_y + view_h - 2.0));
+        if kept.start <= top && bottom < kept.end {
+            return None;
+        }
+        let gesture = self.drag.is_some() || self.selecting() || self.overlay_mouse;
+        let landing = if gesture {
+            None
+        } else if let Some(place) = self.pending_row {
+            Some((Wanted::Row(place), row_of(place.offset)))
+        } else if let Some(place) = self.pending_offset {
+            Some((Wanted::Offset(place), row_of(place.offset)))
+        } else if let Some(Kept::Top(place)) = self.kept_view {
+            Some((Wanted::Top(place), row_of(place.offset)))
+        } else if let (Some(Kept::Caret(below)), Some(caret)) = (self.kept_view, self.caret) {
+            Some((Wanted::Caret(caret.offset, below), row_of(caret.offset)))
+        } else if self.bottom_hold.held_at(self.scroll_y) {
+            Some((Wanted::Bottom, total - 1))
+        } else {
+            None
+        };
+        let (wanted, row) = landing.or_else(|| {
+            let place = scroll::TopPlace::of(lay, doc, self.scroll_y)?;
+            Some((Wanted::Top(place), top))
+        })?;
+        Some((wanted, row, total))
     }
 
     /// Finishes a line landing on the frame that made it: the slide has
@@ -9240,6 +9435,7 @@ impl App {
         // otherwise land a pixel apart at a fractional scroll, the
         // seat of a caret row at a fractional display scale.
         let frame_y = scroll::frame_offset(self.scroll_y);
+        let preview = self.preview_frame(avail_px, size.height);
         let lay = self.layout.as_ref().expect("layout exists");
         let mut highlight: Vec<DecoRect> = match &self.selection {
             Some(sel) => selection::rects(sel, lay, &self.document, &mut self.fonts)
@@ -9307,6 +9503,11 @@ impl App {
                 ));
                 self.pending_band_for = (!interactive).then_some(size_tag);
             }
+        }
+        // While a big file is measured, the place the view is going to
+        // is shown before the layout can show it.
+        if preview.is_some() {
+            direct = preview;
         }
         let view: &[u32] = match &direct {
             Some(pixels) => pixels,

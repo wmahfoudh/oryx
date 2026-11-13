@@ -391,6 +391,12 @@ impl BottomHold {
         self.held = false;
     }
 
+    /// Whether a jump to the bottom waits for the pass to end with the
+    /// view still where the jump left it: the hold `settle` would spend.
+    pub fn held_at(&self, scroll_y: f32) -> bool {
+        self.held && scroll_y == self.seated
+    }
+
     /// Whether this slice must seat the view on the completed
     /// document's bottom, which spends the hold. A view that has moved
     /// since the jump belongs to the reader again and releases the

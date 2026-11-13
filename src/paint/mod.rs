@@ -1,6 +1,7 @@
 mod band;
 pub mod gutter;
 pub mod painter;
+pub mod preview;
 pub mod scroll;
 
 pub use band::{band, band_numbered, paper};

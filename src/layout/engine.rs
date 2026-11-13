@@ -1162,6 +1162,14 @@ impl LayoutPass {
         self.done
     }
 
+    /// The lines of the open code block the layout holds rows for: the
+    /// stretch the pass kept, blank lines included. Empty when it kept
+    /// none yet, None when no code block is open.
+    pub fn kept_lines(&self) -> Option<Range<usize>> {
+        let open = self.open.as_ref()?;
+        Some(open.kept.clone().unwrap_or(open.line..open.line))
+    }
+
     /// Attaches the shaping pool; the next slice claims it and seeds
     /// ahead. Without one the pass shapes every step itself.
     pub fn attach_pool(&mut self, pool: std::sync::Arc<crate::layout::pool::ShapePool>) {
