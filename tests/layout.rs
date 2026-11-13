@@ -6366,6 +6366,71 @@ fn footnote_references_that_touch_are_drawn_apart() {
 /// where a full shaping of the file puts it, to the bit. The file mixes
 /// what the count takes with what it leaves to the shaper.
 #[test]
+fn a_very_long_line_is_placed_a_chunk_at_a_step() {
+    let long: String = (0..90_000).map(|i| format!("\"key{i}\": {i}, ")).collect();
+    let dir = std::env::temp_dir().join("oryx-long-line");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut fonts = fonts();
+    for (name, text) in [
+        (
+            "among.json",
+            format!("{{\n  \"a\": 1,\n{long}\n  \"z\": 2\n}}\n"),
+        ),
+        ("alone.json", long.clone()),
+    ] {
+        let path = dir.join(name);
+        std::fs::write(&path, &text).unwrap();
+        let doc = load::open(&path, None).unwrap().document;
+        let full = lay_doc(&doc, 1000.0, &mut fonts);
+        for retain in [false, true] {
+            let mut media = MediaCache::offline(PathBuf::from("."));
+            let (mut out, mut pass) = layout_begin(&doc, &cfg(), 1000.0);
+            if retain {
+                pass.retain_around(0.0, 600.0);
+            }
+            let mut slices = 0;
+            let mut seen_before_the_end = false;
+            loop {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_millis(16);
+                let done = layout_more(
+                    &doc,
+                    &theme(),
+                    &mut fonts,
+                    &mut media,
+                    &cfg(),
+                    &mut out,
+                    &mut pass,
+                    Some(deadline),
+                );
+                slices += 1;
+                if done {
+                    break;
+                }
+                // The line is over a megabyte: its first rows are there
+                // and the placed height grows while the rest is shaped.
+                seen_before_the_end |= !out.runs.is_empty() && out.height > 600.0;
+            }
+            let what = format!("{name} retain {retain}");
+            assert!(slices > 8, "{what}: {slices} slices");
+            assert!(seen_before_the_end, "{what}: no row before the end");
+            assert_eq!(out.height.to_bits(), full.height.to_bits(), "{what}");
+            let lines = text.lines().count();
+            for line in 0..=lines {
+                assert_eq!(
+                    out.approx_top(0, line).map(f32::to_bits),
+                    full.approx_top(0, line).map(f32::to_bits),
+                    "{what} line {line}"
+                );
+            }
+            if !retain {
+                assert_eq!(out.runs.len(), full.runs.len(), "{what}");
+                assert!(out.runs == full.runs, "{what}: the runs differ");
+            }
+        }
+    }
+}
+
+#[test]
 fn a_long_code_file_counted_stands_where_the_shaped_one_does() {
     let mut text = String::new();
     for i in 0..4500 {

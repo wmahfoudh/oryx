@@ -1140,7 +1140,29 @@ pub struct LayoutPass {
     /// The order position whose lines are counted from here on, so the
     /// pool is not fed the lines the count answers.
     counting: Option<usize>,
+    /// The line of the open code block being shaped a chunk at a step.
+    long: Option<LongLine>,
 }
+
+/// A line of more than `LONG_LINE` bytes that no worker had ready,
+/// shaped one chunk at a step so that the pass reads its deadline
+/// inside the line: a line of megabytes would hold the window for as
+/// long as it takes to shape. Each chunk's runs join the layout as they
+/// are shaped, under the line's one record, at the place and in the
+/// order the line shaped at once gives them (`shape_code_line`).
+struct LongLine {
+    position: usize,
+    line: usize,
+    chunks: Vec<Range<usize>>,
+    /// The next chunk to shape.
+    next: usize,
+    /// The height of the chunks shaped so far, added in their order.
+    height: f32,
+}
+
+/// A line longer than this is not given to a worker: the job copies the
+/// line, and its result would come after the steps have shaped it.
+const GIANT_LINE: usize = 128 * LONG_LINE;
 
 /// A code block is counted once this many of its lines are left when
 /// the pass moves past the kept ones. A shorter block is shaped whole,
@@ -1859,6 +1881,7 @@ pub fn layout_begin(
         retain: None,
         counter: None,
         counting: None,
+        long: None,
     };
     let mut out = LayoutDoc::default();
     out.table.margin = margin;
@@ -2116,6 +2139,9 @@ fn pool_top_up(doc: &Document, pass: &mut LayoutPass) {
             if line.is_empty() {
                 continue;
             }
+            if line.len() > GIANT_LINE {
+                continue;
+            }
             // A line the assembler counts needs no shaping.
             if pass.counting == Some(pass.seed_position)
                 && pass.counter.is_some()
@@ -2317,9 +2343,12 @@ fn placed_height(pass: &LayoutPass) -> f32 {
     if pass.first {
         return 0.0;
     }
-    match &pass.open {
-        Some(open) => open.line_top() + open.pad + pass.vertical_margin,
-        None => pass.cursor + pass.vertical_margin,
+    match (&pass.open, &pass.long) {
+        // The chunks of a long line shaped so far count as placed, so
+        // the view can follow them.
+        (Some(open), Some(long)) => open.line_top() + long.height + open.pad + pass.vertical_margin,
+        (Some(open), None) => open.line_top() + open.pad + pass.vertical_margin,
+        (None, _) => pass.cursor + pass.vertical_margin,
     }
 }
 
@@ -3708,6 +3737,95 @@ fn code_panel_rects(
     ]
 }
 
+/// The record of a long line whose first chunks are placed: the last
+/// record, when it is that line's.
+fn long_line_record(out: &LayoutDoc, block: usize, line: usize) -> Option<usize> {
+    let last = out.code_lines.len().checked_sub(1)?;
+    let record = &out.code_lines[last];
+    (record.block == block && record.line == line).then_some(last)
+}
+
+/// Shapes the next chunk of a long line and joins its runs to the
+/// layout under the line's record. Answers the line's height once its
+/// last chunk is shaped, None while chunks are left. The runs and the
+/// height are those of `shape_code_line_step` on the whole line, spliced
+/// at `top`: the same chunks, each shaped at the height of those before
+/// it, the heights added in the same order.
+#[allow(clippy::too_many_arguments)]
+fn long_line_step(
+    fonts: &mut FontStore,
+    theme: &Theme,
+    cfg: &ViewConfig,
+    line: &str,
+    segments: &[(Range<usize>, SyntaxRole)],
+    open: &OpenCode,
+    x0: f32,
+    top: f32,
+    prose: bool,
+    out: &mut LayoutDoc,
+    pass: &mut LayoutPass,
+) -> Option<f32> {
+    let mut long = match pass.long.take() {
+        Some(long) => long,
+        None => {
+            let runs = out.runs.len();
+            out.code_lines.push(CodeLine {
+                block: open.block,
+                line: open.line,
+                runs: runs..runs,
+                x0,
+                y0: top,
+                size: open.size,
+                line_height: open.line_height,
+                wrap_width: open.wrap_width,
+            });
+            LongLine {
+                position: open.position,
+                line: open.line,
+                chunks: long_line_chunks(line),
+                next: 0,
+                height: 0.0,
+            }
+        }
+    };
+    let record = long_line_record(out, open.block, open.line)?;
+    let chunk = long.chunks[long.next].clone();
+    let whole_line = [(0..line.len(), SyntaxRole::Plain)];
+    let segments: &[(Range<usize>, SyntaxRole)] = if segments.is_empty() {
+        &whole_line
+    } else {
+        segments
+    };
+    let local = segments_within(segments, &chunk);
+    let mut scratch = std::mem::take(&mut pass.scratch);
+    long.height += shape_code_chunk(
+        fonts,
+        theme,
+        cfg,
+        &line[chunk.clone()],
+        chunk.start,
+        open.line,
+        &local,
+        open.block,
+        x0,
+        long.height,
+        open.size,
+        open.line_height,
+        open.wrap_width,
+        prose,
+        &mut scratch,
+    );
+    out.splice(&mut scratch, top);
+    pass.scratch = scratch;
+    out.code_lines[record].runs.end = out.runs.len();
+    long.next += 1;
+    if long.next < long.chunks.len() {
+        pass.long = Some(long);
+        return None;
+    }
+    Some(long.height.max(open.line_height))
+}
+
 /// Places one line of the open code block and grows its panel, or closes
 /// the block once its last line is placed.
 fn place_code_line(
@@ -3745,8 +3863,20 @@ fn place_code_line(
 
     let top = open.line_top();
     let line = lines.line(&doc.source, open.line);
-    let runs_mark = out.runs.len();
-    let code_mark = out.code_lines.len();
+    // Where the line's elements start: the ends of the vectors, or the
+    // record of a long line whose first chunks are placed already.
+    let resumed = pass
+        .long
+        .as_ref()
+        .filter(|long| long.position == open.position && long.line == open.line)
+        .and_then(|_| long_line_record(out, open.block, open.line));
+    let (runs_mark, code_mark) = match resumed {
+        Some(record) => (out.code_lines[record].runs.start, record),
+        None => {
+            pass.long = None;
+            (out.runs.len(), out.code_lines.len())
+        }
+    };
     let mut advance = open.line_height;
     // A line of plain ASCII past the kept lines of a long block: its
     // height by the count, with no shaping.
@@ -3801,16 +3931,47 @@ fn place_code_line(
         }
     } else if !line.is_empty() {
         let key = StepKey::step(open.position, open.line);
-        let pooled = pass
-            .pool
-            .as_ref()
-            .and_then(|pool| pool.take(pass.pool_generation, key));
-        let (shaped, mut scratch) = match pooled {
-            Some(shaped) => (shaped.height, shaped.scratch),
+        let pooled = match pass.long {
+            Some(_) => None,
+            None => pass
+                .pool
+                .as_ref()
+                .and_then(|pool| pool.take(pass.pool_generation, key)),
+        };
+        let empty: Vec<(Range<usize>, SyntaxRole)> = Vec::new();
+        let segments = highlights.get(open.line).unwrap_or(&empty);
+        let x0 = open.frame.x_base + open.pad;
+        let shaped = match pooled {
+            Some(shaped) => {
+                let mut scratch = shaped.scratch;
+                out.splice(&mut scratch, top);
+                pass.scratch = scratch;
+                shaped.height
+            }
+            None if line.len() > LONG_LINE => {
+                let step = long_line_step(
+                    fonts,
+                    theme,
+                    cfg,
+                    line,
+                    segments,
+                    &open,
+                    x0,
+                    top,
+                    doc.plain_file,
+                    out,
+                    pass,
+                );
+                match step {
+                    Some(height) => height,
+                    // More chunks to shape: the line is not placed yet.
+                    None => {
+                        pass.open = Some(open);
+                        return;
+                    }
+                }
+            }
             None => {
-                let empty: Vec<(Range<usize>, SyntaxRole)> = Vec::new();
-                let segments = highlights.get(open.line).unwrap_or(&empty);
-                let x0 = open.frame.x_base + open.pad;
                 let mut scratch = std::mem::take(&mut pass.scratch);
                 let advance = shape_code_line_step(
                     fonts,
@@ -3827,11 +3988,11 @@ fn place_code_line(
                     doc.plain_file,
                     &mut scratch,
                 );
-                (advance, scratch)
+                out.splice(&mut scratch, top);
+                pass.scratch = scratch;
+                advance
             }
         };
-        out.splice(&mut scratch, top);
-        pass.scratch = scratch;
         advance = shaped;
         if advance != open.line_height {
             out.table
@@ -7594,6 +7755,57 @@ mod tests {
             (with_escape - with_space).abs() < 0.01,
             "the escape measures as a space: {with_escape} against {with_space}"
         );
+    }
+
+    #[test]
+    fn a_long_line_placed_in_steps_is_the_line_shaped_at_once() {
+        let long: String = (0..9000).map(|i| format!("\"key{i}\": {i}, ")).collect();
+        assert!(long.len() > 10 * LONG_LINE);
+        let text = format!("first\n{long}\nlast\n");
+        let dir = std::env::temp_dir().join("oryx-long-line-unit");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("long.json");
+        std::fs::write(&path, &text).unwrap();
+        let doc = crate::doc::load::open(&path, None).unwrap().document;
+        let lay = lay_of(&doc);
+        let record = lay
+            .code_lines
+            .iter()
+            .find(|record| record.line == 1)
+            .expect("the long line has a record");
+        let mut fonts = FontStore::new();
+        let mut whole = LayoutDoc::default();
+        let height = shape_code_line_step(
+            &mut fonts,
+            &Theme::default_dark(),
+            &ViewConfig::default(),
+            &long,
+            &[],
+            0,
+            1,
+            record.x0,
+            record.size,
+            record.line_height,
+            record.wrap_width,
+            false,
+            &mut whole,
+        );
+        let top = lay.approx_top(0, 1).unwrap();
+        assert_eq!(record.y0.to_bits(), top.to_bits());
+        assert_eq!(
+            (lay.approx_top(0, 2).unwrap() - top).to_bits(),
+            height.to_bits(),
+            "the line's height"
+        );
+        let placed = &lay.runs[record.runs.clone()];
+        assert_eq!(placed.len(), whole.runs.len());
+        for (step, once) in placed.iter().zip(&whole.runs) {
+            assert_eq!(step.text, once.text);
+            assert_eq!(step.x.to_bits(), once.x.to_bits());
+            assert_eq!(step.y.to_bits(), (once.y + top).to_bits());
+            assert_eq!(step.baseline.to_bits(), (once.baseline + top).to_bits());
+            assert_eq!(step.width.to_bits(), once.width.to_bits());
+        }
     }
 
     fn lay_of(doc: &Document) -> LayoutDoc {
