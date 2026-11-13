@@ -10,6 +10,7 @@
 - A file of one very long line no longer blocks the window when it opens. A 200 MB file of one line now shows its text after a second, and you can scroll while the rest is prepared. Before, the window showed nothing and read no key for more than a minute and a half.
 - The PDF export of a file of one very long line no longer blocks the window. The count of pages written now moves from the start, and `Escape` cancels at once. The export of a 200 MB file of one line also uses about 500 MB of memory, where it used 1.9 GB. Before, the window read no key for two minutes on that file, and `Escape` was read only once the whole line was prepared.
 - A zoom step while a big code file is still being colored no longer blocks the window. Before, it could take more than five minutes on a 200 MB file.
+- A double click, a selection with the mouse and `Ctrl+A` are now faster in a big code or text file. In a 200 MB Rust file, a double click now takes 0.13 s and `Ctrl+A` 0.01 s. Before, 0.47 s and 0.14 s.
 - The search in a big code or text file no longer blocks the window. In the same playlist, a single common letter in the search bar now answers in under a second, and `Escape` closes the bar at once. Before, the window was blocked for minutes.
 - A definition list with a tab before its colon no longer crashes Oryx. Before, Oryx crashed when the definition above it ended with an accented letter or a non-Latin character.
 - A list item that holds a link definition, followed by a line of spaces, no longer crashes Oryx.

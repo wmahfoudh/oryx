@@ -134,6 +134,57 @@ pub(crate) fn block_pieces(doc: &Document, index: usize) -> Vec<Piece<'_>> {
     out
 }
 
+/// A block's display text for an action on the spans `first..=last`. A
+/// code block answers the pieces of those lines alone, each with the
+/// separator before it: a code or text file is one block of all its
+/// lines, and the whole list is millions of pieces. Any other block
+/// answers its whole list.
+pub(crate) fn block_pieces_between(
+    doc: &Document,
+    index: usize,
+    first: usize,
+    last: usize,
+) -> Vec<Piece<'_>> {
+    let BlockKind::CodeBlock { lines, .. } = &doc.blocks[index].kind else {
+        return block_pieces(doc, index);
+    };
+    let mut out = Vec::new();
+    for i in first..lines.len().min(last.saturating_add(1)) {
+        if i > 0 {
+            out.push(Piece::Sep("\n"));
+        }
+        out.push(Piece::Addr {
+            span: i,
+            text: lines.line(&doc.source, i).into(),
+        });
+    }
+    out
+}
+
+/// The end of a block's last addressed piece. None for a block with no
+/// text.
+fn last_addr(doc: &Document, index: usize) -> Option<ModelPos> {
+    if let BlockKind::CodeBlock { lines, .. } = &doc.blocks[index].kind {
+        let span = lines.len().checked_sub(1)?;
+        return Some(ModelPos {
+            block: index,
+            span,
+            byte: lines.line(&doc.source, span).len(),
+        });
+    }
+    block_pieces(doc, index)
+        .into_iter()
+        .rev()
+        .find_map(|piece| match piece {
+            Piece::Addr { span, text } => Some(ModelPos {
+                block: index,
+                span,
+                byte: text.len(),
+            }),
+            _ => None,
+        })
+}
+
 /// Inline spans as addressed pieces. A footnote reference reads with a
 /// space before its label, the separation its raised baseline gives it
 /// on screen.
@@ -159,19 +210,9 @@ fn span_pieces<'a>(out: &mut Vec<Piece<'a>>, spans: &'a [Span], base: usize, sou
 /// when nothing is selectable, a document of pictures alone.
 pub fn all(doc: &Document) -> Option<Selection> {
     let last = doc.blocks.len().checked_sub(1)?;
-    let mut end: Option<ModelPos> = None;
-    for index in 0..doc.blocks.len() {
-        for piece in block_pieces(doc, index) {
-            if let Piece::Addr { span, text } = piece {
-                end = Some(ModelPos {
-                    block: index,
-                    span,
-                    byte: text.len(),
-                });
-            }
-        }
-    }
-    let end = end?;
+    let end = (0..doc.blocks.len())
+        .rev()
+        .find_map(|index| last_addr(doc, index))?;
     Some(Selection {
         start: ModelPos {
             block: 0,
@@ -195,6 +236,16 @@ pub fn all(doc: &Document) -> Option<Selection> {
 /// display separators `block_pieces` defines. Only the endpoint blocks
 /// slice; everything between comes whole.
 pub fn plain_text(sel: &Selection, doc: &Document) -> String {
+    plain_text_from(sel, doc, block_pieces_between)
+}
+
+/// `plain_text` over the pieces `pieces` answers for a block and the
+/// spans the selection reaches in it.
+fn plain_text_from<'a>(
+    sel: &Selection,
+    doc: &'a Document,
+    pieces: impl Fn(&'a Document, usize, usize, usize) -> Vec<Piece<'a>>,
+) -> String {
     if sel.is_empty() || doc.blocks.is_empty() {
         return String::new();
     }
@@ -208,7 +259,9 @@ pub fn plain_text(sel: &Selection, doc: &Document) -> String {
         // a selection made of line breaks alone starts at a piece's end
         // and copies the breaks after it.
         let mut started = index != a.block;
-        for piece in block_pieces(doc, index) {
+        let first = if index == a.block { a.span } else { 0 };
+        let last = if index == b.block { b.span } else { usize::MAX };
+        for piece in pieces(doc, index, first, last) {
             match piece {
                 Piece::Sep(sep) => {
                     if started {
@@ -272,6 +325,43 @@ pub fn plain_text(sel: &Selection, doc: &Document) -> String {
         out.push_str(&block_text);
     }
     out
+}
+
+/// For a selection inside one code block: whether its text, trimmed of
+/// the whitespace at its ends, is not empty and lies on one line. None
+/// for any other selection. It says of the text what a search for a
+/// line break in it would say, and reads the lines from each end of
+/// the selection until a character that is not whitespace, so a
+/// selection of half a file is answered without its text being built.
+pub fn code_text_on_one_line(sel: &Selection, doc: &Document) -> Option<bool> {
+    let (a, b) = sel.ordered();
+    if a.block != b.block {
+        return None;
+    }
+    let BlockKind::CodeBlock { lines, .. } = &doc.blocks.get(a.block)?.kind else {
+        return None;
+    };
+    let Some(last) = lines.len().checked_sub(1) else {
+        return Some(false);
+    };
+    let inked = |i: usize| {
+        let text = lines.line(&doc.source, i);
+        let from = if i == a.span {
+            floor_boundary(text, a.byte)
+        } else {
+            0
+        };
+        let to = if i == b.span {
+            floor_boundary(text, b.byte)
+        } else {
+            text.len()
+        };
+        from < to && !text[from..to].chars().all(char::is_whitespace)
+    };
+    let reach = a.span..=b.span.min(last);
+    let first = reach.clone().find(|&i| inked(i));
+    let end = reach.rev().find(|&i| inked(i));
+    Some(first.is_some() && first == end)
 }
 
 /// The selected range as markdown: one verbatim slice of the document
@@ -472,6 +562,14 @@ pub fn click_chain(prev: Option<(u8, f32, f32)>, within: bool, x: f32, y: f32) -
 /// span and text length. Separators bound it, so it is one table cell,
 /// one soft segment of prose, or one code line.
 fn piece_window(doc: &Document, block: usize, span: usize) -> Vec<(usize, String)> {
+    // A code line is a window alone: a line break bounds it on each side.
+    if let BlockKind::CodeBlock { lines, .. } = &doc.blocks[block].kind {
+        return if span < lines.len() {
+            vec![(span, lines.line(&doc.source, span).to_string())]
+        } else {
+            Vec::new()
+        };
+    }
     let pieces = block_pieces(doc, block);
     let mut window: Vec<(usize, String)> = Vec::new();
     let mut found = false;
@@ -1491,6 +1589,187 @@ mod tests {
     use crate::layout::{layout, ViewConfig};
     use crate::style::theme::Theme;
     use std::path::PathBuf;
+
+    /// The window around a span as the whole list of pieces gives it,
+    /// the reference for `piece_window`.
+    fn window_by_list(doc: &Document, block: usize, span: usize) -> Vec<(usize, String)> {
+        let mut window: Vec<(usize, String)> = Vec::new();
+        let mut found = false;
+        for piece in &block_pieces(doc, block) {
+            match piece {
+                Piece::Addr { span: s, text } => {
+                    found |= *s == span;
+                    window.push((*s, text.to_string()));
+                }
+                _ if found => break,
+                _ => window.clear(),
+            }
+        }
+        if found {
+            window
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Each position of a document's text, and one past the last line
+    /// of a code block.
+    fn positions(doc: &Document) -> Vec<ModelPos> {
+        let mut out = Vec::new();
+        for block in 0..doc.blocks.len() {
+            let mut spans = 0;
+            for piece in block_pieces(doc, block) {
+                if let Piece::Addr { span, text } = piece {
+                    spans = span + 1;
+                    for byte in 0..=text.len() {
+                        if text.is_char_boundary(byte) {
+                            out.push(ModelPos { block, span, byte });
+                        }
+                    }
+                }
+            }
+            out.push(ModelPos {
+                block,
+                span: spans,
+                byte: 0,
+            });
+        }
+        out
+    }
+
+    const CODE: &str = "fn main() {\n\n   \n\tlet été = \"👩\u{200d}💻\";\n  x\n\n}\n\n";
+
+    /// In a code block the text of a selection is read from its own
+    /// lines; the whole list of the block's lines gives the same text,
+    /// whatever the two ends, in either order.
+    #[test]
+    fn the_text_of_a_selection_in_code_is_the_text_from_the_whole_list() {
+        let page = markdown::parse(
+            "intro *one*\n\n```rust\nlet a = 1;\n\n  b\n```\n\nafter[^n]\n\n[^n]: note\n",
+        );
+        for doc in [crate::doc::load::code_document(None, CODE), page] {
+            let all = positions(&doc);
+            for &start in &all {
+                for &end in &all {
+                    let sel = Selection { start, end };
+                    assert_eq!(
+                        plain_text(&sel, &doc),
+                        plain_text_from(&sel, &doc, |doc, index, _, _| block_pieces(doc, index)),
+                        "{sel:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A selection in a code block is on one line when its trimmed text
+    /// is not empty and holds no line break.
+    #[test]
+    fn a_selection_in_code_is_on_one_line_when_its_trimmed_text_is() {
+        let doc = crate::doc::load::code_document(None, CODE);
+        let all = positions(&doc);
+        for &start in &all {
+            for &end in &all {
+                let sel = Selection { start, end };
+                let text = plain_text(&sel, &doc);
+                let text = text.trim();
+                assert_eq!(
+                    code_text_on_one_line(&sel, &doc),
+                    Some(!text.is_empty() && !text.contains('\n')),
+                    "{sel:?} {text:?}"
+                );
+            }
+        }
+        let page = markdown::parse("one\n\ntwo\n");
+        let across = Selection {
+            start: ModelPos {
+                block: 0,
+                span: 0,
+                byte: 0,
+            },
+            end: ModelPos {
+                block: 1,
+                span: 0,
+                byte: 1,
+            },
+        };
+        assert_eq!(code_text_on_one_line(&across, &page), None);
+        assert_eq!(
+            code_text_on_one_line(
+                &Selection {
+                    start: across.start,
+                    end: ModelPos {
+                        block: 0,
+                        span: 0,
+                        byte: 2
+                    }
+                },
+                &page
+            ),
+            None,
+            "a paragraph is not a code block"
+        );
+    }
+
+    /// The window of a double click is the line clicked in a code block,
+    /// as the whole list of pieces bounds it, and the word is the same.
+    #[test]
+    fn the_window_of_a_code_line_is_the_one_the_whole_list_gives() {
+        let page =
+            markdown::parse("intro\n\n```rust\nlet a = 1;\n\n  b\n```\n\n|a|b|\n|-|-|\n|c|d|\n");
+        for doc in [crate::doc::load::code_document(None, CODE), page] {
+            for pos in positions(&doc) {
+                assert_eq!(
+                    piece_window(&doc, pos.block, pos.span),
+                    window_by_list(&doc, pos.block, pos.span),
+                    "{pos:?}"
+                );
+            }
+        }
+    }
+
+    /// `all` ends after the last piece of the last block that has text.
+    #[test]
+    fn the_whole_document_ends_where_the_walk_of_all_pieces_ends() {
+        let by_walk = |doc: &Document| {
+            let mut end = None;
+            for index in 0..doc.blocks.len() {
+                for piece in block_pieces(doc, index) {
+                    if let Piece::Addr { span, text } = piece {
+                        end = Some(ModelPos {
+                            block: index,
+                            span,
+                            byte: text.len(),
+                        });
+                    }
+                }
+            }
+            // A last block with no text, a picture or a rule, is taken
+            // whole: the end is its start.
+            let last = doc.blocks.len().checked_sub(1)?;
+            end.map(|end| {
+                if end.block == last {
+                    end
+                } else {
+                    ModelPos {
+                        block: last,
+                        span: 0,
+                        byte: 0,
+                    }
+                }
+            })
+        };
+        for doc in [
+            crate::doc::load::code_document(None, CODE),
+            crate::doc::load::code_document(None, ""),
+            crate::doc::load::code_document(None, "one"),
+            markdown::parse("text\n\n```\ncode\n```\n\n---\n"),
+            markdown::parse("![alt](missing.png)\n"),
+            markdown::parse(""),
+        ] {
+            assert_eq!(all(&doc).map(|sel| sel.end), by_walk(&doc));
+        }
+    }
 
     fn lay_doc_at(source: &str, width: f32) -> (Document, LayoutDoc, FontStore) {
         let doc = markdown::parse(source);

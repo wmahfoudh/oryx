@@ -127,6 +127,11 @@ pub fn find(doc: &Document, selection: Selection, matched: Match) -> Option<Occu
     if !within_reach(doc, &selection) {
         return None;
     }
+    // In a code block a selection over lines is refused on its lines,
+    // before its text is built: half a file can be selected.
+    if selection::code_text_on_one_line(&selection, doc) == Some(false) {
+        return None;
+    }
     let text = selection::plain_text(&selection, doc);
     let text = text.trim();
     if !lights(text) {
