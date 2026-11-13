@@ -3820,11 +3820,7 @@ fn long_line_step(
             }
         }
     };
-    // The export's drain stops before the last row placed, so the
-    // record of a line in chunks is still the last one.
-    let record = long_line_record(out, open.block, open.line);
-    debug_assert!(record.is_some(), "a line in chunks lost its record");
-    let record = record?;
+    let record = long_line_record(out, open.block, open.line)?;
     let chunk = long.chunks[long.next].clone();
     let whole_line = [(0..line.len(), SyntaxRole::Plain)];
     let segments: &[(Range<usize>, SyntaxRole)] = if segments.is_empty() {
@@ -3901,11 +3897,21 @@ fn place_code_line(
     let line = lines.line(&doc.source, open.line);
     // Where the line's elements start: the ends of the vectors, or the
     // record of a long line whose first chunks are placed already.
-    let resumed = pass
+    let in_chunks = pass
         .long
         .as_ref()
-        .filter(|long| long.position == open.position && long.line == open.line)
-        .and_then(|_| long_line_record(out, open.block, open.line));
+        .is_some_and(|long| long.position == open.position && long.line == open.line);
+    let resumed = in_chunks
+        .then(|| long_line_record(out, open.block, open.line))
+        .flatten();
+    // In a pass that keeps every line, the export's, a line in chunks
+    // has its record: the drain stops before the last row placed. A
+    // line without one would start over above its rows already on a
+    // page.
+    debug_assert!(
+        resumed.is_some() || !in_chunks || pass.retain.is_some(),
+        "a line in chunks lost its record"
+    );
     let (runs_mark, code_mark) = match resumed {
         Some(record) => (out.code_lines[record].runs.start, record),
         None => {
@@ -7882,6 +7888,32 @@ mod tests {
             );
             assert_eq!(out.height.to_bits(), once.height.to_bits());
         }
+    }
+
+    /// The export drains the rows of its written pages while a long
+    /// line is in chunks, and never the last row placed. A drain past
+    /// it would take the line's record, and the line would start over.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "a line in chunks lost its record")]
+    fn a_drain_past_the_record_of_a_line_in_chunks_is_caught() {
+        let (doc, _) = long_line_file("long.json");
+        let (theme, cfg) = (Theme::default_dark(), ViewConfig::default());
+        let mut fonts = FontStore::new();
+        let mut media = MediaCache::offline(PathBuf::from("."));
+        let (mut out, mut pass) = layout_begin(&doc, &cfg, 800.0);
+        pass.long_lines_in_steps();
+        while pass.long.is_none() {
+            assert!(!layout_step(
+                &doc, &theme, &mut fonts, &mut media, &cfg, &mut out, &mut pass
+            ));
+        }
+        let runs = out.runs.len();
+        let code = out.drain_front(runs, 0, 0, 0);
+        pass.rebase(runs, 0, 0, 0, code);
+        layout_step(
+            &doc, &theme, &mut fonts, &mut media, &cfg, &mut out, &mut pass,
+        );
     }
 
     #[test]
