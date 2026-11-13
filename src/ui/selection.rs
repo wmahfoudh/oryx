@@ -359,9 +359,10 @@ pub fn code_text_on_one_line(sel: &Selection, doc: &Document) -> Option<bool> {
         from < to && !text[from..to].chars().all(char::is_whitespace)
     };
     let reach = a.span..=b.span.min(last);
-    let first = reach.clone().find(|&i| inked(i));
-    let end = reach.rev().find(|&i| inked(i));
-    Some(first.is_some() && first == end)
+    let Some(first) = reach.clone().find(|&i| inked(i)) else {
+        return Some(false);
+    };
+    Some(reach.rev().find(|&i| inked(i)) == Some(first))
 }
 
 /// The selected range as markdown: one verbatim slice of the document
