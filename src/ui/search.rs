@@ -709,15 +709,14 @@ pub fn matches(doc: &Document, query: &str) -> Vec<Selection> {
         return Vec::new();
     }
     if let Some(lines) = sole_code_lines(doc, query) {
-        let all = 0..lines.len();
         return if smart_case_sensitive(query) {
             let finder = memchr::memmem::Finder::new(query);
-            line_matches(doc, lines, all, |line, out| {
+            line_matches(doc, lines, whole_lines(lines), 0, |line, _, out| {
                 exact_in_line(line, &finder, out)
             })
         } else {
             let needle: String = query.chars().map(fold).collect();
-            line_matches(doc, lines, all, |line, out| {
+            line_matches(doc, lines, whole_lines(lines), 0, |line, _, out| {
                 folded_in_line(line, query, &needle, out)
             })
         };
@@ -748,48 +747,63 @@ pub fn word_matches(doc: &Document, word: &str) -> Vec<Selection> {
         return Vec::new();
     }
     if let Some(lines) = sole_code_lines(doc, word) {
-        return words_in_lines(doc, lines, word, 0..lines.len());
+        return words_in_lines(doc, lines, word, whole_lines(lines));
     }
     word_matches_by_haystack(doc, word)
 }
 
-/// `word_matches` in the lines `lines` of a document that is one code
-/// block: the occurrences a view needs, searched in its own lines. None
-/// in any other document, and none for a word with a line break.
-pub fn word_matches_in(doc: &Document, word: &str, lines: Range<usize>) -> Vec<Selection> {
+/// The start of a line: the line's index and the count of its first
+/// bytes. The lines a layout holds are such starts, a line of megabytes
+/// being placed from its first byte on, a chunk at a time.
+pub type LineStart = (usize, usize);
+
+/// Each line of a block, whole.
+fn whole_lines(lines: &CodeBody) -> impl Iterator<Item = LineStart> {
+    (0..lines.len()).map(|line| (line, usize::MAX))
+}
+
+/// `word_matches` in the line starts `starts` of a document that is one
+/// code block: the occurrences that begin in those bytes, which are the
+/// ones a search of the whole file finds there. None in any other
+/// document, and none for a word with a line break.
+pub fn word_matches_in(doc: &Document, word: &str, starts: &[LineStart]) -> Vec<Selection> {
     match sole_code_lines(doc, word) {
-        Some(body) if !word.is_empty() => words_in_lines(doc, body, word, lines),
+        Some(body) if !word.is_empty() => words_in_lines(doc, body, word, starts.iter().copied()),
         _ => Vec::new(),
     }
 }
 
-/// `text_matches` in the lines `lines` of a document that is one code
-/// block. None in any other document, and none for a text with a line
-/// break.
-pub fn text_matches_in(doc: &Document, text: &str, lines: Range<usize>) -> Vec<Selection> {
+/// `text_matches` in the line starts `starts` of a document that is one
+/// code block. None in any other document, and none for a text with a
+/// line break.
+pub fn text_matches_in(doc: &Document, text: &str, starts: &[LineStart]) -> Vec<Selection> {
     match sole_code_lines(doc, text) {
         Some(body) if !text.is_empty() => {
             let finder = memchr::memmem::Finder::new(text);
-            line_matches(doc, body, lines, |line, out| {
-                exact_in_line(line, &finder, out)
-            })
+            line_matches(
+                doc,
+                body,
+                starts.iter().copied(),
+                text.len() - 1,
+                |line, end, out| exact_in_line(&line[..end], &finder, out),
+            )
         }
         _ => Vec::new(),
     }
 }
 
-/// The whole-word occurrences of `word` in the lines `within` of a
-/// one-block document.
+/// The whole-word occurrences of `word` in the line starts `within` of
+/// a one-block document.
 fn words_in_lines(
     doc: &Document,
     lines: &CodeBody,
     word: &str,
-    within: Range<usize>,
+    within: impl Iterator<Item = LineStart>,
 ) -> Vec<Selection> {
     let finder = memchr::memmem::Finder::new(word);
-    line_matches(doc, lines, within, |line, out| {
+    line_matches(doc, lines, within, word.len() - 1, |line, end, out| {
         let from = out.len();
-        exact_in_line(line, &finder, out);
+        exact_in_line(&line[..end], &finder, out);
         // A line's neighbour is a line break, never a word character.
         let mut kept = from;
         for i in from..out.len() {
@@ -827,7 +841,10 @@ pub fn text_matches(doc: &Document, text: &str) -> Vec<Selection> {
         return Vec::new();
     }
     if let Some(lines) = sole_code_lines(doc, text) {
-        return text_matches_in(doc, text, 0..lines.len());
+        let finder = memchr::memmem::Finder::new(text);
+        return line_matches(doc, lines, whole_lines(lines), 0, |line, _, out| {
+            exact_in_line(line, &finder, out)
+        });
     }
     text_matches_by_haystack(doc, text)
 }
@@ -865,24 +882,34 @@ pub fn sole_code_block(doc: &Document) -> bool {
     sole_code_lines(doc, "").is_some()
 }
 
-/// The matches `find` reports in each of the lines `within` of a
-/// one-block document, in document order. `find` appends the byte
-/// ranges of a line's matches.
+/// The matches `find` reports in each of the line starts `within` of a
+/// one-block document, in document order. `find` is given the line and
+/// the byte where its search ends, a character boundary `reach` bytes
+/// past the start's count or more, so that a match that begins in the
+/// start is found whole; it appends the byte ranges of the matches.
 fn line_matches(
     doc: &Document,
     lines: &CodeBody,
-    within: Range<usize>,
-    mut find: impl FnMut(&str, &mut Vec<Range<usize>>),
+    within: impl Iterator<Item = LineStart>,
+    reach: usize,
+    mut find: impl FnMut(&str, usize, &mut Vec<Range<usize>>),
 ) -> Vec<Selection> {
     let mut out = Vec::new();
     let mut found: Vec<Range<usize>> = Vec::new();
-    for span in within.start..within.end.min(lines.len()) {
+    for (span, count) in within {
+        if span >= lines.len() {
+            continue;
+        }
         let line = lines.line(&doc.source, span);
         if line.is_empty() {
             continue;
         }
+        let mut end = count.saturating_add(reach).min(line.len());
+        while !line.is_char_boundary(end) {
+            end += 1;
+        }
         found.clear();
-        find(line, &mut found);
+        find(line, end, &mut found);
         out.extend(found.iter().map(|range| Selection {
             start: ModelPos {
                 block: 0,

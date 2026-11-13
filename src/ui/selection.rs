@@ -896,20 +896,39 @@ pub fn held_matches(
     from..to
 }
 
-/// The lines of a one-block document's code block that the layout's
-/// placed runs cover, both ends included: the lines whose matches
-/// `held_matches` can keep. Empty when nothing is placed.
-pub fn held_lines(lay: &LayoutDoc) -> std::ops::Range<usize> {
-    let spans = || {
-        lay.runs
-            .iter()
-            .filter_map(run_interval)
-            .map(|(at, _)| at.span)
-    };
-    match (spans().min(), spans().max()) {
-        (Some(first), Some(last)) => first..last + 1,
-        _ => 0..0,
+/// The text of a one-block document that the layout's placed runs
+/// cover: each line with a run, in order, and the byte its last run
+/// ends at, the spaces after it included. A match can be given a
+/// rectangle only where it begins in such a start. A line of megabytes
+/// is placed from its first byte on, a chunk at a time, so the start
+/// of a line is all that is held of it. Empty when nothing is placed.
+pub fn held_starts(lay: &LayoutDoc, doc: &Document) -> Vec<(usize, usize)> {
+    let mut starts: Vec<(usize, usize)> = Vec::new();
+    for (index, run) in lay.runs.iter().enumerate() {
+        let Some((at, end)) = run_interval(run) else {
+            continue;
+        };
+        let end = end
+            .byte
+            .saturating_add(run_tail(lay, doc, index, run).len());
+        match starts.last_mut() {
+            Some((line, count)) if *line == at.span => *count = (*count).max(end),
+            _ => starts.push((at.span, end)),
+        }
     }
+    // The runs follow the lines; a layout that held a line in two
+    // places would name it twice.
+    if !starts.is_sorted_by(|a, b| a.0 < b.0) {
+        starts.sort_unstable();
+        starts.dedup_by(|next, kept| {
+            let same = next.0 == kept.0;
+            if same {
+                kept.1 = kept.1.max(next.1);
+            }
+            same
+        });
+    }
+    starts
 }
 
 /// The top of each match, the first value of `match_spans`.

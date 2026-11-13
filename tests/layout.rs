@@ -6536,7 +6536,7 @@ fn the_occurrences_of_the_held_lines_draw_what_the_whole_file_draws() {
                     .map(|(_, rect)| rect)
                     .collect()
             };
-            found.search_lines(&doc, selection::held_lines(&lay));
+            found.search_held(&doc, selection::held_starts(&lay, &doc));
             assert!(
                 found.matches.len() < all.len() / 4,
                 "{} of {} matches kept at {scroll}",
@@ -6549,4 +6549,93 @@ fn the_occurrences_of_the_held_lines_draw_what_the_whole_file_draws() {
         }
     }
     assert!(seen > 50, "{seen} rectangles compared");
+}
+
+/// A file of one very long line, stopped while the line is placed a
+/// chunk at a step: the layout holds the start of the line, and the
+/// occurrences searched in that start draw what the whole line's draw.
+/// The same start is not searched twice.
+#[test]
+fn the_occurrences_of_a_long_line_in_chunks_are_those_of_its_held_start() {
+    use oryx::ui::occurrences::{self, Match};
+    use oryx::ui::selection::{self, ModelPos, Selection};
+    let line: String = (0..40_000)
+        .map(|i| format!("count recount{i} aa aaa "))
+        .collect();
+    let path = std::env::temp_dir().join(format!("oryx-held-start-{}.txt", std::process::id()));
+    std::fs::write(&path, &line).unwrap();
+    let doc = load::open(&path, None).unwrap().document;
+    std::fs::remove_file(&path).ok();
+    let mut fonts = fonts();
+    let mut media = MediaCache::offline(PathBuf::from("."));
+    let (mut lay, mut pass) = layout_begin(&doc, &cfg(), 500.0);
+    pass.retain_around(0.0, 600.0);
+    for _ in 0..6 {
+        assert!(!layout_step(
+            &doc,
+            &theme(),
+            &mut fonts,
+            &mut media,
+            &cfg(),
+            &mut lay,
+            &mut pass
+        ));
+    }
+    lay.index_more();
+    let held = selection::held_starts(&lay, &doc);
+    assert_eq!(held.len(), 1, "one line");
+    assert!(
+        held[0].1 > 1000 && held[0].1 < line.len() / 4,
+        "the start of the line is held: {} of {}",
+        held[0].1,
+        line.len()
+    );
+    let at = |byte| ModelPos {
+        block: 0,
+        span: 0,
+        byte,
+    };
+    for (matched, sel) in [
+        (Match::Word, 0..5),
+        (Match::Text, 0..5),
+        (Match::Text, 6..8),
+        (
+            Match::Text,
+            line.find(" aa ").unwrap() + 1..line.find(" aa ").unwrap() + 3,
+        ),
+    ] {
+        let sel = Selection {
+            start: at(sel.start),
+            end: at(sel.end),
+        };
+        let mut found = occurrences::find(&doc, sel, matched).expect("a set");
+        let all = found.all_matches(&doc);
+        found.search_held(&doc, held.clone());
+        assert!(
+            !found.matches.is_empty() && found.matches.len() < all.len() / 4,
+            "{} of {} matches kept",
+            found.matches.len(),
+            all.len()
+        );
+        assert!(
+            all.starts_with(&found.matches),
+            "the matches of the start are the first of the line's"
+        );
+        let rects = |fonts: &mut FontStore, matches: &[Selection]| -> Vec<_> {
+            selection::window_rects(&lay, &doc, fonts, matches, -1200.0, 1800.0)
+                .into_iter()
+                .map(|(_, rect)| rect)
+                .collect()
+        };
+        let held_rects = rects(&mut fonts, &found.matches);
+        assert!(!held_rects.is_empty());
+        assert_eq!(held_rects, rects(&mut fonts, &all), "{matched:?} {sel:?}");
+        let kept = found.matches.as_ptr();
+        found.search_held(&doc, held.clone());
+        assert_eq!(
+            found.matches.as_ptr(),
+            kept,
+            "the same start is not searched again"
+        );
+    }
 }

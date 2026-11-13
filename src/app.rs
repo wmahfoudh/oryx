@@ -6043,8 +6043,10 @@ impl App {
             return;
         };
         if self.search.is_some() || self.selection != Some(found.word) {
+            if !found.draws_nothing() {
+                self.band = None;
+            }
             self.occurrences = None;
-            self.band = None;
             return;
         }
         let vh = self.viewport_h();
@@ -6057,9 +6059,10 @@ impl App {
         let (Some(lay), Some(found)) = (self.layout.as_ref(), self.occurrences.as_mut()) else {
             return;
         };
-        // A one-block document: the matches of the lines the layout
+        // A one-block document: the matches of the text the layout
         // holds now, the only ones a rectangle can be built for.
-        found.search_lines(&self.document, selection::held_lines(lay));
+        let had_none = found.draws_nothing();
+        found.search_held(&self.document, selection::held_starts(lay, &self.document));
         found.rects = window_rects(lay, &self.document, &mut self.fonts, &found.matches, lo, hi)
             .into_iter()
             .map(|(_, rect)| rect)
@@ -6081,8 +6084,9 @@ impl App {
         found.partial = partial_window;
         // A band painted before the layout moved holds the old places.
         // A scroll past the window needs no repaint of its own: the band
-        // covers the same five views the rectangles did.
-        if moved {
+        // covers the same five views the rectangles did. A set that drew
+        // nothing and draws nothing left the band as it is.
+        if moved && !(had_none && found.draws_nothing()) {
             self.band = None;
         }
     }
@@ -6317,8 +6321,12 @@ impl App {
             return;
         }
         self.occurrences = occurrences::find(&self.document, sel, occurrences::Match::Text);
-        if self.occurrences.is_some() {
-            self.band = None;
+        if let Some(found) = self.occurrences.as_ref() {
+            // A one-block document's set has no match yet: the frame
+            // searches the held text, and drops the band if any is lit.
+            if !found.draws_nothing() {
+                self.band = None;
+            }
             self.request_redraw();
         }
     }
