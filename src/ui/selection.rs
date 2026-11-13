@@ -896,6 +896,22 @@ pub fn held_matches(
     from..to
 }
 
+/// The lines of a one-block document's code block that the layout's
+/// placed runs cover, both ends included: the lines whose matches
+/// `held_matches` can keep. Empty when nothing is placed.
+pub fn held_lines(lay: &LayoutDoc) -> std::ops::Range<usize> {
+    let spans = || {
+        lay.runs
+            .iter()
+            .filter_map(run_interval)
+            .map(|(at, _)| at.span)
+    };
+    match (spans().min(), spans().max()) {
+        (Some(first), Some(last)) => first..last + 1,
+        _ => 0..0,
+    }
+}
+
 /// The top of each match, the first value of `match_spans`.
 pub fn match_tops(lay: &LayoutDoc, doc: &Document, matches: &[Selection]) -> Vec<f32> {
     match_spans(lay, doc, matches)

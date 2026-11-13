@@ -6484,3 +6484,69 @@ fn a_long_code_file_counted_stands_where_the_shaped_one_does() {
         }
     }
 }
+
+/// In a code file the lit occurrences are searched in the lines the
+/// layout holds, the only ones a rectangle is built for: at any scroll
+/// the rectangles are those the matches of the whole file give.
+#[test]
+fn the_occurrences_of_the_held_lines_draw_what_the_whole_file_draws() {
+    use oryx::ui::occurrences::{self, Match};
+    use oryx::ui::selection::{self, ModelPos, Selection};
+    let mut text = String::new();
+    for i in 0..3000 {
+        match i % 7 {
+            0 => text.push_str(&format!("let count = recount({i}) + count;\n")),
+            3 => text.push_str(&format!(
+                "// {} count\n",
+                "a long comment that wraps ".repeat(8)
+            )),
+            5 => text.push('\n'),
+            _ => text.push_str(&format!("value_{i} = count_all[{i}];\n")),
+        }
+    }
+    let path = std::env::temp_dir().join(format!("oryx-held-lines-{}.rs", std::process::id()));
+    std::fs::write(&path, &text).unwrap();
+    let doc = load::open(&path, None).unwrap().document;
+    std::fs::remove_file(&path).ok();
+    let viewport = 600.0;
+    let clicked = Selection {
+        start: ModelPos {
+            block: 0,
+            span: 1400,
+            byte: 4,
+        },
+        end: ModelPos {
+            block: 0,
+            span: 1400,
+            byte: 9,
+        },
+    };
+    assert_eq!(selection::plain_text(&clicked, &doc), "count");
+    let mut seen = 0;
+    for matched in [Match::Word, Match::Text] {
+        let mut found = occurrences::find(&doc, clicked, matched).expect("a set");
+        let all = found.all_matches(&doc);
+        for scroll in [0.0f32, 4_000.0, 31_000.0, 45_000.0, 1.0e7] {
+            let lay = windowed(&doc, 500.0, scroll, viewport);
+            let mut fonts = fonts();
+            let (lo, hi) = (scroll - 2.0 * viewport, scroll + 3.0 * viewport);
+            let rects = |fonts: &mut FontStore, matches: &[Selection]| -> Vec<_> {
+                selection::window_rects(&lay, &doc, fonts, matches, lo, hi)
+                    .into_iter()
+                    .map(|(_, rect)| rect)
+                    .collect()
+            };
+            found.search_lines(&doc, selection::held_lines(&lay));
+            assert!(
+                found.matches.len() < all.len() / 4,
+                "{} of {} matches kept at {scroll}",
+                found.matches.len(),
+                all.len()
+            );
+            let held = rects(&mut fonts, &found.matches);
+            assert_eq!(held, rects(&mut fonts, &all), "{matched:?} at {scroll}");
+            seen += held.len();
+        }
+    }
+    assert!(seen > 50, "{seen} rectangles compared");
+}

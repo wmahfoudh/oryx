@@ -709,12 +709,15 @@ pub fn matches(doc: &Document, query: &str) -> Vec<Selection> {
         return Vec::new();
     }
     if let Some(lines) = sole_code_lines(doc, query) {
+        let all = 0..lines.len();
         return if smart_case_sensitive(query) {
             let finder = memchr::memmem::Finder::new(query);
-            line_matches(doc, lines, |line, out| exact_in_line(line, &finder, out))
+            line_matches(doc, lines, all, |line, out| {
+                exact_in_line(line, &finder, out)
+            })
         } else {
             let needle: String = query.chars().map(fold).collect();
-            line_matches(doc, lines, |line, out| {
+            line_matches(doc, lines, all, |line, out| {
                 folded_in_line(line, query, &needle, out)
             })
         };
@@ -745,25 +748,61 @@ pub fn word_matches(doc: &Document, word: &str) -> Vec<Selection> {
         return Vec::new();
     }
     if let Some(lines) = sole_code_lines(doc, word) {
-        let finder = memchr::memmem::Finder::new(word);
-        return line_matches(doc, lines, |line, out| {
-            let from = out.len();
-            exact_in_line(line, &finder, out);
-            // A line's neighbour is a line break, never a word character.
-            let mut kept = from;
-            for i in from..out.len() {
-                let range = out[i].clone();
-                let before = line[..range.start].chars().next_back();
-                let after = line[range.end..].chars().next();
-                if !before.is_some_and(word_char) && !after.is_some_and(word_char) {
-                    out[kept] = range;
-                    kept += 1;
-                }
-            }
-            out.truncate(kept);
-        });
+        return words_in_lines(doc, lines, word, 0..lines.len());
     }
     word_matches_by_haystack(doc, word)
+}
+
+/// `word_matches` in the lines `lines` of a document that is one code
+/// block: the occurrences a view needs, searched in its own lines. None
+/// in any other document, and none for a word with a line break.
+pub fn word_matches_in(doc: &Document, word: &str, lines: Range<usize>) -> Vec<Selection> {
+    match sole_code_lines(doc, word) {
+        Some(body) if !word.is_empty() => words_in_lines(doc, body, word, lines),
+        _ => Vec::new(),
+    }
+}
+
+/// `text_matches` in the lines `lines` of a document that is one code
+/// block. None in any other document, and none for a text with a line
+/// break.
+pub fn text_matches_in(doc: &Document, text: &str, lines: Range<usize>) -> Vec<Selection> {
+    match sole_code_lines(doc, text) {
+        Some(body) if !text.is_empty() => {
+            let finder = memchr::memmem::Finder::new(text);
+            line_matches(doc, body, lines, |line, out| {
+                exact_in_line(line, &finder, out)
+            })
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// The whole-word occurrences of `word` in the lines `within` of a
+/// one-block document.
+fn words_in_lines(
+    doc: &Document,
+    lines: &CodeBody,
+    word: &str,
+    within: Range<usize>,
+) -> Vec<Selection> {
+    let finder = memchr::memmem::Finder::new(word);
+    line_matches(doc, lines, within, |line, out| {
+        let from = out.len();
+        exact_in_line(line, &finder, out);
+        // A line's neighbour is a line break, never a word character.
+        let mut kept = from;
+        for i in from..out.len() {
+            let range = out[i].clone();
+            let before = line[..range.start].chars().next_back();
+            let after = line[range.end..].chars().next();
+            if !before.is_some_and(word_char) && !after.is_some_and(word_char) {
+                out[kept] = range;
+                kept += 1;
+            }
+        }
+        out.truncate(kept);
+    })
 }
 
 fn word_matches_by_haystack(doc: &Document, word: &str) -> Vec<Selection> {
@@ -788,8 +827,7 @@ pub fn text_matches(doc: &Document, text: &str) -> Vec<Selection> {
         return Vec::new();
     }
     if let Some(lines) = sole_code_lines(doc, text) {
-        let finder = memchr::memmem::Finder::new(text);
-        return line_matches(doc, lines, |line, out| exact_in_line(line, &finder, out));
+        return text_matches_in(doc, text, 0..lines.len());
     }
     text_matches_by_haystack(doc, text)
 }
@@ -827,16 +865,18 @@ pub fn sole_code_block(doc: &Document) -> bool {
     sole_code_lines(doc, "").is_some()
 }
 
-/// The matches `find` reports in each line of a one-block document, in
-/// document order. `find` appends the byte ranges of a line's matches.
+/// The matches `find` reports in each of the lines `within` of a
+/// one-block document, in document order. `find` appends the byte
+/// ranges of a line's matches.
 fn line_matches(
     doc: &Document,
     lines: &CodeBody,
+    within: Range<usize>,
     mut find: impl FnMut(&str, &mut Vec<Range<usize>>),
 ) -> Vec<Selection> {
     let mut out = Vec::new();
     let mut found: Vec<Range<usize>> = Vec::new();
-    for span in 0..lines.len() {
+    for span in within.start..within.end.min(lines.len()) {
         let line = lines.line(&doc.source, span);
         if line.is_empty() {
             continue;

@@ -3,6 +3,12 @@
 //! or a text on one line selected by a drag, a Shift+click or the
 //! keyboard, wherever it appears. The set is found once per selection,
 //! when it has settled, and lives exactly as long as that selection.
+//! In a document that is one code block (a code file, a text file, the
+//! source view) the matches are those of the lines the layout holds,
+//! searched again each time the rectangles are built: only those lines
+//! are drawn, and a scan of a huge file at each selection is felt.
+
+use std::ops::Range;
 
 use crate::doc::model::{BlockKind, Document};
 use crate::ui::search;
@@ -25,7 +31,13 @@ pub struct Occurrences {
     /// How the matches were found, for a second search in the same
     /// text after a highlight fold.
     pub matched: Match,
-    /// Every other match, in document order.
+    /// The text looked for: the selection's, trimmed.
+    text: String,
+    /// In a one-block document, the lines `matches` was searched in.
+    /// None in a page, where `matches` is every other match.
+    lines: Option<Range<usize>>,
+    /// The other matches, in document order: all of them in a page,
+    /// those of `lines` in a one-block document.
     pub matches: Vec<Selection>,
     /// The rectangles of the matches around the view, and the scroll
     /// they were computed at; the same windowing as the search's.
@@ -50,6 +62,46 @@ impl Occurrences {
         let relaid = self.stale || (self.partial && !partial_window);
         (relaid || (scroll - self.rects_scroll).abs() > view, relaid)
     }
+
+    /// In a one-block document, searches the lines `lines` again, those
+    /// the layout holds now, and keeps their matches. A page keeps the
+    /// matches `find` gave it.
+    pub fn search_lines(&mut self, doc: &Document, lines: Range<usize>) {
+        if self.lines.is_none() {
+            return;
+        }
+        let found = match self.matched {
+            Match::Word => search::word_matches_in(doc, &self.text, lines.clone()),
+            Match::Text => search::text_matches_in(doc, &self.text, lines.clone()),
+        };
+        self.matches = others(found, &self.word);
+        self.lines = Some(lines);
+    }
+
+    /// Every other match of the document, as one search of the whole
+    /// text finds them: what the matches of the held lines are checked
+    /// against.
+    pub fn all_matches(&self, doc: &Document) -> Vec<Selection> {
+        let found = match self.matched {
+            Match::Word => search::word_matches(doc, &self.text),
+            Match::Text => search::text_matches(doc, &self.text),
+        };
+        others(found, &self.word)
+    }
+}
+
+/// The matches outside the selection. A word styled in two spans is
+/// addressed differently by the click and by the search, so the
+/// selected one is told by overlap.
+fn others(found: Vec<Selection>, selection: &Selection) -> Vec<Selection> {
+    let (start, end) = selection.ordered();
+    found
+        .into_iter()
+        .filter(|m| {
+            let (a, b) = m.ordered();
+            b <= start || a >= end
+        })
+        .collect()
 }
 
 /// The length a selection may have and still light, in characters:
@@ -119,7 +171,9 @@ fn at_block_end(doc: &Document, pos: ModelPos) -> bool {
 
 /// The other occurrences of a selection: a double-clicked word, whole,
 /// or a selected text trimmed of whitespace at its ends, wherever it
-/// appears. None when the text does not light or stands nowhere else.
+/// appears. None when the text does not light, or stands nowhere else
+/// in a page. In a one-block document the set comes with no match yet:
+/// `search_lines` finds those of the lines the layout holds.
 /// The set keeps the selection as made, since it lives as long as that
 /// selection stands. A selection beyond reach on its positions is
 /// refused before its text is built, which costs the blocks it spans.
@@ -137,29 +191,22 @@ pub fn find(doc: &Document, selection: Selection, matched: Match) -> Option<Occu
     if !lights(text) {
         return None;
     }
-    let (start, end) = selection.ordered();
-    let found = match matched {
-        Match::Word => search::word_matches(doc, text),
-        Match::Text => search::text_matches(doc, text),
-    };
-    // A word styled in two spans is addressed differently by the click
-    // and by the search, so the selected one is told by overlap.
-    let matches: Vec<Selection> = found
-        .into_iter()
-        .filter(|m| {
-            let (a, b) = m.ordered();
-            b <= start || a >= end
-        })
-        .collect();
-    (!matches.is_empty()).then_some(Occurrences {
+    let mut set = Occurrences {
         word: selection,
         matched,
-        matches,
+        text: text.to_string(),
+        lines: search::sole_code_block(doc).then_some(0..0),
+        matches: Vec::new(),
         rects: Vec::new(),
         rects_scroll: 0.0,
         partial: false,
         stale: true,
-    })
+    };
+    if set.lines.is_some() {
+        return Some(set);
+    }
+    set.matches = set.all_matches(doc);
+    (!set.matches.is_empty()).then_some(set)
 }
 
 #[cfg(test)]
@@ -367,7 +414,9 @@ mod tests {
             selection::plain_text(&line, &doc).trim(),
             "/// Aggregates samples into buckets."
         );
-        let found = find(&doc, line, Match::Text).expect("the identical line");
+        let mut found = find(&doc, line, Match::Text).expect("the identical line");
+        assert!(found.matches.is_empty(), "no line searched yet");
+        found.search_lines(&doc, 0..5);
         assert_eq!(found.matches.len(), 1);
         assert!(!found.matches.contains(&line));
     }
@@ -415,8 +464,14 @@ mod tests {
         );
         let clicked = word(&doc, 0, 0, 5);
         assert_eq!(selection::plain_text(&clicked, &doc), "count");
-        let found = find(&doc, clicked, Match::Word).expect("two others");
+        let mut found = find(&doc, clicked, Match::Word).expect("two others");
+        found.search_lines(&doc, 0..3);
         assert_eq!(found.matches.len(), 2, "not recount, not count_all");
+        assert_eq!(found.matches, found.all_matches(&doc));
+        found.search_lines(&doc, 0..2);
+        assert_eq!(found.matches.len(), 1, "the lines searched alone");
+        found.search_lines(&doc, 2..9);
+        assert_eq!(found.matches.len(), 1, "a range past the last line");
     }
 
     #[test]
@@ -435,6 +490,8 @@ mod tests {
                 },
             },
             matched: Match::Text,
+            text: String::new(),
+            lines: None,
             matches: Vec::new(),
             rects: Vec::new(),
             rects_scroll: 1000.0,

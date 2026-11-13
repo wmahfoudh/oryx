@@ -6057,10 +6057,25 @@ impl App {
         let (Some(lay), Some(found)) = (self.layout.as_ref(), self.occurrences.as_mut()) else {
             return;
         };
+        // A one-block document: the matches of the lines the layout
+        // holds now, the only ones a rectangle can be built for.
+        found.search_lines(&self.document, selection::held_lines(lay));
         found.rects = window_rects(lay, &self.document, &mut self.fonts, &found.matches, lo, hi)
             .into_iter()
             .map(|(_, rect)| rect)
             .collect();
+        #[cfg(debug_assertions)]
+        if self.document.source.len() < 1 << 20 {
+            let all = found.all_matches(&self.document);
+            let whole: Vec<_> = window_rects(lay, &self.document, &mut self.fonts, &all, lo, hi)
+                .into_iter()
+                .map(|(_, rect)| rect)
+                .collect();
+            debug_assert_eq!(
+                found.rects, whole,
+                "the held lines' matches draw the file's"
+            );
+        }
         found.rects_scroll = scroll;
         found.stale = false;
         found.partial = partial_window;
