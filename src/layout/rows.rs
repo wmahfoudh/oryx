@@ -27,6 +27,8 @@ const LAST: u8 = 0x7e;
 pub(crate) struct Widths {
     size_bits: u32,
     advance: [f32; 128],
+    /// The widest of the advances.
+    widest: f32,
 }
 
 impl Widths {
@@ -50,6 +52,7 @@ impl Widths {
         Some(Widths {
             size_bits: size.to_bits(),
             advance,
+            widest: advance.iter().copied().fold(0.0, f32::max),
         })
     }
 
@@ -78,6 +81,12 @@ impl Widths {
     /// it, which may be all the row held.
     pub(crate) fn rows(&self, line: &str, wrap: f32) -> usize {
         let bytes = line.as_bytes();
+        // A line that fits with a pixel to spare is one row whatever its
+        // words: each sum below stays under the row's width. The pixel
+        // is far more than the rounding of the sums of a line this short.
+        if bytes.len() as f32 * self.widest <= wrap - 1.0 {
+            return 1;
+        }
         let mut rows = 0usize;
         // The width of the words the open row holds, and where it starts.
         let mut range = 0.0_f32;

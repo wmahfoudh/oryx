@@ -2087,7 +2087,10 @@ fn pool_top_up(doc: &Document, pass: &mut LayoutPass) {
         return;
     };
     let window = 4 * pool.width();
-    while pool.backlog() < window && pass.seed_position < pass.order.len() {
+    // The backlog is read behind two locks: once here and once after
+    // each job, not at each line the loop passes without a job.
+    let mut backlog = pool.backlog();
+    while backlog < window && pass.seed_position < pass.order.len() {
         let index = pass.order[pass.seed_position];
         let block = &doc.blocks[index];
         if let BlockKind::CodeBlock {
@@ -2144,6 +2147,7 @@ fn pool_top_up(doc: &Document, pass: &mut LayoutPass) {
                     prose: doc.plain_file,
                 },
             });
+            backlog = pool.backlog();
         } else {
             let position = pass.seed_position;
             pass.seed_position += 1;
@@ -2175,6 +2179,7 @@ fn pool_top_up(doc: &Document, pass: &mut LayoutPass) {
                     avail,
                 },
             });
+            backlog = pool.backlog();
         }
     }
 }
