@@ -833,6 +833,63 @@ pub fn rects_window(
     rects_for(sel, lay, doc, fonts, cache, head.chain(tail))
 }
 
+/// The selection's boxes on the lines between `top` and `bottom`, what
+/// a frame paints. The runs are read `margin` further on each side, so
+/// a line at an edge has all its runs and its boxes are whole. A
+/// layout can hold every row of a line of megabytes, and each run that
+/// ends in spaces is shaped for its box: over the whole layout that is
+/// seconds and gigabytes a frame. A selection of line breaks alone is
+/// boxed from the run before its first break, wherever that run is.
+pub fn rects_between(
+    sel: &Selection,
+    lay: &LayoutDoc,
+    doc: &Document,
+    fonts: &mut FontStore,
+    top: f32,
+    bottom: f32,
+    margin: f32,
+) -> Vec<(f32, f32, f32, f32)> {
+    let mut cache = ShapeCache::default();
+    let near = rects_near(
+        sel,
+        lay,
+        doc,
+        fonts,
+        &mut cache,
+        top - margin,
+        bottom + margin,
+    );
+    #[cfg(debug_assertions)]
+    if lay.runs.len() <= 4096 {
+        let painted = |r: &&(f32, f32, f32, f32)| r.1 + r.3 > top && r.1 < bottom;
+        let whole = rects(sel, lay, doc, fonts);
+        debug_assert_eq!(
+            near.iter().filter(painted).collect::<Vec<_>>(),
+            whole.iter().filter(painted).collect::<Vec<_>>(),
+            "the boxes near the view are the selection's"
+        );
+    }
+    near
+}
+
+/// The boxes of `rects_between`, from the runs between `lo` and `hi`,
+/// each run shaped through the cache.
+fn rects_near(
+    sel: &Selection,
+    lay: &LayoutDoc,
+    doc: &Document,
+    fonts: &mut FontStore,
+    cache: &mut ShapeCache,
+    lo: f32,
+    hi: f32,
+) -> Vec<(f32, f32, f32, f32)> {
+    if breaks_only(doc, sel).is_some() {
+        rects_cached(sel, lay, doc, fonts, cache)
+    } else {
+        rects_window(sel, lay, doc, fonts, cache, lo, hi)
+    }
+}
+
 /// The rectangles of the matches that reach between `lo` and `hi`, each
 /// with its match's index, what the search and the lit occurrences
 /// paint. A match taller than the band, the whole of a source view, is
@@ -2526,6 +2583,87 @@ mod tests {
             (w - (run.width + 3.0 * space_w)).abs() < 1.0,
             "the box runs over the three trailing spaces: {w} against {}",
             run.width + 3.0 * space_w
+        );
+    }
+
+    /// A frame paints some lines of a selection: their boxes, read from
+    /// the runs near them, are the boxes the whole layout gives there.
+    #[test]
+    fn the_boxes_near_the_view_are_the_boxes_of_the_whole_selection() {
+        let words: String = (0..3000).map(|n| format!("\"key{n}\": {n}, ")).collect();
+        let code = format!("```\n{words}\n\n\n\nlast line\n```\n");
+        let page: String = (0..120)
+            .map(|n| format!("Paragraph {n} with *lorem* and `more` lorem, said twice.  \n\n"))
+            .collect();
+        for (source, width) in [(code.as_str(), 400.0), (page.as_str(), 300.0)] {
+            let (doc, mut l, mut fonts) = lay_doc_at(source, width);
+            l.index_more();
+            let sel = select_all(&doc);
+            let whole = rects(&sel, &l, &doc, &mut fonts);
+            assert!(whole.len() > 100, "a selection of many lines");
+            let view = 600.0;
+            for top in [0.0, l.height / 3.0, l.height - view] {
+                let (top, bottom) = (top, top + view);
+                let near = rects_between(&sel, &l, &doc, &mut fonts, top, bottom, view);
+                let painted = |r: &&(f32, f32, f32, f32)| r.1 + r.3 > top && r.1 < bottom;
+                assert_eq!(
+                    near.iter().filter(painted).collect::<Vec<_>>(),
+                    whole.iter().filter(painted).collect::<Vec<_>>(),
+                    "at {top}"
+                );
+            }
+        }
+    }
+
+    /// A selection of line breaks alone is boxed from the line before
+    /// its first break, which can be far above the lines a frame paints.
+    #[test]
+    fn the_breaks_far_below_their_first_line_are_boxed_near_the_view() {
+        let blanks = "\n".repeat(400);
+        let (doc, l, mut fonts) = lay_doc(&format!("```\nfirst{blanks}last\n```\n"));
+        let sel = Selection {
+            start: ModelPos {
+                block: 0,
+                span: 0,
+                byte: 5,
+            },
+            end: ModelPos {
+                block: 0,
+                span: 400,
+                byte: 0,
+            },
+        };
+        let whole = rects(&sel, &l, &doc, &mut fonts);
+        assert_eq!(whole.len(), 400);
+        let (top, bottom) = (l.height - 600.0, l.height);
+        let near = rects_between(&sel, &l, &doc, &mut fonts, top, bottom, 600.0);
+        assert_eq!(near, whole);
+    }
+
+    /// A line of megabytes is held whole by the layout, thousands of
+    /// rows. The boxes of a frame shape the rows near the view, not
+    /// each row of the line.
+    #[test]
+    fn the_boxes_of_a_frame_shape_the_rows_near_the_view_alone() {
+        let words: String = (0..6000).map(|n| format!("\"key{n}\": {n}, ")).collect();
+        let (doc, mut l, mut fonts) = lay_doc_at(&format!("```\n{words}\n```\n"), 400.0);
+        l.index_more();
+        let sel = select_all(&doc);
+        let mut every = ShapeCache::default();
+        rects_cached(&sel, &l, &doc, &mut fonts, &mut every);
+        assert!(
+            every.len() > 1000,
+            "the rows end in a space: {}",
+            every.len()
+        );
+        let top = l.height / 2.0;
+        let mut cache = ShapeCache::default();
+        let near = rects_near(&sel, &l, &doc, &mut fonts, &mut cache, top, top + 600.0);
+        assert!(!near.is_empty());
+        assert!(
+            cache.len() < 100,
+            "{} rows shaped for a view of 600 pixels",
+            cache.len()
         );
     }
 

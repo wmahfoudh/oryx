@@ -9471,12 +9471,30 @@ impl App {
         let frame_y = scroll::frame_offset(self.scroll_y);
         let preview = self.preview_frame(avail_px, size.height);
         let lay = self.layout.as_ref().expect("layout exists");
+        let numbers = self.numbers_color();
+        let band_usable = self.band.as_ref().is_some_and(|b| {
+            b.width == avail_px
+                && b.height == size.height * 5
+                && !b.needs_repaint(frame_y, size.height as f32)
+        });
+        // The selection's boxes for a frame that paints, on the lines a
+        // band can cover: it starts at most four views above the view,
+        // at the document's end, and ends at most five below its top.
+        let view_h = size.height as f32;
         let mut highlight: Vec<DecoRect> = match &self.selection {
-            Some(sel) => selection::rects(sel, lay, &self.document, &mut self.fonts)
-                .into_iter()
-                .map(|(x, y, w, h)| DecoRect::fill(x, y, w, h, self.theme.ui.selection_bg))
-                .collect(),
-            None => Vec::new(),
+            Some(sel) if !band_usable => selection::rects_between(
+                sel,
+                lay,
+                &self.document,
+                &mut self.fonts,
+                frame_y - 4.0 * view_h,
+                frame_y + 5.0 * view_h,
+                view_h,
+            )
+            .into_iter()
+            .map(|(x, y, w, h)| DecoRect::fill(x, y, w, h, self.theme.ui.selection_bg))
+            .collect(),
+            _ => Vec::new(),
         };
         if let Some(state) = self.search.as_ref() {
             for &(index, (x, y, w, h)) in &state.rects {
@@ -9498,12 +9516,6 @@ impl App {
             );
         }
 
-        let numbers = self.numbers_color();
-        let band_usable = self.band.as_ref().is_some_and(|b| {
-            b.width == avail_px
-                && b.height == size.height * 5
-                && !b.needs_repaint(frame_y, size.height as f32)
-        });
         let size_tag = (size.width, size.height);
         let mut direct: Option<Vec<u32>> = None;
         if !band_usable {
