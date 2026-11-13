@@ -472,6 +472,56 @@ pub struct Arrival {
     pub slow: Vec<usize>,
 }
 
+impl Arrival {
+    /// The lines whose colors folding this arrival into `doc` will
+    /// change, as ranges of lines: the ones the layout must shape
+    /// again. A line the arrival leaves as it is drawn needs nothing,
+    /// and that is every line too long for the grammar (`LONG_LINE`),
+    /// which is plain before and after: shaping such a line again costs
+    /// seconds for a megabyte and changes no pixel. Asked before the
+    /// fold, while the document still has the old colors.
+    pub fn changed_lines(&self, doc: &crate::doc::model::Document) -> Vec<Range<usize>> {
+        use crate::doc::model::BlockKind;
+        let whole = self.start_line..self.start_line + self.spans.len();
+        let Some(BlockKind::CodeBlock {
+            lines, highlights, ..
+        }) = doc.blocks.get(self.block).map(|block| &block.kind)
+        else {
+            return vec![whole];
+        };
+        let mut changed: Vec<Range<usize>> = Vec::new();
+        for (i, new) in self.spans.iter().enumerate() {
+            let line = self.start_line + i;
+            let old = highlights.get(line).map_or(&[][..], Vec::as_slice);
+            let len = (line < lines.len()).then(|| lines.line(&doc.source, line).len());
+            if same_colors(old, new, len) {
+                continue;
+            }
+            match changed.last_mut() {
+                Some(last) if last.end == line => last.end = line + 1,
+                _ => changed.push(line..line + 1),
+            }
+        }
+        changed
+    }
+}
+
+/// Whether two rows of styled ranges draw a line of `len` bytes the
+/// same: the same ranges, or each either empty or one plain range over
+/// the whole line, which is how a line with no ranges is shaped.
+fn same_colors(
+    old: &[(Range<usize>, SyntaxRole)],
+    new: &[(Range<usize>, SyntaxRole)],
+    len: Option<usize>,
+) -> bool {
+    let plain = |row: &[(Range<usize>, SyntaxRole)]| match row {
+        [] => true,
+        [(range, SyntaxRole::Plain)] => len.is_some_and(|len| *range == (0..len)),
+        _ => false,
+    };
+    old == new || (plain(old) && plain(new))
+}
+
 /// A band of lines to color cold, ahead of the exact sweep, so a view
 /// resting past the frontier does not read as plain text.
 pub struct SpecJob {
@@ -1162,6 +1212,56 @@ fn role_for(stack: &ScopeStack) -> SyntaxRole {
 
 #[cfg(test)]
 mod tests {
+    fn arrival_at(start_line: usize, spans: Vec<LineSpans>) -> Arrival {
+        Arrival {
+            block: 0,
+            start_line,
+            spans,
+            seam: None,
+            converged: false,
+            reach: 0,
+            speculative: false,
+            slow: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn an_arrival_changes_only_the_lines_it_draws_otherwise() {
+        use crate::doc::model::BlockKind;
+        let long = "x".repeat(LONG_LINE + 10);
+        let text = format!("let a = 1;\n{long}\nlet b = 2;\nlet c = 3;\n");
+        let dir = std::env::temp_dir().join("oryx-changed-lines");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("changed.rs");
+        std::fs::write(&path, &text).unwrap();
+        let mut doc = crate::doc::load::open(&path, None).unwrap().document;
+        let colored = |n: usize| vec![(0..3, SyntaxRole::Keyword), (3..n, SyntaxRole::Plain)];
+        let plain_long = vec![(0..long.len(), SyntaxRole::Plain)];
+        // No colors yet: the colored lines change, the long line stays
+        // the plain line it was shaped as.
+        let first = arrival_at(
+            0,
+            vec![colored(10), plain_long.clone(), colored(10), colored(10)],
+        );
+        assert_eq!(first.changed_lines(&doc), vec![0..1, 2..4]);
+        if let BlockKind::CodeBlock { highlights, .. } = &mut doc.blocks[0].kind {
+            *highlights = first.spans.clone();
+        }
+        // The same colors again change nothing.
+        assert_eq!(first.changed_lines(&doc), Vec::<Range<usize>>::new());
+        // One line colored otherwise.
+        let mut second = first.spans.clone();
+        second[2] = vec![(0..10, SyntaxRole::Comment)];
+        assert_eq!(arrival_at(0, second).changed_lines(&doc), vec![2..3]);
+        // A plain range that does not cover the line is not the line
+        // with no ranges.
+        let short = arrival_at(1, vec![vec![(0..5, SyntaxRole::Plain)]]);
+        assert_eq!(short.changed_lines(&doc), vec![1..2]);
+        // A line past the block's end counts as changed.
+        let past = arrival_at(9, vec![colored(10)]);
+        assert_eq!(past.changed_lines(&doc), vec![9..10]);
+    }
+
     use super::*;
 
     #[test]

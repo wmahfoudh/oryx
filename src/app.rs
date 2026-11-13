@@ -6881,7 +6881,16 @@ impl App {
             }
             return;
         }
+        // The lines each arrival draws otherwise, read before its fold:
+        // only those are shaped again.
+        let mut changed: Vec<(usize, std::ops::Range<usize>)> = Vec::new();
         for arrival in &arrivals {
+            changed.extend(
+                arrival
+                    .changed_lines(&self.document)
+                    .into_iter()
+                    .map(|lines| (arrival.block, lines)),
+            );
             // The table folds the arrival: a chunk's rows and seams, a
             // caret seam (a state and no spans), or a guess's rows. The
             // caret ask that landed is done, whatever the table made of
@@ -6912,11 +6921,7 @@ impl App {
                 self.selection = caret::span_selection(&self.document, x, y);
             }
         }
-        self.pending_recolor.extend(
-            arrivals
-                .iter()
-                .map(|a| (a.block, a.start_line..a.start_line + a.spans.len())),
-        );
+        self.pending_recolor.extend(changed);
         // Recolors land in waves: the model folds immediately, but the
         // run vector rebuilds at most once per wave, so a trickling
         // wash-in pays a handful of ranged rebuilds, not hundreds. The
