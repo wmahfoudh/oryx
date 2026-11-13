@@ -41,11 +41,11 @@ impl Widths {
         let mut text = [0u8; 1];
         for byte in FIRST..=LAST {
             text[0] = byte;
-            let glyphs = glyph_widths(fonts, face, size, std::str::from_utf8(&text).ok()?);
-            let [width] = glyphs[..] else {
+            let glyphs = shaped_glyphs(fonts, face, size, std::str::from_utf8(&text).ok()?);
+            let [glyph] = glyphs[..] else {
                 return None;
             };
-            advance[byte as usize] = width;
+            advance[byte as usize] = glyph.width;
         }
         Some(Widths {
             size_bits: size.to_bits(),
@@ -69,13 +69,28 @@ impl Widths {
     }
 
     /// The rows `line` takes at `wrap`. The line is `countable`.
+    ///
+    /// A row is counted when the shaper closes it with something on it.
+    /// The shaper closes a row from where it began to where the next one
+    /// begins, and leaves out a row whose two ends are the same place: a
+    /// character wider than the row closes the empty row before it, and
+    /// a word that does not fit closes the row without the space before
+    /// it, which may be all the row held.
     pub(crate) fn rows(&self, line: &str, wrap: f32) -> usize {
         let bytes = line.as_bytes();
         let mut rows = 0usize;
         // The width of the words the open row holds, and where it starts.
         let mut range = 0.0_f32;
         let mut start = 0usize;
+        // Whether the word placed last was a space.
+        let mut after_blank = false;
         let mut place = |from: usize, to: usize, blank: bool| {
+            let mut close = |start: &mut usize, end: usize, next: usize| {
+                if end != *start {
+                    rows += 1;
+                }
+                *start = next;
+            };
             let mut width = 0.0_f32;
             for &b in &bytes[from..to] {
                 width += self.advance[b as usize];
@@ -84,32 +99,31 @@ impl Widths {
                 range += width;
             } else if width > wrap {
                 if range > 0.0 {
-                    rows += 1;
+                    close(&mut start, from, from);
                     range = 0.0;
-                    start = from;
                 }
                 for (i, &b) in bytes[from..to].iter().enumerate() {
                     let glyph = self.advance[b as usize];
                     if range + glyph <= wrap {
                         range += glyph;
                     } else {
-                        rows += 1;
+                        close(&mut start, from + i, from + i);
                         range = glyph;
-                        start = from + i;
                     }
                 }
             } else {
+                // A space is one byte, so the space before this word
+                // starts at `from - 1`.
+                let end = if after_blank { from - 1 } else { from };
+                let next = if blank { to } else { from };
                 if range > 0.0 {
-                    rows += 1;
-                }
-                if blank {
-                    range = 0.0;
-                    start = to;
+                    close(&mut start, end, next);
                 } else {
-                    range = width;
-                    start = from;
+                    start = next;
                 }
+                range = if blank { 0.0 } else { width };
             }
+            after_blank = blank;
         };
         let mut word = 0usize;
         for (end, _) in unicode_linebreak::linebreaks(line) {
@@ -140,8 +154,17 @@ pub(crate) fn countable(line: &str) -> bool {
         && line.bytes().all(|b| (FIRST..=LAST).contains(&b))
 }
 
-/// The advances of the glyphs of `text` shaped alone, as a code line is.
-fn glyph_widths(fonts: &mut FontStore, face: &str, size: f32, text: &str) -> Vec<f32> {
+/// A glyph of a shaped text: its advance, and its number in its font.
+#[derive(Clone, Copy)]
+struct Glyph {
+    width: f32,
+    id: u16,
+    font: cosmic_text::fontdb::ID,
+    weight: cosmic_text::fontdb::Weight,
+}
+
+/// The glyphs of `text` shaped alone, as a code line is.
+fn shaped_glyphs(fonts: &mut FontStore, face: &str, size: f32, text: &str) -> Vec<Glyph> {
     let mut buffer = Buffer::new(&mut fonts.font_system, Metrics::new(size, size));
     buffer.set_size(&mut fonts.font_system, None, None);
     let attrs = Attrs::new().family(Family::Name(face));
@@ -153,16 +176,25 @@ fn glyph_widths(fonts: &mut FontStore, face: &str, size: f32, text: &str) -> Vec
         None,
     );
     buffer.shape_until_scroll(&mut fonts.font_system, false);
-    let mut widths = Vec::new();
+    let mut glyphs = Vec::new();
     for run in buffer.layout_runs() {
-        widths.extend(run.glyphs.iter().map(|g| g.w));
+        glyphs.extend(run.glyphs.iter().map(|g| Glyph {
+            width: g.w,
+            id: g.glyph_id,
+            font: g.font_id,
+            weight: g.font_weight,
+        }));
     }
-    widths
+    glyphs
 }
 
 /// Whether each pair of printable ASCII characters of `face` is laid
-/// out as the two characters alone. Read once per face: an advance
-/// scales with the size, so the answer holds at each size.
+/// out as the two characters alone: the same advances, and the glyphs
+/// the font's character map gives. The shaper allows no line break
+/// inside a pair of punctuation marks whose glyphs the font replaces
+/// (`->` in a font with programming ligatures), so the breaks of such a
+/// face are not those of UAX 14. Read once per face: an advance scales
+/// with the size, so the answer holds at each size.
 fn face_counts(fonts: &mut FontStore, face: &str) -> bool {
     static FACES: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
     let faces = FACES.get_or_init(Default::default);
@@ -175,20 +207,28 @@ fn face_counts(fonts: &mut FontStore, face: &str) -> bool {
         return known;
     }
     const SIZE: f32 = 20.0;
-    let mut alone = [0.0_f32; 128];
+    let mut alone: [Option<Glyph>; 128] = [None; 128];
     let mut text = [0u8; 2];
     let mut counts = true;
     for byte in FIRST..=LAST {
         text[0] = byte;
-        let glyphs = glyph_widths(
+        let glyphs = shaped_glyphs(
             fonts,
             face,
             SIZE,
             std::str::from_utf8(&text[..1]).unwrap_or(""),
         );
-        match glyphs[..] {
-            [width] => alone[byte as usize] = width,
-            _ => counts = false,
+        let mapped = match glyphs[..] {
+            [glyph] => fonts
+                .font_system
+                .get_font(glyph.font, glyph.weight)
+                .is_some_and(|font| font.as_swash().charmap().map(char::from(byte)) == glyph.id)
+                .then_some(glyph),
+            _ => None,
+        };
+        match mapped {
+            Some(glyph) => alone[byte as usize] = Some(glyph),
+            None => counts = false,
         }
     }
     'pairs: for first in FIRST..=LAST {
@@ -202,11 +242,15 @@ fn face_counts(fonts: &mut FontStore, face: &str) -> bool {
                 continue;
             }
             text = [first, second];
-            let glyphs = glyph_widths(fonts, face, SIZE, std::str::from_utf8(&text).unwrap_or(""));
-            let same = matches!(glyphs[..], [a, b]
-                if a.to_bits() == alone[first as usize].to_bits()
-                    && b.to_bits() == alone[second as usize].to_bits());
-            if !same {
+            let glyphs = shaped_glyphs(fonts, face, SIZE, std::str::from_utf8(&text).unwrap_or(""));
+            let same = |glyph: Glyph, byte: u8| {
+                alone[byte as usize].is_some_and(|a| {
+                    a.width.to_bits() == glyph.width.to_bits()
+                        && a.id == glyph.id
+                        && a.font == glyph.font
+                })
+            };
+            if !matches!(glyphs[..], [a, b] if same(a, first) && same(b, second)) {
                 counts = false;
                 break 'pairs;
             }
@@ -278,6 +322,77 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_row_the_shaper_leaves_empty_is_not_counted() {
+        let mut fonts = FontStore::new();
+        // A character wider than the row: the shaper opens no row before it.
+        for (size, wrap) in [(96.0_f32, 50.0_f32), (69.0, 40.0), (120.0, 58.0)] {
+            let widths = Widths::of(&mut fonts, CODE_FAMILY, size).unwrap();
+            for line in ["a", "ab", "abc def", "x y", "fn main() {}", "   ", "a  b"] {
+                check(&mut fonts, &widths, line, size, wrap);
+            }
+        }
+        // One space, then a word that fills the row: the shaper drops the
+        // space and the row it was alone on.
+        let (size, wrap) = (20.0_f32, 829.0_f32);
+        let widths = Widths::of(&mut fonts, CODE_FAMILY, size).unwrap();
+        let fill = (wrap / widths.advance[b'a' as usize]).floor() as usize;
+        for line in [
+            format!(" {}", "a".repeat(fill)),
+            format!(" {}", "a".repeat(fill - 1)),
+            format!("  {}", "a".repeat(fill)),
+            format!("x {}", "a".repeat(fill)),
+            format!("{} {}", "b".repeat(fill), "a".repeat(fill)),
+            format!("{}   {}", "b".repeat(fill - 1), "a".repeat(fill)),
+        ] {
+            check(&mut fonts, &widths, &line, size, wrap);
+        }
+        for (size, wrap, line) in [
+            (32.5_f32, 50.0_f32, " r;"),
+            (22.0, 50.0, " = /"),
+            (14.4, 50.0, "i<&X y  |#   iMf'y"),
+        ] {
+            let widths = Widths::of(&mut fonts, CODE_FAMILY, size).unwrap();
+            check(&mut fonts, &widths, line, size, wrap);
+        }
+    }
+
+    /// The count against the shaper: random lines of printable ASCII,
+    /// one character in three a space, at sizes up to a character wider
+    /// than the row.
+    #[test]
+    #[ignore]
+    fn fuzz_rows() {
+        use proptest::prelude::*;
+        let config = ProptestConfig {
+            failure_persistence: None,
+            ..ProptestConfig::default()
+        };
+        let fonts = std::cell::RefCell::new(FontStore::new());
+        let character = prop_oneof![
+            1 => Just(' '),
+            2 => (0x21u8..=0x7e).prop_map(char::from),
+        ];
+        proptest!(config, |(
+            line in prop::collection::vec(character, 1..120),
+            size in prop::sample::select(vec![14.4_f32, 16.94, 20.0, 22.0, 26.4, 32.5, 69.0, 96.0]),
+            wrap in 40.0_f32..900.0,
+        )| {
+            let line: String = line.into_iter().collect();
+            let fonts = &mut *fonts.borrow_mut();
+            let widths = Widths::of(fonts, CODE_FAMILY, size).unwrap();
+            let line_height = crate::layout::metrics::LINE_HEIGHT * size;
+            let shaped = shaped_code_line_height(fonts, &line, size, line_height, wrap);
+            let counted = widths.height(&line, wrap, line_height);
+            prop_assert_eq!(
+                counted.to_bits(),
+                shaped.to_bits(),
+                "size {} wrap {}: counted {}, shaped {}, line {:?}",
+                size, wrap, counted, shaped, line
+            );
+        });
     }
 
     #[test]
