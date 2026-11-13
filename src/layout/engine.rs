@@ -1142,6 +1142,10 @@ pub struct LayoutPass {
     counting: Option<usize>,
     /// The line of the open code block being shaped a chunk at a step.
     long: Option<LongLine>,
+    /// Whether a long line of a code or text file is shaped a chunk at
+    /// a step (`in_steps`): the window's pass, with its retention
+    /// bound, and the export's. A full layout shapes it at once.
+    steps: bool,
 }
 
 /// A line of more than `LONG_LINE` bytes that no worker had ready,
@@ -1249,6 +1253,14 @@ impl LayoutPass {
     /// band and its margin are measured into the table and dropped.
     pub fn retain_around(&mut self, scroll: f32, viewport_h: f32) {
         self.retain = Some((scroll, viewport_h));
+        self.steps = true;
+    }
+
+    /// Asks for a long line of a code or text file a chunk at a step,
+    /// in a pass that keeps every line: the export's, which closes and
+    /// writes its pages as the rows come.
+    pub fn long_lines_in_steps(&mut self) {
+        self.steps = true;
     }
 
     /// Shifts the indices the pass holds into the layout's vectors
@@ -1885,6 +1897,7 @@ pub fn layout_begin(
         seed_position: 0,
         seed_line: 0,
         retain: None,
+        steps: false,
         counter: None,
         counting: None,
         long: None,
@@ -2147,7 +2160,7 @@ fn pool_top_up(doc: &Document, pass: &mut LayoutPass) {
                 continue;
             }
             // Such a line of a block shaped in steps (`in_steps`).
-            if line.len() > GIANT_LINE && pass.retain.is_some() && !code_framed(doc) {
+            if line.len() > GIANT_LINE && pass.steps && !code_framed(doc) {
                 continue;
             }
             // A line the assembler counts needs no shaping.
@@ -3747,12 +3760,13 @@ fn code_panel_rects(
 
 /// Whether a line no worker had ready is shaped a chunk at a step: a
 /// line of more than `LONG_LINE` bytes of a block with no panel (a code
-/// or text file), in a pass with a retention bound (the window's). A
-/// fenced block's panel is sized as each line is placed and the export
-/// paginates and drains as the pass goes: both take a placed line to be
-/// whole, so there a long line is shaped at once, as it always was.
+/// or text file), in a pass that asks for steps (the window's and the
+/// export's). A fenced block's panel is sized as each line is placed,
+/// and the export drains what it has paginated: a line of such a block
+/// left in chunks would let it drain the panel, so there a long line is
+/// shaped at once. A full layout shapes it at once too.
 fn in_steps(pass: &LayoutPass, open: &OpenCode, line: &str) -> bool {
-    pass.long.is_some() || (line.len() > LONG_LINE && pass.retain.is_some() && !open.framed)
+    pass.long.is_some() || (line.len() > LONG_LINE && pass.steps && !open.framed)
 }
 
 /// The record of a long line whose first chunks are placed: the last
@@ -3806,7 +3820,11 @@ fn long_line_step(
             }
         }
     };
-    let record = long_line_record(out, open.block, open.line)?;
+    // The export's drain stops before the last row placed, so the
+    // record of a line in chunks is still the last one.
+    let record = long_line_record(out, open.block, open.line);
+    debug_assert!(record.is_some(), "a line in chunks lost its record");
+    let record = record?;
     let chunk = long.chunks[long.next].clone();
     let whole_line = [(0..line.len(), SyntaxRole::Plain)];
     let segments: &[(Range<usize>, SyntaxRole)] = if segments.is_empty() {

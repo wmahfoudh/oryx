@@ -382,6 +382,9 @@ impl ExportPass {
                 if let Some(pool) = pool {
                     pass.attach_pool(std::sync::Arc::clone(pool));
                 }
+                // A file of one very long line: the pages are written as
+                // its rows come, and the deadline is read inside the line.
+                pass.long_lines_in_steps();
                 self.layout = out;
                 self.pass = Some(pass);
                 self.ctx = Some(std::sync::Arc::new(ShapeCtx {
@@ -517,6 +520,12 @@ impl ExportPass {
 
     pub fn is_done(&self) -> bool {
         self.phase == Phase::Done
+    }
+
+    /// The runs the pass holds now: those placed and not yet on a
+    /// written page. For the tests of the drain.
+    pub fn runs_held(&self) -> usize {
+        self.layout.runs.len()
     }
 
     /// Closes the `.part` file and renames it onto the target, so a

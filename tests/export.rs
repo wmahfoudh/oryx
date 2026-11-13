@@ -1480,6 +1480,89 @@ fn a_fenced_block_with_a_very_long_line_exports() {
     assert!(pages > 5, "{pages} pages");
 }
 
+/// A code file that is one very long line is exported a chunk of the
+/// line at a step: the pages are written as the rows come and the
+/// written rows are dropped, so the pass holds a small part of the line
+/// at a time and a step ends inside the line. The pages are those of
+/// the layout made in one go, which shapes the line at once.
+#[test]
+fn a_code_file_of_one_very_long_line_exports_in_steps() {
+    let long: String = (0..20000).map(|i| format!("\"key{i}\": {i}, ")).collect();
+    let path = std::env::temp_dir().join(format!("oryx-one-line-{}.json", std::process::id()));
+    std::fs::write(&path, format!("{long}\n")).unwrap();
+    let doc = oryx::doc::load::open(&path, None).unwrap().document;
+    std::fs::remove_file(&path).ok();
+
+    let reference = export_with(&doc, PageSize::A4, true);
+    let reference = Pdf::load_mem(&reference).expect("a reader parses the reference");
+    let count = reference.get_pages().len();
+    assert!(count > 20, "the line spans pages, got {count}");
+    let whole = {
+        let (geometry, mut cfg) = geometry_and_cfg();
+        cfg.print = true;
+        let mut fonts = FontStore::new();
+        let mut media = MediaCache::offline(PathBuf::from("tests/fixtures"));
+        let theme = Theme::default_dark();
+        layout(&doc, &theme, &mut fonts, &mut media, &cfg, geometry.width)
+            .runs
+            .len()
+    };
+
+    let settings = ExportSettings {
+        body_size: 11.0,
+        code_size: 9.0,
+        page: PageSize::A4,
+        page_numbers: true,
+        justify: false,
+        ..ExportSettings::default()
+    };
+    for workers in [0, 4] {
+        let target = std::env::temp_dir().join(format!(
+            "oryx-one-line-{workers}-{}.pdf",
+            std::process::id()
+        ));
+        let mut fonts = FontStore::new();
+        let mut media = MediaCache::offline(PathBuf::from("tests/fixtures"));
+        let pool = (workers > 0)
+            .then(|| std::sync::Arc::new(oryx::layout::ShapePool::new(workers, &fonts.seed())));
+        let mut pass = ExportPass::new(&settings, Theme::default_dark(), target.clone());
+        let mut peak = 0;
+        let mut steps = 0;
+        // The rows of written pages are dropped once no closed page
+        // waits, so a step is given the time to write those it closed,
+        // in the debug build too.
+        while !pass.is_done() {
+            steps += 1;
+            pass.step(
+                Instant::now() + Duration::from_millis(500),
+                &doc,
+                &mut fonts,
+                &mut media,
+                false,
+                pool.as_ref(),
+            );
+            peak = peak.max(pass.runs_held());
+        }
+        let pages = pass.finish(&doc, &fonts).expect("the export lands");
+        let streamed = std::fs::read(&target).expect("the streamed file");
+        std::fs::remove_file(&target).ok();
+        assert!(
+            peak * 4 < whole,
+            "{workers} workers: {peak} runs held at a step, of the line's {whole}, {steps} steps"
+        );
+        let streamed = Pdf::load_mem(&streamed).expect("a reader parses the streamed file");
+        assert_eq!(pages, count, "{workers} workers: the page count");
+        assert_eq!(streamed.get_pages().len(), count);
+        for page in 1..=count as u32 {
+            assert_eq!(
+                streamed.extract_text(&[page]).expect("streamed text"),
+                reference.extract_text(&[page]).expect("reference text"),
+                "{workers} workers: the text of page {page}"
+            );
+        }
+    }
+}
+
 #[test]
 fn a_code_block_of_wrapped_lines_exports() {
     for (lines, width, code_size, lead) in
