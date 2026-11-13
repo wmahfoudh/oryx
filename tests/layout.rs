@@ -6361,10 +6361,9 @@ fn footnote_references_that_touch_are_drawn_apart() {
     );
 }
 
-/// A long code file whose lines are measured past the kept ones: the
-/// plain ASCII lines are counted without shaping, and each line stands
-/// where a full shaping of the file puts it, to the bit. The file mixes
-/// what the count takes with what it leaves to the shaper.
+/// A line of megabytes in a code file: the window's pass shapes it a
+/// chunk at a step, slices end inside it, and the layout is the one
+/// made in one go, which shapes the line at once.
 #[test]
 fn a_very_long_line_is_placed_a_chunk_at_a_step() {
     let long: String = (0..90_000).map(|i| format!("\"key{i}\": {i}, ")).collect();
@@ -6382,12 +6381,11 @@ fn a_very_long_line_is_placed_a_chunk_at_a_step() {
         std::fs::write(&path, &text).unwrap();
         let doc = load::open(&path, None).unwrap().document;
         let full = lay_doc(&doc, 1000.0, &mut fonts);
-        for retain in [false, true] {
+        // A bound that keeps every line, then the window's own.
+        for (retain, view_h) in [(false, 1.0e9), (true, 600.0)] {
             let mut media = MediaCache::offline(PathBuf::from("."));
             let (mut out, mut pass) = layout_begin(&doc, &cfg(), 1000.0);
-            if retain {
-                pass.retain_around(0.0, 600.0);
-            }
+            pass.retain_around(0.0, view_h);
             let mut slices = 0;
             let mut seen_before_the_end = false;
             loop {
@@ -6430,6 +6428,10 @@ fn a_very_long_line_is_placed_a_chunk_at_a_step() {
     }
 }
 
+/// A long code file whose lines are measured past the kept ones: the
+/// plain ASCII lines are counted without shaping, and each line stands
+/// where a full shaping of the file puts it, to the bit. The file mixes
+/// what the count takes with what it leaves to the shaper.
 #[test]
 fn a_long_code_file_counted_stands_where_the_shaped_one_does() {
     let mut text = String::new();

@@ -1184,6 +1184,12 @@ impl LayoutPass {
         self.done
     }
 
+    /// Whether a long line is being shaped a chunk at a step: its rows
+    /// join the layout as they are shaped.
+    pub fn in_long_line(&self) -> bool {
+        self.long.is_some()
+    }
+
     /// The lines of the open code block the layout holds rows for: the
     /// stretch the pass kept, blank lines included. Empty when it kept
     /// none yet, None when no code block is open.
@@ -2100,7 +2106,8 @@ fn pool_sync(doc: &Document, theme: &Theme, cfg: &ViewConfig, pass: &mut LayoutP
     match &pass.open {
         Some(open) => {
             pass.seed_position = open.position;
-            pass.seed_line = open.line;
+            // The line being shaped a chunk at a step takes no worker.
+            pass.seed_line = open.line + usize::from(pass.long.is_some());
         }
         None => {
             pass.seed_position = pass.position;
@@ -2139,7 +2146,8 @@ fn pool_top_up(doc: &Document, pass: &mut LayoutPass) {
             if line.is_empty() {
                 continue;
             }
-            if line.len() > GIANT_LINE {
+            // Such a line of a block shaped in steps (`in_steps`).
+            if line.len() > GIANT_LINE && pass.retain.is_some() && !code_framed(doc) {
                 continue;
             }
             // A line the assembler counts needs no shaping.
@@ -3737,6 +3745,16 @@ fn code_panel_rects(
     ]
 }
 
+/// Whether a line no worker had ready is shaped a chunk at a step: a
+/// line of more than `LONG_LINE` bytes of a block with no panel (a code
+/// or text file), in a pass with a retention bound (the window's). A
+/// fenced block's panel is sized as each line is placed and the export
+/// paginates and drains as the pass goes: both take a placed line to be
+/// whole, so there a long line is shaped at once, as it always was.
+fn in_steps(pass: &LayoutPass, open: &OpenCode, line: &str) -> bool {
+    pass.long.is_some() || (line.len() > LONG_LINE && pass.retain.is_some() && !open.framed)
+}
+
 /// The record of a long line whose first chunks are placed: the last
 /// record, when it is that line's.
 fn long_line_record(out: &LayoutDoc, block: usize, line: usize) -> Option<usize> {
@@ -3948,7 +3966,7 @@ fn place_code_line(
                 pass.scratch = scratch;
                 shaped.height
             }
-            None if line.len() > LONG_LINE => {
+            None if in_steps(pass, &open, line) => {
                 let step = long_line_step(
                     fonts,
                     theme,
@@ -6874,8 +6892,33 @@ pub fn recolor_batch(
     fonts: &mut FontStore,
     cfg: &ViewConfig,
     patches: &[(usize, Range<usize>)],
-    pass: Option<&mut LayoutPass>,
+    mut pass: Option<&mut LayoutPass>,
 ) -> Option<(usize, usize, isize)> {
+    // A line the pass is shaping a chunk at a step has a record and a
+    // part of its runs. Shaping it whole here would leave the pass to
+    // add its remaining chunks a second time: the line starts over, and
+    // its chunks take the document's colors as the pass shapes them.
+    if let Some(pass) = pass.as_deref_mut() {
+        let open = pass
+            .long
+            .as_ref()
+            .zip(pass.open.as_ref())
+            .map(|(long, open)| (open.block, long.line));
+        if let Some((block, line)) = open {
+            let named = patches
+                .iter()
+                .any(|(b, lines)| *b == block && lines.contains(&line));
+            if let Some(record) = long_line_record(lay, block, line).filter(|_| named) {
+                let runs = lay.code_lines[record].runs.start;
+                lay.runs.truncate(runs);
+                lay.code_lines.truncate(record);
+                if lay.index.runs.indexed > runs {
+                    lay.index.runs.clear();
+                }
+                pass.long = None;
+            }
+        }
+    }
     // Records sort by (block, line) and their run ranges rise with it,
     // so the affected list visits the run vector strictly left to right.
     let mut affected: Vec<usize> = Vec::new();
@@ -7757,17 +7800,77 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_long_line_placed_in_steps_is_the_line_shaped_at_once() {
+    /// A pass with a retention bound that keeps every line, stepped
+    /// until the long line 1 has its record and `more` chunks after it;
+    /// then `between`, then the rest of the pass.
+    fn stepped(
+        doc: &Document,
+        fonts: &mut FontStore,
+        more: usize,
+        between: impl FnOnce(&mut LayoutDoc, &mut LayoutPass, &mut FontStore),
+    ) -> LayoutDoc {
+        let (theme, cfg) = (Theme::default_dark(), ViewConfig::default());
+        let mut media = MediaCache::offline(PathBuf::from("."));
+        let (mut out, mut pass) = layout_begin(doc, &cfg, 800.0);
+        pass.retain_around(0.0, 1.0e9);
+        while !out.code_lines.last().is_some_and(|record| record.line == 1) {
+            assert!(!layout_step(
+                doc, &theme, fonts, &mut media, &cfg, &mut out, &mut pass
+            ));
+        }
+        for _ in 0..more {
+            layout_step(doc, &theme, fonts, &mut media, &cfg, &mut out, &mut pass);
+        }
+        assert!(pass.long.is_some(), "the line is in chunks");
+        between(&mut out, &mut pass, fonts);
+        layout_more(
+            doc, &theme, fonts, &mut media, &cfg, &mut out, &mut pass, None,
+        );
+        out
+    }
+
+    fn long_line_file(name: &str) -> (Document, String) {
         let long: String = (0..9000).map(|i| format!("\"key{i}\": {i}, ")).collect();
-        assert!(long.len() > 10 * LONG_LINE);
         let text = format!("first\n{long}\nlast\n");
         let dir = std::env::temp_dir().join("oryx-long-line-unit");
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("long.json");
+        let path = dir.join(name);
         std::fs::write(&path, &text).unwrap();
-        let doc = crate::doc::load::open(&path, None).unwrap().document;
-        let lay = lay_of(&doc);
+        (crate::doc::load::open(&path, None).unwrap().document, long)
+    }
+
+    #[test]
+    fn a_recolor_of_a_line_in_chunks_starts_the_line_over() {
+        let (doc, _) = long_line_file("recolor.json");
+        // The layout made in one go shapes the line at once.
+        let once = lay_of(&doc);
+        let mut fonts = FontStore::new();
+        for patch in [0..1, 1..2, 0..3] {
+            let out = stepped(&doc, &mut fonts, 2, |out, pass, fonts| {
+                recolor_batch(
+                    out,
+                    &doc,
+                    &Theme::default_dark(),
+                    fonts,
+                    &ViewConfig::default(),
+                    &[(0, patch.clone())],
+                    Some(pass),
+                );
+            });
+            assert_eq!(out.runs.len(), once.runs.len(), "recolor of {patch:?}");
+            assert!(
+                out.runs == once.runs,
+                "recolor of {patch:?}: the runs differ"
+            );
+            assert_eq!(out.height.to_bits(), once.height.to_bits());
+        }
+    }
+
+    #[test]
+    fn a_long_line_placed_in_steps_is_the_line_shaped_at_once() {
+        let (doc, long) = long_line_file("long.json");
+        assert!(long.len() > 10 * LONG_LINE);
+        let lay = stepped(&doc, &mut FontStore::new(), 2, |_, _, _| {});
         let record = lay
             .code_lines
             .iter()

@@ -9149,7 +9149,13 @@ impl App {
             return None;
         }
         let lay = self.layout.as_ref()?;
-        let kept = self.pass.as_ref()?.kept_lines()?;
+        let pass = self.pass.as_ref()?;
+        // A long line shaped a chunk at a step shows its rows as they
+        // come, though it is not among the kept lines yet.
+        if pass.in_long_line() {
+            return None;
+        }
+        let kept = pass.kept_lines()?;
         // A view that reaches past what is placed is the pass's own
         // first frames.
         if lay.height < self.scroll_y + view_h {

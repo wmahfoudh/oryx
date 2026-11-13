@@ -473,13 +473,15 @@ pub struct Arrival {
 }
 
 impl Arrival {
-    /// The lines whose colors folding this arrival into `doc` will
-    /// change, as ranges of lines: the ones the layout must shape
-    /// again. A line the arrival leaves as it is drawn needs nothing,
-    /// and that is every line too long for the grammar (`LONG_LINE`),
-    /// which is plain before and after: shaping such a line again costs
-    /// seconds for a megabyte and changes no pixel. Asked before the
-    /// fold, while the document still has the old colors.
+    /// The lines of this arrival the layout must shape again, as ranges
+    /// of lines: all of them, but a line that has no colors in `doc` and
+    /// gets none. That is every line too long for the grammar
+    /// (`LONG_LINE`), plain before and after: shaping such a line again
+    /// costs seconds for a megabyte and changes no pixel. A colored line
+    /// is shaped again even when its colors are the ones `doc` holds: a
+    /// recolor that was owed and dropped (the page parked for the
+    /// editor, the help page shown) is made up by the next arrival.
+    /// Asked before the fold, while `doc` still has the old colors.
     pub fn changed_lines(&self, doc: &crate::doc::model::Document) -> Vec<Range<usize>> {
         use crate::doc::model::BlockKind;
         let whole = self.start_line..self.start_line + self.spans.len();
@@ -494,7 +496,7 @@ impl Arrival {
             let line = self.start_line + i;
             let old = highlights.get(line).map_or(&[][..], Vec::as_slice);
             let len = (line < lines.len()).then(|| lines.line(&doc.source, line).len());
-            if same_colors(old, new, len) {
+            if both_plain(old, new, len) {
                 continue;
             }
             match changed.last_mut() {
@@ -506,10 +508,10 @@ impl Arrival {
     }
 }
 
-/// Whether two rows of styled ranges draw a line of `len` bytes the
-/// same: the same ranges, or each either empty or one plain range over
-/// the whole line, which is how a line with no ranges is shaped.
-fn same_colors(
+/// Whether a line of `len` bytes has no colors before and after: each
+/// row either empty or one plain range over the whole line, which is
+/// how a line with no ranges is shaped.
+fn both_plain(
     old: &[(Range<usize>, SyntaxRole)],
     new: &[(Range<usize>, SyntaxRole)],
     len: Option<usize>,
@@ -519,7 +521,7 @@ fn same_colors(
         [(range, SyntaxRole::Plain)] => len.is_some_and(|len| *range == (0..len)),
         _ => false,
     };
-    old == new || (plain(old) && plain(new))
+    plain(old) && plain(new)
 }
 
 /// A band of lines to color cold, ahead of the exact sweep, so a view
@@ -1226,7 +1228,7 @@ mod tests {
     }
 
     #[test]
-    fn an_arrival_changes_only_the_lines_it_draws_otherwise() {
+    fn an_arrival_shapes_again_each_line_but_one_plain_before_and_after() {
         use crate::doc::model::BlockKind;
         let long = "x".repeat(LONG_LINE + 10);
         let text = format!("let a = 1;\n{long}\nlet b = 2;\nlet c = 3;\n");
@@ -1247,12 +1249,13 @@ mod tests {
         if let BlockKind::CodeBlock { highlights, .. } = &mut doc.blocks[0].kind {
             *highlights = first.spans.clone();
         }
-        // The same colors again change nothing.
-        assert_eq!(first.changed_lines(&doc), Vec::<Range<usize>>::new());
-        // One line colored otherwise.
+        // The same colors again: the colored lines are shaped again, a
+        // recolor owed and dropped being made up this way.
+        assert_eq!(first.changed_lines(&doc), vec![0..1, 2..4]);
+        // Other colors on one line: the same lines, the long one left.
         let mut second = first.spans.clone();
         second[2] = vec![(0..10, SyntaxRole::Comment)];
-        assert_eq!(arrival_at(0, second).changed_lines(&doc), vec![2..3]);
+        assert_eq!(arrival_at(0, second).changed_lines(&doc), vec![0..1, 2..4]);
         // A plain range that does not cover the line is not the line
         // with no ranges.
         let short = arrival_at(1, vec![vec![(0..5, SyntaxRole::Plain)]]);

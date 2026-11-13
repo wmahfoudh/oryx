@@ -1451,6 +1451,36 @@ fn a_long_code_block_in_a_quote_exports() {
 /// keeps the runs that remain. The subtraction once went below zero,
 /// a panic in the debug build.
 #[test]
+fn a_fenced_block_with_a_very_long_line_exports() {
+    let long: String = (0..9000).map(|i| format!("\"key{i}\": {i}, ")).collect();
+    let source = format!("Some text.\n\n```json\n{long}\n```\n\nAfter.\n");
+    let doc = markdown::parse(source.as_str());
+    let target = std::env::temp_dir().join(format!("oryx-export-long-{}.pdf", std::process::id()));
+    let settings = ExportSettings {
+        body_size: 11.0,
+        code_size: 9.0,
+        page: PageSize::A4,
+        ..ExportSettings::default()
+    };
+    let mut fonts = FontStore::new();
+    let mut media = MediaCache::offline(PathBuf::from("tests/fixtures"));
+    let mut pass = ExportPass::new(&settings, Theme::default_dark(), target.clone());
+    while !pass.is_done() {
+        pass.step(
+            Instant::now() + Duration::from_millis(2),
+            &doc,
+            &mut fonts,
+            &mut media,
+            false,
+            None,
+        );
+    }
+    let pages = pass.finish(&doc, &fonts).expect("the export lands");
+    std::fs::remove_file(&target).ok();
+    assert!(pages > 5, "{pages} pages");
+}
+
+#[test]
 fn a_code_block_of_wrapped_lines_exports() {
     for (lines, width, code_size, lead) in
         [(2000usize, 300usize, 9.0f32, 0usize), (150, 2500, 8.0, 2)]
