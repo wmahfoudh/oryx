@@ -5,7 +5,9 @@
 ### Fixes
 
 - A big code file with long lines is now as fast far down as at its top. Before, in a 194 MB playlist whose lines wrap, a page key at the end of the file took 0.4 s, and the editor used more than half a processor core there while you typed nothing.
-- A big code file is now measured faster when you open it, change the zoom or the width of the window: 6 s for that playlist, 3.5 s for a 200 MB Rust file. Before, 21 s and 34 s. `Ctrl+End` right after the open shows the end of the file sooner by the same amount.
+- A big code file is now measured faster when you open it, change the zoom or the width of the window: 6 s for that playlist, 2 s for a 200 MB Rust file. Before, 21 s and 34 s.
+- A jump in a big code or text file now shows its text at once while Oryx still measures the file: `Ctrl+End` right after the open, a zoom step or a new window width far down the file, page keys past the first screens. Before, the page stayed blank until the measure reached the place: 4 s in that playlist, 20 s in the same file as text.
+- A file of one very long line no longer blocks the window when it opens. A 200 MB file of one line now shows its text after a second, and you can scroll while the rest is prepared. Before, the window showed nothing and read no key for more than a minute and a half.
 - A zoom step while a big code file is still being colored no longer blocks the window. Before, it could take more than five minutes on a 200 MB file.
 - The search in a big code or text file no longer blocks the window. In the same playlist, a single common letter in the search bar now answers in under a second, and `Escape` closes the bar at once. Before, the window was blocked for minutes.
 - A definition list with a tab before its colon no longer crashes Oryx. Before, Oryx crashed when the definition above it ended with an accented letter or a non-Latin character.
