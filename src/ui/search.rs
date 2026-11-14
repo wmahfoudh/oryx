@@ -756,10 +756,10 @@ pub fn word_matches(doc: &Document, word: &str) -> Vec<Selection> {
 /// byte it ends before. The lines a layout holds are such parts: a line
 /// is held whole, but a line of more than `LONG_LINE` bytes is held by
 /// its pieces around the view. In a part that starts inside its line
-/// the scan starts at the part's first byte: for a text that overlaps
-/// itself (`aa` in `aaaa`) and a part cut inside such a stretch, the
-/// occurrences found can be other ones than a scan of the whole line
-/// finds.
+/// the scan starts just before the part's first byte: for a text that
+/// overlaps itself (`aa` in `aaaa`) and a part cut inside such a
+/// stretch, the occurrences found can be other ones than a scan of the
+/// whole line finds.
 pub type LinePart = (usize, usize, usize);
 
 /// Each line of a block, whole.
@@ -889,10 +889,11 @@ pub fn sole_code_block(doc: &Document) -> bool {
 
 /// The matches `find` reports in each of the line parts `within` of a
 /// one-block document, in document order. `find` is given the line and
-/// the bytes of its search: from the part's first byte to a character
-/// boundary `reach` bytes past the part's end or more, so that a match
-/// that begins in the part is found whole; it appends the byte ranges
-/// of the matches, counted from the line's start.
+/// the bytes of its search: from `reach` bytes before the part's first
+/// byte to a character boundary `reach` bytes past the part's end or
+/// more, so that a match with a byte in the part is found whole; it
+/// appends the byte ranges of the matches, counted from the line's
+/// start.
 fn line_matches(
     doc: &Document,
     lines: &CodeBody,
@@ -914,7 +915,10 @@ fn line_matches(
         while !line.is_char_boundary(end) {
             end += 1;
         }
-        let mut start = from.min(end);
+        // A match that begins before the part and ends in it has a
+        // box in the part's first row: the scan starts `reach` bytes
+        // early for it.
+        let mut start = from.saturating_sub(reach).min(end);
         while !line.is_char_boundary(start) {
             start -= 1;
         }
@@ -2037,6 +2041,35 @@ mod tests {
         let mut out = doc.source.to_string();
         out.replace_range(region, &text);
         out
+    }
+
+    /// A part of a line that starts inside a word: a piece of a line
+    /// with no space is cut there. The occurrence that begins before
+    /// the part and ends in it is found, as a word and as a text.
+    #[test]
+    fn an_occurrence_across_the_first_byte_of_a_part_is_found() {
+        let doc = crate::doc::load::code_document(None, "name0,name1,name0,name2\n");
+        let at = |range: Range<usize>| Selection {
+            start: ModelPos {
+                block: 0,
+                span: 0,
+                byte: range.start,
+            },
+            end: ModelPos {
+                block: 0,
+                span: 0,
+                byte: range.end,
+            },
+        };
+        // The part starts inside the second `name0`, bytes 12 to 17.
+        for from in [13, 16] {
+            let part = [(0, from, 23)];
+            assert_eq!(word_matches_in(&doc, "name0", &part), [at(12..17)]);
+            assert_eq!(text_matches_in(&doc, "name0", &part), [at(12..17)]);
+        }
+        // One that ends before the part is not.
+        assert_eq!(text_matches_in(&doc, "name0", &[(0, 17, 23)]), []);
+        assert_eq!(text_matches_in(&doc, "name", &[(0, 17, 23)]), [at(18..22)]);
     }
 
     #[test]

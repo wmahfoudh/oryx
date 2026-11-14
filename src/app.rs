@@ -9197,12 +9197,6 @@ impl App {
         if kept.start <= top && bottom < kept.end {
             return None;
         }
-        // A line placed in pieces shows its rows as they come: the
-        // preview is made of whole lines.
-        let long = |row: usize| lines.line_len(row) > highlight::LONG_LINE;
-        if long(top) || long(bottom) {
-            return None;
-        }
         let gesture = self.drag.is_some() || self.selecting() || self.overlay_mouse;
         let landing = if gesture {
             None
