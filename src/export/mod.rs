@@ -382,9 +382,6 @@ impl ExportPass {
                 if let Some(pool) = pool {
                     pass.attach_pool(std::sync::Arc::clone(pool));
                 }
-                // A file of one very long line: the pages are written as
-                // its rows come, and the deadline is read inside the line.
-                pass.long_lines_in_steps();
                 self.layout = out;
                 self.pass = Some(pass);
                 self.ctx = Some(std::sync::Arc::new(ShapeCtx {
@@ -395,17 +392,25 @@ impl ExportPass {
             }
             loop {
                 let pass = self.pass.as_mut().expect("emission has a pass");
-                let chunk = Instant::now() + LAYOUT_CHUNK;
-                let complete = layout_more(
-                    doc,
-                    &self.theme,
-                    fonts,
-                    media,
-                    &self.cfg,
-                    &mut self.layout,
-                    pass,
-                    Some(chunk.min(deadline)),
-                );
+                // Pages a deadline left in the queue are written first:
+                // the workers go on shaping meanwhile, and a layout
+                // that took what they have ready at each step would
+                // run ahead of the writer with no bound.
+                let complete = if self.queue.is_empty() {
+                    let chunk = Instant::now() + LAYOUT_CHUNK;
+                    layout_more(
+                        doc,
+                        &self.theme,
+                        fonts,
+                        media,
+                        &self.cfg,
+                        &mut self.layout,
+                        pass,
+                        Some(chunk.min(deadline)),
+                    )
+                } else {
+                    pass.is_complete()
+                };
                 // Close what the grown layout decides, keep a bounded
                 // window of their shaping seeded, and write what the
                 // workers already got to; the deadline can interrupt

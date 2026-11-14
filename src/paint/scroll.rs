@@ -127,8 +127,9 @@ impl EdgeScroll {
 
 /// The source offset of what stands at the top of the view: the start
 /// of the block there, and inside a code block whose lines are the
-/// source's own, the start of the line there. A code or text file is
-/// one such block, so its place is a line, not the top of the file.
+/// source's own, the start of the line there, or of the piece there in
+/// a line longer than `LONG_LINE`. A code or text file is one such
+/// block, so its place is a line, not the top of the file.
 /// The block is looked up on the page, not in the order of the source:
 /// a footnote definition stands at the end of the page, and the blocks
 /// of a closed details group are not on it.
@@ -141,22 +142,39 @@ pub fn top_offset(lay: &LayoutDoc, doc: &Document, scroll_y: f32) -> usize {
     };
     let block = &doc.blocks[index];
     if let BlockKind::CodeBlock { lines, .. } = &block.kind {
-        let line = lay
-            .code_line_at(index, lines.len(), scroll_y + 1.0)
-            .and_then(|line| lines.line_range(line));
-        if let Some(range) = line {
-            return range.start;
+        let place = lay
+            .code_place_at(index, lines.len(), scroll_y + 1.0)
+            .and_then(|(line, byte)| Some(lines.line_range(line)?.start + byte));
+        if let Some(offset) = place {
+            return offset;
         }
     }
     block.range.start
 }
 
+/// The line of a code block an offset stands on and the offset's byte
+/// in it, for a block whose lines are the source's own.
+fn line_place(doc: &Document, block: usize, offset: usize) -> Option<(usize, usize)> {
+    let BlockKind::CodeBlock { lines, .. } = &doc.blocks[block].kind else {
+        return None;
+    };
+    let line = lines
+        .row_at(&doc.source, offset)?
+        .min(lines.len().checked_sub(1)?);
+    let start = lines.line_range(line)?.start;
+    Some((line, offset.saturating_sub(start)))
+}
+
 /// Where a source offset stands on the page, the inverse of
 /// `top_offset`: the top of its block, or of its line inside a code
-/// block whose lines answer for a source offset. None before the pass
-/// places the block.
+/// block whose lines answer for a source offset, or of its piece in a
+/// line longer than `LONG_LINE`. None before the pass places the
+/// block.
 pub fn offset_top(lay: &LayoutDoc, doc: &Document, offset: usize) -> Option<f32> {
     let block = doc.block_at_offset(offset)?;
+    if let Some((line, byte)) = line_place(doc, block, offset) {
+        return lay.approx_top_at(block, line, byte);
+    }
     let line = match &doc.blocks[block].kind {
         BlockKind::CodeBlock { lines, .. } if !lines.is_empty() => lines
             .row_at(&doc.source, offset)
@@ -168,9 +186,13 @@ pub fn offset_top(lay: &LayoutDoc, doc: &Document, offset: usize) -> Option<f32>
 
 /// The top and the bottom of what `offset_top` answers for: the block
 /// of a source offset, or its line inside a code block whose lines
-/// answer for a source offset. None before the pass places the block.
+/// answer for a source offset, or its piece in a line longer than
+/// `LONG_LINE`. None before the pass places the block.
 pub fn offset_span(lay: &LayoutDoc, doc: &Document, offset: usize) -> Option<Range<f32>> {
     let block = doc.block_at_offset(offset)?;
+    if let Some((line, byte)) = line_place(doc, block, offset) {
+        return lay.code_span_at(block, line, byte);
+    }
     if let BlockKind::CodeBlock { lines, .. } = &doc.blocks[block].kind {
         if let Some(row) = lines.row_at(&doc.source, offset) {
             let line = row.min(lines.len().saturating_sub(1));
@@ -267,6 +289,17 @@ pub fn source_row(doc: &Document, block: usize, offset: usize) -> usize {
     let start = block.range.start;
     let end = offset.min(doc.source.len()).max(start);
     doc.source[start..end].matches('\n').count()
+}
+
+/// The top of the row `source_row` answers for an offset, from the
+/// block table: its line's, or its piece's in a line longer than
+/// `LONG_LINE`.
+pub fn table_row_top(lay: &LayoutDoc, doc: &Document, block: usize, offset: usize) -> Option<f32> {
+    let row = source_row(doc, block, offset);
+    match line_place(doc, block, offset) {
+        Some((line, byte)) if line == row => lay.approx_top_at(block, line, byte),
+        _ => lay.approx_top(block, row),
+    }
 }
 
 /// How far under the top of the view a landing stands its block, when

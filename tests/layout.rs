@@ -4424,6 +4424,7 @@ fn fast_keystroke(
     let new_touched = start_line..start_line + text.matches('\n').count() + 1;
     let mut current = doc.source.to_string();
     current.replace_range(range.clone(), text);
+    let edit = range.start..range.start + text.len();
     let (old_lines, new_lines) =
         oryx::edit::splice_document(doc, &current, range, new_touched.clone())
             .expect("a file document splices");
@@ -4437,7 +4438,8 @@ fn fast_keystroke(
             &cfg(),
             0,
             old_lines,
-            new_lines
+            new_lines,
+            edit
         ),
         "a placed code entry takes the splice"
     );
@@ -6536,7 +6538,7 @@ fn the_occurrences_of_the_held_lines_draw_what_the_whole_file_draws() {
                     .map(|(_, rect)| rect)
                     .collect()
             };
-            found.search_held(&doc, selection::held_starts(&lay, &doc));
+            found.search_held(&doc, selection::held_parts(&lay, &doc));
             assert!(
                 found.matches.len() < all.len() / 4,
                 "{} of {} matches kept at {scroll}",
@@ -6549,6 +6551,135 @@ fn the_occurrences_of_the_held_lines_draw_what_the_whole_file_draws() {
         }
     }
     assert!(seen > 50, "{seen} rectangles compared");
+}
+
+/// A text file with a line of fifteen pieces between two ordinary
+/// lines, the view in the middle of the long line. The layout holds
+/// the pieces around the view, not the line. The top of the view is a
+/// place inside the line, and the table answers for it by piece. The
+/// occurrences searched in the held part draw what the whole file's
+/// draw. A key typed there, a line break and its removal splice the
+/// layout as a fresh pass lays it out.
+#[test]
+fn a_long_line_is_held_by_its_pieces_around_the_view() {
+    use oryx::paint::scroll;
+    use oryx::ui::occurrences::{self, Match};
+    use oryx::ui::selection::{self, ModelPos, Selection};
+    let long: String = (0..7_000).map(|i| format!("\"key{i}\": {i}, ")).collect();
+    assert!(long.len() > 14 * highlight::LONG_LINE);
+    let base = format!("first\n{long}\nlast line\n");
+    let path = std::env::temp_dir().join(format!("oryx-pieces-{}.txt", std::process::id()));
+    std::fs::write(&path, &base).unwrap();
+    let mut doc = load::open(&path, None).unwrap().document;
+    let mut reference = load::open(&path, None).unwrap().document;
+    std::fs::remove_file(&path).ok();
+    let kind = load::FileKind::Text;
+    let (width, viewport) = (500.0, 400.0);
+    let height = windowed(&doc, width, 0.0, viewport).height;
+    let scroll = (height / 2.0).round();
+    let mut lay = windowed(&doc, width, scroll, viewport);
+    lay.records_consistent().unwrap();
+
+    let held = selection::held_parts(&lay, &doc);
+    assert_eq!(held.len(), 1, "the long line alone is around the view");
+    let (line, from, to) = held[0];
+    assert_eq!(line, 1);
+    assert!(
+        from > highlight::LONG_LINE
+            && to < long.len() - highlight::LONG_LINE
+            && to - from < long.len() / 2,
+        "the pieces around the view are held: {from}..{to} of {}",
+        long.len()
+    );
+
+    // The top of the view is a place inside the line.
+    let line_start = "first\n".len();
+    let top = scroll::top_offset(&lay, &doc, scroll);
+    assert!(top > line_start + from && top < line_start + to, "{top}");
+    let piece_top = scroll::offset_top(&lay, &doc, top).unwrap();
+    assert!(piece_top <= scroll + 1.0 && piece_top > scroll - 20.0 * viewport);
+    assert_eq!(scroll::top_offset(&lay, &doc, piece_top), top);
+    let span = scroll::offset_span(&lay, &doc, top + 10).unwrap();
+    assert_eq!(span.start, piece_top);
+    assert!(span.end > scroll);
+    assert_eq!(
+        scroll::offset_top(&lay, &doc, line_start),
+        lay.approx_top(0, 1)
+    );
+    // A run of that piece stands where the table says the piece does.
+    let first_run = lay
+        .runs
+        .iter()
+        .find(|run| matches!(run.text, oryx::layout::TextRef::Model { start, .. } if start as usize == top - line_start))
+        .expect("the piece's first run is held");
+    assert_eq!(first_run.y, piece_top);
+
+    // The occurrences of the held part.
+    let key = from + long[from..].find("key").unwrap();
+    let at = |byte| ModelPos {
+        block: 0,
+        span: 1,
+        byte,
+    };
+    for matched in [Match::Text, Match::Word] {
+        let sel = match matched {
+            Match::Text => Selection {
+                start: at(key),
+                end: at(key + 3),
+            },
+            // The number after the colon, a whole word.
+            Match::Word => {
+                let colon = key + long[key..].find(": ").unwrap() + 2;
+                let comma = colon + long[colon..].find(',').unwrap();
+                Selection {
+                    start: at(colon),
+                    end: at(comma),
+                }
+            }
+        };
+        let mut found = occurrences::find(&doc, sel, matched).expect("a set");
+        let all = found.all_matches(&doc);
+        found.search_held(&doc, held.clone());
+        assert!(found.matches.len() < all.len().max(2) / 2 || all.len() < 4);
+        let mut fonts = fonts();
+        let (lo, hi) = (scroll - 2.0 * viewport, scroll + 3.0 * viewport);
+        let rects = |fonts: &mut FontStore, matches: &[Selection]| -> Vec<_> {
+            selection::window_rects(&lay, &doc, fonts, matches, lo, hi)
+                .into_iter()
+                .map(|(_, rect)| rect)
+                .collect()
+        };
+        let drawn = rects(&mut fonts, &found.matches);
+        if matched == Match::Text {
+            assert!(drawn.len() > 20, "{} rectangles", drawn.len());
+        }
+        assert_eq!(drawn, rects(&mut fonts, &all), "{matched:?}");
+    }
+
+    // A key in the held part, a line break there, and its removal.
+    let place = line_start + key;
+    let steps: &[(usize, usize, &str)] = &[
+        (place, place, "x"),
+        (place + 40, place + 40, "\n"),
+        (place + 40, place + 41, ""),
+        (place, place + 1, ""),
+    ];
+    for &(start, end, text) in steps {
+        fast_keystroke(
+            &mut doc,
+            &mut reference,
+            kind,
+            &mut lay,
+            start..end,
+            text,
+            scroll,
+            viewport,
+        );
+        lay.records_consistent().unwrap();
+        let fresh = windowed(&reference, width, scroll, viewport);
+        assert_same_layout(&lay, &doc, &fresh, &reference);
+    }
+    assert_eq!(&*doc.source, base.as_str());
 }
 
 /// A file of one very long line, stopped while the line is placed a
@@ -6582,12 +6713,12 @@ fn the_occurrences_of_a_long_line_in_chunks_are_those_of_its_held_start() {
         ));
     }
     lay.index_more();
-    let held = selection::held_starts(&lay, &doc);
+    let held = selection::held_parts(&lay, &doc);
     assert_eq!(held.len(), 1, "one line");
     assert!(
-        held[0].1 > 1000 && held[0].1 < line.len() / 4,
+        held[0].1 == 0 && held[0].2 > 1000 && held[0].2 < line.len() / 4,
         "the start of the line is held: {} of {}",
-        held[0].1,
+        held[0].2,
         line.len()
     );
     let at = |byte| ModelPos {

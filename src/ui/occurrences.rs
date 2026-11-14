@@ -10,7 +10,7 @@
 //! felt.
 
 use crate::doc::model::{BlockKind, Document};
-use crate::ui::search::{self, LineStart};
+use crate::ui::search::{self, LinePart};
 use crate::ui::selection::{self, ModelPos, Selection};
 
 /// How a selection's occurrences are matched: a double-clicked word
@@ -33,9 +33,9 @@ pub struct Occurrences {
     /// The text looked for: the selection's, trimmed.
     text: String,
     /// In a one-block document, the line starts `matches` was searched
-    /// in (`selection::held_starts`). None in a page, where `matches`
+    /// in (`selection::held_parts`). None in a page, where `matches`
     /// is every other match.
-    searched: Option<Vec<LineStart>>,
+    searched: Option<Vec<LinePart>>,
     /// The other matches, in document order: all of them in a page,
     /// those of `searched` in a one-block document.
     pub matches: Vec<Selection>,
@@ -69,7 +69,7 @@ impl Occurrences {
     /// selection and is found again when the text changes, and a line
     /// of megabytes held whole is searched once. A page keeps the
     /// matches `find` gave it.
-    pub fn search_held(&mut self, doc: &Document, held: Vec<LineStart>) {
+    pub fn search_held(&mut self, doc: &Document, held: Vec<LinePart>) {
         match &self.searched {
             None => return,
             Some(searched) if *searched == held => return,
@@ -427,7 +427,7 @@ mod tests {
         );
         let mut found = find(&doc, line, Match::Text).expect("the identical line");
         assert!(found.matches.is_empty(), "no line searched yet");
-        found.search_held(&doc, (0..5).map(|line| (line, usize::MAX)).collect());
+        found.search_held(&doc, (0..5).map(|line| (line, 0, usize::MAX)).collect());
         assert_eq!(found.matches.len(), 1);
         assert!(!found.matches.contains(&line));
     }
@@ -476,8 +476,8 @@ mod tests {
         let clicked = word(&doc, 0, 0, 5);
         assert_eq!(selection::plain_text(&clicked, &doc), "count");
         let mut found = find(&doc, clicked, Match::Word).expect("two others");
-        let whole = |lines: std::ops::Range<usize>| -> Vec<LineStart> {
-            lines.map(|line| (line, usize::MAX)).collect()
+        let whole = |lines: std::ops::Range<usize>| -> Vec<LinePart> {
+            lines.map(|line| (line, 0, usize::MAX)).collect()
         };
         found.search_held(&doc, whole(0..3));
         assert_eq!(found.matches.len(), 2, "not recount, not count_all");
@@ -488,11 +488,11 @@ mod tests {
         assert_eq!(found.matches.len(), 1, "lines past the last one");
         // The second line's start: `count` begins at byte 14, and
         // `count_all` is no whole word however little of it is held.
-        found.search_held(&doc, vec![(1, 14)]);
+        found.search_held(&doc, vec![(1, 0, 14)]);
         assert!(found.matches.is_empty(), "the word begins after the start");
-        found.search_held(&doc, vec![(1, 15)]);
+        found.search_held(&doc, vec![(1, 0, 15)]);
         assert_eq!(found.matches.len(), 1, "it begins in the start");
-        found.search_held(&doc, vec![(1, 25)]);
+        found.search_held(&doc, vec![(1, 0, 25)]);
         assert_eq!(found.matches.len(), 1);
     }
 

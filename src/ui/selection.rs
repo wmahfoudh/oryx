@@ -956,13 +956,14 @@ pub fn held_matches(
 }
 
 /// The text of a one-block document that the layout's placed runs
-/// cover: each line with a run, in order, and the byte its last run
-/// ends at, the spaces after it included. A match can be given a
-/// rectangle only where it begins in such a start. A line of megabytes
-/// is placed from its first byte on, a chunk at a time, so the start
-/// of a line is all that is held of it. Empty when nothing is placed.
-pub fn held_starts(lay: &LayoutDoc, doc: &Document) -> Vec<(usize, usize)> {
-    let mut starts: Vec<(usize, usize)> = Vec::new();
+/// cover: each line with a run, in order, with the byte its first run
+/// starts at and the byte its last run ends at, the spaces after it
+/// included. A match can be given a rectangle only where it begins in
+/// such a part. A line of more than `LONG_LINE` bytes is held by its
+/// pieces around the view, which follow each other, so its part can
+/// start inside it. Empty when nothing is placed.
+pub fn held_parts(lay: &LayoutDoc, doc: &Document) -> Vec<(usize, usize, usize)> {
+    let mut parts: Vec<(usize, usize, usize)> = Vec::new();
     for (index, run) in lay.runs.iter().enumerate() {
         let Some((at, end)) = run_interval(run) else {
             continue;
@@ -970,24 +971,28 @@ pub fn held_starts(lay: &LayoutDoc, doc: &Document) -> Vec<(usize, usize)> {
         let end = end
             .byte
             .saturating_add(run_tail(lay, doc, index, run).len());
-        match starts.last_mut() {
-            Some((line, count)) if *line == at.span => *count = (*count).max(end),
-            _ => starts.push((at.span, end)),
+        match parts.last_mut() {
+            Some((line, from, to)) if *line == at.span => {
+                *from = (*from).min(at.byte);
+                *to = (*to).max(end);
+            }
+            _ => parts.push((at.span, at.byte, end)),
         }
     }
     // The runs follow the lines; a layout that held a line in two
     // places would name it twice.
-    if !starts.is_sorted_by(|a, b| a.0 < b.0) {
-        starts.sort_unstable();
-        starts.dedup_by(|next, kept| {
+    if !parts.is_sorted_by(|a, b| a.0 < b.0) {
+        parts.sort_unstable();
+        parts.dedup_by(|next, kept| {
             let same = next.0 == kept.0;
             if same {
-                kept.1 = kept.1.max(next.1);
+                kept.1 = kept.1.min(next.1);
+                kept.2 = kept.2.max(next.2);
             }
             same
         });
     }
-    starts
+    parts
 }
 
 /// The top of each match, the first value of `match_spans`.
@@ -1042,7 +1047,9 @@ pub fn match_spans(lay: &LayoutDoc, doc: &Document, matches: &[Selection]) -> Ve
     for (span, m) in spans.iter_mut().zip(matches) {
         if span.0 == f32::MAX {
             let pos = m.ordered().0;
-            let y = lay.approx_top(pos.block, pos.span).unwrap_or(f32::MAX);
+            let y = lay
+                .approx_top_at(pos.block, pos.span, pos.byte)
+                .unwrap_or(f32::MAX);
             *span = (y, y);
         }
     }

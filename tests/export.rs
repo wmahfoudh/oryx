@@ -1480,11 +1480,13 @@ fn a_fenced_block_with_a_very_long_line_exports() {
     assert!(pages > 5, "{pages} pages");
 }
 
-/// A code file that is one very long line is exported a chunk of the
+/// A code file that is one very long line is exported a piece of the
 /// line at a step: the pages are written as the rows come and the
 /// written rows are dropped, so the pass holds a small part of the line
-/// at a time and a step ends inside the line. The pages are those of
-/// the layout made in one go, which shapes the line at once.
+/// at a time and a step ends inside the line. With workers it holds
+/// the pieces they have ready, four a worker, whatever the line's
+/// length: one worker here, the line being 46 pieces. The pages are
+/// those of the layout made in one go.
 #[test]
 fn a_code_file_of_one_very_long_line_exports_in_steps() {
     let long: String = (0..20000).map(|i| format!("\"key{i}\": {i}, ")).collect();
@@ -1516,7 +1518,7 @@ fn a_code_file_of_one_very_long_line_exports_in_steps() {
         justify: false,
         ..ExportSettings::default()
     };
-    for workers in [0, 4] {
+    for workers in [0, 1] {
         let target = std::env::temp_dir().join(format!(
             "oryx-one-line-{workers}-{}.pdf",
             std::process::id()

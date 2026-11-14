@@ -736,11 +736,16 @@ fn rowless(lay: &LayoutDoc, doc: &Document, offset: usize, view_h: f32) -> Optio
     if doc.code_file || doc.plain_file {
         // The line table answers by a binary search; a count of the
         // newlines from the top grew with the file on every crossing.
-        let line = match &doc.blocks[block].kind {
-            BlockKind::CodeBlock { lines, .. } => lines.row_at(&doc.source, offset),
+        // A place inside a line of more than `LONG_LINE` bytes is
+        // seated on the first row of its piece.
+        let place = match &doc.blocks[block].kind {
+            BlockKind::CodeBlock { lines, .. } => lines.row_at(&doc.source, offset).map(|line| {
+                let start = lines.line_range(line).map_or(offset, |range| range.start);
+                (line, offset.saturating_sub(start))
+            }),
             _ => None,
         };
-        if let Some(seat) = line.and_then(|line| lay.code_line_seat(block, line)) {
+        if let Some(seat) = place.and_then(|(line, byte)| lay.code_seat_at(block, line, byte)) {
             return Some(Rowless::Line(seat.y..seat.y + seat.height));
         }
     }

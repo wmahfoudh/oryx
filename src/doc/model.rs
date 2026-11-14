@@ -446,6 +446,11 @@ impl CodeBody {
         slice(base, &self.lines[index])
     }
 
+    /// The length of a line in bytes.
+    pub fn line_len(&self, index: usize) -> usize {
+        self.lines[index].len()
+    }
+
     /// The line an offset falls on: the last line starting at or before
     /// it, its line break included, and the last line past the end;
     /// None for a body without lines. The offset is a source offset for

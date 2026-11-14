@@ -12,7 +12,8 @@ use crate::style::fonts::line_width;
 use super::metrics;
 use crate::doc::images::MediaCache;
 use crate::doc::model::{
-    AlertKind, Block, BlockKind, ColumnAlign, Document, Marker, Span, SpanImage, SpanScript,
+    AlertKind, Block, BlockKind, CodeBody, ColumnAlign, Document, Marker, Span, SpanImage,
+    SpanScript,
 };
 use crate::layout::pool::{Job, ShapeCtx, StepKey, Work};
 use crate::style::fonts::{FontStore, BODY_FAMILY, CODE_FAMILY};
@@ -342,9 +343,307 @@ pub(crate) struct BlockTable {
     /// The pass geometry blocks were placed against, for re-shaping.
     margin: f32,
     content_width: f32,
+    /// The long lines of each code position read so far, by position:
+    /// what turns a unit of the position into a line or a piece of one.
+    /// A position with no long line has an entry with none.
+    long: Vec<LongLines>,
+}
+
+/// The lines of one code position longer than `LONG_LINE`, in order.
+#[derive(Debug, Default)]
+struct LongLines {
+    position: u32,
+    lines: Vec<Pieced>,
+}
+
+/// A line longer than `LONG_LINE`, placed as one unit per piece.
+#[derive(Debug, Clone, PartialEq)]
+struct Pieced {
+    line: u32,
+    /// The units the long lines above this one add to their position,
+    /// beyond one a line: the line's first unit is `line + before`.
+    before: u32,
+    /// Where each piece ends, in bytes from the line's start.
+    ends: Vec<u32>,
+}
+
+impl Pieced {
+    fn first_unit(&self) -> usize {
+        (self.line + self.before) as usize
+    }
+
+    /// The units this line and those above add beyond one a line.
+    fn after(&self) -> usize {
+        self.before as usize + self.ends.len() - 1
+    }
+}
+
+/// A unit of a code block: a line, or one piece of a line longer than
+/// `LONG_LINE`. The table, the window, the pool and the count place
+/// units; a block with no long line has its lines as units.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct UnitPlace {
+    line: usize,
+    /// The piece's bytes in its line; None for a whole line.
+    piece: Option<(usize, usize)>,
+}
+
+/// Where the pieces of a long line end.
+fn piece_ends(line: &str) -> Vec<u32> {
+    long_line_chunks(line)
+        .into_iter()
+        .map(|chunk| chunk.end as u32)
+        .collect()
+}
+
+/// The long lines of a code body, each with its pieces.
+fn long_lines_of(lines: &CodeBody, source: &str) -> Vec<Pieced> {
+    let mut found = Vec::new();
+    let mut before = 0_u32;
+    for line in 0..lines.len() {
+        if lines.line_len(line) <= LONG_LINE {
+            continue;
+        }
+        let ends = piece_ends(lines.line(source, line));
+        let added = ends.len() as u32 - 1;
+        found.push(Pieced {
+            line: line as u32,
+            before,
+            ends,
+        });
+        before += added;
+    }
+    found
+}
+
+/// The text of one unit and its styled ranges, counted from the unit's
+/// first byte.
+struct UnitText<'a> {
+    line: usize,
+    /// The first byte of a piece in its line; None for a whole line.
+    piece: Option<usize>,
+    text: &'a str,
+    segments: std::borrow::Cow<'a, [(Range<usize>, SyntaxRole)]>,
+}
+
+fn unit_text<'a>(
+    table: &BlockTable,
+    position: usize,
+    unit: usize,
+    lines: &'a CodeBody,
+    highlights: &'a [Vec<(Range<usize>, SyntaxRole)>],
+    source: &'a str,
+) -> UnitText<'a> {
+    let place = table.unit_place(position, unit);
+    let line = lines.line(source, place.line);
+    let colors: &[(Range<usize>, SyntaxRole)] = highlights.get(place.line).map_or(&[], |s| s);
+    match place.piece {
+        None => UnitText {
+            line: place.line,
+            piece: None,
+            text: line,
+            segments: std::borrow::Cow::Borrowed(colors),
+        },
+        Some((start, end)) => UnitText {
+            line: place.line,
+            piece: Some(start),
+            text: &line[start..end],
+            segments: std::borrow::Cow::Owned(segments_within(colors, &(start..end))),
+        },
+    }
 }
 
 impl BlockTable {
+    /// Reads the long lines of a code position, once. The pool asks
+    /// ahead of the pass, the pass when it opens the block.
+    fn read_long(&mut self, doc: &Document, position: usize, block: usize) {
+        let at = self
+            .long
+            .partition_point(|l| (l.position as usize) < position);
+        if self
+            .long
+            .get(at)
+            .is_some_and(|l| l.position as usize == position)
+        {
+            return;
+        }
+        let lines = match &doc.blocks[block].kind {
+            BlockKind::CodeBlock { lines, .. } => long_lines_of(lines, &doc.source),
+            _ => Vec::new(),
+        };
+        self.long.insert(
+            at,
+            LongLines {
+                position: position as u32,
+                lines,
+            },
+        );
+    }
+
+    /// Follows an edit that put the lines `new` where the lines `old`
+    /// were: the long lines among the new ones are read, those below
+    /// move with the lines. `edit` is the new text's bytes in the
+    /// source. Answers how many units at the start of the touched
+    /// lines and how many at their end the edit left as they were:
+    /// the pieces of a long line that end before the edit, and those
+    /// that start after it, when the new line is cut at the same
+    /// bytes.
+    fn edit_long(
+        &mut self,
+        lines: &CodeBody,
+        source: &str,
+        position: usize,
+        old: &Range<usize>,
+        new: &Range<usize>,
+        edit: &Range<usize>,
+    ) -> (usize, usize) {
+        let at = self
+            .long
+            .partition_point(|l| (l.position as usize) < position);
+        let Some(long) = self
+            .long
+            .get_mut(at)
+            .filter(|l| l.position as usize == position)
+        else {
+            return (0, 0);
+        };
+        let list = &mut long.lines;
+        let lo = list.partition_point(|p| (p.line as usize) < old.start);
+        let hi = list.partition_point(|p| (p.line as usize) < old.end);
+        let delta = new.len() as i64 - old.len() as i64;
+        for p in &mut list[hi..] {
+            p.line = (p.line as i64 + delta) as u32;
+        }
+        let fresh: Vec<Pieced> = new
+            .clone()
+            .filter(|&line| line < lines.len() && lines.line_len(line) > LONG_LINE)
+            .map(|line| Pieced {
+                line: line as u32,
+                before: 0,
+                ends: piece_ends(lines.line(source, line)),
+            })
+            .collect();
+
+        // The pieces the edit left as they were. The first touched
+        // line starts where it did, so a piece of it that ends at or
+        // before the edit, at the same byte as before, has its bytes.
+        // The last touched line ends with the same bytes after the
+        // edit, so a piece of it that starts in them, as far from the
+        // line's end as before, has its bytes too.
+        let touched = (!old.is_empty() && !new.is_empty() && new.end <= lines.len())
+            .then(|| Some((lines.line_range(new.start)?, lines.line_range(new.end - 1)?)))
+            .flatten();
+        let mut same = (0, 0);
+        if let Some((first, last)) = touched.filter(|(first, last)| {
+            first.start <= edit.start && edit.end <= last.end && edit.start <= edit.end
+        }) {
+            let before_edit = edit.start - first.start;
+            let after_edit = last.end - edit.end;
+            let was = &list[lo..hi];
+            let old_first = was.first().filter(|p| p.line as usize == old.start);
+            let new_first = fresh.first().filter(|p| p.line as usize == new.start);
+            if let (Some(a), Some(b)) = (old_first, new_first) {
+                same.0 = a
+                    .ends
+                    .iter()
+                    .zip(&b.ends)
+                    .take_while(|(x, y)| x == y && **x as usize <= before_edit)
+                    .count();
+            }
+            let old_last = was.last().filter(|p| p.line as usize + 1 == old.end);
+            let new_last = fresh.last().filter(|p| p.line as usize + 1 == new.end);
+            if let (Some(a), Some(b)) = (old_last, new_last) {
+                // Each piece's start, as its distance from the line's
+                // end, the last piece first.
+                let from_end = |p: &Pieced| {
+                    let len = *p.ends.last().expect("a long line has pieces");
+                    let ends = p.ends.clone();
+                    (0..ends.len())
+                        .rev()
+                        .map(move |k| len - if k == 0 { 0 } else { ends[k - 1] })
+                };
+                same.1 = from_end(a)
+                    .zip(from_end(b))
+                    .take_while(|(x, y)| x == y && *x as usize <= after_edit)
+                    .count();
+            }
+        }
+
+        list.splice(lo..hi, fresh);
+        let mut before = match lo.checked_sub(1) {
+            Some(above) => list[above].after() as u32,
+            None => 0,
+        };
+        for p in &mut list[lo..] {
+            p.before = before;
+            before += p.ends.len() as u32 - 1;
+        }
+        same
+    }
+
+    /// The long lines of a position, none before `read_long`.
+    fn long_of(&self, position: usize) -> &[Pieced] {
+        let at = self
+            .long
+            .partition_point(|l| (l.position as usize) < position);
+        match self.long.get(at) {
+            Some(l) if l.position as usize == position => &l.lines,
+            _ => &[],
+        }
+    }
+
+    /// The first unit of line `line` of a position. A line past the
+    /// last answers the position's unit count.
+    fn unit_of(&self, position: usize, line: usize) -> usize {
+        let long = self.long_of(position);
+        let above = long.partition_point(|p| (p.line as usize) < line);
+        match above {
+            0 => line,
+            n => line + long[n - 1].after(),
+        }
+    }
+
+    /// The unit holding byte `byte` of a line; a byte at a piece's end
+    /// belongs to the next piece, and past the last to the last.
+    fn unit_of_byte(&self, position: usize, line: usize, byte: usize) -> usize {
+        let long = self.long_of(position);
+        let at = long.partition_point(|p| (p.line as usize) < line);
+        match long.get(at) {
+            Some(p) if p.line as usize == line => {
+                let piece = p.ends.partition_point(|&end| end as usize <= byte);
+                p.first_unit() + piece.min(p.ends.len() - 1)
+            }
+            _ => self.unit_of(position, line),
+        }
+    }
+
+    /// The line a unit belongs to and, in a long line, its bytes.
+    fn unit_place(&self, position: usize, unit: usize) -> UnitPlace {
+        let long = self.long_of(position);
+        let upto = long.partition_point(|p| p.first_unit() <= unit);
+        let Some(p) = upto.checked_sub(1).map(|i| &long[i]) else {
+            return UnitPlace {
+                line: unit,
+                piece: None,
+            };
+        };
+        let piece = unit - p.first_unit();
+        if piece < p.ends.len() {
+            let start = match piece {
+                0 => 0,
+                k => p.ends[k - 1] as usize,
+            };
+            return UnitPlace {
+                line: p.line as usize,
+                piece: Some((start, p.ends[piece] as usize)),
+            };
+        }
+        UnitPlace {
+            line: unit - p.after(),
+            piece: None,
+        }
+    }
+
     fn push(&mut self, block: usize, entry: BlockEntry) {
         if self.position_of_block.len() <= block {
             self.position_of_block.resize(block + 1, u32::MAX);
@@ -442,13 +741,18 @@ impl BlockTable {
         &self.tall[lo..hi]
     }
 
-    /// The recorded top of line `line`, reproducing the placement
+    /// The recorded top of unit `unit`, reproducing the placement
     /// arithmetic bit for bit: the shared advance in closed form, plus
-    /// the wrapped lines' extra heights as the pass accumulated them.
-    fn code_line_top(&self, position: usize, line: usize) -> f32 {
+    /// the wrapped units' extra heights as the pass accumulated them.
+    fn unit_top(&self, position: usize, unit: usize) -> f32 {
         let entry = &self.entries[position];
-        let (extra, _) = self.extra_above(position, line);
-        code_line_y(entry.content_y + entry.pad, line, entry.line_height, extra)
+        let (extra, _) = self.extra_above(position, unit);
+        code_line_y(entry.content_y + entry.pad, unit, entry.line_height, extra)
+    }
+
+    /// The recorded top of line `line`: its first unit's.
+    fn code_line_top(&self, position: usize, line: usize) -> f32 {
+        self.unit_top(position, self.unit_of(position, line))
     }
 }
 
@@ -767,6 +1071,13 @@ pub struct TableRow {
 pub struct CodeLine {
     pub block: usize,
     pub line: usize,
+    /// The record's bytes in its line: the whole line, or one piece of
+    /// a line longer than `LONG_LINE`.
+    pub bytes: Range<usize>,
+    /// The record's unit in its block's position.
+    unit: usize,
+    /// Whether the record is a piece of a line longer than `LONG_LINE`.
+    piece: bool,
     runs: Range<usize>,
     x0: f32,
     y0: f32,
@@ -995,7 +1306,7 @@ impl LayoutDoc {
         let top = |position: usize| {
             let entry = &self.table.entries[position];
             if entry.flags & ENTRY_CODE != 0 {
-                self.table.code_line_top(position, 0)
+                self.table.unit_top(position, 0)
             } else {
                 entry.y
             }
@@ -1018,16 +1329,17 @@ impl LayoutDoc {
         if self.table.entries[position].flags & ENTRY_CODE == 0 {
             return None;
         }
-        let (mut at, mut past) = (0, lines.max(1));
+        let units = self.table.unit_of(position, lines);
+        let (mut at, mut past) = (0, units.max(1));
         while at + 1 < past {
             let mid = at + (past - at) / 2;
-            if self.table.code_line_top(position, mid) <= y {
+            if self.table.unit_top(position, mid) <= y {
                 at = mid;
             } else {
                 past = mid;
             }
         }
-        Some(at)
+        Some(self.table.unit_place(position, at).line)
     }
 
     /// The recorded top and bottom of a block, from the block table.
@@ -1046,19 +1358,84 @@ impl LayoutDoc {
     /// the layout holds no glyphs for. None before the pass places the
     /// block, and for a block that is not code.
     pub fn code_line_seat(&self, block: usize, line: usize) -> Option<LineSeat> {
+        self.code_seat_at(block, line, 0)
+    }
+
+    /// `code_line_seat` for a place inside a line: in a line longer
+    /// than `LONG_LINE`, the first row of the piece holding byte `byte`
+    /// of the line, the nearest row the table knows.
+    pub fn code_seat_at(&self, block: usize, line: usize, byte: usize) -> Option<LineSeat> {
         let position = *self.table.position_of_block.get(block)?;
         if position == u32::MAX {
             return None;
         }
-        let entry = &self.table.entries[position as usize];
+        let position = position as usize;
+        let entry = &self.table.entries[position];
         if entry.flags & ENTRY_CODE == 0 {
             return None;
         }
+        let unit = self.table.unit_of_byte(position, line, byte);
         Some(LineSeat {
             x: entry.x0,
-            y: self.table.code_line_top(position as usize, line),
+            y: self.table.unit_top(position, unit),
             height: entry.line_height,
         })
+    }
+
+    /// `approx_top` for a place inside a line: in a code line longer
+    /// than `LONG_LINE`, the top of the piece holding byte `byte` of
+    /// the line. The line's top for any other line, the block's for a
+    /// block that is not code.
+    pub fn approx_top_at(&self, block: usize, span: usize, byte: usize) -> Option<f32> {
+        let position = *self.table.position_of_block.get(block)?;
+        if position == u32::MAX {
+            return None;
+        }
+        let position = position as usize;
+        let entry = &self.table.entries[position];
+        if entry.flags & ENTRY_CODE == 0 {
+            return Some(entry.y);
+        }
+        let unit = self.table.unit_of_byte(position, span, byte);
+        Some(self.table.unit_top(position, unit))
+    }
+
+    /// The top and the bottom of what `approx_top_at` answers for in a
+    /// code block: a line, or the piece of a long line holding `byte`.
+    /// None for a block that is not code.
+    pub fn code_span_at(&self, block: usize, line: usize, byte: usize) -> Option<Range<f32>> {
+        let position = *self.table.position_of_block.get(block)?;
+        if position == u32::MAX {
+            return None;
+        }
+        let position = position as usize;
+        if self.table.entries[position].flags & ENTRY_CODE == 0 {
+            return None;
+        }
+        // The units tile the block, so one ends where the next starts.
+        let unit = self.table.unit_of_byte(position, line, byte);
+        let top = self.table.unit_top(position, unit);
+        Some(top..self.table.unit_top(position, unit + 1).max(top))
+    }
+
+    /// `code_line_at` with the place inside the line: the line standing
+    /// at height `y` and, in a line longer than `LONG_LINE`, the first
+    /// byte of the piece there; zero for any other line.
+    pub fn code_place_at(&self, block: usize, lines: usize, y: f32) -> Option<(usize, usize)> {
+        let position = *self.table.position_of_block.get(block)?;
+        if position == u32::MAX {
+            return None;
+        }
+        let position = position as usize;
+        if self.table.entries[position].flags & ENTRY_CODE == 0 {
+            return None;
+        }
+        let units = self.table.unit_of(position, lines);
+        let at = partition(units.max(1), |unit| {
+            self.table.unit_top(position, unit) <= y
+        });
+        let place = self.table.unit_place(position, at.saturating_sub(1));
+        Some((place.line, place.piece.map_or(0, |(start, _)| start)))
     }
 }
 
@@ -1126,7 +1503,7 @@ pub struct LayoutPass {
     pool_generation: u64,
     ctx: Option<std::sync::Arc<crate::layout::pool::ShapeCtx>>,
     /// Where seeding reached: the order position and, inside a code
-    /// block, the next line to claim.
+    /// block, the next unit to claim.
     seed_position: usize,
     seed_line: usize,
     /// Retention bound: scroll position and viewport height. None keeps
@@ -1140,35 +1517,9 @@ pub struct LayoutPass {
     /// The order position whose lines are counted from here on, so the
     /// pool is not fed the lines the count answers.
     counting: Option<usize>,
-    /// The line of the open code block being shaped a chunk at a step.
-    long: Option<LongLine>,
-    /// Whether a long line of a code or text file is shaped a chunk at
-    /// a step (`in_steps`): the window's pass, with its retention
-    /// bound, and the export's. A full layout shapes it at once.
-    steps: bool,
 }
 
-/// A line of more than `LONG_LINE` bytes that no worker had ready,
-/// shaped one chunk at a step so that the pass reads its deadline
-/// inside the line: a line of megabytes would hold the window for as
-/// long as it takes to shape. Each chunk's runs join the layout as they
-/// are shaped, under the line's one record, at the place and in the
-/// order the line shaped at once gives them (`shape_code_line`).
-struct LongLine {
-    position: usize,
-    line: usize,
-    chunks: Vec<Range<usize>>,
-    /// The next chunk to shape.
-    next: usize,
-    /// The height of the chunks shaped so far, added in their order.
-    height: f32,
-}
-
-/// A line longer than this is not given to a worker: the job copies the
-/// line, and its result would come after the steps have shaped it.
-const GIANT_LINE: usize = 128 * LONG_LINE;
-
-/// A code block is counted once this many of its lines are left when
+/// A code block is counted once this many of its units are left when
 /// the pass moves past the kept ones. A shorter block is shaped whole,
 /// as before: reading a face's table costs more than it saves there.
 const COUNT_FROM: usize = 2048;
@@ -1188,18 +1539,17 @@ impl LayoutPass {
         self.done
     }
 
-    /// Whether a long line is being shaped a chunk at a step: its rows
-    /// join the layout as they are shaped.
-    pub fn in_long_line(&self) -> bool {
-        self.long.is_some()
-    }
-
     /// The lines of the open code block the layout holds rows for: the
-    /// stretch the pass kept, blank lines included. Empty when it kept
-    /// none yet, None when no code block is open.
-    pub fn kept_lines(&self) -> Option<Range<usize>> {
+    /// stretch the pass kept, blank lines included, a line longer than
+    /// `LONG_LINE` as soon as one of its pieces is kept. Empty when it
+    /// kept none yet, None when no code block is open.
+    pub fn kept_lines(&self, lay: &LayoutDoc) -> Option<Range<usize>> {
         let open = self.open.as_ref()?;
-        Some(open.kept.clone().unwrap_or(open.line..open.line))
+        let line = |unit: usize| lay.table.unit_place(open.position, unit).line;
+        Some(match &open.kept {
+            Some(kept) if !kept.is_empty() => line(kept.start)..line(kept.end - 1) + 1,
+            _ => line(open.unit)..line(open.unit),
+        })
     }
 
     /// Attaches the shaping pool; the next slice claims it and seeds
@@ -1253,14 +1603,6 @@ impl LayoutPass {
     /// band and its margin are measured into the table and dropped.
     pub fn retain_around(&mut self, scroll: f32, viewport_h: f32) {
         self.retain = Some((scroll, viewport_h));
-        self.steps = true;
-    }
-
-    /// Asks for a long line of a code or text file a chunk at a step,
-    /// in a pass that keeps every line: the export's, which closes and
-    /// writes its pages as the rows come.
-    pub fn long_lines_in_steps(&mut self) {
-        self.steps = true;
     }
 
     /// Shifts the indices the pass holds into the layout's vectors
@@ -1445,10 +1787,12 @@ pub fn code_lines_in(
             continue;
         }
         let block = entry.block as usize;
-        let total = code_line_count(doc, block);
-        let lines = lay.table.lines_over(position, total, &range);
-        if !lines.is_empty() {
-            out.push((block, lines));
+        let total = code_unit_count(doc, &lay.table, position);
+        let units = lay.table.lines_over(position, total, &range);
+        if !units.is_empty() {
+            let first = lay.table.unit_place(position, units.start).line;
+            let last = lay.table.unit_place(position, units.end - 1).line;
+            out.push((block, first..last + 1));
         }
     }
     out
@@ -1476,12 +1820,12 @@ fn partition(n: usize, pred: impl Fn(usize) -> bool) -> usize {
 }
 
 impl BlockTable {
-    /// Lines of code position `position` overlapping `range`, out of
-    /// `total` lines. A line's bottom is the next line's top, since the
-    /// lines tile the panel.
+    /// Units of code position `position` overlapping `range`, out of
+    /// `total` units. A unit's bottom is the next unit's top, since the
+    /// units tile the panel.
     fn lines_over(&self, position: usize, total: usize, range: &Range<f32>) -> Range<usize> {
-        let start = partition(total, |l| self.code_line_top(position, l + 1) < range.start);
-        let end = partition(total, |l| self.code_line_top(position, l) <= range.end);
+        let start = partition(total, |u| self.unit_top(position, u + 1) < range.start);
+        let end = partition(total, |u| self.unit_top(position, u) <= range.end);
         start..end.max(start)
     }
 }
@@ -1492,6 +1836,12 @@ fn code_line_count(doc: &Document, block: usize) -> usize {
         BlockKind::CodeBlock { lines, .. } => lines.len(),
         _ => 0,
     }
+}
+
+/// The unit count of a placed code position; zero for anything else.
+fn code_unit_count(doc: &Document, table: &BlockTable, position: usize) -> usize {
+    let lines = code_line_count(doc, table.entries[position].block as usize);
+    table.unit_of(position, lines)
 }
 
 /// One side of a window fill: whole positions to replay and, at the
@@ -1663,7 +2013,7 @@ fn line_jump(
         if entry.flags & ENTRY_CODE == 0 || !target.contains(&position) {
             return false;
         }
-        let total = code_line_count(doc, entry.block as usize);
+        let total = code_unit_count(doc, &lay.table, position);
         let allowed = lay.table.lines_over(position, total, range);
         let lines = &window.marks[position - window.start].lines;
         // The segment line eviction will leave, including its collapse
@@ -1691,7 +2041,7 @@ fn plan_line_evictions(
     let mut back = None;
     let first = &lay.table.entries[kept.start];
     if first.flags & ENTRY_CODE != 0 {
-        let total = code_line_count(doc, first.block as usize);
+        let total = code_unit_count(doc, &lay.table, kept.start);
         let allowed = lay.table.lines_over(kept.start, total, range);
         let lines = &mark_of(kept.start).lines;
         if lines.start < allowed.start {
@@ -1701,7 +2051,7 @@ fn plan_line_evictions(
     let last_pos = kept.end - 1;
     let last = &lay.table.entries[last_pos];
     if last.flags & ENTRY_CODE != 0 {
-        let total = code_line_count(doc, last.block as usize);
+        let total = code_unit_count(doc, &lay.table, last_pos);
         let allowed = lay.table.lines_over(last_pos, total, range);
         let lines = &mark_of(last_pos).lines;
         if lines.end > allowed.end {
@@ -1726,7 +2076,7 @@ fn plan_fill_front(
     if first.flags & ENTRY_CODE != 0 && target.contains(&kept.start) {
         let window = lay.window.as_ref().expect("windowed layout");
         let lines = &window.marks[kept.start - window.start].lines;
-        let total = code_line_count(doc, first.block as usize);
+        let total = code_unit_count(doc, &lay.table, kept.start);
         let need = lay.table.lines_over(kept.start, total, fill);
         if need.start < lines.start {
             extend = Some((kept.start, need.start..lines.start));
@@ -1755,7 +2105,7 @@ fn plan_fill_back(
     if last.flags & ENTRY_CODE != 0 && target.contains(&last_pos) {
         let window = lay.window.as_ref().expect("windowed layout");
         let lines = &window.marks[last_pos - window.start].lines;
-        let total = code_line_count(doc, last.block as usize);
+        let total = code_unit_count(doc, &lay.table, last_pos);
         let need = lay.table.lines_over(last_pos, total, fill);
         if need.end > lines.end {
             extend = Some((last_pos, lines.end..need.end));
@@ -1813,19 +2163,20 @@ struct OpenCode {
     size: f32,
     line_height: f32,
     wrap_width: f32,
-    line: usize,
-    /// Height beyond the shared line height accumulated by wrapped lines.
+    /// The next unit to place.
+    unit: usize,
+    /// Height beyond the shared line height accumulated by wrapped units.
     extra: f32,
-    /// Lines inside the retention bound so far.
+    /// Units inside the retention bound so far.
     kept: Option<Range<usize>>,
     /// Element state at the block's start, for dropping it whole.
     counts: ElementCounts,
 }
 
 impl OpenCode {
-    /// The top of the next line to place: the bottom of what is placed.
+    /// The top of the next unit to place: the bottom of what is placed.
     fn line_top(&self) -> f32 {
-        code_line_y(self.y0 + self.pad, self.line, self.line_height, self.extra)
+        code_line_y(self.y0 + self.pad, self.unit, self.line_height, self.extra)
     }
 }
 
@@ -1897,10 +2248,8 @@ pub fn layout_begin(
         seed_position: 0,
         seed_line: 0,
         retain: None,
-        steps: false,
         counter: None,
         counting: None,
-        long: None,
     };
     let mut out = LayoutDoc::default();
     out.table.margin = margin;
@@ -1963,12 +2312,12 @@ pub fn layout_more(
     pool_sync(doc, theme, cfg, pass);
     // Seed before the first deadline check, so even an expired slice
     // leaves the workers fed for the next one.
-    pool_top_up(doc, pass);
+    pool_top_up(doc, out, pass);
     while !pass.done {
         if deadline.is_some_and(|at| Instant::now() >= at) {
             return false;
         }
-        pool_top_up(doc, pass);
+        pool_top_up(doc, out, pass);
         layout_step(doc, theme, fonts, media, cfg, out, pass);
     }
     // A bounded pass dropped most blocks but their side text stayed
@@ -2119,8 +2468,7 @@ fn pool_sync(doc: &Document, theme: &Theme, cfg: &ViewConfig, pass: &mut LayoutP
     match &pass.open {
         Some(open) => {
             pass.seed_position = open.position;
-            // The line being shaped a chunk at a step takes no worker.
-            pass.seed_line = open.line + usize::from(pass.long.is_some());
+            pass.seed_line = open.unit;
         }
         None => {
             pass.seed_position = pass.position;
@@ -2130,7 +2478,7 @@ fn pool_sync(doc: &Document, theme: &Theme, cfg: &ViewConfig, pass: &mut LayoutP
 }
 
 /// Keeps the claim queue ahead of the assembler by a bounded window.
-fn pool_top_up(doc: &Document, pass: &mut LayoutPass) {
+fn pool_top_up(doc: &Document, out: &mut LayoutDoc, pass: &mut LayoutPass) {
     let Some(pool) = pass.pool.clone() else {
         return;
     };
@@ -2148,26 +2496,30 @@ fn pool_top_up(doc: &Document, pass: &mut LayoutPass) {
             lines, highlights, ..
         } = &block.kind
         {
-            if pass.seed_line >= lines.len() {
+            out.table.read_long(doc, pass.seed_position, index);
+            if pass.seed_line >= out.table.unit_of(pass.seed_position, lines.len()) {
                 pass.seed_position += 1;
                 pass.seed_line = 0;
                 continue;
             }
-            let line_index = pass.seed_line;
+            let unit_index = pass.seed_line;
             pass.seed_line += 1;
-            let line = lines.line(&doc.source, line_index);
-            if line.is_empty() {
+            let unit = unit_text(
+                &out.table,
+                pass.seed_position,
+                unit_index,
+                lines,
+                highlights,
+                &doc.source,
+            );
+            if unit.text.is_empty() {
                 continue;
             }
-            // Such a line of a block shaped in steps (`in_steps`).
-            if line.len() > GIANT_LINE && pass.steps && !code_framed(doc) {
-                continue;
-            }
-            // A line the assembler counts needs no shaping.
+            // A unit the assembler counts needs no shaping.
             if pass.counting == Some(pass.seed_position)
                 && pass.counter.is_some()
-                && super::rows::countable(line)
-                && highlights.get(line_index).is_none_or(|s| regular_face(s))
+                && super::rows::countable(unit.text)
+                && highlights.get(unit.line).is_none_or(|s| regular_face(s))
             {
                 continue;
             }
@@ -2188,13 +2540,15 @@ fn pool_top_up(doc: &Document, pass: &mut LayoutPass) {
             };
             pool.submit(Job {
                 generation: pass.pool_generation,
-                key: StepKey::step(pass.seed_position, line_index),
+                key: StepKey::step(pass.seed_position, unit_index),
                 ctx: std::sync::Arc::clone(&ctx),
                 work: Work::CodeLine {
-                    line: line.to_string(),
-                    segments: highlights.get(line_index).cloned().unwrap_or_default(),
+                    line: unit.text.to_string(),
+                    segments: unit.segments.into_owned(),
                     block_index: index,
-                    line_index,
+                    line_index: unit.line,
+                    unit: unit_index,
+                    piece: unit.piece,
                     x0: x_base + pad,
                     size,
                     line_height: metrics::LINE_HEIGHT * size,
@@ -2364,12 +2718,9 @@ fn placed_height(pass: &LayoutPass) -> f32 {
     if pass.first {
         return 0.0;
     }
-    match (&pass.open, &pass.long) {
-        // The chunks of a long line shaped so far count as placed, so
-        // the view can follow them.
-        (Some(open), Some(long)) => open.line_top() + long.height + open.pad + pass.vertical_margin,
-        (Some(open), None) => open.line_top() + open.pad + pass.vertical_margin,
-        (None, _) => pass.cursor + pass.vertical_margin,
+    match &pass.open {
+        Some(open) => open.line_top() + open.pad + pass.vertical_margin,
+        None => pass.cursor + pass.vertical_margin,
     }
 }
 
@@ -2516,6 +2867,7 @@ fn place_block(
     // over as many steps as the slice budget allows.
     if is_code {
         pass.scratch = scratch;
+        out.table.read_long(doc, pass.position - 1, block_index);
         let open = open_code(
             theme,
             cfg,
@@ -2894,7 +3246,7 @@ impl LayoutDoc {
         let window = self.window.as_mut().expect("windowed layout");
         let mark0 = window.marks.front().expect("a first position").clone();
         let upto = upto.clamp(mark0.lines.start, mark0.lines.end);
-        let cut = self.code_lines[..mark0.code].partition_point(|c| c.line < upto);
+        let cut = self.code_lines[..mark0.code].partition_point(|c| c.unit < upto);
         if cut > 0 {
             let lo = self.code_lines[0].runs.start;
             let hi = self.code_lines[cut - 1].runs.end;
@@ -2931,7 +3283,7 @@ impl LayoutDoc {
             0
         };
         let records = &self.code_lines[prev_code..last.code];
-        let cut = prev_code + records.partition_point(|c| c.line < from);
+        let cut = prev_code + records.partition_point(|c| c.unit < from);
         if cut < last.code {
             let lo = self.code_lines[cut].runs.start;
             self.runs.truncate(lo);
@@ -3158,20 +3510,29 @@ fn seed_plan(
             &ctx.cfg,
             &doc.source,
         );
-        for line in lines {
-            let text = source_lines.line(&doc.source, line);
-            if text.is_empty() {
+        for unit_index in lines {
+            let unit = unit_text(
+                table,
+                position,
+                unit_index,
+                source_lines,
+                highlights,
+                &doc.source,
+            );
+            if unit.text.is_empty() {
                 continue;
             }
             pool.submit(Job {
                 generation,
-                key: StepKey::step(position, line),
+                key: StepKey::step(position, unit_index),
                 ctx: std::sync::Arc::clone(ctx),
                 work: Work::CodeLine {
-                    line: text.to_string(),
-                    segments: highlights.get(line).cloned().unwrap_or_default(),
+                    line: unit.text.to_string(),
+                    segments: unit.segments.into_owned(),
                     block_index: entry.block as usize,
-                    line_index: line,
+                    line_index: unit.line,
+                    unit: unit_index,
+                    piece: unit.piece,
                     x0: x_base + entry.pad,
                     size: code_face(doc.plain_file, &ctx.cfg).1 * ctx.cfg.zoom,
                     line_height: entry.line_height,
@@ -3197,7 +3558,7 @@ fn seed_plan(
         }
         let block = &doc.blocks[entry.block as usize];
         if entry.flags & ENTRY_CODE != 0 {
-            let total = code_line_count(doc, entry.block as usize);
+            let total = code_unit_count(doc, table, position);
             seed_lines(position, table.lines_over(position, total, &plan.fill));
             continue;
         }
@@ -3371,7 +3732,7 @@ fn replay_position(
                 out.rects.push(rect);
             }
         }
-        let total = code_line_count(doc, entry.block as usize);
+        let total = code_unit_count(doc, table, position);
         lines = table.lines_over(position, total, fill);
         replay_code_lines(
             doc,
@@ -3442,7 +3803,8 @@ fn replay_position(
     lines
 }
 
-/// Re-shapes a recorded code block's lines at their recorded tops.
+/// Re-shapes a recorded code block's units `lines` at their recorded
+/// tops.
 #[allow(clippy::too_many_arguments)]
 fn replay_code_lines(
     doc: &Document,
@@ -3476,27 +3838,27 @@ fn replay_code_lines(
     let base = entry.content_y + entry.pad;
     let tall = table.tall_of(position);
     let (mut extra, mut next_tall) = table.extra_above(position, lines.start);
-    let empty: Vec<(Range<usize>, SyntaxRole)> = Vec::new();
     let mut scratch = LayoutDoc::default();
     for line in lines {
         let top = code_line_y(base, line, entry.line_height, extra);
-        let text = source_lines.line(&doc.source, line);
-        if !text.is_empty() {
+        let unit = unit_text(table, position, line, source_lines, highlights, &doc.source);
+        if !unit.text.is_empty() {
             match take(StepKey::step(position, line)) {
                 Some(shaped) => {
                     let mut ready = shaped.scratch;
                     out.splice(&mut ready, top);
                 }
                 None => {
-                    let segments = highlights.get(line).unwrap_or(&empty);
                     shape_code_line_step(
                         fonts,
                         theme,
                         cfg,
-                        text,
-                        segments,
+                        unit.text,
+                        &unit.segments,
                         entry.block as usize,
+                        unit.line,
                         line,
+                        unit.piece,
                         x0,
                         size,
                         entry.line_height,
@@ -3731,7 +4093,7 @@ fn open_code(
         size,
         line_height,
         wrap_width,
-        line: 0,
+        unit: 0,
         extra: 0.0,
         kept: None,
         counts,
@@ -3758,108 +4120,8 @@ fn code_panel_rects(
     ]
 }
 
-/// Whether a line no worker had ready is shaped a chunk at a step: a
-/// line of more than `LONG_LINE` bytes of a block with no panel (a code
-/// or text file), in a pass that asks for steps (the window's and the
-/// export's). A fenced block's panel is sized as each line is placed,
-/// and the export drains what it has paginated: a line of such a block
-/// left in chunks would let it drain the panel, so there a long line is
-/// shaped at once. A full layout shapes it at once too.
-fn in_steps(pass: &LayoutPass, open: &OpenCode, line: &str) -> bool {
-    pass.long.is_some() || (line.len() > LONG_LINE && pass.steps && !open.framed)
-}
-
-/// The record of a long line whose first chunks are placed: the last
-/// record, when it is that line's.
-fn long_line_record(out: &LayoutDoc, block: usize, line: usize) -> Option<usize> {
-    let last = out.code_lines.len().checked_sub(1)?;
-    let record = &out.code_lines[last];
-    (record.block == block && record.line == line).then_some(last)
-}
-
-/// Shapes the next chunk of a long line and joins its runs to the
-/// layout under the line's record. Answers the line's height once its
-/// last chunk is shaped, None while chunks are left. The runs and the
-/// height are those of `shape_code_line_step` on the whole line, spliced
-/// at `top`: the same chunks, each shaped at the height of those before
-/// it, the heights added in the same order.
-#[allow(clippy::too_many_arguments)]
-fn long_line_step(
-    fonts: &mut FontStore,
-    theme: &Theme,
-    cfg: &ViewConfig,
-    line: &str,
-    segments: &[(Range<usize>, SyntaxRole)],
-    open: &OpenCode,
-    x0: f32,
-    top: f32,
-    prose: bool,
-    out: &mut LayoutDoc,
-    pass: &mut LayoutPass,
-) -> Option<f32> {
-    let mut long = match pass.long.take() {
-        Some(long) => long,
-        None => {
-            let runs = out.runs.len();
-            out.code_lines.push(CodeLine {
-                block: open.block,
-                line: open.line,
-                runs: runs..runs,
-                x0,
-                y0: top,
-                size: open.size,
-                line_height: open.line_height,
-                wrap_width: open.wrap_width,
-            });
-            LongLine {
-                position: open.position,
-                line: open.line,
-                chunks: long_line_chunks(line),
-                next: 0,
-                height: 0.0,
-            }
-        }
-    };
-    let record = long_line_record(out, open.block, open.line)?;
-    let chunk = long.chunks[long.next].clone();
-    let whole_line = [(0..line.len(), SyntaxRole::Plain)];
-    let segments: &[(Range<usize>, SyntaxRole)] = if segments.is_empty() {
-        &whole_line
-    } else {
-        segments
-    };
-    let local = segments_within(segments, &chunk);
-    let mut scratch = std::mem::take(&mut pass.scratch);
-    long.height += shape_code_chunk(
-        fonts,
-        theme,
-        cfg,
-        &line[chunk.clone()],
-        chunk.start,
-        open.line,
-        &local,
-        open.block,
-        x0,
-        long.height,
-        open.size,
-        open.line_height,
-        open.wrap_width,
-        prose,
-        &mut scratch,
-    );
-    out.splice(&mut scratch, top);
-    pass.scratch = scratch;
-    out.code_lines[record].runs.end = out.runs.len();
-    long.next += 1;
-    if long.next < long.chunks.len() {
-        pass.long = Some(long);
-        return None;
-    }
-    Some(long.height.max(open.line_height))
-}
-
-/// Places one line of the open code block and grows its panel, or closes
-/// the block once its last line is placed.
+/// Places one unit of the open code block and grows its panel, or closes
+/// the block once its last unit is placed.
 fn place_code_line(
     doc: &Document,
     theme: &Theme,
@@ -3876,7 +4138,8 @@ fn place_code_line(
     else {
         return;
     };
-    if open.line >= lines.len() {
+    let units = out.table.unit_of(open.position, lines.len());
+    if open.unit >= units {
         let height = open.line_top() - open.y0 + open.pad;
         finish_block(
             theme,
@@ -3894,46 +4157,31 @@ fn place_code_line(
     }
 
     let top = open.line_top();
-    let line = lines.line(&doc.source, open.line);
-    // Where the line's elements start: the ends of the vectors, or the
-    // record of a long line whose first chunks are placed already.
-    let in_chunks = pass
-        .long
-        .as_ref()
-        .is_some_and(|long| long.position == open.position && long.line == open.line);
-    let resumed = in_chunks
-        .then(|| long_line_record(out, open.block, open.line))
-        .flatten();
-    // In a pass that keeps every line, the export's, a line in chunks
-    // has its record: the drain stops before the last row placed. A
-    // line without one would start over above its rows already on a
-    // page.
-    debug_assert!(
-        resumed.is_some() || !in_chunks || pass.retain.is_some(),
-        "a line in chunks lost its record"
+    let unit = unit_text(
+        &out.table,
+        open.position,
+        open.unit,
+        lines,
+        highlights,
+        &doc.source,
     );
-    let (runs_mark, code_mark) = match resumed {
-        Some(record) => (out.code_lines[record].runs.start, record),
-        None => {
-            pass.long = None;
-            (out.runs.len(), out.code_lines.len())
-        }
-    };
+    let (runs_mark, code_mark) = (out.runs.len(), out.code_lines.len());
+    let x0 = open.frame.x_base + open.pad;
     let mut advance = open.line_height;
-    // A line of plain ASCII past the kept lines of a long block: its
+    // A unit of plain ASCII past the kept units of a long block: its
     // height by the count, with no shaping.
     let counted = match (&pass.counter, pass.retain) {
         (Some(widths), Some((scroll, viewport_h)))
             if pass.counting == Some(open.position)
-                && !line.is_empty()
+                && !unit.text.is_empty()
                 && widths.is_for(open.size)
-                && super::rows::countable(line)
-                && highlights.get(open.line).is_none_or(|s| regular_face(s)) =>
+                && super::rows::countable(unit.text)
+                && highlights.get(unit.line).is_none_or(|s| regular_face(s)) =>
         {
-            let height = widths.height(line, open.wrap_width, open.line_height);
+            let height = widths.height(unit.text, open.wrap_width, open.line_height);
             let range = retain_range(scroll, viewport_h);
             let inside = top <= range.end && top + height >= range.start;
-            let contiguous = open.kept.as_ref().is_none_or(|kept| kept.end == open.line);
+            let contiguous = open.kept.as_ref().is_none_or(|kept| kept.end == open.unit);
             (!(inside && contiguous)).then_some(height)
         }
         _ => None,
@@ -3941,18 +4189,18 @@ fn place_code_line(
     if let Some(height) = counted {
         #[cfg(debug_assertions)]
         {
-            let empty: Vec<(Range<usize>, SyntaxRole)> = Vec::new();
-            let segments = highlights.get(open.line).unwrap_or(&empty);
             let mut scratch = LayoutDoc::default();
             let shaped = shape_code_line_step(
                 fonts,
                 theme,
                 cfg,
-                line,
-                segments,
+                unit.text,
+                &unit.segments,
                 open.block,
-                open.line,
-                open.frame.x_base + open.pad,
+                unit.line,
+                open.unit,
+                unit.piece,
+                x0,
                 open.size,
                 open.line_height,
                 open.wrap_width,
@@ -3962,27 +4210,21 @@ fn place_code_line(
             debug_assert_eq!(
                 height.to_bits(),
                 shaped.to_bits(),
-                "line {} counted {height}, shaped {shaped}",
-                open.line
+                "unit {} counted {height}, shaped {shaped}",
+                open.unit
             );
         }
         advance = height;
         if advance != open.line_height {
             out.table
-                .push_tall(open.position, open.line as u32, advance);
+                .push_tall(open.position, open.unit as u32, advance);
         }
-    } else if !line.is_empty() {
-        let key = StepKey::step(open.position, open.line);
-        let pooled = match pass.long {
-            Some(_) => None,
-            None => pass
-                .pool
-                .as_ref()
-                .and_then(|pool| pool.take(pass.pool_generation, key)),
-        };
-        let empty: Vec<(Range<usize>, SyntaxRole)> = Vec::new();
-        let segments = highlights.get(open.line).unwrap_or(&empty);
-        let x0 = open.frame.x_base + open.pad;
+    } else if !unit.text.is_empty() {
+        let key = StepKey::step(open.position, open.unit);
+        let pooled = pass
+            .pool
+            .as_ref()
+            .and_then(|pool| pool.take(pass.pool_generation, key));
         let shaped = match pooled {
             Some(shaped) => {
                 let mut scratch = shaped.scratch;
@@ -3990,39 +4232,18 @@ fn place_code_line(
                 pass.scratch = scratch;
                 shaped.height
             }
-            None if in_steps(pass, &open, line) => {
-                let step = long_line_step(
-                    fonts,
-                    theme,
-                    cfg,
-                    line,
-                    segments,
-                    &open,
-                    x0,
-                    top,
-                    doc.plain_file,
-                    out,
-                    pass,
-                );
-                match step {
-                    Some(height) => height,
-                    // More chunks to shape: the line is not placed yet.
-                    None => {
-                        pass.open = Some(open);
-                        return;
-                    }
-                }
-            }
             None => {
                 let mut scratch = std::mem::take(&mut pass.scratch);
                 let advance = shape_code_line_step(
                     fonts,
                     theme,
                     cfg,
-                    line,
-                    segments,
+                    unit.text,
+                    &unit.segments,
                     open.block,
-                    open.line,
+                    unit.line,
+                    open.unit,
+                    unit.piece,
                     x0,
                     open.size,
                     open.line_height,
@@ -4038,20 +4259,20 @@ fn place_code_line(
         advance = shaped;
         if advance != open.line_height {
             out.table
-                .push_tall(open.position, open.line as u32, advance);
+                .push_tall(open.position, open.unit as u32, advance);
         }
     }
-    // A line outside the retention bound was measured and drops; one
+    // A unit outside the retention bound was measured and drops; one
     // that would leave a gap in the kept segment drops too, and the
     // slide materializes it later.
     if let Some((scroll, viewport_h)) = pass.retain {
         let range = retain_range(scroll, viewport_h);
         let inside = top <= range.end && top + advance >= range.start;
-        let contiguous = open.kept.as_ref().is_none_or(|kept| kept.end == open.line);
+        let contiguous = open.kept.as_ref().is_none_or(|kept| kept.end == open.unit);
         if inside && contiguous {
             match &mut open.kept {
-                Some(kept) => kept.end = open.line + 1,
-                None => open.kept = Some(open.line..open.line + 1),
+                Some(kept) => kept.end = open.unit + 1,
+                None => open.kept = Some(open.unit..open.unit + 1),
             }
         } else {
             out.runs.truncate(runs_mark);
@@ -4059,12 +4280,12 @@ fn place_code_line(
             if out.index.runs.indexed > runs_mark {
                 out.index.runs.clear();
             }
-            // A line of a long block was measured and dropped: from
-            // here the block's lines in the code face are counted where
-            // a line allows it.
+            // A unit of a long block was measured and dropped: from
+            // here the block's units in the code face are counted where
+            // a unit allows it.
             if pass.counting != Some(open.position)
                 && !doc.plain_file
-                && lines.len() - open.line >= COUNT_FROM
+                && units - open.unit >= COUNT_FROM
             {
                 if !pass.counter.as_ref().is_some_and(|w| w.is_for(open.size)) {
                     let face = code_face(doc.plain_file, cfg).0;
@@ -4079,7 +4300,7 @@ fn place_code_line(
     if advance != open.line_height {
         open.extra += advance - open.line_height;
     }
-    open.line += 1;
+    open.unit += 1;
 
     if open.framed {
         let height = open.line_top() - open.y0 + open.pad;
@@ -6916,33 +7137,8 @@ pub fn recolor_batch(
     fonts: &mut FontStore,
     cfg: &ViewConfig,
     patches: &[(usize, Range<usize>)],
-    mut pass: Option<&mut LayoutPass>,
+    pass: Option<&mut LayoutPass>,
 ) -> Option<(usize, usize, isize)> {
-    // A line the pass is shaping a chunk at a step has a record and a
-    // part of its runs. Shaping it whole here would leave the pass to
-    // add its remaining chunks a second time: the line starts over, and
-    // its chunks take the document's colors as the pass shapes them.
-    if let Some(pass) = pass.as_deref_mut() {
-        let open = pass
-            .long
-            .as_ref()
-            .zip(pass.open.as_ref())
-            .map(|(long, open)| (open.block, long.line));
-        if let Some((block, line)) = open {
-            let named = patches
-                .iter()
-                .any(|(b, lines)| *b == block && lines.contains(&line));
-            if let Some(record) = long_line_record(lay, block, line).filter(|_| named) {
-                let runs = lay.code_lines[record].runs.start;
-                lay.runs.truncate(runs);
-                lay.code_lines.truncate(record);
-                if lay.index.runs.indexed > runs {
-                    lay.index.runs.clear();
-                }
-                pass.long = None;
-            }
-        }
-    }
     // Records sort by (block, line) and their run ranges rise with it,
     // so the affected list visits the run vector strictly left to right.
     let mut affected: Vec<usize> = Vec::new();
@@ -6968,7 +7164,6 @@ pub fn recolor_batch(
     let mut rebuilt: Vec<TextRun> = Vec::with_capacity(run_hi - run_lo);
     let mut copied = run_lo;
     let mut scratch = LayoutDoc::default();
-    let empty: Vec<(Range<usize>, SyntaxRole)> = Vec::new();
     let mut next = affected.iter().peekable();
     for index in first..lay.code_lines.len() {
         if next.peek() != Some(&&index) {
@@ -6994,12 +7189,31 @@ pub fn recolor_batch(
                 return None;
             }
             let line = source_lines.line(&doc.source, record.line);
-            let segments = highlights.get(record.line).unwrap_or(&empty);
-            shape_code_line(
+            let colors: &[(Range<usize>, SyntaxRole)] =
+                highlights.get(record.line).map_or(&[], |s| s);
+            // A piece is shaped again from its own bytes. One whose
+            // line changed under it keeps its old runs, and so does a
+            // line that grew past what one record holds.
+            let (text, local) = if record.piece {
+                let text = line.get(record.bytes.clone())?;
+                (text, Some(segments_within(colors, &record.bytes)))
+            } else if line.len() > LONG_LINE {
+                return None;
+            } else {
+                (line, None)
+            };
+            let whole = [(0..text.len(), SyntaxRole::Plain)];
+            let segments = match local.as_deref().unwrap_or(colors) {
+                [] => &whole[..],
+                segments => segments,
+            };
+            let base = if record.piece { record.bytes.start } else { 0 };
+            shape_code_chunk(
                 fonts,
                 theme,
                 cfg,
-                line,
+                text,
+                base,
                 record.line,
                 segments,
                 record.block,
@@ -7065,7 +7279,9 @@ pub fn recolor_batch(
 /// tall exceptions and every height shift arithmetically, and the
 /// window clears so the standing per-frame refill re-materializes the
 /// band from the corrected table. Nothing else in the document
-/// re-measures. The document must already carry the edit. Answers
+/// re-measures: of a line longer than `LONG_LINE`, the pieces the edit
+/// changed alone. The document must already carry the edit, and `edit`
+/// is the new text's bytes in its source. Answers
 /// false when the layout is not windowed or the block is not placed as
 /// a code entry, the caller's cue to restart the pass instead.
 #[allow(clippy::too_many_arguments)]
@@ -7078,6 +7294,7 @@ pub fn edit_code_lines(
     block: usize,
     old_lines: Range<usize>,
     new_lines: Range<usize>,
+    edit: Range<usize>,
 ) -> bool {
     if lay.window.is_none() {
         return false;
@@ -7098,13 +7315,33 @@ pub fn edit_code_lines(
         return false;
     };
 
-    // What the touched lines measured before the edit: the shared
+    // The units of the touched lines before the edit and after it,
+    // less the pieces of a long line the edit left as they were: their
+    // heights stand.
+    let old_units =
+        lay.table.unit_of(position, old_lines.start)..lay.table.unit_of(position, old_lines.end);
+    let (head, tail) =
+        lay.table
+            .edit_long(lines, &doc.source, position, &old_lines, &new_lines, &edit);
+    let new_units =
+        lay.table.unit_of(position, new_lines.start)..lay.table.unit_of(position, new_lines.end);
+    debug_assert_eq!(
+        lay.table.long_of(position),
+        long_lines_of(lines, &doc.source),
+        "the long lines after the edit are the document's"
+    );
+    let same = (head + tail).min(old_units.len()).min(new_units.len());
+    let (head, tail) = (head.min(same), same - head.min(same));
+    let old_units = old_units.start + head..old_units.end - tail;
+    let new_units = new_units.start + head..new_units.end - tail;
+
+    // What the touched units measured before the edit: the shared
     // advance plus their tall exceptions.
-    let mut old_h = old_lines.len() as f32 * line_height;
+    let mut old_h = old_units.len() as f32 * line_height;
     let tall = lay.table.tall_of(position);
-    let first = tall.partition_point(|&(_, l, _)| (l as usize) < old_lines.start);
+    let first = tall.partition_point(|&(_, l, _)| (l as usize) < old_units.start);
     for &(_, l, h) in &tall[first..] {
-        if l as usize >= old_lines.end {
+        if l as usize >= old_units.end {
             break;
         }
         old_h += h - line_height;
@@ -7122,26 +7359,26 @@ pub fn edit_code_lines(
     let x0 = x_base + pad;
     let wrap_width = (avail - 2.0 * pad).max(40.0);
     let size = code_face(doc.plain_file, cfg).1 * cfg.zoom;
-    let empty: Vec<(Range<usize>, SyntaxRole)> = Vec::new();
     let mut scratch = LayoutDoc::default();
     let mut new_h = 0.0_f32;
     let mut new_tall: Vec<(u32, u32, f32)> = Vec::new();
-    for line in new_lines.clone() {
-        let text = lines.line(&doc.source, line);
-        let advance = if text.is_empty() {
+    for line in new_units.clone() {
+        let unit = unit_text(&lay.table, position, line, lines, highlights, &doc.source);
+        let advance = if unit.text.is_empty() {
             line_height
         } else {
             scratch.runs.clear();
             scratch.code_lines.clear();
-            let segments = highlights.get(line).unwrap_or(&empty);
             shape_code_line_step(
                 fonts,
                 theme,
                 cfg,
-                text,
-                segments,
+                unit.text,
+                &unit.segments,
                 block,
+                unit.line,
                 line,
+                unit.piece,
                 x0,
                 size,
                 line_height,
@@ -7156,16 +7393,16 @@ pub fn edit_code_lines(
         new_h += advance;
     }
     let dy = new_h - old_h;
-    let line_delta = new_lines.len() as isize - old_lines.len() as isize;
+    let line_delta = new_units.len() as isize - old_units.len() as isize;
 
     // The tall exceptions: the touched range's entries swap for the
     // measured ones, the position's later lines re-index.
     let tall = &mut lay.table.tall;
     let p = position as u32;
     let lo =
-        tall.partition_point(|&(tp, tl, _)| tp < p || (tp == p && (tl as usize) < old_lines.start));
+        tall.partition_point(|&(tp, tl, _)| tp < p || (tp == p && (tl as usize) < old_units.start));
     let hi =
-        tall.partition_point(|&(tp, tl, _)| tp < p || (tp == p && (tl as usize) < old_lines.end));
+        tall.partition_point(|&(tp, tl, _)| tp < p || (tp == p && (tl as usize) < old_units.end));
     let pos_end = tall.partition_point(|&(tp, _, _)| tp <= p);
     for t in &mut tall[hi..pos_end] {
         t.1 = t.1.wrapping_add_signed(line_delta as i32);
@@ -7213,17 +7450,23 @@ pub fn recolor_code_lines(
     recolor_batch(lay, doc, theme, fonts, cfg, &[(block, lines)], None)
 }
 
-/// Shapes one code line into the scratch from zero, record included:
-/// the unit place_code_line and a pool worker share.
+/// Shapes one unit of a code block into the scratch from zero, record
+/// included: what `place_code_line` and a pool worker share. `text` is
+/// a line, or the piece of a line longer than `LONG_LINE` that starts
+/// `piece` bytes into it; its styled ranges count from its first byte,
+/// and its runs keep their byte offsets into the whole line, so
+/// selection, copy, search and the editor see one line.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn shape_code_line_step(
     fonts: &mut FontStore,
     theme: &Theme,
     cfg: &ViewConfig,
-    line: &str,
+    text: &str,
     segments: &[(Range<usize>, SyntaxRole)],
     block_index: usize,
     line_index: usize,
+    unit: usize,
+    piece: Option<usize>,
     x0: f32,
     size: f32,
     line_height: f32,
@@ -7231,11 +7474,19 @@ pub(crate) fn shape_code_line_step(
     prose: bool,
     scratch: &mut LayoutDoc,
 ) -> f32 {
-    let advance = shape_code_line(
+    let (base, piece) = (piece.unwrap_or(0), piece.is_some());
+    let whole = [(0..text.len(), SyntaxRole::Plain)];
+    let segments: &[(Range<usize>, SyntaxRole)] = if segments.is_empty() {
+        &whole
+    } else {
+        segments
+    };
+    let height = shape_code_chunk(
         fonts,
         theme,
         cfg,
-        line,
+        text,
+        base,
         line_index,
         segments,
         block_index,
@@ -7250,6 +7501,9 @@ pub(crate) fn shape_code_line_step(
     scratch.code_lines.push(CodeLine {
         block: block_index,
         line: line_index,
+        bytes: base..base + text.len(),
+        unit,
+        piece,
         runs: 0..scratch.runs.len(),
         x0,
         y0: 0.0,
@@ -7257,86 +7511,14 @@ pub(crate) fn shape_code_line_step(
         line_height,
         wrap_width,
     });
-    advance
-}
-
-/// Shapes one code line: one row per source line, wrapping inside the
-/// panel, colors from the highlight roles. A line longer than
-/// `LONG_LINE` shapes in chunks, each its own buffer stacked under the
-/// previous one, so the cost stays linear in the line's length; the
-/// runs keep their byte offsets into the whole line, so selection,
-/// copy, search and the editor see one line.
-#[allow(clippy::too_many_arguments)]
-fn shape_code_line(
-    fonts: &mut FontStore,
-    theme: &Theme,
-    cfg: &ViewConfig,
-    line: &str,
-    line_index: usize,
-    segments: &[(Range<usize>, SyntaxRole)],
-    block_index: usize,
-    x0: f32,
-    y0: f32,
-    size: f32,
-    line_height: f32,
-    wrap_width: f32,
-    prose: bool,
-    out: &mut LayoutDoc,
-) -> f32 {
-    let whole_line = [(0..line.len(), SyntaxRole::Plain)];
-    let segments: &[(Range<usize>, SyntaxRole)] = if segments.is_empty() {
-        &whole_line
-    } else {
-        segments
-    };
-    if line.len() <= LONG_LINE {
-        let height = shape_code_chunk(
-            fonts,
-            theme,
-            cfg,
-            line,
-            0,
-            line_index,
-            segments,
-            block_index,
-            x0,
-            y0,
-            size,
-            line_height,
-            wrap_width,
-            prose,
-            out,
-        );
-        return height.max(line_height);
-    }
-    let mut height = 0.0_f32;
-    for chunk in long_line_chunks(line) {
-        let local = segments_within(segments, &chunk);
-        height += shape_code_chunk(
-            fonts,
-            theme,
-            cfg,
-            &line[chunk.clone()],
-            chunk.start,
-            line_index,
-            &local,
-            block_index,
-            x0,
-            y0 + height,
-            size,
-            line_height,
-            wrap_width,
-            prose,
-            out,
-        );
-    }
     height.max(line_height)
 }
 
-/// Cuts a long line into chunks of at most `LONG_LINE` bytes, each
+/// Cuts a long line into pieces of at most `LONG_LINE` bytes, each
 /// ending on a character boundary and, when one sits in the last few
-/// hundred bytes, after a space, so the cut reads as a wrap. A line
-/// within the threshold is one chunk.
+/// hundred bytes, after a space, so the cut reads as a wrap. Each piece
+/// is shaped in its own buffer, so the cost stays linear in the line's
+/// length. A line within the threshold is one piece.
 fn long_line_chunks(line: &str) -> Vec<Range<usize>> {
     const LOOK_BACK: usize = 256;
     let bytes = line.as_bytes();
@@ -7495,6 +7677,8 @@ pub(crate) fn shaped_code_line_height(
         &[],
         0,
         0,
+        0,
+        None,
         0.0,
         size,
         line_height,
@@ -7825,8 +8009,8 @@ mod tests {
     }
 
     /// A pass with a retention bound that keeps every line, stepped
-    /// until the long line 1 has its record and `more` chunks after it;
-    /// then `between`, then the rest of the pass.
+    /// until the long line 1 has its first piece and `more` pieces
+    /// after it; then `between`, then the rest of the pass.
     fn stepped(
         doc: &Document,
         fonts: &mut FontStore,
@@ -7845,7 +8029,10 @@ mod tests {
         for _ in 0..more {
             layout_step(doc, &theme, fonts, &mut media, &cfg, &mut out, &mut pass);
         }
-        assert!(pass.long.is_some(), "the line is in chunks");
+        assert!(
+            out.code_lines.last().is_some_and(|record| record.line == 1) && !pass.is_complete(),
+            "the line is partly placed"
+        );
         between(&mut out, &mut pass, fonts);
         layout_more(
             doc, &theme, fonts, &mut media, &cfg, &mut out, &mut pass, None,
@@ -7864,9 +8051,8 @@ mod tests {
     }
 
     #[test]
-    fn a_recolor_of_a_line_in_chunks_starts_the_line_over() {
+    fn a_recolor_of_a_long_line_partly_placed_changes_no_run() {
         let (doc, _) = long_line_file("recolor.json");
-        // The layout made in one go shapes the line at once.
         let once = lay_of(&doc);
         let mut fonts = FontStore::new();
         for patch in [0..1, 1..2, 0..3] {
@@ -7890,75 +8076,298 @@ mod tests {
         }
     }
 
-    /// The export drains the rows of its written pages while a long
-    /// line is in chunks, and never the last row placed. A drain past
-    /// it would take the line's record, and the line would start over.
+    /// A line longer than `LONG_LINE` is placed a piece at a step, each
+    /// piece a unit of the table. Its runs are those of its chunks
+    /// shaped one under the other: the same text, the same rows, the
+    /// same `x`. A row's `y` is the piece's top plus the row's place in
+    /// the piece, where it was the line's top plus the row's place in
+    /// the line: the two sums can differ in their last bit.
     #[test]
-    #[cfg(debug_assertions)]
-    #[should_panic(expected = "a line in chunks lost its record")]
-    fn a_drain_past_the_record_of_a_line_in_chunks_is_caught() {
-        let (doc, _) = long_line_file("long.json");
-        let (theme, cfg) = (Theme::default_dark(), ViewConfig::default());
-        let mut fonts = FontStore::new();
-        let mut media = MediaCache::offline(PathBuf::from("."));
-        let (mut out, mut pass) = layout_begin(&doc, &cfg, 800.0);
-        pass.long_lines_in_steps();
-        while pass.long.is_none() {
-            assert!(!layout_step(
-                &doc, &theme, &mut fonts, &mut media, &cfg, &mut out, &mut pass
-            ));
-        }
-        let runs = out.runs.len();
-        let code = out.drain_front(runs, 0, 0, 0);
-        pass.rebase(runs, 0, 0, 0, code);
-        layout_step(
-            &doc, &theme, &mut fonts, &mut media, &cfg, &mut out, &mut pass,
-        );
-    }
-
-    #[test]
-    fn a_long_line_placed_in_steps_is_the_line_shaped_at_once() {
+    fn the_pieces_of_a_long_line_are_its_chunks_stacked() {
         let (doc, long) = long_line_file("long.json");
         assert!(long.len() > 10 * LONG_LINE);
         let lay = stepped(&doc, &mut FontStore::new(), 2, |_, _, _| {});
-        let record = lay
-            .code_lines
-            .iter()
-            .find(|record| record.line == 1)
-            .expect("the long line has a record");
+        lay.records_consistent().unwrap();
+        let records: Vec<&CodeLine> = lay.code_lines.iter().filter(|r| r.line == 1).collect();
+        let chunks = long_line_chunks(&long);
+        assert_eq!(records.len(), chunks.len(), "a record a piece");
+        let first = records[0];
         let mut fonts = FontStore::new();
         let mut whole = LayoutDoc::default();
-        let height = shape_code_line_step(
-            &mut fonts,
-            &Theme::default_dark(),
-            &ViewConfig::default(),
-            &long,
-            &[],
-            0,
-            1,
-            record.x0,
-            record.size,
-            record.line_height,
-            record.wrap_width,
-            false,
-            &mut whole,
-        );
+        let mut height = 0.0_f32;
+        let plain = |len: usize| [(0..len, SyntaxRole::Plain)];
+        for (record, chunk) in records.iter().zip(&chunks) {
+            assert_eq!(record.bytes, *chunk);
+            assert!(record.piece);
+            height += shape_code_chunk(
+                &mut fonts,
+                &Theme::default_dark(),
+                &ViewConfig::default(),
+                &long[chunk.clone()],
+                chunk.start,
+                1,
+                &plain(chunk.len()),
+                0,
+                first.x0,
+                height,
+                first.size,
+                first.line_height,
+                first.wrap_width,
+                false,
+                &mut whole,
+            );
+        }
         let top = lay.approx_top(0, 1).unwrap();
-        assert_eq!(record.y0.to_bits(), top.to_bits());
-        assert_eq!(
-            (lay.approx_top(0, 2).unwrap() - top).to_bits(),
-            height.to_bits(),
-            "the line's height"
+        assert_eq!(first.y0.to_bits(), top.to_bits());
+        let near = |a: f32, b: f32| (a - b).abs() <= 4.0 * f32::EPSILON * a.abs().max(b.abs());
+        let placed_height = lay.approx_top(0, 2).unwrap() - top;
+        assert!(
+            near(placed_height + top, height + top),
+            "the line's height: {placed_height} against {height}"
         );
-        let placed = &lay.runs[record.runs.clone()];
+        let last = records[records.len() - 1];
+        let placed = &lay.runs[first.runs.start..last.runs.end];
         assert_eq!(placed.len(), whole.runs.len());
         for (step, once) in placed.iter().zip(&whole.runs) {
             assert_eq!(step.text, once.text);
             assert_eq!(step.x.to_bits(), once.x.to_bits());
-            assert_eq!(step.y.to_bits(), (once.y + top).to_bits());
-            assert_eq!(step.baseline.to_bits(), (once.baseline + top).to_bits());
             assert_eq!(step.width.to_bits(), once.width.to_bits());
+            assert_eq!(
+                (step.baseline - step.y).round(),
+                (once.baseline - once.y).round()
+            );
+            assert!(
+                near(step.y, once.y + top),
+                "{} against {}",
+                step.y,
+                once.y + top
+            );
         }
+        // The lines around it are units as before, and the table
+        // answers in lines.
+        assert_eq!(lay.code_line_at(0, 3, top + 1.0), Some(1));
+        assert_eq!(lay.code_line_at(0, 3, top + height - 1.0), Some(1));
+        assert_eq!(lay.code_line_at(0, 3, top + height + 1.0), Some(2));
+        assert_eq!(lay.code_line_at(0, 3, top - 1.0), Some(0));
+        let middle = &records[chunks.len() / 2];
+        for byte in [middle.bytes.start, middle.bytes.end - 1] {
+            let piece_top = lay.approx_top_at(0, 1, byte).unwrap();
+            assert_eq!(piece_top.to_bits(), middle.y0.to_bits());
+            let span = lay.code_span_at(0, 1, byte).unwrap();
+            assert_eq!(span.start.to_bits(), middle.y0.to_bits());
+            assert_eq!(
+                lay.code_place_at(0, 3, span.start + 1.0),
+                Some((1, middle.bytes.start))
+            );
+            assert_eq!(
+                lay.code_place_at(0, 3, span.end - 1.0),
+                Some((1, middle.bytes.start))
+            );
+        }
+        assert_eq!(lay.approx_top_at(0, 2, 0), lay.approx_top(0, 2));
+        assert_eq!(lay.approx_top_at(0, 1, long.len()), Some(last.y0));
+        assert_eq!(lay.code_place_at(0, 3, top - 1.0), Some((0, 0)));
+        assert_eq!(lay.code_place_at(0, 3, top + height + 1.0), Some((2, 0)));
+    }
+
+    /// An edit inside a long line leaves the pieces before it and,
+    /// where the line is cut at the same bytes after it, the pieces
+    /// after it: their heights are not measured again. The map of the
+    /// long lines after the edit is the one a fresh pass reads.
+    #[test]
+    fn an_edit_in_a_long_line_keeps_the_pieces_it_did_not_change() {
+        let (mut doc, long) = long_line_file("edit.json");
+        let pieces = long_line_chunks(&long);
+        let n = pieces.len();
+        assert!(n > 10);
+        let (theme, cfg) = (Theme::default_dark(), ViewConfig::default());
+        let mut fonts = FontStore::new();
+        let mut media = MediaCache::offline(PathBuf::from("."));
+        let (mut lay, mut pass) = layout_begin(&doc, &cfg, 800.0);
+        pass.retain_around(0.0, 600.0);
+        layout_more(
+            &doc, &theme, &mut fonts, &mut media, &cfg, &mut lay, &mut pass, None,
+        );
+        let line_start = "first\n".len();
+        let edit = |doc: &mut Document, lay: &mut LayoutDoc, range: Range<usize>, text: &str| {
+            let removed = doc.source[range.clone()].matches('\n').count();
+            let line = doc.source[..range.start].matches('\n').count();
+            let touched = line..line + text.matches('\n').count() + 1;
+            let mut current = doc.source.to_string();
+            current.replace_range(range.clone(), text);
+            let (old, new) =
+                crate::edit::splice_document(doc, &current, range.clone(), touched).unwrap();
+            assert_eq!(old.len(), removed + 1);
+            let BlockKind::CodeBlock { lines, .. } = &doc.blocks[0].kind else {
+                panic!("a code file");
+            };
+            let inserted = range.start..range.start + text.len();
+            let same = lay
+                .table
+                .edit_long(lines, &doc.source, 0, &old, &new, &inserted);
+            assert_eq!(lay.table.long_of(0), long_lines_of(lines, &doc.source));
+            same
+        };
+        // A letter inside the fourth piece, in a word: the piece ends
+        // after the same space, one byte further.
+        let at = line_start + pieces[3].start + 100;
+        assert_eq!(edit(&mut doc, &mut lay, at..at, "x"), (3, n - 4));
+        assert_eq!(edit(&mut doc, &mut lay, at..at + 1, ""), (3, n - 4));
+        // The same bytes written again: the pieces are cut where they
+        // were, and the one written is measured.
+        assert_eq!(edit(&mut doc, &mut lay, at..at + 1, "y"), (3, n - 4));
+        // A letter at the very start of a piece belongs to that piece.
+        let at = line_start + pieces[5].start;
+        assert_eq!(edit(&mut doc, &mut lay, at..at, "z"), (5, n - 6));
+        // A line break in the sixth piece: the first line keeps the
+        // five pieces before it, and the second is cut from its own
+        // start, at other bytes.
+        let at = line_start + pieces[5].start + 200;
+        let (head, tail) = edit(&mut doc, &mut lay, at..at, "\n");
+        assert_eq!(head, 5);
+        assert!(tail < n - 6, "{tail} pieces kept after the break");
+    }
+
+    /// The map of the long lines through random edits: lines of up to
+    /// five pieces, with spaces often, seldom or never, and a letter
+    /// of two bytes; an edit that removes and writes a few bytes, a
+    /// line break or a piece's worth. After each edit the map is the
+    /// one a fresh read gives, the units it says the edit left have
+    /// the bytes they had, and the units of a line are the line.
+    #[test]
+    #[ignore]
+    fn fuzz_pieces() {
+        use proptest::prelude::*;
+        fn body(text: &str) -> CodeBody {
+            let mut start = 0;
+            let mut lines = Vec::new();
+            for line in text.split('\n') {
+                lines.push(start as u32..(start + line.len()) as u32);
+                start += line.len() + 1;
+            }
+            CodeBody::verbatim(lines)
+        }
+        fn table(lines: &CodeBody, text: &str) -> BlockTable {
+            let mut table = BlockTable::default();
+            table.long.push(LongLines {
+                position: 0,
+                lines: long_lines_of(lines, text),
+            });
+            table
+        }
+        let config = ProptestConfig {
+            failure_persistence: None,
+            ..ProptestConfig::default()
+        };
+        let line = (
+            0usize..40_000,
+            prop::sample::select(vec![0usize, 7, 60, 400]),
+        );
+        let written = prop::sample::select(vec![
+            String::new(),
+            "x".to_string(),
+            " ".to_string(),
+            "\n".to_string(),
+            "\u{e9}".to_string(),
+            "a b\n\nc".to_string(),
+            "y".repeat(9_000),
+            "w ".repeat(5_000),
+        ]);
+        let edit = (
+            0.0f64..1.0,
+            prop::sample::select(vec![0usize, 0, 1, 3, 300, 20_000]),
+            written,
+        );
+        proptest!(config, |(
+            lines in prop::collection::vec(line, 1..5),
+            edits in prop::collection::vec(edit, 1..6),
+        )| {
+            let mut text = String::new();
+            for (index, (len, space)) in lines.iter().enumerate() {
+                if index > 0 {
+                    text.push('\n');
+                }
+                let start = text.len();
+                while text.len() - start < *len {
+                    let at = text.len() - start;
+                    text.push(match at {
+                        _ if *space > 0 && at % space == space - 1 => ' ',
+                        _ if at.is_multiple_of(997) => '\u{e9}',
+                        _ => (b'a' + (at % 23) as u8) as char,
+                    });
+                }
+            }
+            let mut lines = body(&text);
+            let mut map = table(&lines, &text);
+            for (place, removed, written) in edits {
+                let mut start = (place * text.len() as f64) as usize;
+                while !text.is_char_boundary(start) {
+                    start -= 1;
+                }
+                let mut end = (start + removed).min(text.len());
+                while !text.is_char_boundary(end) {
+                    end += 1;
+                }
+                let first = text[..start].matches('\n').count();
+                let old = first..first + text[start..end].matches('\n').count() + 1;
+                let new = first..first + written.matches('\n').count() + 1;
+                let mut after = text.clone();
+                after.replace_range(start..end, &written);
+                let after_lines = body(&after);
+                let was = table(&lines, &text);
+                let (head, tail) = map.edit_long(
+                    &after_lines,
+                    &after,
+                    0,
+                    &old,
+                    &new,
+                    &(start..start + written.len()),
+                );
+                prop_assert_eq!(map.long_of(0), long_lines_of(&after_lines, &after));
+                let old_units = was.unit_of(0, old.start)..was.unit_of(0, old.end);
+                let new_units = map.unit_of(0, new.start)..map.unit_of(0, new.end);
+                prop_assert!(head + tail <= old_units.len().min(new_units.len()));
+                let unit = |table: &BlockTable, lines: &CodeBody, text: &str, unit: usize| {
+                    unit_text(table, 0, unit, lines, &[], text).text.to_string()
+                };
+                for k in 0..head {
+                    prop_assert_eq!(
+                        unit(&was, &lines, &text, old_units.start + k),
+                        unit(&map, &after_lines, &after, new_units.start + k)
+                    );
+                }
+                for k in 1..=tail {
+                    prop_assert_eq!(
+                        unit(&was, &lines, &text, old_units.end - k),
+                        unit(&map, &after_lines, &after, new_units.end - k)
+                    );
+                }
+                // The units of each line, in order, are the line.
+                let units = map.unit_of(0, after_lines.len());
+                let mut joined = vec![String::new(); after_lines.len()];
+                let mut last = 0;
+                for index in 0..units {
+                    let place = map.unit_place(0, index);
+                    prop_assert!(place.line >= last && place.line < after_lines.len());
+                    last = place.line;
+                    if joined[place.line].is_empty() {
+                        prop_assert_eq!(map.unit_of(0, place.line), index);
+                    }
+                    let piece = unit(&map, &after_lines, &after, index);
+                    prop_assert!(piece.len() <= LONG_LINE);
+                    if let Some((from, _)) = place.piece {
+                        prop_assert_eq!(map.unit_of_byte(0, place.line, from), index);
+                        prop_assert_eq!(from, joined[place.line].len());
+                    }
+                    joined[place.line].push_str(&piece);
+                }
+                for (index, line) in joined.iter().enumerate() {
+                    prop_assert_eq!(line.as_str(), after_lines.line(&after, index));
+                }
+                text = after;
+                lines = after_lines;
+            }
+        });
     }
 
     fn lay_of(doc: &Document) -> LayoutDoc {

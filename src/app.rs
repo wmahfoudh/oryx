@@ -878,7 +878,7 @@ fn row_y(lay: &LayoutDoc, doc: &Document, offset: usize) -> Option<f32> {
         return Some(y);
     }
     let block = doc.block_at_offset(offset)?;
-    lay.approx_top(block, scroll::source_row(doc, block, offset))
+    scroll::table_row_top(lay, doc, block, offset)
 }
 
 /// The scroll that shows the source line at `offset` with its row
@@ -3213,6 +3213,7 @@ impl App {
                     0,
                     old_lines,
                     new_lines,
+                    range.start..range.start + text.len(),
                 );
                 if placed {
                     // The next frame's window slide re-materializes the
@@ -6062,13 +6063,20 @@ impl App {
         // A one-block document: the matches of the text the layout
         // holds now, the only ones a rectangle can be built for.
         let had_none = found.draws_nothing();
-        found.search_held(&self.document, selection::held_starts(lay, &self.document));
+        let held = selection::held_parts(lay, &self.document);
+        // A part that starts inside its line is scanned from there,
+        // which the whole file's scan need not agree with for a text
+        // that overlaps itself.
+        #[cfg(debug_assertions)]
+        let comparable =
+            found.matched == occurrences::Match::Word || held.iter().all(|&(_, from, _)| from == 0);
+        found.search_held(&self.document, held);
         found.rects = window_rects(lay, &self.document, &mut self.fonts, &found.matches, lo, hi)
             .into_iter()
             .map(|(_, rect)| rect)
             .collect();
         #[cfg(debug_assertions)]
-        if self.document.source.len() < 1 << 20 {
+        if comparable && self.document.source.len() < 1 << 20 {
             let all = found.all_matches(&self.document);
             let whole: Vec<_> = window_rects(lay, &self.document, &mut self.fonts, &all, lo, hi)
                 .into_iter()
@@ -6115,7 +6123,7 @@ impl App {
             Some(exact) => exact,
             None => {
                 let pos = m.ordered().0;
-                match lay.approx_top(pos.block, pos.span) {
+                match lay.approx_top_at(pos.block, pos.span, pos.byte) {
                     Some(top) => (top, self.cfg.body_size * self.cfg.zoom),
                     None => return,
                 }
@@ -9164,21 +9172,17 @@ impl App {
             return None;
         }
         let doc = &self.document;
-        let total = match doc.blocks.first().map(|block| &block.kind) {
-            Some(BlockKind::CodeBlock { lines, .. }) if doc.blocks.len() == 1 => lines.len(),
-            _ => 0,
+        let lines = match doc.blocks.first().map(|block| &block.kind) {
+            Some(BlockKind::CodeBlock { lines, .. }) if doc.blocks.len() == 1 => lines,
+            _ => return None,
         };
+        let total = lines.len();
         if total == 0 || !(doc.code_file || doc.plain_file) {
             return None;
         }
         let lay = self.layout.as_ref()?;
         let pass = self.pass.as_ref()?;
-        // A long line shaped a chunk at a step shows its rows as they
-        // come, though it is not among the kept lines yet.
-        if pass.in_long_line() {
-            return None;
-        }
-        let kept = pass.kept_lines()?;
+        let kept = pass.kept_lines(lay)?;
         // A view that reaches past what is placed is the pass's own
         // first frames.
         if lay.height < self.scroll_y + view_h {
@@ -9191,6 +9195,12 @@ impl App {
         let top = row_of(scroll::top_offset(lay, doc, self.scroll_y));
         let bottom = row_of(scroll::top_offset(lay, doc, self.scroll_y + view_h - 2.0));
         if kept.start <= top && bottom < kept.end {
+            return None;
+        }
+        // A line placed in pieces shows its rows as they come: the
+        // preview is made of whole lines.
+        let long = |row: usize| lines.line_len(row) > highlight::LONG_LINE;
+        if long(top) || long(bottom) {
             return None;
         }
         let gesture = self.drag.is_some() || self.selecting() || self.overlay_mouse;

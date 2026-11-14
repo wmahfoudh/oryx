@@ -648,7 +648,15 @@ fn keystroke_measured() {
             let model_us = started.elapsed().as_micros();
             let started = Instant::now();
             assert!(edit_code_lines(
-                &mut lay, &doc, &theme, &mut fonts, &cfg, 0, old_lines, new_lines,
+                &mut lay,
+                &doc,
+                &theme,
+                &mut fonts,
+                &cfg,
+                0,
+                old_lines,
+                new_lines,
+                at..at + 1,
             ));
             let layout_us = started.elapsed().as_micros();
             let started = Instant::now();

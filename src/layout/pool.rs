@@ -71,6 +71,10 @@ pub(crate) enum Work {
         segments: Vec<(Range<usize>, SyntaxRole)>,
         block_index: usize,
         line_index: usize,
+        /// The unit of the block's position this text is, and the
+        /// first byte of a piece in its line.
+        unit: usize,
+        piece: Option<usize>,
         x0: f32,
         size: f32,
         line_height: f32,
@@ -335,6 +339,8 @@ fn worker(shared: Arc<Shared>, mut fonts: crate::style::fonts::FontStore) {
                 segments,
                 block_index,
                 line_index,
+                unit,
+                piece,
                 x0,
                 size,
                 line_height,
@@ -348,6 +354,8 @@ fn worker(shared: Arc<Shared>, mut fonts: crate::style::fonts::FontStore) {
                 segments,
                 *block_index,
                 *line_index,
+                *unit,
+                *piece,
                 *x0,
                 *size,
                 *line_height,
