@@ -216,6 +216,36 @@ fn offset_piece(lay: &LayoutDoc, doc: &Document, offset: usize) -> Option<(usize
     Some((start + piece.start, start + piece.end))
 }
 
+/// The source bytes of the pieces around `offset` in a code line longer
+/// than `LONG_LINE`: the piece holding it, `before` pieces above and
+/// `after` below, within the line. None for any other place.
+pub fn pieces_around(
+    lay: &LayoutDoc,
+    doc: &Document,
+    offset: usize,
+    before: usize,
+    after: usize,
+) -> Option<Range<usize>> {
+    let block = doc.block_at_offset(offset)?;
+    let (line, byte) = line_place(doc, block, offset)?;
+    let start = offset - byte;
+    let mut piece = lay.code_piece_at(block, line, byte)?;
+    for _ in 0..before {
+        if piece.start == 0 {
+            break;
+        }
+        piece.start = lay.code_piece_at(block, line, piece.start - 1)?.start;
+    }
+    for _ in 0..after {
+        let next = lay.code_piece_at(block, line, piece.end)?;
+        if next.end <= piece.end {
+            break;
+        }
+        piece.end = next.end;
+    }
+    Some(start + piece.start..start + piece.end)
+}
+
 /// What stands at the top of a view, kept so that a new layout of the
 /// same text shows it there again: after a zoom step, a new width or a
 /// new font, the page above the view has another height, and the

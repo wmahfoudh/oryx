@@ -429,6 +429,14 @@ impl CodeBody {
         }
     }
 
+    /// A body of one line, the source bytes `bytes`: some pieces of a
+    /// very long line, for a preview of them. The body reads its lines
+    /// in the source.
+    pub fn part(&self, bytes: Range<usize>) -> CodeBody {
+        debug_assert!(self.is_verbatim());
+        CodeBody::verbatim(std::iter::once(bytes.start as u32..bytes.end as u32).collect())
+    }
+
     pub fn len(&self) -> usize {
         self.lines.len()
     }

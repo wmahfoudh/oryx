@@ -862,6 +862,9 @@ enum Wanted {
 /// lines at the same place.
 struct PreviewFrame {
     preview: paint::preview::Preview,
+    /// The rows and, inside a very long line, the pieces it was asked
+    /// for.
+    asked: (std::ops::Range<usize>, Option<std::ops::Range<usize>>),
     /// The colored lines the preview was built with, so that colors
     /// that arrive show.
     colored: usize,
@@ -9093,7 +9096,7 @@ impl App {
         if found.is_none() {
             self.preview = None;
         }
-        let (wanted, row, total) = found?;
+        let (wanted, row, total, piece) = found?;
         let view_h = height as f32;
         let row_h = self.row_h();
         let doc = &self.document;
@@ -9104,11 +9107,15 @@ impl App {
             BlockKind::CodeBlock { highlights, .. } => highlights.len().clamp(rows.start, rows.end),
             _ => 0,
         };
+        let asked = (rows.clone(), piece.clone());
         let fresh = self.preview.as_ref().is_some_and(|frame| {
-            frame.preview.rows == rows && frame.colored == colored && frame.width == width
+            frame.asked == asked && frame.colored == colored && frame.width == width
         });
         if !fresh {
-            let preview = paint::preview::build(
+            // The rows around the place, where they are a few tens of
+            // kilobytes. Rows of very long lines are not: the place is
+            // then shown by the pieces around it of its own line.
+            let by_rows = paint::preview::build(
                 &self.document,
                 &self.theme,
                 &mut self.fonts,
@@ -9116,9 +9123,24 @@ impl App {
                 &self.cfg,
                 width as f32,
                 rows,
-            )?;
+            );
+            let preview = match (by_rows, piece) {
+                (Some(preview), _) => preview,
+                (None, Some(bytes)) => paint::preview::build_pieces(
+                    &self.document,
+                    &self.theme,
+                    &mut self.fonts,
+                    &mut self.media,
+                    &self.cfg,
+                    width as f32,
+                    row,
+                    bytes,
+                )?,
+                (None, None) => return None,
+            };
             self.preview = Some(PreviewFrame {
                 preview,
+                asked,
                 colored,
                 width,
                 painted: None,
@@ -9164,10 +9186,15 @@ impl App {
         Some(frame.pixels.clone())
     }
 
-    /// What a preview would show now, the row of the file it names and
-    /// the file's line count. None when the layout shows the view, when
-    /// no pass runs, and for a document that is not one block of lines.
-    fn preview_wanted(&self, view_h: f32) -> Option<(Wanted, usize, usize)> {
+    /// What a preview would show now, the row of the file it names,
+    /// the file's line count and, for a place inside a line longer
+    /// than `LONG_LINE`, the source bytes of the pieces around it. None
+    /// when the layout shows the view, when no pass runs, and for a
+    /// document that is not one block of lines.
+    fn preview_wanted(
+        &self,
+        view_h: f32,
+    ) -> Option<(Wanted, usize, usize, Option<std::ops::Range<usize>>)> {
         if !self.pass_active() || self.export.is_some() || self.parse_pending {
             return None;
         }
@@ -9182,7 +9209,6 @@ impl App {
         }
         let lay = self.layout.as_ref()?;
         let pass = self.pass.as_ref()?;
-        let kept = pass.kept_lines(lay)?;
         // A view that reaches past what is placed is the pass's own
         // first frames.
         if lay.height < self.scroll_y + view_h {
@@ -9192,9 +9218,14 @@ impl App {
         // The first and the last line of the view, which the block
         // table answers exactly: the lines above them are measured.
         // `top_offset` reads one pixel under what it is given.
+        // In a very long line the place is a piece of the line: the
+        // layout holds the pieces around the view, not the line.
+        let held = |y: f32| {
+            let (line, byte) = lay.code_place_at(0, total, y + 1.0)?;
+            pass.keeps(lay, line, byte)
+        };
         let top = row_of(scroll::top_offset(lay, doc, self.scroll_y));
-        let bottom = row_of(scroll::top_offset(lay, doc, self.scroll_y + view_h - 2.0));
-        if kept.start <= top && bottom < kept.end {
+        if held(self.scroll_y)? && held(self.scroll_y + view_h - 2.0)? {
             return None;
         }
         let gesture = self.drag.is_some() || self.selecting() || self.overlay_mouse;
@@ -9217,7 +9248,15 @@ impl App {
             let place = scroll::TopPlace::of(lay, doc, self.scroll_y)?;
             Some((Wanted::Top(place), top))
         })?;
-        Some((wanted, row, total))
+        // The offset the preview is built around.
+        let anchor = match &wanted {
+            Wanted::Row(place) | Wanted::Offset(place) => place.offset,
+            Wanted::Top(place) => place.offset,
+            Wanted::Caret(offset, _) => *offset,
+            Wanted::Bottom => lines.line_range(total - 1)?.end,
+        };
+        let piece = scroll::pieces_around(lay, doc, anchor, 1, 2);
+        Some((wanted, row, total, piece))
     }
 
     /// Finishes a line landing on the frame that made it: the slide has

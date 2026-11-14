@@ -1651,17 +1651,14 @@ impl LayoutPass {
         self.done
     }
 
-    /// The lines of the open code block the layout holds rows for: the
-    /// stretch the pass kept, blank lines included, a line longer than
-    /// `LONG_LINE` as soon as one of its pieces is kept. Empty when it
-    /// kept none yet, None when no code block is open.
-    pub fn kept_lines(&self, lay: &LayoutDoc) -> Option<Range<usize>> {
+    /// Whether the layout holds the rows of byte `byte` of line `line`
+    /// of the open code block: the line is in the stretch the pass
+    /// kept, and in a line longer than `LONG_LINE`, the piece holding
+    /// the byte is. None when no code block is open.
+    pub fn keeps(&self, lay: &LayoutDoc, line: usize, byte: usize) -> Option<bool> {
         let open = self.open.as_ref()?;
-        let line = |unit: usize| lay.table.unit_place(open.position, unit).line;
-        Some(match &open.kept {
-            Some(kept) if !kept.is_empty() => line(kept.start)..line(kept.end - 1) + 1,
-            _ => line(open.unit)..line(open.unit),
-        })
+        let unit = lay.table.unit_of_byte(open.position, line, byte);
+        Some(open.kept.as_ref().is_some_and(|kept| kept.contains(&unit)))
     }
 
     /// Attaches the shaping pool; the next slice claims it and seeds

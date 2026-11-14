@@ -28,6 +28,9 @@ pub struct Preview {
     pub lay: LayoutDoc,
     /// The rows of the file the preview holds.
     pub rows: Range<usize>,
+    /// The source bytes it holds of its one row, when that row is a
+    /// line longer than `LONG_LINE` shown by some of its pieces.
+    pub piece: Option<Range<usize>>,
 }
 
 /// The rows a preview holds to show `row` anywhere in a window `view_h`
@@ -114,6 +117,77 @@ pub fn build(
         doc: part,
         lay,
         rows,
+        piece: None,
+    })
+}
+
+/// The preview of some pieces of row `row` of `doc`, a line longer than
+/// `LONG_LINE`: the source bytes `bytes`, which start and end where
+/// pieces of the line do (`scroll::pieces_around`). The layout cuts a
+/// line from its start by its text, so the pieces of the preview are
+/// those of the file. A file of one very long line has no rows around
+/// a place to show, and its one row is far more than `MOST_BYTES`.
+/// None for a document `build` refuses.
+#[allow(clippy::too_many_arguments)]
+pub fn build_pieces(
+    doc: &Document,
+    theme: &Theme,
+    fonts: &mut FontStore,
+    media: &mut MediaCache,
+    cfg: &ViewConfig,
+    width: f32,
+    row: usize,
+    bytes: Range<usize>,
+) -> Option<Preview> {
+    if !(doc.code_file || doc.plain_file) {
+        return None;
+    }
+    let [block] = &doc.blocks[..] else {
+        return None;
+    };
+    let BlockKind::CodeBlock {
+        language, lines, ..
+    } = &block.kind
+    else {
+        return None;
+    };
+    let line = lines.line_range(row)?;
+    if !lines.is_verbatim()
+        || bytes.is_empty()
+        || bytes.len() > MOST_BYTES
+        || bytes.start < line.start
+        || bytes.end > line.end
+    {
+        return None;
+    }
+    let part = Document {
+        blocks: vec![Block {
+            quote_depth: block.quote_depth,
+            alert: block.alert,
+            range: block.range.clone(),
+            centered: block.centered,
+            right: block.right,
+            left: block.left,
+            details: block.details,
+            kind: BlockKind::CodeBlock {
+                language: language.clone(),
+                // A long line has no colors.
+                lines: lines.part(bytes.clone()),
+                highlights: Vec::new(),
+                exact: 0,
+            },
+        }],
+        source: Arc::clone(&doc.source),
+        code_file: doc.code_file,
+        plain_file: doc.plain_file,
+        ..Document::default()
+    };
+    let lay = layout(&part, theme, fonts, media, cfg, width);
+    Some(Preview {
+        doc: part,
+        lay,
+        rows: row..row + 1,
+        piece: Some(bytes),
     })
 }
 
@@ -211,6 +285,75 @@ mod tests {
                     );
                     let differ = page.iter().zip(&part).filter(|(a, b)| a != b).count();
                     assert_eq!(differ, 0, "{name} row {row} below {below}");
+                }
+            }
+        }
+    }
+
+    /// A file of one line of 400 KB: the preview of four pieces of it
+    /// paints what the file's own layout paints at the same place, at
+    /// the top of a piece and inside one.
+    #[test]
+    fn a_preview_of_pieces_paints_what_the_settled_page_paints_there() {
+        let dir = std::env::temp_dir().join("oryx-preview-pieces");
+        std::fs::create_dir_all(&dir).unwrap();
+        let theme = Theme::default_dark();
+        let mut fonts = FontStore::new();
+        let mut media = MediaCache::offline(PathBuf::from("."));
+        let cfg = ViewConfig::default();
+        let line: String = (0..60_000).map(|i| format!("word{i} ")).collect();
+        for name in ["pieces.json", "pieces.txt"] {
+            let path = dir.join(name);
+            std::fs::write(&path, format!("{line}\n")).unwrap();
+            let doc = load::open(&path, None).unwrap().document;
+            let full = layout(&doc, &theme, &mut fonts, &mut media, &cfg, 1000.0);
+            assert!(build(&doc, &theme, &mut fonts, &mut media, &cfg, 1000.0, 0..1).is_none());
+            for at in [0, 9_000, line.len() / 2, line.len() - 5] {
+                let bytes = scroll::pieces_around(&full, &doc, at, 1, 2).expect("a long line");
+                assert!(bytes.contains(&at) && bytes.len() <= 4 * 8192, "{bytes:?}");
+                let preview = build_pieces(
+                    &doc,
+                    &theme,
+                    &mut fonts,
+                    &mut media,
+                    &cfg,
+                    1000.0,
+                    0,
+                    bytes.clone(),
+                )
+                .unwrap();
+                assert_eq!(preview.piece, Some(bytes.clone()));
+                for below in [0.0_f32, -300.0, -1500.0] {
+                    // The same place on both: so far under the top of
+                    // the piece holding `at`.
+                    let place = |lay: &LayoutDoc, doc: &Document| {
+                        let top = scroll::offset_top(lay, doc, at).unwrap();
+                        scroll::frame_offset(scroll::clamp(top - below, lay.height, 600.0))
+                    };
+                    let mut paint = |lay: &LayoutDoc, doc: &Document| {
+                        let y = place(lay, doc);
+                        band_numbered(
+                            lay,
+                            doc,
+                            &theme,
+                            &mut fonts,
+                            &mut media,
+                            &[],
+                            None,
+                            y,
+                            1000,
+                            600,
+                        )
+                    };
+                    let page = paint(&full, &doc);
+                    let part = paint(&preview.lay, &preview.doc);
+                    // The pages differ where the view passes the pieces
+                    // the preview holds; these places do not.
+                    let top = scroll::offset_top(&preview.lay, &preview.doc, at).unwrap() - below;
+                    if top + 600.0 <= preview.lay.height && top >= 0.0 {
+                        let differ = page.iter().zip(&part).filter(|(a, b)| a != b).count();
+                        assert_eq!(differ, 0, "{name} at {at} below {below}");
+                    }
                 }
             }
         }
