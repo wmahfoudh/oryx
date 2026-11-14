@@ -9480,7 +9480,15 @@ impl App {
         // The selection's boxes for a frame that paints, on the lines a
         // band can cover: it starts at most four views above the view,
         // at the document's end, and ends at most five below its top.
+        // A run is found by its own height and boxed at its line's, so
+        // the runs are read a tallest line further, in a window of a
+        // few pixels too.
         let view_h = size.height as f32;
+        let reach = view_h.max(metrics::tallest_line(
+            self.cfg.body_size,
+            self.cfg.code_size,
+            self.cfg.zoom,
+        ));
         let mut highlight: Vec<DecoRect> = match &self.selection {
             Some(sel) if !band_usable => selection::rects_between(
                 sel,
@@ -9489,7 +9497,7 @@ impl App {
                 &mut self.fonts,
                 frame_y - 4.0 * view_h,
                 frame_y + 5.0 * view_h,
-                view_h,
+                reach,
             )
             .into_iter()
             .map(|(x, y, w, h)| DecoRect::fill(x, y, w, h, self.theme.ui.selection_bg))

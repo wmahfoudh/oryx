@@ -835,7 +835,9 @@ pub fn rects_window(
 
 /// The selection's boxes on the lines between `top` and `bottom`, what
 /// a frame paints. The runs are read `margin` further on each side, so
-/// a line at an edge has all its runs and its boxes are whole. A
+/// a line at an edge has all its runs and its boxes are whole: `margin`
+/// is at least the height of the tallest line (`metrics::tallest_line`),
+/// a small run being found by its own height and boxed at its line's. A
 /// layout can hold every row of a line of megabytes, and each run that
 /// ends in spaces is shaped for its box: over the whole layout that is
 /// seconds and gigabytes a frame. A selection of line breaks alone is
@@ -2613,6 +2615,64 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A window a few pixels tall: a small run that opens a heading's
+    /// line is boxed at the line's height, so the runs are read a
+    /// tallest line further than the view, not a view further.
+    #[test]
+    fn a_view_of_a_few_pixels_boxes_a_small_run_on_a_tall_line() {
+        let page: String = (0..300)
+            .map(|n| {
+                format!(
+                    "# `code` heading {n}\n\n{}\n\n",
+                    "Some text. ".repeat(1 + n % 7)
+                )
+            })
+            .collect();
+        let doc = markdown::parse(page.as_str());
+        let cfg = ViewConfig {
+            zoom: 3.0,
+            ..ViewConfig::default()
+        };
+        let mut fonts = FontStore::new();
+        let mut media = MediaCache::offline(PathBuf::from("."));
+        let mut l = layout(
+            &doc,
+            &Theme::default_dark(),
+            &mut fonts,
+            &mut media,
+            &cfg,
+            3000.0,
+        );
+        l.index_more();
+        let sel = select_all(&doc);
+        let whole = rects(&sel, &l, &doc, &mut fonts);
+        let view = 2.0;
+        let margin = metrics::tallest_line(cfg.body_size, cfg.code_size, cfg.zoom).max(view);
+        // The index keeps a run under the buckets, 512 pixels each,
+        // that its own height reaches. The frames are those whose runs
+        // are read from a bucket's edge that a small run ends above and
+        // its line crosses, by more than the view.
+        let mut frames = 0;
+        for run in &l.runs {
+            let own = run.y + metrics::LINE_HEIGHT * run.size;
+            let line = run.y + line_height_at(&l, run);
+            let edge = (own / 512.0).ceil() * 512.0;
+            if edge + view >= line {
+                continue;
+            }
+            frames += 1;
+            let (top, bottom) = (edge + view, edge + 10.0 * view);
+            let near = rects_between(&sel, &l, &doc, &mut fonts, top, bottom, margin);
+            let painted = |r: &&(f32, f32, f32, f32)| r.1 + r.3 > top && r.1 < bottom;
+            assert_eq!(
+                near.iter().filter(painted).collect::<Vec<_>>(),
+                whole.iter().filter(painted).collect::<Vec<_>>(),
+                "at {top}"
+            );
+        }
+        assert!(frames > 0, "a heading's line crosses a bucket's edge");
     }
 
     /// A selection of line breaks alone is boxed from the line before

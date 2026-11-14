@@ -46,6 +46,14 @@ pub fn heading_scale(level: u8) -> f32 {
     }
 }
 
+/// The height of the tallest line of text a layout can hold, a first
+/// level heading's, in the larger of the body and the code sizes since
+/// inline code in a heading is scaled with it. A run on such a line can
+/// be this far above the line's bottom, whatever its own size.
+pub fn tallest_line(body_size: f32, code_size: f32, zoom: f32) -> f32 {
+    LINE_HEIGHT * heading_scale(1) * body_size.max(code_size) * zoom
+}
+
 /// Space above a block, from its own font size. Doubled for h1 and h2.
 pub fn space_above(heading_level: Option<u8>, size: f32) -> f32 {
     match heading_level {
