@@ -431,6 +431,12 @@ pub fn fitted_below(
 /// the slide draws it (`caret::line_top`); None for a blank line, for
 /// the other blocks, and before the pass places the block.
 pub fn line_estimate(lay: &LayoutDoc, doc: &Document, offset: usize) -> Option<f32> {
+    // A code block is none of the blocks estimated below. Said before
+    // the search for the line's ends, which would read a file of one
+    // line whole.
+    if doc.is_one_code_block() {
+        return None;
+    }
     let source = &doc.source;
     // A remembered offset may fall inside a character after an edit.
     let mut offset = offset.min(source.len());
@@ -1115,6 +1121,92 @@ mod tests {
             fitted_below(&lay, &doc, at, 290.0, 600.0),
             0.0,
             "the block is taller than the view and no line of it answers"
+        );
+    }
+
+    /// `line_estimate` as it read every document before a document of
+    /// one code block answered without the search: the reference of
+    /// the test below.
+    fn estimate_by_search(lay: &LayoutDoc, doc: &Document, offset: usize) -> Option<f32> {
+        let source = &doc.source;
+        let mut offset = offset.min(source.len());
+        while !source.is_char_boundary(offset) {
+            offset -= 1;
+        }
+        let start = source[..offset].rfind('\n').map_or(0, |at| at + 1);
+        let end = source[offset..]
+            .find('\n')
+            .map_or(source.len(), |at| offset + at);
+        if source[start..end].trim().is_empty() {
+            return None;
+        }
+        let index = doc.block_at_offset(end)?;
+        let block = &doc.blocks[index];
+        let rows = matches!(
+            block.kind,
+            BlockKind::Heading { .. }
+                | BlockKind::Paragraph { .. }
+                | BlockKind::ListItem { .. }
+                | BlockKind::Table { .. }
+                | BlockKind::FootnoteDef { .. }
+                | BlockKind::Summary { .. }
+        );
+        if !rows {
+            return None;
+        }
+        let span = lay.block_span(index)?;
+        let share =
+            start.saturating_sub(block.range.start) as f32 / block.range.len().max(1) as f32;
+        Some(span.start + share.min(1.0) * (span.end - span.start))
+    }
+
+    #[test]
+    fn the_estimate_of_a_line_is_the_one_the_search_gave() {
+        let code = "fn a() {}\n\n  \nlet é = 1;\nlast";
+        let docs = [
+            load::code_document(Some("rust"), code),
+            load::code_document(None, ""),
+            load::text_document(code),
+            load::text_document("one line and no break"),
+            load::text_document("a\n\n\n"),
+            crate::doc::markdown::parse("```rust\nlet a = 1;\n\nlet b = 2;\n```\n"),
+            crate::doc::markdown::parse(
+                "# Title\n\nA paragraph\nof two lines.\n\n```\ncode\n```\n\n- item\n\n| a |\n|---|\n| b |\n",
+            ),
+        ];
+        for doc in &docs {
+            let lay = lay_of(doc);
+            for offset in 0..=doc.source.len() + 1 {
+                assert_eq!(
+                    line_estimate(&lay, doc, offset),
+                    estimate_by_search(&lay, doc, offset),
+                    "offset {offset} of {:?}",
+                    &doc.source[..]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_estimate_in_a_file_of_one_line_does_not_read_the_line() {
+        let text = "word ".repeat(1 << 20);
+        let doc = load::text_document(&text);
+        let lay = LayoutDoc::default();
+        let at = text.len() / 2;
+        // The cost of reading the line once, the measure of the bound.
+        let clock = std::time::Instant::now();
+        for _ in 0..4 {
+            assert_eq!(std::hint::black_box(&text[..]).rfind('\n'), None);
+        }
+        let once = clock.elapsed() / 4;
+        let clock = std::time::Instant::now();
+        for _ in 0..100 {
+            assert_eq!(line_estimate(&lay, &doc, std::hint::black_box(at)), None);
+        }
+        let asked = clock.elapsed();
+        assert!(
+            asked < once * 10,
+            "a hundred estimates cost {asked:?}, and reading the line once {once:?}"
         );
     }
 

@@ -131,6 +131,21 @@ impl Document {
         }
     }
 
+    /// Whether the document is one code block: a code file, a text
+    /// file, a preview of some of their rows, or a page that is one
+    /// fence. Such a document can hold one line of hundreds of megabytes,
+    /// so what the page asks at each frame must not read a line of it
+    /// to its ends.
+    pub fn is_one_code_block(&self) -> bool {
+        matches!(
+            &self.blocks[..],
+            [Block {
+                kind: BlockKind::CodeBlock { .. },
+                ..
+            }]
+        )
+    }
+
     /// Whether justification applies: prose documents, markdown and
     /// books. Code and text files are line-oriented and ignore the
     /// setting everywhere it is read.

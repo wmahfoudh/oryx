@@ -515,6 +515,12 @@ pub fn line_top(lay: &LayoutDoc, doc: &Document, offset: usize) -> Option<f32> {
 
 /// The highest run the page draws for the source line holding `offset`.
 fn line_run<'l>(lay: &'l LayoutDoc, doc: &Document, offset: usize) -> Option<&'l TextRun> {
+    // A code block has no span for a run to answer by, so its lines
+    // have no run here. Said before the search for the line's ends,
+    // which would read a file of one line whole.
+    if doc.is_one_code_block() {
+        return None;
+    }
     let source = &doc.source;
     // A remembered offset may fall inside a character after an edit.
     let mut offset = offset.min(source.len());
@@ -2641,6 +2647,87 @@ mod tests {
             .find(|run| l.run_text(doc, run).starts_with(text))
             .unwrap_or_else(|| panic!("no run starts with {text:?}"))
             .y
+    }
+
+    /// `line_top` as it read every document before a document of one
+    /// code block answered without the search: the reference of the
+    /// test below.
+    fn top_by_search(lay: &LayoutDoc, doc: &Document, offset: usize) -> Option<f32> {
+        let source = &doc.source;
+        let mut offset = offset.min(source.len());
+        while !source.is_char_boundary(offset) {
+            offset -= 1;
+        }
+        let start = source[..offset].rfind('\n').map_or(0, |at| at + 1);
+        let end = source[offset..]
+            .find('\n')
+            .map_or(source.len(), |at| offset + at);
+        let block = doc.block_at_offset(end)?;
+        let spans = run_spans(&doc.blocks[block].kind);
+        let mut top: Option<&TextRun> = None;
+        for run in lay.runs.iter().filter(|run| run.block == block) {
+            let TextRef::Model { start: at, len } = run.text else {
+                continue;
+            };
+            let Some(span) = spans.get(run.span) else {
+                continue;
+            };
+            let shown = shown_source(span, source, at as usize, len as usize);
+            if shown.start < end && start < shown.end && top.is_none_or(|top| run.y < top.y) {
+                top = Some(run);
+            }
+        }
+        top.map(|run| run.y)
+    }
+
+    #[test]
+    fn the_top_of_a_line_is_the_one_the_search_gave() {
+        let code = "fn a() {}\n\n  \nlet é = 1;\nlast";
+        let docs = [
+            load::code_document(Some("rust"), code),
+            load::code_document(None, ""),
+            load::text_document(code),
+            load::text_document("one line and no break"),
+            load::text_document("a\n\n\n"),
+            md_doc("```rust\nlet a = 1;\n\nlet b = 2;\n```\n"),
+            md_doc(
+                "# Title\n\nA paragraph\nof two lines.\n\n```\ncode\n```\n\n- item\n\n| a |\n|---|\n| b |\n",
+            ),
+        ];
+        for doc in &docs {
+            let (l, _) = lay_of(doc);
+            for offset in 0..=doc.source.len() + 1 {
+                assert_eq!(
+                    line_top(&l, doc, offset),
+                    top_by_search(&l, doc, offset),
+                    "offset {offset} of {:?}",
+                    &doc.source[..]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_top_of_a_line_in_a_file_of_one_line_does_not_read_the_line() {
+        let text = "word ".repeat(1 << 20);
+        let doc = load::text_document(&text);
+        let l = LayoutDoc::default();
+        let at = text.len() / 2;
+        // The cost of reading the line once, the measure of the bound.
+        let clock = std::time::Instant::now();
+        for _ in 0..4 {
+            assert_eq!(std::hint::black_box(&text[..]).rfind('\n'), None);
+        }
+        let once = clock.elapsed() / 4;
+        let clock = std::time::Instant::now();
+        for _ in 0..100 {
+            assert_eq!(line_top(&l, &doc, std::hint::black_box(at)), None);
+        }
+        let asked = clock.elapsed();
+        assert!(
+            asked < once * 10,
+            "a hundred tops cost {asked:?}, and reading the line once {once:?}"
+        );
     }
 
     #[test]
