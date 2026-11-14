@@ -44,6 +44,20 @@ pub fn rows_around(total: usize, row: usize, view_h: f32, row_h: f32) -> Range<u
     from.saturating_sub(2 * screen)..(from + 3 * screen).min(total)
 }
 
+/// How many pieces of a line longer than `LONG_LINE` a preview holds
+/// before the piece of its place and after it, for a window `view_h`
+/// tall and `width` wide whose rows are `row_h` tall: enough to fill
+/// the window above the place and below it. A piece is taken as 4 KB,
+/// the least an edit leaves, and a character as a quarter of a row's
+/// height wide, less than any face draws, so the count errs on more
+/// pieces. Fifteen pieces at most, the preview's `MOST_BYTES`.
+pub fn pieces_for(view_h: f32, row_h: f32, width: f32) -> (usize, usize) {
+    let row_h = row_h.max(1.0);
+    let rows_a_piece = (4096.0 * 0.25 * row_h / width.max(1.0)).max(1.0);
+    let screens = (view_h / row_h / rows_a_piece).ceil().max(1.0) as usize;
+    (screens.min(5), (screens + 1).min(9))
+}
+
 /// The most text a preview lays out. Five windows of ordinary lines
 /// are a few tens of kilobytes.
 const MOST_BYTES: usize = 128 * 1024;
@@ -355,6 +369,52 @@ mod tests {
                         assert_eq!(differ, 0, "{name} at {at} below {below}");
                     }
                 }
+            }
+        }
+    }
+
+    /// The pieces of a preview fill a window above and below their
+    /// place: one and two in a window of 1000 by 600, more in a tall
+    /// and wide one, where four would leave a third of it blank.
+    #[test]
+    fn the_pieces_of_a_preview_fill_a_tall_window() {
+        assert_eq!(pieces_for(600.0, 30.0, 1000.0), (1, 2));
+        let (before, after) = pieces_for(2100.0, 25.5, 3840.0);
+        assert!(
+            before >= 4 && after >= 5 && before + after < 15,
+            "{before} {after}"
+        );
+        let dir = std::env::temp_dir().join("oryx-preview-tall");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("tall.txt");
+        let line: String = (0..80_000).map(|i| format!("word{i} ")).collect();
+        std::fs::write(&path, format!("{line}\n")).unwrap();
+        let doc = load::open(&path, None).unwrap().document;
+        let theme = Theme::default_dark();
+        let mut fonts = FontStore::new();
+        let mut media = MediaCache::offline(PathBuf::from("."));
+        let cfg = ViewConfig {
+            body_size: 17.0,
+            ..ViewConfig::default()
+        };
+        let (width, view_h) = (3840.0, 2100.0);
+        let full = layout(&doc, &theme, &mut fonts, &mut media, &cfg, width);
+        let row_h = crate::layout::metrics::LINE_HEIGHT * crate::layout::line_face(&doc, &cfg).1;
+        let (before, after) = pieces_for(view_h, row_h, width);
+        for at in [line.len() / 2, line.len() - 5] {
+            let bytes = scroll::pieces_around(&full, &doc, at, before, after).unwrap();
+            assert!(bytes.len() <= 128 * 1024, "{}", bytes.len());
+            let preview =
+                build_pieces(&doc, &theme, &mut fonts, &mut media, &cfg, width, 0, bytes).unwrap();
+            let top = scroll::offset_top(&preview.lay, &preview.doc, at).unwrap();
+            // A window of text above the place, and one below it
+            // unless the line ends there.
+            assert!(top >= view_h, "{top} above the place at {at}");
+            if at < line.len() - 5 {
+                assert!(
+                    preview.lay.height - top >= view_h,
+                    "below the place at {at}"
+                );
             }
         }
     }

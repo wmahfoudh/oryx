@@ -321,6 +321,7 @@ pub fn run(
         kept_view: None,
         pending_anchor: None,
         pending_offset: None,
+        thumb_landing: None,
         landing_settle: None,
         preview: None,
         history: History::default(),
@@ -1621,6 +1622,12 @@ struct App {
     /// A book source offset to land on once delivered and placed: a
     /// restored reading position or an internal link's target.
     pending_offset: Option<Place>,
+    /// The scroll the page was left at by a drop of the scrollbar's
+    /// thumb whose place the measure has not reached (`drag_to`), while
+    /// `pending_offset` holds that place. A view that has moved since
+    /// is the reader's: the landing is released, as a held `Ctrl+End`
+    /// is.
+    thumb_landing: Option<f32>,
     /// A line landing made this frame, whose exact row `settle_landing`
     /// finds once the slide has drawn the rows around it.
     landing_settle: Option<Place>,
@@ -2194,10 +2201,15 @@ impl App {
             Command::Forward => self.step_history(true),
             Command::Top => {
                 self.push_jump();
+                self.drop_thumb_landing();
                 self.scroll_to(0.0);
             }
             Command::Bottom => {
                 self.push_jump();
+                // The end of the measured part is where a drop of the
+                // thumb left the page: the scroll alone would not say
+                // that the reader asked for the end.
+                self.drop_thumb_landing();
                 self.scroll_to(self.doc_height());
                 // The placed height is all Oryx knows, so on a document
                 // still streaming this lands short of the file's end;
@@ -6195,6 +6207,29 @@ impl App {
             && matches!(&doc.blocks[..], [block] if matches!(&block.kind, BlockKind::CodeBlock { lines, .. } if !lines.is_empty()))
     }
 
+    /// Releases the landing a drop of the thumb left waiting, once the
+    /// view is no longer where the drop left it: a wheel step, a key,
+    /// a jump of the search or a caret's seat has moved it since.
+    fn release_thumb_landing(&mut self) {
+        let Some(parked) = self.thumb_landing else {
+            return;
+        };
+        if self.pending_offset.is_some() && self.scroll_y != parked {
+            self.pending_offset = None;
+        }
+        if self.pending_offset.is_none() {
+            self.thumb_landing = None;
+        }
+    }
+
+    /// Drops the landing a drop of the thumb left waiting, for a key
+    /// that leaves the view where it is and still means another place.
+    fn drop_thumb_landing(&mut self) {
+        if self.thumb_landing.take().is_some() {
+            self.pending_offset = None;
+        }
+    }
+
     /// The share of the file the thumb stands at while the file is
     /// measured. None once it is, and for any other document.
     fn measured_share(&self) -> Option<f32> {
@@ -6202,8 +6237,10 @@ impl App {
             return None;
         }
         let lay = self.layout.as_ref()?;
-        let offset = match self.pending_offset {
-            Some(place) => place.offset,
+        // The place the frame shows: the preview's when a preview
+        // stands, else the top of the page.
+        let offset = match self.preview_wanted(self.viewport_h()) {
+            Some((.., anchor)) => anchor,
             None => scroll::top_offset(lay, &self.document, self.scroll_y),
         };
         Some(scroll::share_of_offset(&self.document, offset))
@@ -6228,10 +6265,19 @@ impl App {
             let offset = scroll::offset_at_share(lay, &self.document, share);
             self.pending_row = None;
             self.kept_view = None;
+            // A caret's seat still owed would ask for its row again on
+            // the next frame, and the preview would show it.
+            self.caret_snap = false;
+            self.caret_seat = None;
+            // A held `Ctrl+End` would be spent at the page's end, where
+            // the drop leaves the page.
+            self.bottom_hold.clear();
+            self.thumb_landing = None;
             self.pending_offset = Some(Place::top(offset));
             self.resolve_pending();
             if self.pending_offset.is_some() {
                 self.scroll_to(self.doc_height());
+                self.thumb_landing = Some(self.scroll_y);
             }
             self.request_redraw();
             return;
@@ -7304,6 +7350,7 @@ impl App {
     /// Drops the landings that still wait for the layout. A new landing
     /// replaces them, or an older one would move the view after it.
     fn drop_waiting_landings(&mut self) {
+        self.thumb_landing = None;
         self.kept_view = None;
         self.pending_anchor = None;
         self.pending_offset = None;
@@ -7504,7 +7551,11 @@ impl App {
     /// file resting in edit mode is skipped, since it returns through
     /// its caret rather than through a reading position.
     fn remember_position(&mut self) {
-        let Some(offset) = self.top_offset() else {
+        // A place the view still waits for is where the reader is, not
+        // the scroll, which a drop of the thumb leaves at the end of
+        // the measured part.
+        let waiting = self.pending_offset.map(|place| place.offset);
+        let Some(offset) = waiting.or_else(|| self.top_offset()) else {
             return;
         };
         if let Some(key) = self.document.book_id.clone() {
@@ -7888,11 +7939,19 @@ impl App {
             let _ = save::write_atomic(&path, b"");
         }
         let scroll = self.scroll_y;
+        // A place a drop of the thumb still waits for is kept as that
+        // place: the scroll is only where the page was left meanwhile.
+        let dropped = self.pending_offset.filter(|_| self.thumb_landing.is_some());
         self.open_file(&path, false);
-        // The reload keeps its exact scroll; the revisit target would
-        // land it on the block's top instead.
-        self.pending_offset = None;
-        self.scroll_y = scroll;
+        match dropped {
+            Some(place) => self.pending_offset = Some(place),
+            None => {
+                // The reload keeps its exact scroll; the revisit target
+                // would land it on the block's top instead.
+                self.pending_offset = None;
+                self.scroll_y = scroll;
+            }
+        }
     }
 
     /// Ctrl+Shift+R: a reload that also discards the remote images this
@@ -9007,6 +9066,9 @@ impl App {
         if self.layout.is_some() && (self.layout_width == avail || self.settle_at.is_some()) {
             return false;
         }
+        // A new pass clamps the scroll to what it has placed: a place a
+        // drop of the thumb waits for stays, as a landing like another.
+        self.thumb_landing = None;
         // A new width, of the window or of the sidebar, with the layout
         // of the old one still here: the view keeps its place.
         self.keep_view();
@@ -9153,7 +9215,7 @@ impl App {
         if found.is_none() {
             self.preview = None;
         }
-        let (wanted, row, total, piece) = found?;
+        let (wanted, row, total, piece, _) = found?;
         let view_h = height as f32;
         let row_h = self.row_h();
         let doc = &self.document;
@@ -9164,10 +9226,15 @@ impl App {
             BlockKind::CodeBlock { highlights, .. } => highlights.len().clamp(rows.start, rows.end),
             _ => 0,
         };
-        let asked = (rows.clone(), piece.clone());
+        // A preview built by rows shows its rows whatever the piece
+        // the place is in.
         let fresh = self.preview.as_ref().is_some_and(|frame| {
-            frame.asked == asked && frame.colored == colored && frame.width == width
+            frame.asked.0 == rows
+                && (frame.preview.piece.is_none() || frame.asked.1 == piece)
+                && frame.colored == colored
+                && frame.width == width
         });
+        let asked = (rows.clone(), piece.clone());
         if !fresh {
             // The rows around the place, where they are a few tens of
             // kilobytes. Rows of very long lines are not: the place is
@@ -9248,10 +9315,11 @@ impl App {
     /// than `LONG_LINE`, the source bytes of the pieces around it. None
     /// when the layout shows the view, when no pass runs, and for a
     /// document that is not one block of lines.
+    #[allow(clippy::type_complexity)]
     fn preview_wanted(
         &self,
         view_h: f32,
-    ) -> Option<(Wanted, usize, usize, Option<std::ops::Range<usize>>)> {
+    ) -> Option<(Wanted, usize, usize, Option<std::ops::Range<usize>>, usize)> {
         if !self.pass_active() || self.export.is_some() || self.parse_pending {
             return None;
         }
@@ -9315,8 +9383,9 @@ impl App {
             Wanted::Caret(offset, _) => *offset,
             Wanted::Bottom => lines.line_range(total - 1)?.end,
         };
-        let piece = scroll::pieces_around(lay, doc, anchor, 1, 2);
-        Some((wanted, row, total, piece))
+        let (before, after) = paint::preview::pieces_for(view_h, self.row_h(), self.layout_width);
+        let piece = scroll::pieces_around(lay, doc, anchor, before, after);
+        Some((wanted, row, total, piece, anchor))
     }
 
     /// Finishes a line landing on the frame that made it: the slide has
@@ -9339,6 +9408,7 @@ impl App {
     /// Applies a scroll position or an anchor asked for before the pass
     /// had placed it.
     fn resolve_pending(&mut self) {
+        self.release_thumb_landing();
         if !self.parse_pending {
             if let Some(target) = self.pending_goto.take() {
                 self.go_to(target);
@@ -9572,6 +9642,7 @@ impl App {
         // otherwise land a pixel apart at a fractional scroll, the
         // seat of a caret row at a fractional display scale.
         let frame_y = scroll::frame_offset(self.scroll_y);
+        self.release_thumb_landing();
         let preview = self.preview_frame(avail_px, size.height);
         let thumb = self.thumb();
         let lay = self.layout.as_ref().expect("layout exists");
