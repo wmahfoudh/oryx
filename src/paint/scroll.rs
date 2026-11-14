@@ -206,6 +206,16 @@ pub fn offset_span(lay: &LayoutDoc, doc: &Document, offset: usize) -> Option<Ran
     lay.block_span(block)
 }
 
+/// The source bytes of the piece holding `offset`, in a code line
+/// longer than `LONG_LINE`. None for any other place.
+fn offset_piece(lay: &LayoutDoc, doc: &Document, offset: usize) -> Option<(usize, usize)> {
+    let block = doc.block_at_offset(offset)?;
+    let (line, byte) = line_place(doc, block, offset)?;
+    let piece = lay.code_piece_at(block, line, byte)?;
+    let start = offset - byte;
+    Some((start + piece.start, start + piece.end))
+}
+
 /// What stands at the top of a view, kept so that a new layout of the
 /// same text shows it there again: after a zoom step, a new width or a
 /// new font, the page above the view has another height, and the
@@ -224,6 +234,11 @@ pub struct TopPlace {
     /// The heights are those of the whole block, since its line did
     /// not hold the top edge.
     whole: bool,
+    /// The source bytes of the piece at `offset`, in a line longer than
+    /// `LONG_LINE`. An edit cuts again the pieces it touches, and a new
+    /// pass cuts the line from its start: the new layout can hold
+    /// other pieces of the same text.
+    piece: Option<(usize, usize)>,
 }
 
 impl TopPlace {
@@ -247,6 +262,7 @@ impl TopPlace {
             above: (scroll_y - span.start).max(0.0),
             height: span.end - span.start,
             whole,
+            piece: offset_piece(lay, doc, offset).filter(|_| !whole),
         })
     }
 
@@ -255,7 +271,24 @@ impl TopPlace {
     /// top edge. A layout that left the block as it was answers the
     /// scroll the place was taken at. None before the pass places the
     /// block.
+    ///
+    /// In a long line whose pieces are not those the place was taken
+    /// from, the byte that stood at the top edge is placed again: the
+    /// same share of the piece's bytes as of its height, in the old
+    /// piece and in the new one.
     pub fn scroll(&self, lay: &LayoutDoc, doc: &Document) -> Option<f32> {
+        if let Some((from, to)) = self.piece.filter(|_| self.height > 0.0) {
+            let share = (self.above / self.height).clamp(0.0, 1.0);
+            let byte = (from + ((to - from) as f32 * share) as usize).min(to.saturating_sub(1));
+            match offset_piece(lay, doc, byte) {
+                Some(piece) if piece != (from, to) => {
+                    let span = offset_span(lay, doc, byte)?;
+                    let share = (byte - piece.0) as f32 / (piece.1 - piece.0).max(1) as f32;
+                    return Some(span.start + (span.end - span.start) * share);
+                }
+                _ => {}
+            }
+        }
         let span = if self.whole {
             lay.block_span(doc.block_at_offset(self.offset)?)?
         } else {

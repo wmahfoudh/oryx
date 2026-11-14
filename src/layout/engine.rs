@@ -633,6 +633,9 @@ impl BlockTable {
                 Some(start) if is_last => start,
                 _ => text.len(),
             };
+            // A line with no kept piece is cut as a pass cuts it; one
+            // whose only kept piece goes to a short stretch is not.
+            let fresh_line = before.is_empty() && after.is_empty();
             if (1..SHORT_STRETCH).contains(&(to - from)) {
                 if before.pop().is_some() {
                     from = before.last().map_or(0, |&end| end as usize);
@@ -640,7 +643,7 @@ impl BlockTable {
                     to = after.remove(0) as usize;
                 }
             }
-            let ends = if before.is_empty() && after.is_empty() {
+            let ends = if fresh_line {
                 piece_ends(text)
             } else {
                 if is_first {
@@ -1507,6 +1510,22 @@ impl LayoutDoc {
         let unit = self.table.unit_of_byte(position, line, byte);
         let top = self.table.unit_top(position, unit);
         Some(top..self.table.unit_top(position, unit + 1).max(top))
+    }
+
+    /// The bytes, in its line, of the piece holding byte `byte` of a
+    /// code line longer than `LONG_LINE`. None for any other line.
+    pub fn code_piece_at(&self, block: usize, line: usize, byte: usize) -> Option<Range<usize>> {
+        let position = *self.table.position_of_block.get(block)?;
+        if position == u32::MAX {
+            return None;
+        }
+        let position = position as usize;
+        if self.table.entries[position].flags & ENTRY_CODE == 0 {
+            return None;
+        }
+        let unit = self.table.unit_of_byte(position, line, byte);
+        let (start, end) = self.table.unit_place(position, unit).piece?;
+        Some(start..end)
     }
 
     /// `code_line_at` with the place inside the line: the line standing
@@ -8444,6 +8463,50 @@ mod tests {
         }
     }
 
+    /// The line table and the map of the long lines of a plain text,
+    /// for the tests of `edit_long` alone.
+    mod pieces_of_text {
+        use super::*;
+        pub fn body(text: &str) -> CodeBody {
+            let mut start = 0;
+            let mut lines = Vec::new();
+            for line in text.split('\n') {
+                lines.push(start as u32..(start + line.len()) as u32);
+                start += line.len() + 1;
+            }
+            CodeBody::verbatim(lines)
+        }
+        pub fn table(lines: &CodeBody, text: &str) -> BlockTable {
+            let mut table = BlockTable::default();
+            table.long.push(LongLines {
+                position: 0,
+                lines: long_lines_of(lines, text),
+            });
+            table
+        }
+    }
+
+    /// A short stretch that takes the one kept piece of its line is
+    /// cut with it in equal parts: no piece of a few hundred bytes is
+    /// left beside a full one.
+    #[test]
+    fn a_short_stretch_with_the_one_kept_piece_is_cut_in_equal_parts() {
+        use pieces_of_text::{body, table};
+        let text = "x".repeat(20_000);
+        let lines = body(&text);
+        let mut map = table(&lines, &text);
+        assert_eq!(map.long_of(0)[0].ends, [8_192, 16_384, 20_000]);
+        // A line break 200 bytes into the second piece.
+        let mut after = text.clone();
+        after.insert(8_392, '\n');
+        let after_lines = body(&after);
+        let same = map.edit_long(&after_lines, &after, 0, &(0..1), &(0..2), &(8_392..8_393));
+        assert!(long_lines_hold(&after_lines, &after, map.long_of(0)));
+        assert_eq!(map.long_of(0)[0].ends, [4_196, 8_392]);
+        assert_eq!(map.long_of(0)[1].ends, [7_992, 11_608]);
+        assert_eq!(same, (0, 1));
+    }
+
     /// The map of the long lines through random edits: lines of up to
     /// five pieces, with spaces often, seldom or never, and a letter
     /// of two bytes; an edit that removes and writes a few bytes, a
@@ -8455,24 +8518,8 @@ mod tests {
     #[test]
     #[ignore]
     fn fuzz_pieces() {
+        use pieces_of_text::{body, table};
         use proptest::prelude::*;
-        fn body(text: &str) -> CodeBody {
-            let mut start = 0;
-            let mut lines = Vec::new();
-            for line in text.split('\n') {
-                lines.push(start as u32..(start + line.len()) as u32);
-                start += line.len() + 1;
-            }
-            CodeBody::verbatim(lines)
-        }
-        fn table(lines: &CodeBody, text: &str) -> BlockTable {
-            let mut table = BlockTable::default();
-            table.long.push(LongLines {
-                position: 0,
-                lines: long_lines_of(lines, text),
-            });
-            table
-        }
         let config = ProptestConfig {
             failure_persistence: None,
             ..ProptestConfig::default()

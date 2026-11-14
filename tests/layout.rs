@@ -6698,6 +6698,74 @@ fn a_long_line_is_held_by_its_pieces_around_the_view() {
     assert_eq!(&*doc.source, base.as_str());
 }
 
+/// A view far down a long line, kept across a new width after a paste
+/// near the line's start. The edit cut again the pieces it touched, so
+/// the pieces of the layout before the new width are not those the new
+/// pass cuts: the place is kept by its byte, not by its piece.
+#[test]
+fn a_view_in_a_long_line_is_kept_across_a_new_width_after_an_edit() {
+    use oryx::paint::scroll::TopPlace;
+    let long: String = (0..30_000).map(|i| format!("word{i} ")).collect();
+    let base = format!("first\n{long}\nlast\n");
+    let path = std::env::temp_dir().join(format!("oryx-kept-{}.txt", std::process::id()));
+    std::fs::write(&path, &base).unwrap();
+    let mut doc = load::open(&path, None).unwrap().document;
+    let mut reference = load::open(&path, None).unwrap().document;
+    std::fs::remove_file(&path).ok();
+    let (viewport, line_start) = (400.0, "first\n".len());
+    let mut lay = windowed(&doc, 500.0, 0.0, viewport);
+    let at = line_start + 3_000;
+    fast_keystroke(
+        &mut doc,
+        &mut reference,
+        load::FileKind::Text,
+        &mut lay,
+        at..at,
+        &"paste ".repeat(700),
+        0.0,
+        viewport,
+    );
+    // The byte of the first row at or under the top edge.
+    let top_byte = |lay: &LayoutDoc, scroll: f32| -> usize {
+        lay.runs
+            .iter()
+            .filter(|run| run.y >= scroll && run.span == 1)
+            .find_map(|run| match run.text {
+                oryx::layout::TextRef::Model { start, .. } => Some(start as usize),
+                _ => None,
+            })
+            .expect("a row of the long line under the top edge")
+    };
+    for share in [0.25, 0.5, 0.75] {
+        let scroll = (lay.height * share).round();
+        let mut media = MediaCache::offline(PathBuf::from("."));
+        window_to(
+            &doc,
+            &theme(),
+            &mut fonts(),
+            &mut media,
+            &cfg(),
+            &mut lay,
+            None,
+            scroll,
+            viewport,
+            true,
+        );
+        let place = TopPlace::of(&lay, &doc, scroll).expect("a place in the long line");
+        let before = top_byte(&lay, scroll);
+        let wider = windowed(&reference, 540.0, 0.0, viewport);
+        let kept = place
+            .scroll(&wider, &reference)
+            .expect("the line is placed");
+        let wider = windowed(&reference, 540.0, kept, viewport);
+        let after = top_byte(&wider, kept);
+        assert!(
+            before.abs_diff(after) < 200,
+            "at {share}: byte {before} at the top, then {after}"
+        );
+    }
+}
+
 /// A file of one very long line, stopped while the line is placed a
 /// chunk at a step: the layout holds the start of the line, and the
 /// occurrences searched in that start draw what the whole line's draw.
