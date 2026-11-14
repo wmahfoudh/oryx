@@ -2112,6 +2112,12 @@ impl App {
     }
 
     fn scroll_by(&mut self, delta: f32) {
+        // A step the clamp leaves in place, the wheel turned up at the
+        // top, still asks for the page: the scroll alone would not say
+        // so to a seat of the editor that waits.
+        if delta != 0.0 {
+            self.drop_parked_row();
+        }
         self.scroll_to(self.scroll_y + delta);
     }
 
@@ -2464,10 +2470,17 @@ impl App {
             }
             _ => {
                 self.pending_row = Some(place);
-                // While the file is measured, the preview shows the
-                // place over the view, which stays where it is
-                // (`preview_wanted`).
-                self.row_parked = self.file_measured().then_some(self.scroll_y);
+                // In the editor, while the file is measured, the
+                // preview shows the place over the view, which stays
+                // where it is (`preview_wanted`). A jump to the end
+                // still held from the page is older than the seat: spent
+                // at the measure's end, it would move the view, and the
+                // seat would be released as if the reader had.
+                self.row_parked = None;
+                if self.mode == edit::Mode::Edit && self.file_measured() {
+                    self.bottom_hold.clear();
+                    self.row_parked = Some(self.scroll_y);
+                }
             }
         }
     }
@@ -2482,12 +2495,19 @@ impl App {
             return;
         };
         if self.pending_row.is_some() && self.scroll_y != parked {
-            self.pending_row = None;
-            self.caret_snap = false;
-            self.caret_seat = None;
+            self.drop_parked_row();
         }
         if self.pending_row.is_none() {
             self.row_parked = None;
+        }
+    }
+
+    /// Drops a seat of the editor that waits for the measure of the
+    /// file, with the caret's owed view. Nothing for any other seat.
+    fn drop_parked_row(&mut self) {
+        if self.row_parked.take().is_some() && self.pending_row.take().is_some() {
+            self.caret_snap = false;
+            self.caret_seat = None;
         }
     }
 
@@ -2496,7 +2516,11 @@ impl App {
     /// the view, so the seat is counted from where the view is now.
     /// Asked by the frame once the scroll is clamped.
     fn show_waiting_row(&mut self) {
-        if self.pending_row.is_some() && self.row_parked.is_none() && self.file_measured() {
+        if self.pending_row.is_some()
+            && self.row_parked.is_none()
+            && self.mode == edit::Mode::Edit
+            && self.file_measured()
+        {
             self.row_parked = Some(self.scroll_y);
         }
     }
@@ -2740,7 +2764,13 @@ impl App {
         // The caret moved on, so a seat still owed to the place it left
         // would move the view after this one.
         let owed = self.caret_snap;
-        if owed {
+        // So would a seat made for another place than the caret's, the
+        // line of a jump the caret has left since.
+        let left = match (self.pending_row, self.caret) {
+            (Some(place), Some(caret)) => place.offset != caret.offset,
+            _ => false,
+        };
+        if owed || left {
             self.pending_row = None;
         }
         self.caret_seat = None;
@@ -5197,6 +5227,11 @@ impl App {
             return;
         }
         self.search_origin = self.here();
+        // The reader looks at the page and its matches from here on: a
+        // seat of the editor that waits for the measure would take the
+        // view from them when it lands. The origin above keeps its
+        // place for the way back.
+        self.drop_parked_row();
         let mut query = TextField::new(self.last_query.clone());
         query.select_all();
         self.search = Some(SearchState {
@@ -9411,7 +9446,13 @@ impl App {
         // layout holds too: the keys go to the caret, which is at that
         // place, not in the view. A press of the pointer brings the
         // page back, since a click reads the page.
-        let seat = !gesture && self.pending_row.is_some() && self.row_parked.is_some();
+        // With the search bar open the page shows too, with its
+        // matches.
+        let seat = !gesture
+            && self.mode == edit::Mode::Edit
+            && self.search.is_none()
+            && self.pending_row.is_some()
+            && self.row_parked.is_some();
         if !seat && held(self.scroll_y)? && held(self.scroll_y + view_h - 2.0)? {
             return None;
         }
@@ -9482,7 +9523,7 @@ impl App {
         }
         let height = self.doc_height();
         let vh = self.viewport_h();
-        let before_kept = self.scroll_y;
+        let before_landings = self.scroll_y;
         if let Some(kept) = self.kept_view {
             let target = match kept {
                 Kept::Distance(y) => Some(y),
@@ -9510,11 +9551,6 @@ impl App {
                 _ if settled => self.kept_view = None,
                 _ => {}
             }
-        }
-        // A kept view that came back is not the reader's move: a seat
-        // of the editor that waits is counted from it.
-        if self.scroll_y != before_kept && self.row_parked.is_some() {
-            self.row_parked = Some(self.scroll_y);
         }
         // A row asked for before the layout reached it: the same
         // pending discipline as the offset target below, resolved
@@ -9563,6 +9599,15 @@ impl App {
                     _ => {}
                 }
             }
+        }
+        // A kept view that came back, or another landing that waited,
+        // is not the reader's move: a seat of the editor that still
+        // waits is counted from where they left the view.
+        if self.scroll_y != before_landings
+            && self.pending_row.is_some()
+            && self.row_parked.is_some()
+        {
+            self.row_parked = Some(self.scroll_y);
         }
         let Some(name) = self.pending_anchor.clone() else {
             return;
