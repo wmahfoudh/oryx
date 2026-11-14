@@ -322,6 +322,7 @@ pub fn run(
         pending_anchor: None,
         pending_offset: None,
         thumb_landing: None,
+        row_parked: None,
         landing_settle: None,
         preview: None,
         history: History::default(),
@@ -1628,6 +1629,12 @@ struct App {
     /// is the reader's: the landing is released, as a held `Ctrl+End`
     /// is.
     thumb_landing: Option<f32>,
+    /// The scroll of the view when a seat of the editor was left
+    /// waiting for the measure of the file (`seat_editor_on`), while
+    /// `pending_row` holds that place. The preview shows the place
+    /// meanwhile, over the view. A view that has moved since is the
+    /// reader's: the seat is released, as a drop of the thumb is.
+    row_parked: Option<f32>,
     /// A line landing made this frame, whose exact row `settle_landing`
     /// finds once the slide has drawn the rows around it.
     landing_settle: Option<Place>,
@@ -2455,7 +2462,42 @@ impl App {
                 self.pending_row = None;
                 self.scroll_to(y);
             }
-            _ => self.pending_row = Some(place),
+            _ => {
+                self.pending_row = Some(place);
+                // While the file is measured, the preview shows the
+                // place over the view, which stays where it is
+                // (`preview_wanted`).
+                self.row_parked = self.file_measured().then_some(self.scroll_y);
+            }
+        }
+    }
+
+    /// Releases the seat of the editor that waits for the measure of
+    /// the file, once the view is no longer where the seat found it:
+    /// the wheel, the scrollbar or a key has moved it since. The
+    /// caret's view is no longer owed either, or the next frame would
+    /// seat its line again.
+    fn release_parked_row(&mut self) {
+        let Some(parked) = self.row_parked else {
+            return;
+        };
+        if self.pending_row.is_some() && self.scroll_y != parked {
+            self.pending_row = None;
+            self.caret_snap = false;
+            self.caret_seat = None;
+        }
+        if self.pending_row.is_none() {
+            self.row_parked = None;
+        }
+    }
+
+    /// Shows again a seat of the editor that still waits after a new
+    /// pass started, at an edit or a zoom step: the new pass clamped
+    /// the view, so the seat is counted from where the view is now.
+    /// Asked by the frame once the scroll is clamped.
+    fn show_waiting_row(&mut self) {
+        if self.pending_row.is_some() && self.row_parked.is_none() && self.file_measured() {
+            self.row_parked = Some(self.scroll_y);
         }
     }
 
@@ -5126,6 +5168,11 @@ impl App {
         };
         if let Some(placed) = caret::place(lay, &self.document, &mut self.fonts, x, y) {
             self.caret = Some(placed);
+            // The caret is where the click put it: a seat that waited
+            // for the place it left is no longer owed, nor its snap.
+            self.pending_row = None;
+            self.caret_snap = false;
+            self.caret_seat = None;
             if self.selection.take().is_some() {
                 self.band = None;
             }
@@ -7351,6 +7398,7 @@ impl App {
     /// replaces them, or an older one would move the view after it.
     fn drop_waiting_landings(&mut self) {
         self.thumb_landing = None;
+        self.row_parked = None;
         self.kept_view = None;
         self.pending_anchor = None;
         self.pending_offset = None;
@@ -9069,6 +9117,7 @@ impl App {
         // A new pass clamps the scroll to what it has placed: a place a
         // drop of the thumb waits for stays, as a landing like another.
         self.thumb_landing = None;
+        self.row_parked = None;
         // A new width, of the window or of the sidebar, with the layout
         // of the old one still here: the view keeps its place.
         self.keep_view();
@@ -9202,7 +9251,10 @@ impl App {
     /// measured and dropped. A view the layout does show is left alone,
     /// whatever landing waits: the page under the picture takes the
     /// clicks and the keys, so the picture stands only where that page
-    /// is empty. The place shown is the landing that waits, in the
+    /// is empty. The one exception is a seat of the editor that waits
+    /// (`row_parked`): the keys go to the caret, so the caret's place
+    /// is shown over the view, and a press of the pointer brings the
+    /// page back. The place shown is the landing that waits, in the
     /// order `resolve_pending` spends them, then a jump to the end that
     /// is held, then the scroll's own place; during a gesture of the
     /// pointer, the scroll's place alone, since the view follows the
@@ -9313,8 +9365,9 @@ impl App {
     /// What a preview would show now, the row of the file it names,
     /// the file's line count and, for a place inside a line longer
     /// than `LONG_LINE`, the source bytes of the pieces around it. None
-    /// when the layout shows the view, when no pass runs, and for a
-    /// document that is not one block of lines.
+    /// when the layout shows the view and no seat of the editor waits,
+    /// when no pass runs, and for a document that is not one block of
+    /// lines.
     #[allow(clippy::type_complexity)]
     fn preview_wanted(
         &self,
@@ -9350,13 +9403,18 @@ impl App {
             pass.keeps(lay, line, byte)
         };
         let top = row_of(scroll::top_offset(lay, doc, self.scroll_y));
-        if held(self.scroll_y)? && held(self.scroll_y + view_h - 2.0)? {
-            return None;
-        }
         // A drag of the scrollbar's thumb names its own landing
         // (`drag_to`): the view follows the hand to it.
         let pointing = self.drag.is_some() && !matches!(self.drag, Some(Drag::Scrollbar(_)));
         let gesture = pointing || self.selecting() || self.overlay_mouse;
+        // A seat of the editor that waits is shown over a view the
+        // layout holds too: the keys go to the caret, which is at that
+        // place, not in the view. A press of the pointer brings the
+        // page back, since a click reads the page.
+        let seat = !gesture && self.pending_row.is_some() && self.row_parked.is_some();
+        if !seat && held(self.scroll_y)? && held(self.scroll_y + view_h - 2.0)? {
+            return None;
+        }
         let landing = if gesture {
             None
         } else if let Some(place) = self.pending_row {
@@ -9409,6 +9467,7 @@ impl App {
     /// had placed it.
     fn resolve_pending(&mut self) {
         self.release_thumb_landing();
+        self.release_parked_row();
         if !self.parse_pending {
             if let Some(target) = self.pending_goto.take() {
                 self.go_to(target);
@@ -9423,6 +9482,7 @@ impl App {
         }
         let height = self.doc_height();
         let vh = self.viewport_h();
+        let before_kept = self.scroll_y;
         if let Some(kept) = self.kept_view {
             let target = match kept {
                 Kept::Distance(y) => Some(y),
@@ -9450,6 +9510,11 @@ impl App {
                 _ if settled => self.kept_view = None,
                 _ => {}
             }
+        }
+        // A kept view that came back is not the reader's move: a seat
+        // of the editor that waits is counted from it.
+        if self.scroll_y != before_kept && self.row_parked.is_some() {
+            self.row_parked = Some(self.scroll_y);
         }
         // A row asked for before the layout reached it: the same
         // pending discipline as the offset target below, resolved
@@ -9643,6 +9708,8 @@ impl App {
         // seat of a caret row at a fractional display scale.
         let frame_y = scroll::frame_offset(self.scroll_y);
         self.release_thumb_landing();
+        self.release_parked_row();
+        self.show_waiting_row();
         let preview = self.preview_frame(avail_px, size.height);
         let thumb = self.thumb();
         let lay = self.layout.as_ref().expect("layout exists");
