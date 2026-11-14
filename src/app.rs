@@ -6169,9 +6169,44 @@ impl App {
         }
     }
 
+    /// The scrollbar's thumb. While a code or text file is measured its
+    /// height is not known, and the thumb stands for a share of the
+    /// file's bytes: the place a landing waits for, else the top of
+    /// the view. Its height is the measured part's until the measure
+    /// ends.
     fn thumb(&self) -> Option<(f32, f32)> {
         let vh = self.viewport_h();
-        scrollbar::thumb(self.doc_height(), vh, self.scroll_y, vh, self.scale)
+        let (y, height) = scrollbar::thumb(self.doc_height(), vh, self.scroll_y, vh, self.scale)?;
+        match self.measured_share() {
+            Some(share) => Some((share * (vh - height).max(0.0), height)),
+            None => Some((y, height)),
+        }
+    }
+
+    /// Whether the document is a code or text file of one block whose
+    /// pass still measures it: the case the preview shows a place for
+    /// (`preview_wanted`).
+    fn file_measured(&self) -> bool {
+        let doc = &self.document;
+        self.pass_active()
+            && !self.parse_pending
+            && self.export.is_none()
+            && (doc.code_file || doc.plain_file)
+            && matches!(&doc.blocks[..], [block] if matches!(&block.kind, BlockKind::CodeBlock { lines, .. } if !lines.is_empty()))
+    }
+
+    /// The share of the file the thumb stands at while the file is
+    /// measured. None once it is, and for any other document.
+    fn measured_share(&self) -> Option<f32> {
+        if !self.file_measured() {
+            return None;
+        }
+        let lay = self.layout.as_ref()?;
+        let offset = match self.pending_offset {
+            Some(place) => place.offset,
+            None => scroll::top_offset(lay, &self.document, self.scroll_y),
+        };
+        Some(scroll::share_of_offset(&self.document, offset))
     }
 
     fn drag_to(&mut self, cursor_y: f32) {
@@ -6179,6 +6214,28 @@ impl App {
             return;
         };
         let vh = self.viewport_h();
+        if self.file_measured() {
+            // The thumb names a place in the file, not in the part
+            // measured so far: the view lands there when the measure
+            // reaches it, and the preview shows it meanwhile. The page
+            // goes to the end of the measured part, which the layout
+            // does not hold, so that the preview stands on an empty
+            // page.
+            let share = ((cursor_y - grab) / (vh - thumb_h).max(1.0)).clamp(0.0, 1.0);
+            let Some(lay) = self.layout.as_ref() else {
+                return;
+            };
+            let offset = scroll::offset_at_share(lay, &self.document, share);
+            self.pending_row = None;
+            self.kept_view = None;
+            self.pending_offset = Some(Place::top(offset));
+            self.resolve_pending();
+            if self.pending_offset.is_some() {
+                self.scroll_to(self.doc_height());
+            }
+            self.request_redraw();
+            return;
+        }
         let target =
             scrollbar::scroll_for_thumb(cursor_y - grab, thumb_h, vh, self.doc_height(), vh);
         self.scroll_to(target);
@@ -9228,7 +9285,10 @@ impl App {
         if held(self.scroll_y)? && held(self.scroll_y + view_h - 2.0)? {
             return None;
         }
-        let gesture = self.drag.is_some() || self.selecting() || self.overlay_mouse;
+        // A drag of the scrollbar's thumb names its own landing
+        // (`drag_to`): the view follows the hand to it.
+        let pointing = self.drag.is_some() && !matches!(self.drag, Some(Drag::Scrollbar(_)));
+        let gesture = pointing || self.selecting() || self.overlay_mouse;
         let landing = if gesture {
             None
         } else if let Some(place) = self.pending_row {
@@ -9513,6 +9573,7 @@ impl App {
         // seat of a caret row at a fractional display scale.
         let frame_y = scroll::frame_offset(self.scroll_y);
         let preview = self.preview_frame(avail_px, size.height);
+        let thumb = self.thumb();
         let lay = self.layout.as_ref().expect("layout exists");
         let numbers = self.numbers_color();
         let band_usable = self.band.as_ref().is_some_and(|b| {
@@ -9673,13 +9734,7 @@ impl App {
                 draw_strip(&mut buffer, size.width, size.height, inset, frame_y, &strip);
             }
         }
-        if let Some(thumb) = scrollbar::thumb(
-            lay.height,
-            size.height as f32,
-            self.scroll_y,
-            size.height as f32,
-            self.scale,
-        ) {
+        if let Some(thumb) = thumb {
             let color = if matches!(self.drag, Some(Drag::Scrollbar(_))) {
                 self.theme.ui.scrollbar_hover
             } else {

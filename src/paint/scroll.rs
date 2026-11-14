@@ -246,6 +246,38 @@ pub fn pieces_around(
     Some(start + piece.start..start + piece.end)
 }
 
+/// The source offset at `share` of a file of one block of lines, from 0
+/// at its start to 1 at its end: the start of the line there, or of
+/// the piece there in a line longer than `LONG_LINE`. While such a file
+/// is measured, the scrollbar's thumb stands for a share of its bytes,
+/// since the height of the page is not known yet. Zero for any other
+/// document.
+pub fn offset_at_share(lay: &LayoutDoc, doc: &Document, share: f32) -> usize {
+    let Some(BlockKind::CodeBlock { lines, .. }) = doc.blocks.first().map(|b| &b.kind) else {
+        return 0;
+    };
+    let len = doc.source.len();
+    let at = ((len as f64 * f64::from(share.clamp(0.0, 1.0))) as usize).min(len);
+    let Some(row) = lines.row_at(&doc.source, at) else {
+        return 0;
+    };
+    let row = row.min(lines.len().saturating_sub(1));
+    let Some(line) = lines.line_range(row) else {
+        return 0;
+    };
+    let byte = at.clamp(line.start, line.end) - line.start;
+    match lay.code_piece_at(0, row, byte) {
+        Some(piece) => line.start + piece.start,
+        None => line.start,
+    }
+}
+
+/// The share of the file's bytes that stand before `offset`.
+pub fn share_of_offset(doc: &Document, offset: usize) -> f32 {
+    let len = doc.source.len().max(1);
+    (offset.min(len) as f64 / len as f64) as f32
+}
+
 /// What stands at the top of a view, kept so that a new layout of the
 /// same text shows it there again: after a zoom step, a new width or a
 /// new font, the page above the view has another height, and the
@@ -654,6 +686,63 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    /// The share of a file and its offset: the start of the line at
+    /// that share of the bytes, the start of the piece in a very long
+    /// line, and back within a line's or a piece's worth.
+    #[test]
+    fn a_share_of_a_file_is_an_offset_and_back() {
+        use crate::doc::load;
+        let dir = std::env::temp_dir().join("oryx-share");
+        std::fs::create_dir_all(&dir).unwrap();
+        let long: String = (0..20_000).map(|i| format!("word{i} ")).collect();
+        let text = format!(
+            "{}{long}\n{}",
+            "a short line\n".repeat(2_000),
+            "the end\n".repeat(500)
+        );
+        let path = dir.join("share.txt");
+        std::fs::write(&path, &text).unwrap();
+        let doc = load::open(&path, None).unwrap().document;
+        let mut fonts = crate::style::fonts::FontStore::new();
+        let mut media = crate::doc::images::MediaCache::offline(std::path::PathBuf::from("."));
+        let lay = crate::layout::layout(
+            &doc,
+            &crate::style::theme::Theme::default_dark(),
+            &mut fonts,
+            &mut media,
+            &crate::layout::ViewConfig::default(),
+            800.0,
+        );
+        assert_eq!(offset_at_share(&lay, &doc, 0.0), 0);
+        assert_eq!(offset_at_share(&lay, &doc, -1.0), 0);
+        // The end: the last line's start.
+        let last = offset_at_share(&lay, &doc, 1.0);
+        assert!(
+            text[last..].starts_with("the end") && text.len() - last <= 8,
+            "{last}"
+        );
+        // Among the short lines: a line's start.
+        let at = offset_at_share(&lay, &doc, 0.05);
+        assert!(at > 0 && text[at..].starts_with("a short line") && &text[at - 1..at] == "\n");
+        // Inside the long line: a piece's start, within 8 KB.
+        let line_start = "a short line\n".len() * 2_000;
+        for share in [0.3_f32, 0.5, 0.7] {
+            let at = offset_at_share(&lay, &doc, share);
+            let aimed = (text.len() as f32 * share) as usize;
+            assert!(
+                at > line_start && at <= aimed && aimed - at <= 8192,
+                "{share}: {at}"
+            );
+            assert_eq!(pieces_around(&lay, &doc, at, 0, 0).unwrap().start, at);
+            let back = share_of_offset(&doc, at);
+            assert!(
+                (back - share).abs() < 8192.0 / text.len() as f32 + 1e-4,
+                "{share} {back}"
+            );
+        }
+        assert_eq!(share_of_offset(&doc, text.len() + 5), 1.0);
     }
 
     #[test]
