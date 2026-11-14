@@ -4372,9 +4372,25 @@ fn typing_keeps_every_line_through_the_pooled_pass() {
 /// The app's windowed layout of a file document: begin, retain around
 /// the scroll, complete, slide the window there.
 fn windowed(doc: &Document, width: f32, scroll: f32, viewport: f32) -> LayoutDoc {
+    windowed_as(doc, None, width, scroll, viewport)
+}
+
+/// `windowed`, the long lines cut in the pieces `pieces` holds: an edit
+/// cuts again the pieces it touches alone, so the pieces of an edited
+/// line are not those a pass cuts from the line's start.
+fn windowed_as(
+    doc: &Document,
+    pieces: Option<&LayoutDoc>,
+    width: f32,
+    scroll: f32,
+    viewport: f32,
+) -> LayoutDoc {
     let mut fonts = fonts();
     let mut media = MediaCache::offline(PathBuf::from("."));
     let (mut out, mut pass) = layout_begin(doc, &cfg(), width);
+    if let Some(pieces) = pieces {
+        out.adopt_pieces(pieces);
+    }
     pass.retain_around(scroll, viewport);
     layout_more(
         doc,
@@ -6559,7 +6575,7 @@ fn the_occurrences_of_the_held_lines_draw_what_the_whole_file_draws() {
 /// place inside the line, and the table answers for it by piece. The
 /// occurrences searched in the held part draw what the whole file's
 /// draw. A key typed there, a line break and its removal splice the
-/// layout as a fresh pass lays it out.
+/// layout as a fresh pass lays out the same pieces.
 #[test]
 fn a_long_line_is_held_by_its_pieces_around_the_view() {
     use oryx::paint::scroll;
@@ -6676,7 +6692,7 @@ fn a_long_line_is_held_by_its_pieces_around_the_view() {
             viewport,
         );
         lay.records_consistent().unwrap();
-        let fresh = windowed(&reference, width, scroll, viewport);
+        let fresh = windowed_as(&reference, Some(&lay), width, scroll, viewport);
         assert_same_layout(&lay, &doc, &fresh, &reference);
     }
     assert_eq!(&*doc.source, base.as_str());

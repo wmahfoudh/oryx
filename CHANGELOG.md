@@ -12,6 +12,7 @@
 - A zoom step while a big code file is still being colored no longer blocks the window. Before, it could take more than five minutes on a 200 MB file.
 - A double click, a selection with the mouse and `Ctrl+A` are now faster in a big code or text file. In a 200 MB Rust file, a double click now takes 0.02 s and `Ctrl+A` 0.01 s. Before, 0.47 s and 0.14 s.
 - `Ctrl+A` in the editor no longer blocks the window in a file of one very long line. In an 8 MB file of one line it now takes 0.06 s. Before, the window read no key for more than five minutes, and Oryx used 3 GB of memory.
+- A key typed in the editor no longer blocks the window in a file of one very long line. In a 33 MB file of one line, a key, Enter and an undo now take less than 0.1 s. Before, each blocked the window for 20 s.
 - The search in a big code or text file no longer blocks the window. In the same playlist, a single common letter in the search bar now answers in under a second, and `Escape` closes the bar at once. Before, the window was blocked for minutes.
 - A definition list with a tab before its colon no longer crashes Oryx. Before, Oryx crashed when the definition above it ended with an accented letter or a non-Latin character.
 - A list item that holds a link definition, followed by a line of spaces, no longer crashes Oryx.

@@ -350,7 +350,7 @@ pub(crate) struct BlockTable {
 }
 
 /// The lines of one code position longer than `LONG_LINE`, in order.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 struct LongLines {
     position: u32,
     lines: Vec<Pieced>,
@@ -414,6 +414,37 @@ fn long_lines_of(lines: &CodeBody, source: &str) -> Vec<Pieced> {
         before += added;
     }
     found
+}
+
+/// Whether `long` is a map of the long lines of `lines`: each line
+/// over `LONG_LINE`, in order, with pieces of 1 byte to `LONG_LINE`
+/// that end on character boundaries and at the line's length. An edit
+/// cuts again the pieces it touches alone, so the map of an edited
+/// line is not the one `long_lines_of` reads: this is what holds.
+fn long_lines_hold(lines: &CodeBody, source: &str, long: &[Pieced]) -> bool {
+    let mut found = long.iter();
+    let mut before = 0_u32;
+    for line in 0..lines.len() {
+        if lines.line_len(line) <= LONG_LINE {
+            continue;
+        }
+        let Some(p) = found.next() else {
+            return false;
+        };
+        let text = lines.line(source, line);
+        let mut start = 0;
+        let pieces = p.ends.iter().all(|&end| {
+            let end = end as usize;
+            let holds = end > start && end - start <= LONG_LINE && text.is_char_boundary(end);
+            start = end;
+            holds
+        });
+        if p.line as usize != line || p.before != before || !pieces || start != text.len() {
+            return false;
+        }
+        before += p.ends.len() as u32 - 1;
+    }
+    found.next().is_none()
 }
 
 /// The text of one unit and its styled ranges, counted from the unit's
@@ -481,13 +512,18 @@ impl BlockTable {
     }
 
     /// Follows an edit that put the lines `new` where the lines `old`
-    /// were: the long lines among the new ones are read, those below
-    /// move with the lines. `edit` is the new text's bytes in the
-    /// source. Answers how many units at the start of the touched
-    /// lines and how many at their end the edit left as they were:
-    /// the pieces of a long line that end before the edit, and those
-    /// that start after it, when the new line is cut at the same
-    /// bytes.
+    /// were: the long lines below move with the lines, and the pieces
+    /// the edit touches are cut again, they alone. `edit` is the new
+    /// text's bytes in the source. Answers how many units at the start
+    /// of the touched lines and how many at their end the edit left as
+    /// they were: the pieces of a long line that end at or before the
+    /// edit, and those that start at or after it.
+    ///
+    /// The text of the touched pieces is one stretch (`cut_stretch`).
+    /// A stretch shorter than `SHORT_STRETCH` is cut with the kept
+    /// piece before it, else with the one after, so a deletion leaves
+    /// no row of a few characters. A line with no kept piece is cut
+    /// from its start, as a pass cuts it.
     fn edit_long(
         &mut self,
         lines: &CodeBody,
@@ -514,59 +550,114 @@ impl BlockTable {
         for p in &mut list[hi..] {
             p.line = (p.line as i64 + delta) as u32;
         }
-        let fresh: Vec<Pieced> = new
-            .clone()
-            .filter(|&line| line < lines.len() && lines.line_len(line) > LONG_LINE)
-            .map(|line| Pieced {
-                line: line as u32,
-                before: 0,
-                ends: piece_ends(lines.line(source, line)),
-            })
-            .collect();
 
-        // The pieces the edit left as they were. The first touched
-        // line starts where it did, so a piece of it that ends at or
-        // before the edit, at the same byte as before, has its bytes.
+        // The pieces the edit left as they were, as their ends in the
+        // new lines. The first touched line starts where it did, so a
+        // piece of it that ends at or before the edit has its bytes.
         // The last touched line ends with the same bytes after the
-        // edit, so a piece of it that starts in them, as far from the
-        // line's end as before, has its bytes too.
+        // edit, so a piece of it that starts in them has its bytes
+        // too, as far from the line's end as before.
         let touched = (!old.is_empty() && !new.is_empty() && new.end <= lines.len())
             .then(|| Some((lines.line_range(new.start)?, lines.line_range(new.end - 1)?)))
-            .flatten();
-        let mut same = (0, 0);
-        if let Some((first, last)) = touched.filter(|(first, last)| {
-            first.start <= edit.start && edit.end <= last.end && edit.start <= edit.end
-        }) {
+            .flatten()
+            .filter(|(first, last)| {
+                first.start <= edit.start
+                    && edit.start <= first.end
+                    && last.start <= edit.end
+                    && edit.end <= last.end
+                    && edit.start <= edit.end
+            });
+        let mut head: Vec<u32> = Vec::new();
+        let mut tail: Vec<u32> = Vec::new();
+        // Where the first piece of `tail` starts.
+        let mut tail_start = None;
+        if let Some((first, last)) = &touched {
             let before_edit = edit.start - first.start;
             let after_edit = last.end - edit.end;
             let was = &list[lo..hi];
             let old_first = was.first().filter(|p| p.line as usize == old.start);
-            let new_first = fresh.first().filter(|p| p.line as usize == new.start);
-            if let (Some(a), Some(b)) = (old_first, new_first) {
-                same.0 = a
-                    .ends
-                    .iter()
-                    .zip(&b.ends)
-                    .take_while(|(x, y)| x == y && **x as usize <= before_edit)
-                    .count();
-            }
             let old_last = was.last().filter(|p| p.line as usize + 1 == old.end);
-            let new_last = fresh.last().filter(|p| p.line as usize + 1 == new.end);
-            if let (Some(a), Some(b)) = (old_last, new_last) {
-                // Each piece's start, as its distance from the line's
-                // end, the last piece first.
-                let from_end = |p: &Pieced| {
-                    let len = *p.ends.last().expect("a long line has pieces");
-                    let ends = p.ends.clone();
-                    (0..ends.len())
-                        .rev()
-                        .map(move |k| len - if k == 0 { 0 } else { ends[k - 1] })
-                };
-                same.1 = from_end(a)
-                    .zip(from_end(b))
-                    .take_while(|(x, y)| x == y && *x as usize <= after_edit)
-                    .count();
+            if let Some(p) = old_first {
+                head.extend(
+                    p.ends
+                        .iter()
+                        .take_while(|&&end| end as usize <= before_edit),
+                );
             }
+            let old_len = old_last.map_or(0, |p| p.ends[p.ends.len() - 1] as usize);
+            // What the edit removed of a line that is both the first
+            // and the last lies between the two kept parts.
+            let apart = old.len() > 1 || before_edit + after_edit <= old_len;
+            if let (Some(p), true) = (old_last, after_edit <= old_len && apart) {
+                let kept_from = old_len - after_edit;
+                let from = match kept_from {
+                    0 => 0,
+                    _ => p.ends.partition_point(|&end| (end as usize) < kept_from) + 1,
+                };
+                let moved = last.len() as i64 - old_len as i64;
+                if from < p.ends.len() {
+                    let start = match from {
+                        0 => 0,
+                        _ => p.ends[from - 1],
+                    };
+                    tail_start = Some((start as i64 + moved) as usize);
+                    tail.extend(
+                        p.ends[from..]
+                            .iter()
+                            .map(|&end| (end as i64 + moved) as u32),
+                    );
+                }
+            }
+        }
+
+        let mut same = (0, 0);
+        let mut fresh: Vec<Pieced> = Vec::new();
+        for line in new.clone() {
+            if line >= lines.len() || lines.line_len(line) <= LONG_LINE {
+                continue;
+            }
+            let text = lines.line(source, line);
+            let (is_first, is_last) = (line == new.start, line + 1 == new.end);
+            let mut before = if is_first {
+                std::mem::take(&mut head)
+            } else {
+                Vec::new()
+            };
+            let mut after = if is_last {
+                std::mem::take(&mut tail)
+            } else {
+                Vec::new()
+            };
+            let mut from = before.last().map_or(0, |&end| end as usize);
+            let mut to = match tail_start {
+                Some(start) if is_last => start,
+                _ => text.len(),
+            };
+            if (1..SHORT_STRETCH).contains(&(to - from)) {
+                if before.pop().is_some() {
+                    from = before.last().map_or(0, |&end| end as usize);
+                } else if !after.is_empty() {
+                    to = after.remove(0) as usize;
+                }
+            }
+            let ends = if before.is_empty() && after.is_empty() {
+                piece_ends(text)
+            } else {
+                if is_first {
+                    same.0 = before.len();
+                }
+                if is_last {
+                    same.1 = after.len();
+                }
+                before.extend(cut_stretch(text, from..to));
+                before.append(&mut after);
+                before
+            };
+            fresh.push(Pieced {
+                line: line as u32,
+                before: 0,
+                ends,
+            });
         }
 
         list.splice(lo..hi, fresh);
@@ -3165,6 +3256,15 @@ impl LayoutDoc {
             record.runs = record.runs.start - base.runs..record.runs.end - base.runs;
         }
         self.index = YIndex::default();
+    }
+
+    /// Takes the pieces of the long lines of `other`, before a pass
+    /// places them. An edit cuts again the pieces it touches alone, so
+    /// a test compares an edited layout with a fresh pass over the
+    /// same pieces.
+    #[doc(hidden)]
+    pub fn adopt_pieces(&mut self, other: &LayoutDoc) {
+        self.table.long.clone_from(&other.table.long);
     }
 
     /// Whether the code line records, the run vector and the window's
@@ -7325,9 +7425,8 @@ pub fn edit_code_lines(
             .edit_long(lines, &doc.source, position, &old_lines, &new_lines, &edit);
     let new_units =
         lay.table.unit_of(position, new_lines.start)..lay.table.unit_of(position, new_lines.end);
-    debug_assert_eq!(
-        lay.table.long_of(position),
-        long_lines_of(lines, &doc.source),
+    debug_assert!(
+        long_lines_hold(lines, &doc.source, lay.table.long_of(position)),
         "the long lines after the edit are the document's"
     );
     let same = (head + tail).min(old_units.len()).min(new_units.len());
@@ -7520,25 +7619,62 @@ pub(crate) fn shape_code_line_step(
 /// is shaped in its own buffer, so the cost stays linear in the line's
 /// length. A line within the threshold is one piece.
 fn long_line_chunks(line: &str) -> Vec<Range<usize>> {
-    const LOOK_BACK: usize = 256;
-    let bytes = line.as_bytes();
     let mut chunks = Vec::new();
     let mut start = 0;
     while line.len() - start > LONG_LINE {
-        let target = start + LONG_LINE;
-        let floor = target - LOOK_BACK;
-        let mut end = match bytes[floor..target].iter().rposition(|&b| b == b' ') {
-            Some(space) => floor + space + 1,
-            None => target,
-        };
-        while !line.is_char_boundary(end) {
-            end -= 1;
-        }
+        let end = piece_end(line, start + LONG_LINE);
         chunks.push(start..end);
         start = end;
     }
     chunks.push(start..line.len());
     chunks
+}
+
+/// How far back from where a piece may end a space is looked for.
+const LOOK_BACK: usize = 256;
+
+/// A stretch of a long line shorter than this is cut with the piece
+/// beside it.
+const SHORT_STRETCH: usize = LONG_LINE / 4;
+
+/// Where a piece that may reach byte `target` of `line` ends: after the
+/// last space of the `LOOK_BACK` bytes before it, else at `target`,
+/// moved back to a character boundary.
+fn piece_end(line: &str, target: usize) -> usize {
+    let floor = target - LOOK_BACK;
+    let mut end = match line.as_bytes()[floor..target]
+        .iter()
+        .rposition(|&b| b == b' ')
+    {
+        Some(space) => floor + space + 1,
+        None => target,
+    };
+    while !line.is_char_boundary(end) {
+        end -= 1;
+    }
+    end
+}
+
+/// Where the pieces of the bytes `stretch` of a long line end, the
+/// pieces an edit touched cut again: one piece when the stretch is
+/// within `LONG_LINE`, else equal parts, each ended by `piece_end`.
+/// The parts aim under `LONG_LINE` by what `piece_end` can move an end
+/// back, so no piece passes it.
+fn cut_stretch(line: &str, stretch: Range<usize>) -> Vec<u32> {
+    let len = stretch.len();
+    if len == 0 {
+        return Vec::new();
+    }
+    let parts = if len <= LONG_LINE {
+        1
+    } else {
+        len.div_ceil(LONG_LINE - LOOK_BACK - 4)
+    };
+    let mut ends: Vec<u32> = (1..parts)
+        .map(|k| piece_end(line, stretch.start + len * k / parts) as u32)
+        .collect();
+    ends.push(stretch.end as u32);
+    ends
 }
 
 /// The styled ranges overlapping `chunk`, clipped to it and rebased to
@@ -8170,12 +8306,11 @@ mod tests {
         assert_eq!(lay.code_place_at(0, 3, top + height + 1.0), Some((2, 0)));
     }
 
-    /// An edit inside a long line leaves the pieces before it and,
-    /// where the line is cut at the same bytes after it, the pieces
-    /// after it: their heights are not measured again. The map of the
-    /// long lines after the edit is the one a fresh pass reads.
+    /// An edit inside a long line cuts again the pieces it touches.
+    /// The pieces before and after keep their bytes: their heights are
+    /// not measured again.
     #[test]
-    fn an_edit_in_a_long_line_keeps_the_pieces_it_did_not_change() {
+    fn an_edit_in_a_long_line_cuts_again_the_pieces_it_touches() {
         let (mut doc, long) = long_line_file("edit.json");
         let pieces = long_line_chunks(&long);
         let n = pieces.len();
@@ -8205,35 +8340,118 @@ mod tests {
             let same = lay
                 .table
                 .edit_long(lines, &doc.source, 0, &old, &new, &inserted);
-            assert_eq!(lay.table.long_of(0), long_lines_of(lines, &doc.source));
+            assert!(long_lines_hold(lines, &doc.source, lay.table.long_of(0)));
             same
         };
-        // A letter inside the fourth piece, in a word: the piece ends
-        // after the same space, one byte further.
+        let ends = |lay: &LayoutDoc, line: usize| -> Vec<usize> {
+            lay.table
+                .long_of(0)
+                .iter()
+                .find(|p| p.line as usize == line)
+                .map(|p| p.ends.iter().map(|&end| end as usize).collect())
+                .unwrap_or_default()
+        };
+        // A letter inside the fourth piece: the piece is one byte
+        // longer, the others stand.
         let at = line_start + pieces[3].start + 100;
         assert_eq!(edit(&mut doc, &mut lay, at..at, "x"), (3, n - 4));
+        assert_eq!(ends(&lay, 1)[3], pieces[3].end + 1);
         assert_eq!(edit(&mut doc, &mut lay, at..at + 1, ""), (3, n - 4));
-        // The same bytes written again: the pieces are cut where they
-        // were, and the one written is measured.
         assert_eq!(edit(&mut doc, &mut lay, at..at + 1, "y"), (3, n - 4));
-        // A letter at the very start of a piece belongs to that piece.
+        // A letter typed where a piece ends touches no piece: it is cut
+        // with the piece before it.
         let at = line_start + pieces[5].start;
-        assert_eq!(edit(&mut doc, &mut lay, at..at, "z"), (5, n - 6));
-        // A line break in the sixth piece: the first line keeps the
-        // five pieces before it, and the second is cut from its own
-        // start, at other bytes.
+        assert_eq!(edit(&mut doc, &mut lay, at..at, "z"), (4, n - 5));
+        assert_eq!(ends(&lay, 1)[4], pieces[4].end + 1);
+        // A space typed where the fourth piece ended after a space
+        // moves no piece: the end is kept, not looked for again.
+        let at = line_start + pieces[3].end - 1;
+        assert_eq!(edit(&mut doc, &mut lay, at..at, " "), (3, n - 4));
+        assert_eq!(edit(&mut doc, &mut lay, at..at + 1, ""), (3, n - 4));
+        // A line break 199 bytes into the sixth piece. The first line
+        // keeps four pieces: the 199 bytes are cut with the fifth, in
+        // two parts, the two being over 8 KB. The second line keeps
+        // the pieces after the sixth.
         let at = line_start + pieces[5].start + 200;
-        let (head, tail) = edit(&mut doc, &mut lay, at..at, "\n");
-        assert_eq!(head, 5);
-        assert!(tail < n - 6, "{tail} pieces kept after the break");
+        assert_eq!(edit(&mut doc, &mut lay, at..at, "\n"), (4, n - 6));
+        assert_eq!(ends(&lay, 1).len(), 6);
+        assert_eq!(ends(&lay, 2).len(), n - 5);
+        // The break removed: the pieces of both lines, none measured.
+        assert_eq!(edit(&mut doc, &mut lay, at..at + 1, ""), (6, n - 5));
+        let count = ends(&lay, 1).len();
+        assert_eq!(count, n + 1);
+        // 9,000 bytes written in the third piece: it is cut in three.
+        let at = line_start + pieces[2].start + 100;
+        let written = "w".repeat(9_000);
+        assert_eq!(edit(&mut doc, &mut lay, at..at, &written), (2, count - 3));
+        assert_eq!(ends(&lay, 1).len(), count + 2);
+        // All but 50 bytes of those three pieces removed: what is left
+        // is cut with the piece before, in two parts here.
+        let from = line_start + pieces[2].start + 25;
+        let to = line_start + ends(&lay, 1)[4] - 25;
+        assert_eq!(edit(&mut doc, &mut lay, from..to, ""), (1, count - 3));
+        assert_eq!(ends(&lay, 1).len(), count);
+        // The line cut down to 5,000 bytes is a line as another.
+        let end = line_start + *ends(&lay, 1).last().unwrap();
+        assert_eq!(
+            edit(&mut doc, &mut lay, line_start + 5_000..end, ""),
+            (0, 0)
+        );
+        assert!(lay.table.long_of(0).is_empty());
+        // 20,000 bytes written in it: cut from the line's start, as a
+        // fresh pass cuts it.
+        let at = line_start + 2_000;
+        let written = "word ".repeat(4_000);
+        assert_eq!(edit(&mut doc, &mut lay, at..at, &written), (0, 0));
+        let BlockKind::CodeBlock { lines, .. } = &doc.blocks[0].kind else {
+            panic!("a code file");
+        };
+        assert_eq!(lay.table.long_of(0), long_lines_of(lines, &doc.source));
+    }
+
+    /// A stretch of at most `LONG_LINE` bytes is one piece. A longer
+    /// one is cut in equal parts, each ending after a space when one
+    /// is near, on a character boundary, none over `LONG_LINE`.
+    #[test]
+    fn a_stretch_is_cut_in_equal_parts() {
+        let plain = "x".repeat(40_000);
+        assert_eq!(cut_stretch(&plain, 500..500), Vec::<u32>::new());
+        assert_eq!(cut_stretch(&plain, 500..501), [501]);
+        assert_eq!(cut_stretch(&plain, 100..100 + LONG_LINE), [8_292]);
+        assert_eq!(cut_stretch(&plain, 100..101 + LONG_LINE), [4_196, 8_293]);
+        assert_eq!(cut_stretch(&plain, 0..10_000), [5_000, 10_000]);
+        assert_eq!(cut_stretch(&plain, 0..16_384), [5_461, 10_922, 16_384]);
+        // After the last space of the 256 bytes before the middle.
+        let mut spaced = plain.clone();
+        spaced.replace_range(4_900..4_901, " ");
+        spaced.replace_range(4_700..4_701, " ");
+        assert_eq!(cut_stretch(&spaced, 0..10_000), [4_901, 10_000]);
+        // Not inside a character of two bytes.
+        let mut accent = "x".repeat(4_999);
+        accent.push('\u{e9}');
+        accent.push_str(&"x".repeat(5_000));
+        assert_eq!(cut_stretch(&accent, 0..10_000), [4_999, 10_000]);
+        // The parts of a stretch of any length are within `LONG_LINE`.
+        let words = "word ".repeat(12_000);
+        for len in (LONG_LINE + 1..60_000).step_by(997) {
+            let mut start = 3;
+            for end in cut_stretch(&words, 3..3 + len) {
+                let end = end as usize;
+                assert!(end > start && end - start <= LONG_LINE, "{start}..{end}");
+                start = end;
+            }
+            assert_eq!(start, 3 + len);
+        }
     }
 
     /// The map of the long lines through random edits: lines of up to
     /// five pieces, with spaces often, seldom or never, and a letter
     /// of two bytes; an edit that removes and writes a few bytes, a
-    /// line break or a piece's worth. After each edit the map is the
-    /// one a fresh read gives, the units it says the edit left have
-    /// the bytes they had, and the units of a line are the line.
+    /// line break or a piece's worth. After each edit the map holds
+    /// (`long_lines_hold`), the units it says the edit left have the
+    /// bytes they had, the units it cut again are those the edit
+    /// touched or one beside them, and the units of a line are the
+    /// line.
     #[test]
     #[ignore]
     fn fuzz_pieces() {
@@ -8314,7 +8532,8 @@ mod tests {
                 let mut after = text.clone();
                 after.replace_range(start..end, &written);
                 let after_lines = body(&after);
-                let was = table(&lines, &text);
+                let mut was = BlockTable::default();
+                was.long.clone_from(&map.long);
                 let (head, tail) = map.edit_long(
                     &after_lines,
                     &after,
@@ -8323,10 +8542,27 @@ mod tests {
                     &new,
                     &(start..start + written.len()),
                 );
-                prop_assert_eq!(map.long_of(0), long_lines_of(&after_lines, &after));
+                prop_assert!(long_lines_hold(&after_lines, &after, map.long_of(0)));
                 let old_units = was.unit_of(0, old.start)..was.unit_of(0, old.end);
                 let new_units = map.unit_of(0, new.start)..map.unit_of(0, new.end);
                 prop_assert!(head + tail <= old_units.len().min(new_units.len()));
+                // An edit inside a line that stays long measures the
+                // pieces it touches and at most one beside them.
+                if old.len() == 1 && new.len() == 1 && old_units.len() > 1 && new_units.len() > 1 {
+                    let line_start = lines.line_range(first).unwrap().start;
+                    let (from, to) = (start - line_start, end - line_start);
+                    let untouched = old_units
+                        .clone()
+                        .filter(|&unit| {
+                            let (a, b) = was.unit_place(0, unit).piece.unwrap();
+                            b <= from || a >= to
+                        })
+                        .count();
+                    prop_assert!(
+                        head + tail + 1 >= untouched,
+                        "{} kept of {} untouched", head + tail, untouched
+                    );
+                }
                 let unit = |table: &BlockTable, lines: &CodeBody, text: &str, unit: usize| {
                     unit_text(table, 0, unit, lines, &[], text).text.to_string()
                 };
