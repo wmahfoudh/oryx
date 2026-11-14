@@ -564,7 +564,6 @@ impl BlockTable {
                 first.start <= edit.start
                     && edit.start <= first.end
                     && last.start <= edit.end
-                    && edit.end <= last.end
                     && edit.start <= edit.end
             });
         let mut head: Vec<u32> = Vec::new();
@@ -573,7 +572,10 @@ impl BlockTable {
         let mut tail_start = None;
         if let Some((first, last)) = &touched {
             let before_edit = edit.start - first.start;
-            let after_edit = last.end - edit.end;
+            // A line break written at the very end of the text is past
+            // the last line: the line table has no row after it. No
+            // byte of the line follows the edit then.
+            let after_edit = last.end.saturating_sub(edit.end);
             let was = &list[lo..hi];
             let old_first = was.first().filter(|p| p.line as usize == old.start);
             let old_last = was.last().filter(|p| p.line as usize + 1 == old.end);
@@ -8505,6 +8507,53 @@ mod tests {
         assert_eq!(map.long_of(0)[0].ends, [4_196, 8_392]);
         assert_eq!(map.long_of(0)[1].ends, [7_992, 11_608]);
         assert_eq!(same, (0, 1));
+    }
+
+    /// A line break written at the very end of a file that had none:
+    /// the line table has no row after a final break, so the edit ends
+    /// one byte past the last line. The pieces before it are kept.
+    #[test]
+    fn a_line_break_at_the_end_of_the_last_line_keeps_its_pieces() {
+        use pieces_of_text::{body, table};
+        let text = "x ".repeat(10_000);
+        let len = text.len();
+        let lines = body(&text);
+        let n = table(&lines, &text).long_of(0)[0].ends.len();
+        assert_eq!(n, 3);
+        let one_line = |len: usize| CodeBody::verbatim(std::iter::once(0..len as u32).collect());
+        // Enter at the end.
+        let mut map = table(&lines, &text);
+        let after = format!("{text}\n");
+        let same = map.edit_long(&one_line(len), &after, 0, &(0..1), &(0..1), &(len..len + 1));
+        assert!(long_lines_hold(&one_line(len), &after, map.long_of(0)));
+        assert_eq!(same, (n, 0));
+        // A paste that ends with a line break: its three letters are
+        // cut with the last piece.
+        let mut map = table(&lines, &text);
+        let after = format!("{text}abc\n");
+        let same = map.edit_long(
+            &one_line(len + 3),
+            &after,
+            0,
+            &(0..1),
+            &(0..1),
+            &(len..len + 4),
+        );
+        assert!(long_lines_hold(&one_line(len + 3), &after, map.long_of(0)));
+        assert_eq!(same, (n - 1, 0));
+        // The last ten bytes replaced by a line break.
+        let mut map = table(&lines, &text);
+        let after = format!("{}\n", &text[..len - 10]);
+        let same = map.edit_long(
+            &one_line(len - 10),
+            &after,
+            0,
+            &(0..1),
+            &(0..1),
+            &(len - 10..len - 9),
+        );
+        assert!(long_lines_hold(&one_line(len - 10), &after, map.long_of(0)));
+        assert_eq!(same, (n - 1, 0));
     }
 
     /// The map of the long lines through random edits: lines of up to
