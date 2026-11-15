@@ -803,6 +803,12 @@ enum Kept {
     Caret(f32),
     /// The block or the line at the top of the view.
     Top(scroll::TopPlace),
+    /// The scroll, for the new pass an edit starts in a file that is
+    /// still measured, when the edit is in view: the lines above an
+    /// edit keep their heights, so the same distance shows the same
+    /// lines, and the view does not move under the hand that types.
+    /// It lives until the caret moves by a key or a click.
+    Edit(f32),
 }
 
 impl Kept {
@@ -827,14 +833,39 @@ impl Kept {
         }
     }
 
+    /// What an edit keeps of a view no kept place or landing answers
+    /// for: the scroll, when the row of the edit stands whole in the
+    /// view. `row` is the top of that row, read before the edit drops
+    /// the layout. None for an edit out of view, whose caret the view
+    /// goes to, and at the top of the file, where the view stays.
+    fn of_edit(row: Option<f32>, row_h: f32, scroll_y: f32, view_h: f32) -> Option<Kept> {
+        let (_, away) = filed_height(row?, row_h, scroll_y, view_h);
+        (!away && scroll_y > 0.0).then_some(Kept::Edit(scroll_y))
+    }
+
+    /// For the view an edit kept, whether the row `b` of the caret
+    /// stands whole in it. None for any other kept view.
+    fn edit_holds(self, b: CaretBox, view_h: f32) -> Option<bool> {
+        match self {
+            Kept::Edit(scroll_y) => Some(caret_line_in_view(b.y, b.h, scroll_y, view_h)),
+            _ => None,
+        }
+    }
+
+    /// Whether the kept view shows the caret: its row at its height, or
+    /// the view of an edit made in view.
+    fn shows_caret(self) -> bool {
+        matches!(self, Kept::Caret(_) | Kept::Edit(_))
+    }
+
     /// What stays of a kept view when an edit owes the view to its
-    /// caret. The caret's row at its height agrees with the edit. A top
+    /// caret. A view that shows the caret agrees with the edit. A top
     /// or a distance is the view the edit leaves: in a big file the
     /// view goes to the caret first, and the kept place would take it
     /// back seconds later, when the measure reaches it.
     fn under_snap(self, snap_owed: bool) -> Option<Kept> {
         match self {
-            Kept::Caret(_) => Some(self),
+            kept if kept.shows_caret() => Some(kept),
             _ if snap_owed => None,
             other => Some(other),
         }
@@ -846,6 +877,7 @@ impl Kept {
     fn zoomed(self, ratio: f32) -> Kept {
         match self {
             Kept::Distance(y) => Kept::Distance(y * ratio),
+            Kept::Edit(y) => Kept::Edit(y * ratio),
             place => place,
         }
     }
@@ -954,6 +986,33 @@ struct CaretSeat {
     offset: usize,
     /// The scroll that the seat left.
     scroll: f32,
+}
+
+/// What the box of a caret (`Caret::geometry`) is worth to the code
+/// that brings the view to it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum CaretRow {
+    /// A row the layout has placed.
+    Placed(CaretBox),
+    /// The block table's seat for a line the pass has not reached. On
+    /// a page with no row yet, right after an edit of a big file
+    /// started a new pass, the table counts one row for each line it
+    /// has not placed, so the seat is short of the line's real place,
+    /// and a snap to it stops at the end of the placed part.
+    Guess,
+    /// No box.
+    Unknown,
+}
+
+/// Reads a caret's box against the height the pass has placed.
+/// `pending` says that the pass still runs: once it has ended, the
+/// table is whole and each box is a row.
+fn caret_row(found: Option<CaretBox>, placed: f32, pending: bool) -> CaretRow {
+    match found {
+        Some(b) if pending && b.y + b.h > placed => CaretRow::Guess,
+        Some(b) => CaretRow::Placed(b),
+        None => CaretRow::Unknown,
+    }
 }
 
 /// What a frame does for a caret that is still owed its view.
@@ -2787,18 +2846,23 @@ impl App {
             self.pending_row = None;
         }
         self.caret_seat = None;
+        self.leave_edit_view();
         let (Some(caret), Some(lay)) = (self.caret, self.layout.as_ref()) else {
             return;
         };
-        let settled = match caret.geometry(lay, &self.document, &mut self.fonts) {
-            Some(b) => {
+        let found = caret.geometry(lay, &self.document, &mut self.fonts);
+        let settled = match caret_row(found, lay.height, self.layout_pending()) {
+            CaretRow::Placed(b) => {
                 let target = caret::snap(self.scroll_y, view_h, b);
                 if target != self.scroll_y {
                     self.scroll_to(target);
                 }
                 true
             }
-            None => self.seat_caret_line(view_h),
+            // The kept view brings the caret back where it stood: no
+            // seat is made beside it.
+            CaretRow::Guess if self.keeps_caret_row() => false,
+            CaretRow::Guess | CaretRow::Unknown => self.seat_caret_line(view_h),
         };
         self.caret_snap = snap_still_owed(owed, settled);
     }
@@ -2856,8 +2920,40 @@ impl App {
         let (Some(caret), Some(lay)) = (self.caret, self.layout.as_ref()) else {
             return self.caret.is_none();
         };
+        // `resolve_pending` ran earlier in the frame, and a settled
+        // layout leaves it no kept view. One left here would hold the
+        // snap back with no pass to bring it.
+        debug_assert!(
+            self.layout_pending() || !matches!(self.kept_view, Some(Kept::Edit(_))),
+            "a view kept at an edit outlived its pass"
+        );
         let found = caret.geometry(lay, &self.document, &mut self.fonts);
         let height = lay.height;
+        let found = match caret_row(found, height, self.layout_pending()) {
+            CaretRow::Placed(b) => match self.kept_view.and_then(|kept| kept.edit_holds(b, view_h))
+            {
+                // The view the edit kept shows the caret's row: it
+                // comes back first, and the snap finds the row in it.
+                Some(true) => return false,
+                // The caret ended elsewhere than the edit, as after
+                // Replace All: the kept view would take the view from
+                // it once the snap has shown it.
+                Some(false) => {
+                    self.kept_view = None;
+                    Some(b)
+                }
+                None => Some(b),
+            },
+            // The kept view brings the caret back where it stood, and
+            // that is the caret's landing: no seat is made beside it,
+            // or the seat would land the caret's line at an edge of
+            // the view. The snap stays owed, and finds the caret in
+            // view once the kept view is back.
+            CaretRow::Guess | CaretRow::Unknown if self.keeps_caret_row() => return false,
+            // A guess is not snapped to: the caret's line is seated as
+            // a far caret's is, and lands when the pass reaches it.
+            CaretRow::Guess | CaretRow::Unknown => None,
+        };
         let due = caret_due(
             found.is_some(),
             self.caret_seat,
@@ -3277,6 +3373,8 @@ impl App {
                 ..
             })
         );
+        // Read before the text changes under the layout.
+        let edit_view = self.edit_view(range.start);
         let Some(ledger) = self.ledger.as_mut() else {
             return false;
         };
@@ -3355,6 +3453,11 @@ impl App {
                 grammar
             }
         };
+        // The edit dropped the layout, as in a file still measured:
+        // the new pass brings back the view of an edit made in view.
+        if self.layout.is_none() && self.kept_view.is_none() {
+            self.kept_view = edit_view;
+        }
         // The outline belongs to the rendered page. While a park
         // stands, the document on screen is the source view, whose
         // build would empty the panel; the held outline refreshes on
@@ -5216,6 +5319,7 @@ impl App {
             self.caret = Some(placed);
             // The caret is where the click put it: a seat that waited
             // for the place it left is no longer owed, nor its snap.
+            self.leave_edit_view();
             self.pending_row = None;
             self.caret_snap = false;
             self.caret_seat = None;
@@ -8666,6 +8770,42 @@ impl App {
         self.caret_snap && self.mode == edit::Mode::Edit
     }
 
+    /// Whether the view a new pass keeps shows the caret
+    /// (`Kept::shows_caret`): `resolve_pending` brings it back, and
+    /// that is the caret's landing.
+    fn keeps_caret_row(&self) -> bool {
+        self.kept_view.is_some_and(Kept::shows_caret)
+    }
+
+    /// Drops the view an edit kept (`Kept::Edit`) once the caret has
+    /// moved by a key or a click: that view showed the caret where the
+    /// edit was, and the caret has left it.
+    fn leave_edit_view(&mut self) {
+        if matches!(self.kept_view, Some(Kept::Edit(_))) {
+            self.kept_view = None;
+        }
+    }
+
+    /// What an edit at `offset` keeps of the view if it has to drop
+    /// the layout, read while the layout and the text still agree
+    /// (`Kept::of_edit`). None while a kept place or a landing waits:
+    /// the scroll is then not the view the reader sees.
+    fn edit_view(&self, offset: usize) -> Option<Kept> {
+        let waits = self.kept_view.is_some()
+            || self.pending_row.is_some()
+            || self.pending_offset.is_some()
+            || self.pending_anchor.is_some();
+        if waits || self.mode != edit::Mode::Edit {
+            return None;
+        }
+        Kept::of_edit(
+            self.editor_row_y(offset),
+            self.row_h(),
+            self.scroll_y,
+            self.viewport_h(),
+        )
+    }
+
     /// Session zoom, never persisted. The view keeps its place: the
     /// caret's row in the editor, the top of the view on the page.
     fn set_zoom(&mut self, zoom: f32) {
@@ -9551,7 +9691,7 @@ impl App {
         let before_landings = self.scroll_y;
         if let Some(kept) = self.kept_view {
             let target = match kept {
-                Kept::Distance(y) => Some(y),
+                Kept::Distance(y) | Kept::Edit(y) => Some(y),
                 Kept::Caret(below) => self
                     .caret
                     .and_then(|caret| self.editor_row_y(caret.offset))
@@ -9569,7 +9709,7 @@ impl App {
                 }
                 // The pass ended short of a kept place, as after a zoom
                 // out near the end of the file: the view shows the end.
-                Some(y) if settled && !matches!(kept, Kept::Distance(_)) => {
+                Some(y) if settled && !matches!(kept, Kept::Distance(_) | Kept::Edit(_)) => {
                     self.kept_view = None;
                     self.scroll_y = scroll::clamp(y, height, vh);
                 }
@@ -11552,11 +11692,76 @@ mod tests {
             Some(Kept::Caret(300.0)),
             "the caret's row at its height agrees with the edit"
         );
+        assert_eq!(
+            Kept::Edit(2000.0).under_snap(true),
+            Some(Kept::Edit(2000.0)),
+            "the view of an edit made in view agrees with the edit"
+        );
         assert_eq!(Kept::Top(top).under_snap(false), Some(Kept::Top(top)));
         assert_eq!(
             Kept::Distance(2000.0).under_snap(false),
             Some(Kept::Distance(2000.0))
         );
+    }
+
+    #[test]
+    fn an_edit_in_view_keeps_the_scroll_and_an_edit_out_of_view_keeps_nothing() {
+        use super::Kept;
+        let (row_h, view_h) = (20.0, 600.0);
+        assert_eq!(
+            Kept::of_edit(Some(2300.0), row_h, 2000.0, view_h),
+            Some(Kept::Edit(2000.0)),
+            "the row of the edit stands in the view"
+        );
+        assert_eq!(
+            Kept::of_edit(Some(100.0), row_h, 2000.0, view_h),
+            None,
+            "an edit above the view: the view goes to the caret"
+        );
+        assert_eq!(
+            Kept::of_edit(Some(9000.0), row_h, 2000.0, view_h),
+            None,
+            "an edit under the view"
+        );
+        assert_eq!(
+            Kept::of_edit(Some(1992.0), row_h, 2000.0, view_h),
+            None,
+            "a row the top edge cuts is brought into view"
+        );
+        assert_eq!(
+            Kept::of_edit(None, row_h, 2000.0, view_h),
+            None,
+            "no row to read"
+        );
+        assert_eq!(
+            Kept::of_edit(Some(100.0), row_h, 0.0, view_h),
+            None,
+            "at the top of the file the view stays"
+        );
+        assert_eq!(Kept::Edit(2000.0).zoomed(1.5), Kept::Edit(3000.0));
+        let row = |y: f32| oryx::edit::caret::CaretBox {
+            x: 80.0,
+            y,
+            h: row_h,
+        };
+        assert_eq!(
+            Kept::Edit(2000.0).edit_holds(row(2300.0), view_h),
+            Some(true)
+        );
+        assert_eq!(
+            Kept::Edit(2000.0).edit_holds(row(40.0), view_h),
+            Some(false),
+            "the caret ended far from the edit"
+        );
+        assert_eq!(
+            Kept::Edit(2000.0).edit_holds(row(2590.0), view_h),
+            Some(false),
+            "a row the bottom edge cuts"
+        );
+        assert_eq!(Kept::Caret(300.0).edit_holds(row(2300.0), view_h), None);
+        assert_eq!(Kept::Distance(2000.0).edit_holds(row(2300.0), view_h), None);
+        assert!(Kept::Edit(2000.0).shows_caret() && Kept::Caret(300.0).shows_caret());
+        assert!(!Kept::Distance(2000.0).shows_caret());
     }
 
     #[test]
@@ -11621,6 +11826,45 @@ mod tests {
             !snap_still_owed(false, true),
             "a caret key alone on a row the layout holds owes nothing"
         );
+    }
+
+    #[test]
+    fn a_box_past_the_placed_height_is_a_guess_while_the_pass_runs() {
+        use super::{caret_row, CaretRow};
+        use oryx::edit::caret::CaretBox;
+        let row = |y: f32| CaretBox {
+            x: 80.0,
+            y,
+            h: 33.0,
+        };
+        // The placed height is 288,281, as in the trace of the fault.
+        let placed = 288_281.0;
+        assert_eq!(
+            caret_row(Some(row(1_243_757.0)), placed, true),
+            CaretRow::Guess,
+            "the table's seat for a line the pass has not reached"
+        );
+        assert_eq!(
+            caret_row(Some(row(placed - 20.0)), placed, true),
+            CaretRow::Guess,
+            "a row the placed height cuts is not placed yet"
+        );
+        assert_eq!(
+            caret_row(Some(row(placed - 33.0)), placed, true),
+            CaretRow::Placed(row(placed - 33.0)),
+            "the last placed row"
+        );
+        assert_eq!(
+            caret_row(Some(row(5_000.0)), placed, true),
+            CaretRow::Placed(row(5_000.0))
+        );
+        assert_eq!(
+            caret_row(Some(row(1_243_757.0)), placed, false),
+            CaretRow::Placed(row(1_243_757.0)),
+            "the pass has ended: the table is whole"
+        );
+        assert_eq!(caret_row(None, placed, true), CaretRow::Unknown);
+        assert_eq!(caret_row(None, placed, false), CaretRow::Unknown);
     }
 
     #[test]
