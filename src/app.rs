@@ -827,6 +827,19 @@ impl Kept {
         }
     }
 
+    /// What stays of a kept view when an edit owes the view to its
+    /// caret. The caret's row at its height agrees with the edit. A top
+    /// or a distance is the view the edit leaves: in a big file the
+    /// view goes to the caret first, and the kept place would take it
+    /// back seconds later, when the measure reaches it.
+    fn under_snap(self, snap_owed: bool) -> Option<Kept> {
+        match self {
+            Kept::Caret(_) => Some(self),
+            _ if snap_owed => None,
+            other => Some(other),
+        }
+    }
+
     /// A zoom step made while the kept view still waits for the layout.
     /// A distance grows with the text. A place holds, so several steps
     /// in a row return to the place of the first one.
@@ -3236,6 +3249,9 @@ impl App {
         self.wake_caret();
         self.caret_snap = true;
         self.caret_seat = None;
+        // A view kept from before the edit, at a zoom step made with
+        // the caret out of view, is no longer the reader's place.
+        self.kept_view = self.kept_view.and_then(|kept| kept.under_snap(true));
         self.refresh_title();
     }
 
@@ -8639,9 +8655,15 @@ impl App {
             (edit::Mode::Edit, Some(caret)) => self.editor_row_y(caret.offset),
             _ => None,
         };
-        self.kept_view = Kept::of(caret_row, row_h, self.scroll_y, self.viewport_h(), || {
+        let kept = Kept::of(caret_row, row_h, self.scroll_y, self.viewport_h(), || {
             scroll::TopPlace::of(lay, &self.document, self.scroll_y)
         });
+        self.kept_view = kept.and_then(|kept| kept.under_snap(self.snap_owed()));
+    }
+
+    /// Whether an edit still owes the view to its caret (`caret_snap`).
+    fn snap_owed(&self) -> bool {
+        self.caret_snap && self.mode == edit::Mode::Edit
     }
 
     /// Session zoom, never persisted. The view keeps its place: the
@@ -9163,7 +9185,10 @@ impl App {
             // The landing says where the view goes. A view kept before
             // it would move the page after it.
             self.kept_view = None;
-        } else if self.kept_view.is_none() && keeps_scroll(self.scroll_y, landing_waits) {
+        } else if self.kept_view.is_none()
+            && keeps_scroll(self.scroll_y, landing_waits)
+            && !self.snap_owed()
+        {
             self.kept_view = Some(Kept::Distance(self.scroll_y));
         }
         let (out, mut pass) = layout_begin(&self.document, &self.cfg, avail);
@@ -11513,6 +11538,24 @@ mod tests {
             Kept::of(None, row_h, 0.0, view_h, || None),
             None,
             "the top of the file names no place"
+        );
+    }
+
+    #[test]
+    fn an_edit_that_owes_the_view_to_its_caret_keeps_no_other_view() {
+        use super::Kept;
+        let top = a_top_place();
+        assert_eq!(Kept::Top(top).under_snap(true), None);
+        assert_eq!(Kept::Distance(2000.0).under_snap(true), None);
+        assert_eq!(
+            Kept::Caret(300.0).under_snap(true),
+            Some(Kept::Caret(300.0)),
+            "the caret's row at its height agrees with the edit"
+        );
+        assert_eq!(Kept::Top(top).under_snap(false), Some(Kept::Top(top)));
+        assert_eq!(
+            Kept::Distance(2000.0).under_snap(false),
+            Some(Kept::Distance(2000.0))
         );
     }
 
