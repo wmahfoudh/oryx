@@ -1219,7 +1219,7 @@ fn line_held(lay: &LayoutDoc, doc: &Document, offset: usize) -> bool {
 /// after the final newline stands one row below the last line.
 /// The layout of a big file also holds no row for a moment after an
 /// edit: the text before the caret is advanced over as the whitespace
-/// is. None on a line longer than `LONG_LINE`.
+/// is. None when that text is not to be shaped (`shaped_start`).
 fn seat_without_rows(
     fonts: &mut FontStore,
     lay: &LayoutDoc,
@@ -1227,7 +1227,7 @@ fn seat_without_rows(
     offset: usize,
 ) -> Option<CaretBox> {
     let offset = offset.min(doc.source.len());
-    let prefix = &doc.source[short_line_start(&doc.source, offset)?..offset];
+    let prefix = &doc.source[shaped_start(&doc.source, offset)?..offset];
     let block = model_pos(doc, offset).map_or(0, |pos| pos.block);
     let base = match doc.blocks.get(block).map(|b| &b.kind) {
         Some(BlockKind::CodeBlock { lines, .. }) if !lines.is_empty() => {
@@ -1265,11 +1265,41 @@ fn short_line_start(source: &str, offset: usize) -> Option<usize> {
     ends.then_some(start)
 }
 
+/// The most whitespace shaped to advance a caret over it. A blank line
+/// longer than that gives no seat.
+const BLANK_SHAPED: usize = 1 << 20;
+
+/// The start of the line `offset` is on, when only whitespace stands
+/// between the two, at most `BLANK_SHAPED` bytes of it. A line of
+/// spaces draws no row whatever its length, so its caret is seated by
+/// the whitespace before it.
+fn blank_start(source: &str, offset: usize) -> Option<usize> {
+    let head = source.get(..offset)?;
+    let mut start = offset;
+    for c in head.chars().rev() {
+        if c == '\n' {
+            break;
+        }
+        if !c.is_whitespace() || offset - start >= BLANK_SHAPED {
+            return None;
+        }
+        start -= c.len_utf8();
+    }
+    Some(start)
+}
+
+/// The start of the line `offset` is on, when the text from there to
+/// `offset` can be shaped to advance a caret over it: any text of a
+/// line of at most `LONG_LINE` bytes, and whitespace alone in a longer
+/// line. None for the text of a longer line.
+fn shaped_start(source: &str, offset: usize) -> Option<usize> {
+    short_line_start(source, offset).or_else(|| blank_start(source, offset))
+}
+
 /// A click on a page the layout holds no glyphs for: the line whose
 /// row is under y, the first above them all and the last below, at
 /// its start, or at its end when x is past the whitespace it holds.
-/// None on a line longer than `LONG_LINE`, as `seat_without_rows`
-/// answers.
+/// None on a line whose text is not to be shaped (`shaped_start`).
 fn blank_page_at(
     fonts: &mut FontStore,
     lay: &LayoutDoc,
@@ -1289,10 +1319,7 @@ fn blank_page_at(
         .find('\n')
         .map_or(source.len(), |i| start + i);
     let seat = lay.code_line_seat(0, line)?;
-    if end - start > LONG_LINE {
-        return None;
-    }
-    let text = &source[start..end];
+    let text = &source[shaped_start(source, end)?..end];
     if !text.is_empty() && x > seat.x + whitespace_advance(fonts, lay, text) {
         Some(end)
     } else {
@@ -1316,9 +1343,10 @@ fn whitespace_advance(fonts: &mut FontStore, lay: &LayoutDoc, text: &str) -> f32
 /// The advance of the caret line's own prefix on a line the layout
 /// holds no glyphs for: the whitespace Enter carried onto it, shaped
 /// in the face of the anchor line's first run so a tab advances as a
-/// tab. Zero with nothing before the caret on its line. None on a line
-/// longer than `LONG_LINE`: the layout holds only some of its pieces,
-/// and the line is not a blank one to advance over.
+/// tab. Zero with nothing before the caret on its line. None when the
+/// text before the offset is not to be shaped (`shaped_start`): the
+/// text of a line longer than `LONG_LINE`, of which the layout holds
+/// only some pieces, is not a blank line to advance over.
 fn line_prefix_advance(
     fonts: &mut FontStore,
     lay: &LayoutDoc,
@@ -1326,7 +1354,7 @@ fn line_prefix_advance(
     anchor: &Line,
     offset: usize,
 ) -> Option<f32> {
-    let prefix = &doc.source[short_line_start(&doc.source, offset)?..offset];
+    let prefix = &doc.source[shaped_start(&doc.source, offset)?..offset];
     if prefix.is_empty() {
         return Some(0.0);
     }
@@ -1414,7 +1442,8 @@ fn blank_line_at(
         }
         out
     };
-    // None for a line longer than `LONG_LINE`, which is not blank.
+    // None for the text of a line longer than `LONG_LINE`, which is
+    // not a blank line.
     let seat = |anchor: &Line, start: usize, fonts: &mut FontStore| -> Option<usize> {
         let end = start + source[start..].find('\n').unwrap_or(source.len() - start);
         let x0 = anchor.runs.first().map_or(0.0, |r| r.x);
@@ -2654,6 +2683,94 @@ mod tests {
             Some(Caret::at(source.len())),
             "the nearest row answers, at its end"
         );
+    }
+
+    /// A line of spaces longer than `LONG_LINE` between two lines.
+    fn around_a_line_of_spaces() -> String {
+        format!("first line\n{}\nlast line\n", " ".repeat(LONG_LINE + 808))
+    }
+
+    #[test]
+    fn a_caret_on_a_long_line_of_spaces_is_seated() {
+        let source = around_a_line_of_spaces();
+        let doc = text_doc(&source);
+        let (l, mut fonts) = lay_of(&doc);
+        let first = run(&l, &doc, "first line");
+        let (start, end) = ("first line\n".len(), source.len() - "\nlast line\n".len());
+        for offset in [start, start + 400, end] {
+            let seat = Caret::at(offset)
+                .geometry(&l, &doc, &mut fonts)
+                .unwrap_or_else(|| panic!("a blank line seats its caret at {offset}"));
+            assert!(seat.y > first.y, "under the first line, at {offset}");
+        }
+    }
+
+    #[test]
+    fn a_click_on_a_long_line_of_spaces_lands_on_it() {
+        let source = around_a_line_of_spaces();
+        let doc = text_doc(&source);
+        let (l, mut fonts) = lay_of(&doc);
+        let (first, last) = (run(&l, &doc, "first line"), run(&l, &doc, "last line"));
+        let (start, end) = ("first line\n".len(), source.len() - "\nlast line\n".len());
+        let between = (first.y + last.y) / 2.0 + 2.0;
+        let placed = place(&l, &doc, &mut fonts, first.x + 300.0, between)
+            .expect("a click between two rows is placed");
+        assert!(
+            (start..=end).contains(&placed.offset),
+            "on the line of spaces, not on {:?}",
+            &source[placed.offset.saturating_sub(10)..placed.offset]
+        );
+    }
+
+    #[test]
+    fn a_page_of_spaces_seats_its_caret_and_takes_a_click() {
+        let source = " ".repeat(LONG_LINE + 808);
+        let doc = text_doc(&source);
+        let (l, mut fonts) = lay_of(&doc);
+        assert!(
+            lines_of(&l, &doc).is_empty(),
+            "the fixture draws no row: the blank page's seat answers"
+        );
+        assert!(Caret::at(0).geometry(&l, &doc, &mut fonts).is_some());
+        assert!(Caret::at(source.len())
+            .geometry(&l, &doc, &mut fonts)
+            .is_some());
+        let seat = l.code_line_seat(0, 0).expect("the table has the block");
+        assert!(place(&l, &doc, &mut fonts, seat.x + 300.0, seat.y + 2.0).is_some());
+    }
+
+    #[test]
+    fn whitespace_alone_is_shaped_past_the_long_line_bound() {
+        let spaces = " ".repeat(LONG_LINE + 1);
+        let source = format!("ab\n{spaces}\n{spaces}x{spaces}\n\u{3000}\u{a0}\t");
+        let second = "ab\n".len();
+        let third = second + spaces.len() + 1;
+        assert_eq!(shaped_start(&source, second + spaces.len()), Some(second));
+        assert_eq!(shaped_start(&source, second + 5), Some(second));
+        assert_eq!(
+            shaped_start(&source, third + 5),
+            Some(third),
+            "the whitespace that opens a long line with text"
+        );
+        assert_eq!(
+            shaped_start(&source, third + spaces.len() + 1),
+            None,
+            "text before the offset in a long line"
+        );
+        assert_eq!(
+            shaped_start(&source, third + 2 * spaces.len() + 1),
+            None,
+            "whitespace after the text of a long line"
+        );
+        let last = third + 2 * spaces.len() + 2;
+        assert_eq!(
+            blank_start(&source, source.len()),
+            Some(last),
+            "whitespace of several bytes is walked by character"
+        );
+        let giant = " ".repeat(BLANK_SHAPED + 1);
+        assert_eq!(blank_start(&giant, giant.len()), None);
+        assert_eq!(blank_start(&giant, BLANK_SHAPED), Some(0));
     }
 
     #[test]
