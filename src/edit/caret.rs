@@ -8,6 +8,7 @@
 use crate::doc::model::{BlockKind, Document, Span};
 use crate::layout::{metrics, LayoutDoc, TextRef, TextRun};
 use crate::style::fonts::FontStore;
+use crate::style::highlight::LONG_LINE;
 use crate::ui::selection::{self, ModelPos, Selection, MARKER_SPAN};
 use std::ops::Range;
 
@@ -1149,7 +1150,7 @@ impl Caret {
                 return None;
             }
             let x = line.runs.first().map_or(0.0, |r| r.x)
-                + line_prefix_advance(fonts, lay, doc, line, offset);
+                + line_prefix_advance(fonts, lay, doc, line, offset)?;
             return Some(CaretBox {
                 x,
                 y: line.y + line.h * gap as f32,
@@ -1168,7 +1169,7 @@ impl Caret {
             return None;
         }
         let x = below.runs.first().map_or(0.0, |r| r.x)
-            + line_prefix_advance(fonts, lay, doc, below, offset);
+            + line_prefix_advance(fonts, lay, doc, below, offset)?;
         Some(CaretBox {
             x,
             y: below.y - below.h * gap as f32,
@@ -1216,6 +1217,9 @@ fn line_held(lay: &LayoutDoc, doc: &Document, offset: usize) -> bool {
 /// stand, from the block table, advanced over the whitespace before it.
 /// The line counts newlines from the block's start, so the offset
 /// after the final newline stands one row below the last line.
+/// The layout of a big file also holds no row for a moment after an
+/// edit: the text before the caret is advanced over as the whitespace
+/// is. None on a line longer than `LONG_LINE`.
 fn seat_without_rows(
     fonts: &mut FontStore,
     lay: &LayoutDoc,
@@ -1223,6 +1227,7 @@ fn seat_without_rows(
     offset: usize,
 ) -> Option<CaretBox> {
     let offset = offset.min(doc.source.len());
+    let prefix = &doc.source[short_line_start(&doc.source, offset)?..offset];
     let block = model_pos(doc, offset).map_or(0, |pos| pos.block);
     let base = match doc.blocks.get(block).map(|b| &b.kind) {
         Some(BlockKind::CodeBlock { lines, .. }) if !lines.is_empty() => {
@@ -1232,8 +1237,6 @@ fn seat_without_rows(
     };
     let line = doc.source[base.min(offset)..offset].matches('\n').count();
     let seat = lay.code_line_seat(block, line)?;
-    let head = &doc.source[..offset];
-    let prefix = &head[head.rfind('\n').map_or(0, |i| i + 1)..];
     Some(CaretBox {
         x: seat.x + whitespace_advance(fonts, lay, prefix),
         y: seat.y,
@@ -1241,9 +1244,32 @@ fn seat_without_rows(
     })
 }
 
+/// The start of the line `offset` is on. None for a line longer than
+/// `LONG_LINE`, which the layout places in pieces: such a line can be
+/// as long as the file, and shaping it to seat a caret takes more
+/// memory than the machine has.
+fn short_line_start(source: &str, offset: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let head = bytes.get(..offset)?;
+    // One byte more than the bound, for the line break before a line
+    // of exactly `LONG_LINE` bytes.
+    let from = offset.saturating_sub(LONG_LINE + 1);
+    let start = match head[from..].iter().rposition(|&byte| byte == b'\n') {
+        Some(at) => from + at + 1,
+        None if offset <= LONG_LINE => 0,
+        None => return None,
+    };
+    let room = LONG_LINE - (offset - start);
+    let tail = &bytes[offset..];
+    let ends = tail.len() <= room || tail[..=room].contains(&b'\n');
+    ends.then_some(start)
+}
+
 /// A click on a page the layout holds no glyphs for: the line whose
 /// row is under y, the first above them all and the last below, at
 /// its start, or at its end when x is past the whitespace it holds.
+/// None on a line longer than `LONG_LINE`, as `seat_without_rows`
+/// answers.
 fn blank_page_at(
     fonts: &mut FontStore,
     lay: &LayoutDoc,
@@ -1263,6 +1289,9 @@ fn blank_page_at(
         .find('\n')
         .map_or(source.len(), |i| start + i);
     let seat = lay.code_line_seat(0, line)?;
+    if end - start > LONG_LINE {
+        return None;
+    }
     let text = &source[start..end];
     if !text.is_empty() && x > seat.x + whitespace_advance(fonts, lay, text) {
         Some(end)
@@ -1287,30 +1316,33 @@ fn whitespace_advance(fonts: &mut FontStore, lay: &LayoutDoc, text: &str) -> f32
 /// The advance of the caret line's own prefix on a line the layout
 /// holds no glyphs for: the whitespace Enter carried onto it, shaped
 /// in the face of the anchor line's first run so a tab advances as a
-/// tab. Zero with nothing before the caret on its line.
+/// tab. Zero with nothing before the caret on its line. None on a line
+/// longer than `LONG_LINE`: the layout holds only some of its pieces,
+/// and the line is not a blank one to advance over.
 fn line_prefix_advance(
     fonts: &mut FontStore,
     lay: &LayoutDoc,
     doc: &Document,
     anchor: &Line,
     offset: usize,
-) -> f32 {
-    let head = &doc.source[..offset];
-    let prefix = &head[head.rfind('\n').map_or(0, |i| i + 1)..];
+) -> Option<f32> {
+    let prefix = &doc.source[short_line_start(&doc.source, offset)?..offset];
     if prefix.is_empty() {
-        return 0.0;
+        return Some(0.0);
     }
     let Some(run) = anchor.runs.first() else {
-        return 0.0;
+        return Some(0.0);
     };
     let text_run = &lay.runs[run.index];
     let family = lay.run_family(text_run);
     let buffer = selection::shape_run(fonts, text_run, prefix, family);
-    buffer
-        .layout_runs()
-        .next()
-        .and_then(|line| line.glyphs.last())
-        .map_or(0.0, |g| g.x + g.w)
+    Some(
+        buffer
+            .layout_runs()
+            .next()
+            .and_then(|line| line.glyphs.last())
+            .map_or(0.0, |g| g.x + g.w),
+    )
 }
 
 /// Places the caret from a click, in document coordinates. A click on
@@ -1382,14 +1414,16 @@ fn blank_line_at(
         }
         out
     };
-    let seat = |anchor: &Line, start: usize, fonts: &mut FontStore| -> usize {
+    // None for a line longer than `LONG_LINE`, which is not blank.
+    let seat = |anchor: &Line, start: usize, fonts: &mut FontStore| -> Option<usize> {
         let end = start + source[start..].find('\n').unwrap_or(source.len() - start);
         let x0 = anchor.runs.first().map_or(0.0, |r| r.x);
-        if end > start && x > x0 + line_prefix_advance(fonts, lay, doc, anchor, end) {
+        let advance = line_prefix_advance(fonts, lay, doc, anchor, end)?;
+        Some(if end > start && x > x0 + advance {
             end
         } else {
             start
-        }
+        })
     };
     if let Some(li) = lines.iter().rposition(|l| l.y + l.h <= y) {
         let line = &lines[li];
@@ -1402,7 +1436,7 @@ fn blank_line_at(
         }
         let row = ((y - line.y) / line.h).floor() as usize;
         let j = row.saturating_sub(1).min(blanks.len() - 1);
-        return Some(seat(line, blanks[j], fonts));
+        return seat(line, blanks[j], fonts);
     }
     let below = lines.first()?;
     let blanks = starts(0..below.start);
@@ -1411,7 +1445,7 @@ fn blank_line_at(
     }
     let gap = ((below.y - y) / below.h).floor() as usize + 1;
     let j = blanks.len().saturating_sub(gap);
-    Some(seat(below, blanks[j], fonts))
+    seat(below, blanks[j], fonts)
 }
 
 /// The landing offset on entering edit mode, in precedence order: the
@@ -2535,6 +2569,133 @@ mod tests {
         let doc = text_doc("");
         let (l, _fonts) = lay_of(&doc);
         assert_eq!(landing(&l, &doc, None, None, 0.0, 500.0), 0);
+    }
+
+    /// A layout that holds no row of a file with text, as right after
+    /// an edit of a big file starts a new pass.
+    fn no_rows_yet(doc: &Document) -> (LayoutDoc, FontStore) {
+        let (mut l, fonts) = lay_of(doc);
+        l.runs.clear();
+        (l, fonts)
+    }
+
+    /// A line of words longer than `LONG_LINE`, with a short line
+    /// before it and one after it.
+    fn around_a_long_line() -> String {
+        format!("short\n{}\nlast", "word ".repeat(LONG_LINE / 5 + 1))
+    }
+
+    #[test]
+    fn a_caret_in_a_long_line_has_no_seat_while_the_layout_holds_no_row() {
+        let source = around_a_long_line();
+        let doc = text_doc(&source);
+        let (l, mut fonts) = no_rows_yet(&doc);
+        let long_end = source.len() - "\nlast".len();
+        for offset in [long_end, long_end - 7, "short\n".len() + 3] {
+            assert_eq!(
+                Caret::at(offset).geometry(&l, &doc, &mut fonts),
+                None,
+                "the line at {offset} is not shaped to seat a caret"
+            );
+        }
+    }
+
+    #[test]
+    fn a_caret_in_a_short_line_is_seated_while_the_layout_holds_no_row() {
+        let source = around_a_long_line();
+        let doc = text_doc(&source);
+        let (l, mut fonts) = no_rows_yet(&doc);
+        let first = l.code_line_seat(0, 0).expect("the table has the block");
+        let seat = Caret::at("short".len())
+            .geometry(&l, &doc, &mut fonts)
+            .expect("a short line is advanced over");
+        assert!(seat.x > first.x, "advanced over the word");
+        assert_eq!(seat.y, first.y, "on the first row");
+        assert!(
+            Caret::at(source.len())
+                .geometry(&l, &doc, &mut fonts)
+                .is_some(),
+            "the short line after the long one"
+        );
+    }
+
+    /// A layout that holds the rows of one short line only, as when
+    /// the pieces of a long line around the caret are not placed yet.
+    fn only_the_row_of(doc: &Document, text: &str) -> (LayoutDoc, FontStore) {
+        let (mut l, fonts) = lay_of(doc);
+        let kept: Vec<bool> = l.runs.iter().map(|r| l.run_text(doc, r) == text).collect();
+        let mut kept = kept.into_iter();
+        l.runs.retain(|_| kept.next().unwrap_or(false));
+        assert_eq!(l.runs.len(), 1, "one run shows {text:?}");
+        (l, fonts)
+    }
+
+    #[test]
+    fn a_caret_in_a_long_line_has_no_seat_under_the_row_of_another_line() {
+        let source = format!("short\n{}", "word ".repeat(LONG_LINE / 5 + 1));
+        let doc = text_doc(&source);
+        let (l, mut fonts) = only_the_row_of(&doc, "short");
+        assert_eq!(
+            Caret::at(source.len()).geometry(&l, &doc, &mut fonts),
+            None,
+            "the long line is not a blank line under the row"
+        );
+    }
+
+    #[test]
+    fn a_click_above_the_rows_does_not_take_a_long_line_for_a_blank_one() {
+        let source = format!("{}\nlast", "word ".repeat(LONG_LINE / 5 + 1));
+        let doc = text_doc(&source);
+        let (l, mut fonts) = only_the_row_of(&doc, "last");
+        let row = l.runs[0].clone();
+        let placed = place(&l, &doc, &mut fonts, row.x + 2000.0, row.y - 5.0);
+        assert_eq!(
+            placed,
+            Some(Caret::at(source.len())),
+            "the nearest row answers, at its end"
+        );
+    }
+
+    #[test]
+    fn the_start_of_a_line_is_found_up_to_the_long_line_bound() {
+        let at_bound = "x".repeat(LONG_LINE);
+        let source = format!("ab\n{at_bound}\n{at_bound}y\ncd");
+        let second = "ab\n".len();
+        let third = second + LONG_LINE + 1;
+        assert_eq!(short_line_start(&source, 1), Some(0));
+        assert_eq!(short_line_start(&source, second), Some(second));
+        assert_eq!(short_line_start(&source, second + LONG_LINE), Some(second));
+        assert_eq!(short_line_start(&source, third), None);
+        assert_eq!(short_line_start(&source, third + LONG_LINE + 1), None);
+        assert_eq!(
+            short_line_start(&source, source.len()),
+            Some(source.len() - 2)
+        );
+    }
+
+    #[test]
+    fn a_click_on_a_long_line_is_not_placed_while_the_layout_holds_no_row() {
+        let source = "word ".repeat(LONG_LINE / 5 + 1);
+        let doc = text_doc(&source);
+        let (l, mut fonts) = no_rows_yet(&doc);
+        let first = l.code_line_seat(0, 0).expect("the table has the block");
+        assert_eq!(
+            place(&l, &doc, &mut fonts, first.x + 500.0, first.y + 1.0),
+            None,
+            "the line under the click is not shaped to place a caret"
+        );
+    }
+
+    #[test]
+    fn a_click_on_a_short_line_is_placed_while_the_layout_holds_no_row() {
+        let doc = text_doc("one two three");
+        let (l, mut fonts) = no_rows_yet(&doc);
+        let first = l.code_line_seat(0, 0).expect("the table has the block");
+        assert_eq!(
+            place(&l, &doc, &mut fonts, first.x + 2000.0, first.y + 1.0),
+            Some(Caret::at(doc.source.len())),
+            "past the text of a short line, its end"
+        );
     }
 
     #[test]
