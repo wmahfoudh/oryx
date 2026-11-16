@@ -2526,15 +2526,15 @@ impl App {
     /// for a jump to a line, or where a crossing found the line on the
     /// page, never the way a typed caret is kept in view. A placed row
     /// answers exactly; past the placed height the block table answers
-    /// by line index, which is what a source view is indexed by.
+    /// by line index, which is what a source view is indexed by, and
+    /// inside a very long line the row is read in its piece
+    /// (`row_landing`).
     fn seat_editor_on(&mut self, place: Place) {
         // A row the block table knows may still lie below the height the
         // pass has placed; scrolling now would stop short, so the target
         // is held until the document is tall enough to show it.
         let (height, vh) = (self.doc_height(), self.viewport_h());
-        let target = self
-            .editor_row_y(place.offset)
-            .map(|y| caret::seated(y, place.below));
+        let target = self.row_landing(place.offset, place.below);
         match target {
             Some(y) if scroll::reached(y, height, vh) || !self.layout_pending() => {
                 self.pending_row = None;
@@ -2604,6 +2604,44 @@ impl App {
     /// index, which is how a source view is indexed.
     fn editor_row_y(&self, offset: usize) -> Option<f32> {
         row_y(self.layout.as_ref()?, &self.document, offset)
+    }
+
+    /// The scroll of a landing that stands the editor row holding
+    /// `offset` `below` the top of the view. As `editor_row_y`, and
+    /// inside a line longer than `LONG_LINE` whose rows the layout
+    /// does not hold, the row itself: the block table answers the top
+    /// of the place's piece, and the row can be a hundred rows under
+    /// it (`preview::row_in_piece`). The piece is laid out to read the
+    /// row only once the pass has placed the table's answer: until
+    /// then the landing waits whatever the row is, and each frame of
+    /// the wait would lay the piece out again.
+    fn row_landing(&mut self, offset: usize, below: f32) -> Option<f32> {
+        let pending = self.layout_pending();
+        let view_h = self.viewport_h();
+        let lay = self.layout.as_ref()?;
+        let doc = &self.document;
+        if let Some(y) = caret::row_top(lay, doc, offset) {
+            return Some(caret::seated(y, below));
+        }
+        let block = doc.block_at_offset(offset)?;
+        let top = caret::seated(scroll::table_row_top(lay, doc, block, offset)?, below);
+        if pending && !scroll::reached(top, lay.height, view_h) {
+            return Some(top);
+        }
+        let inside = paint::preview::row_in_piece(
+            doc,
+            lay,
+            &self.theme,
+            &mut self.fonts,
+            &mut self.media,
+            &self.cfg,
+            self.layout_width,
+            offset,
+        );
+        Some(match inside {
+            Some(inside) => top + inside,
+            None => top,
+        })
     }
 
     /// Rebuilds the page held behind the editor from the buffer, which
@@ -9692,10 +9730,11 @@ impl App {
         if let Some(kept) = self.kept_view {
             let target = match kept {
                 Kept::Distance(y) | Kept::Edit(y) => Some(y),
-                Kept::Caret(below) => self
-                    .caret
-                    .and_then(|caret| self.editor_row_y(caret.offset))
-                    .map(|y| caret::seated(y, kept_caret_height(below, vh, self.row_h()))),
+                Kept::Caret(below) => {
+                    let below = kept_caret_height(below, vh, self.row_h());
+                    self.caret
+                        .and_then(|caret| self.row_landing(caret.offset, below))
+                }
                 Kept::Top(place) => self
                     .layout
                     .as_ref()
@@ -9722,9 +9761,7 @@ impl App {
         // against rows rather than blocks, since the editor is indexed
         // by lines and a source view is one block.
         if let Some(place) = self.pending_row {
-            let target = self
-                .editor_row_y(place.offset)
-                .map(|y| caret::seated(y, place.below));
+            let target = self.row_landing(place.offset, place.below);
             match target {
                 Some(y) if scroll::reached(y, height, vh) || !self.layout_pending() => {
                     self.pending_row = None;

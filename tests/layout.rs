@@ -6698,6 +6698,78 @@ fn a_long_line_is_held_by_its_pieces_around_the_view() {
     assert_eq!(&*doc.source, base.as_str());
 }
 
+/// A text file with a line of fifteen pieces between two ordinary
+/// lines, and a layout whose window is at the top of the file: it holds
+/// no row of a place far down the long line. The block table answers
+/// for such a place with the top of its piece, which is rows above the
+/// place's own row. With the distance `row_in_piece` reads on the piece
+/// laid out alone, the answer is the row that a layout around the place
+/// draws. A character of two bytes in each word puts some pieces' ends
+/// beside one.
+#[test]
+fn a_landing_inside_a_long_line_is_on_its_row() {
+    use oryx::edit::caret;
+    use oryx::paint::{preview, scroll};
+    let long: String = (0..7_000)
+        .map(|i| format!("\"cl\u{e9}{i}\": {i}, "))
+        .collect();
+    assert!(long.len() > 14 * highlight::LONG_LINE);
+    let base = format!("first\n{long}\nlast line\n");
+    let path = std::env::temp_dir().join(format!("oryx-piece-row-{}.txt", std::process::id()));
+    std::fs::write(&path, &base).unwrap();
+    let doc = load::open(&path, None).unwrap().document;
+    std::fs::remove_file(&path).ok();
+    let (width, viewport) = (500.0, 400.0);
+    let far = windowed(&doc, width, 0.0, viewport);
+    let mut fonts = fonts();
+    let mut media = MediaCache::offline(PathBuf::from("."));
+    let row_h = metrics::LINE_HEIGHT * oryx::layout::line_face(&doc, &cfg()).1;
+    let line = "first\n".len();
+    let mut inside_of = |at: usize| {
+        preview::row_in_piece(
+            &doc,
+            &far,
+            &theme(),
+            &mut fonts,
+            &mut media,
+            &cfg(),
+            width,
+            at,
+        )
+    };
+    let places = [
+        line,
+        line + 300,
+        line + 20_000,
+        line + long.len() / 2,
+        line + long.len() / 2 + 3_001,
+        line + long.len() - 3,
+        line + long.len(),
+    ];
+    let mut deep = 0;
+    for at in places {
+        let table = scroll::table_row_top(&far, &doc, 0, at).unwrap();
+        let inside = inside_of(at).expect("a place in a long line");
+        let near = windowed(&doc, width, table + inside, viewport);
+        let drawn = caret::row_top(&near, &doc, at).expect("the row is held around its landing");
+        assert!(
+            (table + inside - drawn).abs() < 0.01,
+            "at {at}: the piece at {table}, the row {inside} under it, drawn at {drawn}"
+        );
+        // The window at the top holds the first piece, and draws its
+        // rows where the other layout does.
+        match caret::row_top(&far, &doc, at) {
+            Some(held) => assert_eq!(held, drawn, "at {at}"),
+            None if drawn - table > 5.0 * row_h => deep += 1,
+            None => {}
+        }
+    }
+    assert!(deep >= 3, "the table alone is rows above {deep} places");
+    // An ordinary line has no piece.
+    assert_eq!(inside_of(2), None);
+    assert_eq!(inside_of(base.len() - 4), None);
+}
+
 /// A view far down a long line, kept across a new width after a paste
 /// near the line's start. The edit cut again the pieces it touched, so
 /// the pieces of the layout before the new width are not those the new

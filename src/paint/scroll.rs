@@ -208,7 +208,7 @@ pub fn offset_span(lay: &LayoutDoc, doc: &Document, offset: usize) -> Option<Ran
 
 /// The source bytes of the piece holding `offset`, in a code line
 /// longer than `LONG_LINE`. None for any other place.
-fn offset_piece(lay: &LayoutDoc, doc: &Document, offset: usize) -> Option<(usize, usize)> {
+pub fn offset_piece(lay: &LayoutDoc, doc: &Document, offset: usize) -> Option<(usize, usize)> {
     let block = doc.block_at_offset(offset)?;
     let (line, byte) = line_place(doc, block, offset)?;
     let piece = lay.code_piece_at(block, line, byte)?;

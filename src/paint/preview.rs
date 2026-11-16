@@ -7,16 +7,19 @@
 //! where it stands in the window. A preview is the lines around that
 //! line, laid out as a small document of their own by the ordinary
 //! layout and painted in the page's place, without line numbers, as
-//! the page has none while its block is measured. Nothing reads its positions
-//! but its own paint: the file's layout, its measure and its landings
-//! are as they are without it.
+//! the page has none while its block is measured. Its positions are read
+//! by its own paint and, for the rows inside one piece of a very long
+//! line, by a landing (`row_in_piece`): the file's layout and its
+//! measure are as they are without it.
 
 use std::ops::Range;
 use std::sync::Arc;
 
 use crate::doc::images::MediaCache;
 use crate::doc::model::{Block, BlockKind, Document};
+use crate::edit::caret;
 use crate::layout::{layout, LayoutDoc, ViewConfig};
+use crate::paint::scroll;
 use crate::style::fonts::FontStore;
 use crate::style::theme::Theme;
 
@@ -205,11 +208,42 @@ pub fn build_pieces(
     })
 }
 
+/// How far under the top of its piece the row of `offset` stands, in a
+/// line longer than `LONG_LINE` of a code or text file. The block table
+/// knows where a piece stands and not the rows inside it, over a
+/// hundred of them in a window 1000 wide: a landing on a row the layout
+/// does not hold adds this distance to the table's answer. The piece is
+/// laid out alone, as the file's layout shapes it. None for a place in
+/// any other line, and for a document `build_pieces` refuses.
+#[allow(clippy::too_many_arguments)]
+pub fn row_in_piece(
+    doc: &Document,
+    lay: &LayoutDoc,
+    theme: &Theme,
+    fonts: &mut FontStore,
+    media: &mut MediaCache,
+    cfg: &ViewConfig,
+    width: f32,
+    offset: usize,
+) -> Option<f32> {
+    let (from, to) = scroll::offset_piece(lay, doc, offset)?;
+    let row = scroll::source_row(doc, 0, offset);
+    let piece = build_pieces(doc, theme, fonts, media, cfg, width, row, from..to)?;
+    let top = scroll::offset_top(&piece.lay, &piece.doc, offset)?;
+    let inside = caret::row_top(&piece.lay, &piece.doc, offset)? - top;
+    debug_assert!(
+        (0.0..piece.lay.height).contains(&inside),
+        "a row {inside} under the top of a piece {} tall",
+        piece.lay.height
+    );
+    Some(inside)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::doc::load;
-    use crate::paint::{band_numbered, scroll};
+    use crate::paint::band_numbered;
     use std::path::PathBuf;
 
     fn text() -> String {
