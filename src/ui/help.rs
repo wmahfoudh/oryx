@@ -233,6 +233,11 @@ pub const TIPS: &[Tip] = &[
         text: r#"Run `oryx --register` once and your files will open with Oryx from the file manager, with the right icons."#,
     },
     Tip {
+        kind: TipKind::Note,
+        area: Area::Files,
+        text: r#"When Oryx is busy, a small dot shows in the bottom right corner. You can read and type meanwhile, and the dot goes out when the work is done."#,
+    },
+    Tip {
         kind: TipKind::Tip,
         area: Area::Moving,
         text: r#"`Up` and `Down` scroll one line at a time. `Page Up`, `Page Down`, `Space` and `Shift+Space` scroll a whole page."#,

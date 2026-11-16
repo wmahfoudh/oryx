@@ -3,6 +3,10 @@
 //! the one quiet text color every theme keeps readable, on a plate of
 //! the page's own color (`paint::paper`), so the text scrolling under it
 //! never crosses its letters. It takes no key and no click.
+//!
+//! The busy dot is drawn here too, at the right end of the same plate,
+//! or on a small plate when there is no count. `ui::busy` says when it
+//! shows.
 
 use std::time::Duration;
 
@@ -36,6 +40,9 @@ pub fn place(text_w: f32, width: f32, height: f32) -> (f32, f32, f32) {
 pub const DOT: f32 = 8.0;
 /// Between the dot and the count's text.
 const DOT_GAP: f32 = 6.0;
+/// How far the dot's middle is above the plate's: the middle of the
+/// count's digits, measured on a picture.
+const DOT_RISE: f32 = 2.0;
 
 /// Where the parts of the corner go.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -49,22 +56,21 @@ pub struct Corner {
 }
 
 /// The corner for a count `text_w` wide, if one shows, and the busy
-/// dot, if it shows: the dot is at the left of the count, on the same
-/// plate, and alone on a small plate when there is no count. None when
-/// neither shows.
+/// dot, if it shows. The dot is at the right end of the plate, at the
+/// same place with or without a count, and a count leaves it its room
+/// when it is out, so the text does not move when the dot comes and
+/// goes. None when neither shows.
 pub fn corner(text_w: Option<f32>, dot: bool, width: f32, height: f32) -> Option<Corner> {
-    let before_text = match (dot, text_w) {
-        (false, None) => return None,
-        (false, Some(_)) => 0.0,
-        (true, None) => DOT,
-        (true, Some(_)) => DOT + DOT_GAP,
-    };
-    let plate = place(before_text + text_w.unwrap_or(0.0), width, height);
-    let (x, y, _) = plate;
+    if text_w.is_none() && !dot {
+        return None;
+    }
+    let text_room = text_w.map_or(0.0, |text_w| text_w + DOT_GAP);
+    let plate = place(text_room + DOT, width, height);
+    let (x, y, w) = plate;
     Some(Corner {
         plate,
-        dot: dot.then_some((x + PAD, y + (HEIGHT - DOT) / 2.0)),
-        text_x: x + PAD + before_text,
+        dot: dot.then_some((x + w - PAD - DOT, y + (HEIGHT - DOT) / 2.0 - DOT_RISE)),
+        text_x: x + PAD,
     })
 }
 
@@ -120,33 +126,45 @@ mod tests {
     }
 
     #[test]
-    fn the_count_without_a_dot_is_placed_as_before() {
-        let corner = corner(Some(300.0), false, 1200.0, 800.0).unwrap();
-        assert_eq!(corner.plate, place(300.0, 1200.0, 800.0));
-        assert_eq!(corner.dot, None);
-        assert_eq!(corner.text_x, corner.plate.0 + PAD);
+    fn the_count_stays_in_place_when_the_dot_comes_and_goes() {
+        let idle = corner(Some(300.0), false, 1200.0, 800.0).unwrap();
+        let busy = corner(Some(300.0), true, 1200.0, 800.0).unwrap();
+        assert_eq!(idle.plate, busy.plate);
+        assert_eq!(idle.text_x, busy.text_x);
+        assert_eq!(idle.text_x, idle.plate.0 + PAD);
+        assert_eq!(idle.dot, None);
+        assert!(busy.dot.is_some());
     }
 
     #[test]
-    fn the_dot_is_at_the_left_of_the_count_on_its_plate() {
+    fn the_dot_is_at_the_right_of_the_count_on_its_plate() {
         let corner = corner(Some(300.0), true, 1200.0, 800.0).unwrap();
-        let (x, y, w) = corner.plate;
-        assert_eq!(w, 300.0 + DOT + DOT_GAP + 2.0 * PAD);
+        let (x, _, w) = corner.plate;
+        assert_eq!(w, 300.0 + DOT_GAP + DOT + 2.0 * PAD);
         assert_eq!(x + w, 1200.0 - STRIP_WIDTH - 4.0);
-        let (dot_x, dot_y) = corner.dot.unwrap();
-        assert_eq!(dot_x, x + PAD);
-        assert_eq!(dot_y + DOT / 2.0, y + HEIGHT / 2.0);
-        assert_eq!(corner.text_x, dot_x + DOT + DOT_GAP);
+        let (dot_x, _) = corner.dot.unwrap();
+        assert_eq!(dot_x, corner.text_x + 300.0 + DOT_GAP);
+        assert_eq!(dot_x + DOT, x + w - PAD);
     }
 
     #[test]
-    fn the_dot_alone_is_in_the_corner() {
-        let corner = corner(None, true, 1200.0, 800.0).unwrap();
-        let (x, y, w) = corner.plate;
+    fn the_dot_alone_is_where_it_is_beside_a_count() {
+        let alone = corner(None, true, 1200.0, 800.0).unwrap();
+        let (x, y, w) = alone.plate;
         assert_eq!(w, DOT + 2.0 * PAD);
         assert_eq!(x + w, 1200.0 - STRIP_WIDTH - 4.0);
         assert_eq!(y + HEIGHT, 800.0 - BOTTOM);
-        assert_eq!(corner.dot, Some((x + PAD, y + (HEIGHT - DOT) / 2.0)));
+        let beside = corner(Some(300.0), true, 1200.0, 800.0).unwrap();
+        assert_eq!(alone.dot, beside.dot);
+    }
+
+    #[test]
+    fn the_dot_is_at_the_height_of_the_digits() {
+        let corner = corner(None, true, 1200.0, 800.0).unwrap();
+        let (_, y, _) = corner.plate;
+        let (_, dot_y) = corner.dot.unwrap();
+        assert_eq!(dot_y + DOT / 2.0, y + HEIGHT / 2.0 - DOT_RISE);
+        assert_eq!(DOT_RISE, 2.0);
     }
 
     #[test]
