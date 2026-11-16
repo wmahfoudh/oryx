@@ -2601,20 +2601,61 @@ impl App {
     /// answer exactly, which covers a caret near the view. Beyond the
     /// layout window there are no runs to read, and a jump across a
     /// whole file is that case, so the block table answers by line
-    /// index, which is how a source view is indexed.
+    /// index, which is how a source view is indexed. Inside a line
+    /// longer than `LONG_LINE` that answer is the top of the place's
+    /// piece. It is enough to judge whether a row is in view, and
+    /// which edge it is beyond (`seat_caret_line`, `keep_view_with`,
+    /// `edit_view`): a piece that crosses the view is held whole, so a
+    /// row in view answers exactly. The height of a row out of view is
+    /// read with `row_y_in_piece`.
     fn editor_row_y(&self, offset: usize) -> Option<f32> {
         row_y(self.layout.as_ref()?, &self.document, offset)
     }
 
+    /// The y of the row an offset stands on in the editor, wherever
+    /// the view is. As `editor_row_y`, and inside a line longer than
+    /// `LONG_LINE` whose rows the layout does not hold, the row
+    /// itself: the block table answers the top of the place's piece,
+    /// and the row can be a hundred rows under it
+    /// (`preview::row_in_piece`). The distance the history files for a
+    /// caret out of view is counted from this row (`here`), since
+    /// `row_landing` brings it back to this row.
+    fn row_y_in_piece(&mut self, offset: usize) -> Option<f32> {
+        let lay = self.layout.as_ref()?;
+        let doc = &self.document;
+        if let Some(y) = caret::row_top(lay, doc, offset) {
+            return Some(y);
+        }
+        let block = doc.block_at_offset(offset)?;
+        let top = scroll::table_row_top(lay, doc, block, offset)?;
+        Some(top + self.piece_depth(offset))
+    }
+
+    /// How far the row holding `offset` is under the top of its piece
+    /// of a line longer than `LONG_LINE`. Zero anywhere else.
+    fn piece_depth(&mut self, offset: usize) -> f32 {
+        let Some(lay) = self.layout.as_ref() else {
+            return 0.0;
+        };
+        paint::preview::row_in_piece(
+            &self.document,
+            lay,
+            &self.theme,
+            &mut self.fonts,
+            &mut self.media,
+            &self.cfg,
+            self.layout_width,
+            offset,
+        )
+        .unwrap_or(0.0)
+    }
+
     /// The scroll of a landing that stands the editor row holding
-    /// `offset` `below` the top of the view. As `editor_row_y`, and
-    /// inside a line longer than `LONG_LINE` whose rows the layout
-    /// does not hold, the row itself: the block table answers the top
-    /// of the place's piece, and the row can be a hundred rows under
-    /// it (`preview::row_in_piece`). The piece is laid out to read the
-    /// row only once the pass has placed the table's answer: until
-    /// then the landing waits whatever the row is, and each frame of
-    /// the wait would lay the piece out again.
+    /// `offset` `below` the top of the view (`row_y_in_piece`). The
+    /// piece of a very long line is laid out to read the row only once
+    /// the pass has placed the table's answer: until then the landing
+    /// waits whatever the row is, and each frame of the wait would lay
+    /// the piece out again.
     fn row_landing(&mut self, offset: usize, below: f32) -> Option<f32> {
         let pending = self.layout_pending();
         let view_h = self.viewport_h();
@@ -2624,24 +2665,14 @@ impl App {
             return Some(caret::seated(y, below));
         }
         let block = doc.block_at_offset(offset)?;
-        let top = caret::seated(scroll::table_row_top(lay, doc, block, offset)?, below);
-        if pending && !scroll::reached(top, lay.height, view_h) {
-            return Some(top);
+        let top = scroll::table_row_top(lay, doc, block, offset)?;
+        let waits = caret::seated(top, below);
+        if pending && !scroll::reached(waits, lay.height, view_h) {
+            return Some(waits);
         }
-        let inside = paint::preview::row_in_piece(
-            doc,
-            lay,
-            &self.theme,
-            &mut self.fonts,
-            &mut self.media,
-            &self.cfg,
-            self.layout_width,
-            offset,
-        );
-        Some(match inside {
-            Some(inside) => top + inside,
-            None => top,
-        })
+        // The same sum as the layout's own row, taken before the seat:
+        // far down a big file a float is 2 px apart from the next.
+        Some(caret::seated(top + self.piece_depth(offset), below))
     }
 
     /// Rebuilds the page held behind the editor from the buffer, which
@@ -7549,7 +7580,7 @@ impl App {
     /// that still waits for the layout answers before the screen, which
     /// has not moved yet (`waiting_place`). An untitled note is no place
     /// to come back to, since it goes when another file opens.
-    fn here(&self) -> Option<history::Entry> {
+    fn here(&mut self) -> Option<history::Entry> {
         if self.on_note() {
             return None;
         }
@@ -7563,7 +7594,8 @@ impl App {
             }
             (None, Some(place)) => (place.offset, place.below, place.line, false),
             (Some(caret), None) => {
-                let (below, away) = self.editor_row_y(caret).map_or((0.0, false), |y| {
+                let row = self.row_y_in_piece(caret);
+                let (below, away) = row.map_or((0.0, false), |y| {
                     filed_height(y, self.row_h(), self.scroll_y, self.viewport_h())
                 });
                 (caret, below, true, away)
