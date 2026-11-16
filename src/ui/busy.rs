@@ -44,6 +44,10 @@ impl Work {
 #[derive(Debug, Default)]
 pub struct Busy {
     since: Option<Instant>,
+    /// The work was read running once its delay had passed: its dot
+    /// went on. An end read late, at the delay or after it, leaves
+    /// this unset, and no dot is owed its least time.
+    lit: bool,
     until: Option<Instant>,
 }
 
@@ -56,11 +60,12 @@ impl Busy {
             self.until = None;
         }
         if working {
-            self.since.get_or_insert(now);
+            let since = *self.since.get_or_insert(now);
+            self.lit |= now.saturating_duration_since(since) >= DELAY;
         } else if let Some(since) = self.since.take() {
-            let lit = since + DELAY;
-            if lit <= now && now < lit + LEAST {
-                self.until = Some(lit + LEAST);
+            let out = since + DELAY + LEAST;
+            if std::mem::take(&mut self.lit) && now < out {
+                self.until = Some(out);
             }
         }
     }
@@ -170,6 +175,8 @@ mod tests {
         let start = Instant::now();
         let mut busy = Busy::default();
         busy.note(true, start);
+        // The loop wakes at the delay, reads the work and lights the dot.
+        busy.note(true, start + DELAY);
         // The work ends 100 ms after the dot went on.
         let end = start + DELAY + Duration::from_millis(100);
         busy.note(false, end);
@@ -185,6 +192,26 @@ mod tests {
         busy.note(false, out + Duration::from_millis(100));
         assert!(!busy.shows(out + Duration::from_millis(100)));
         assert_eq!(busy.wake(out + Duration::from_millis(100)), None);
+    }
+
+    #[test]
+    fn work_whose_end_is_read_late_shows_no_dot() {
+        // The coloring can end right after the loop last read it
+        // running. The loop then sleeps until the delay, and reads the
+        // end there: the dot never went on, so nothing stays.
+        let start = Instant::now();
+        let mut busy = Busy::default();
+        busy.note(true, start);
+        busy.note(true, start + Duration::from_millis(5));
+        let late = start + DELAY;
+        busy.note(false, late);
+        assert!(!busy.shows(late));
+        assert_eq!(busy.wake(late), None);
+        // The same end read later still.
+        busy.note(true, late);
+        let later = late + DELAY + Duration::from_millis(100);
+        busy.note(false, later);
+        assert!(!busy.shows(later));
     }
 
     #[test]
