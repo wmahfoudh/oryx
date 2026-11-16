@@ -53,13 +53,20 @@ pub struct Corner {
     pub dot: Option<(f32, f32)>,
     /// The text's left.
     pub text_x: f32,
+    /// The left and the width of a patch of the page's color under the
+    /// dot, when the plate is wider than the window and the dot is over
+    /// the count's text. It reaches the window's right edge, as the
+    /// plate does then, so that no letter shows after the dot.
+    pub patch: Option<(f32, f32)>,
 }
 
 /// The corner for a count `text_w` wide, if one shows, and the busy
 /// dot, if it shows. The dot is at the right end of the plate, at the
 /// same place with or without a count, and a count leaves it its room
 /// when it is out, so the text does not move when the dot comes and
-/// goes. None when neither shows.
+/// goes. In a window narrower than the plate, the line keeps its start
+/// and the dot is at the window's right end, over the text, on a patch.
+/// None when neither shows.
 pub fn corner(text_w: Option<f32>, dot: bool, width: f32, height: f32) -> Option<Corner> {
     if text_w.is_none() && !dot {
         return None;
@@ -67,10 +74,16 @@ pub fn corner(text_w: Option<f32>, dot: bool, width: f32, height: f32) -> Option
     let text_room = text_w.map_or(0.0, |text_w| text_w + DOT_GAP);
     let plate = place(text_room + DOT, width, height);
     let (x, y, w) = plate;
+    // The plate's right end, or the window's when the plate is cut.
+    let cut = x + w > width;
+    let right = if cut { width } else { x + w };
+    let dot_x = (right - PAD - DOT).max(0.0);
+    let patch_x = dot_x - DOT_GAP;
     Some(Corner {
         plate,
-        dot: dot.then_some((x + w - PAD - DOT, y + (HEIGHT - DOT) / 2.0 - DOT_RISE)),
+        dot: dot.then_some((dot_x, y + (HEIGHT - DOT) / 2.0 - DOT_RISE)),
         text_x: x + PAD,
+        patch: (dot && cut && text_w.is_some()).then_some((patch_x, width - patch_x)),
     })
 }
 
@@ -91,9 +104,6 @@ pub fn draw(
     };
     let (x, y, w) = corner.plate;
     painter.fill(x, y, w, HEIGHT, RADIUS, paper);
-    if let Some((dot_x, dot_y)) = corner.dot {
-        painter.fill(dot_x, dot_y, DOT, DOT, DOT / 2.0, theme.text.strike);
-    }
     if let Some(text) = text {
         painter.text(
             corner.text_x,
@@ -104,6 +114,12 @@ pub fn draw(
             400,
             theme.syntax.comment,
         );
+    }
+    if let Some((patch_x, patch_w)) = corner.patch {
+        painter.fill(patch_x, y, patch_w, HEIGHT, 0.0, paper);
+    }
+    if let Some((dot_x, dot_y)) = corner.dot {
+        painter.fill(dot_x, dot_y, DOT, DOT, DOT / 2.0, theme.text.strike);
     }
 }
 
@@ -156,6 +172,49 @@ mod tests {
         assert_eq!(y + HEIGHT, 800.0 - BOTTOM);
         let beside = corner(Some(300.0), true, 1200.0, 800.0).unwrap();
         assert_eq!(alone.dot, beside.dot);
+    }
+
+    #[test]
+    fn in_a_window_narrower_than_the_count_the_dot_is_at_the_windows_right_end() {
+        let narrow = corner(Some(300.0), true, 200.0, 800.0).unwrap();
+        // The line keeps its start, as before.
+        assert_eq!(narrow.plate.0, 0.0);
+        assert_eq!(narrow.text_x, PAD);
+        // The dot is as far from the window's edge as it is from the
+        // plate's end in a window that holds the plate.
+        let (dot_x, _) = narrow.dot.unwrap();
+        assert_eq!(dot_x + DOT, 200.0 - PAD);
+        // It is over the count's text there, on a patch that reaches
+        // the window's edge, so no letter shows after the dot.
+        let (patch_x, patch_w) = narrow.patch.unwrap();
+        assert_eq!(patch_x, dot_x - DOT_GAP);
+        assert_eq!(patch_x + patch_w, 200.0);
+        // No dot, no patch.
+        let idle = corner(Some(300.0), false, 200.0, 800.0).unwrap();
+        assert_eq!(idle.patch, None);
+        // A window too narrow for the dot alone keeps it at the left.
+        let tiny = corner(None, true, 10.0, 800.0).unwrap();
+        assert_eq!(tiny.dot.unwrap().0, 0.0);
+        assert_eq!(tiny.patch, None);
+    }
+
+    #[test]
+    fn a_window_that_holds_the_plate_has_the_dot_at_the_plates_end() {
+        // The plate of a count 300 wide is 330 wide.
+        let plate_w = 300.0 + DOT_GAP + DOT + 2.0 * PAD;
+        // A wide window, a window just too narrow for the margin
+        // beside the scrollbar, and a window exactly as wide as the plate.
+        for width in [1200.0, plate_w + RIGHT - 1.0, plate_w + 5.0, plate_w] {
+            let corner = corner(Some(300.0), true, width, 800.0).unwrap();
+            let (x, _, w) = corner.plate;
+            assert_eq!(w, plate_w);
+            assert_eq!(corner.dot.unwrap().0, x + w - PAD - DOT, "{width}");
+            assert_eq!(corner.patch, None, "{width}");
+        }
+        // One pixel narrower than the plate, the dot is on its patch.
+        let cut = corner(Some(300.0), true, plate_w - 1.0, 800.0).unwrap();
+        assert!(cut.patch.is_some());
+        assert_eq!(cut.dot.unwrap().0 + DOT, plate_w - 1.0 - PAD);
     }
 
     #[test]
