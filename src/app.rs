@@ -40,6 +40,7 @@ use oryx::style::fonts::FontStore;
 use oryx::style::highlight::{self, Highlighter, PendingBlock};
 use oryx::style::seams::Table;
 use oryx::style::theme::{self, Rgba, Theme};
+use oryx::ui::busy::{self, Busy};
 use oryx::ui::confirm;
 use oryx::ui::export::{ExportDialog, ExportProgress};
 use oryx::ui::goto::{self, GotoState};
@@ -441,6 +442,9 @@ pub fn run(
         count_at: None,
         count_inbox: std::sync::mpsc::channel(),
         count_asked: 0,
+        count_live: Arc::new(()),
+        busy: Busy::default(),
+        dot_shown: false,
         open_failed: refused_at_start,
         gutter_measured: None,
         notice: None,
@@ -1641,6 +1645,14 @@ struct App {
         std::sync::mpsc::Receiver<CountResult>,
     ),
     count_asked: u64,
+    /// Each count that is out holds a clone, and lets it go when its
+    /// figures are ready: more than one owner means a count runs.
+    count_live: Arc<()>,
+    /// Since when work has run in the background, for the corner's dot.
+    busy: Busy,
+    /// Whether the dot showed at the last frame, or at the last frame
+    /// asked for it: a frame is asked once when the answer changes.
+    dot_shown: bool,
     /// The page shows an open error's message, not the file's text.
     open_failed: bool,
     /// The room the line numbers were last measured to need, with what
@@ -3025,15 +3037,31 @@ impl App {
         let asked = self.count_asked;
         let inbox = self.count_inbox.0.clone();
         let waker = self.waker.clone();
+        let live = Arc::clone(&self.count_live);
         // A thread the system refuses leaves the line as it stands;
         // the next change asks again.
         let _ = std::thread::Builder::new()
             .name("oryx-count".to_string())
             .spawn(move || {
-                if inbox.send((asked, job.line())).is_ok() {
+                let line = job.line();
+                // Let go before the wake, so that the loop it wakes
+                // reads the count as ended.
+                drop(live);
+                if inbox.send((asked, line)).is_ok() {
                     waker();
                 }
             });
+    }
+
+    /// The work that runs in the background, for the corner's dot.
+    fn work(&self) -> busy::Work {
+        busy::Work {
+            parse: self.parse_pending,
+            measure: self.pass_active(),
+            coloring: self.highlighter.is_running(),
+            count: Arc::strong_count(&self.count_live) > 1,
+            export: self.export.is_some(),
+        }
     }
 
     /// What the corner counts. Books, comics, the welcome page, the
@@ -9082,6 +9110,13 @@ impl App {
         // Read before the frame borrows the graphics: the outline's end
         // of the page waits for a layout still pending.
         let pending = self.layout_pending();
+        // The corner's dot, read here for the same reason, after the
+        // frame's slice: a pass that ended in this frame shows no dot.
+        let working = self.work().any();
+        let now = Instant::now();
+        self.busy.note(working, now);
+        let dot = self.busy.shows(now);
+        self.dot_shown = dot;
         let Some(gfx) = self.gfx.as_mut() else {
             return;
         };
@@ -9297,7 +9332,8 @@ impl App {
             .notice
             .as_ref()
             .is_some_and(|notice| notice.alpha(Instant::now()).is_some());
-        if let Some(text) = self.count_line.as_deref().filter(|_| !noticed) {
+        let count = self.count_line.as_deref();
+        if !noticed && (count.is_some() || dot) {
             let fits = self
                 .notice_canvas
                 .as_ref()
@@ -9311,7 +9347,8 @@ impl App {
                 wordcount::draw(
                     &mut painter,
                     &self.theme,
-                    text,
+                    count,
+                    dot,
                     paint::paper(&self.document, &self.theme),
                     size.width as f32 / self.scale,
                     size.height as f32 / self.scale,
@@ -9540,6 +9577,19 @@ impl ApplicationHandler for App {
         self.ask_caret_seam();
         self.step_fling(&mut wake);
         self.step_edge_scroll(&mut wake);
+        // The corner's dot: one frame when its answer changes, and a
+        // wake while work runs, since the end of the coloring sends no
+        // sure one.
+        let now = Instant::now();
+        self.busy.note(self.work().any(), now);
+        let dot = self.busy.shows(now);
+        if dot != self.dot_shown {
+            self.dot_shown = dot;
+            self.request_redraw();
+        }
+        if let Some(at) = self.busy.wake(now) {
+            wake.by(at);
+        }
         event_loop.set_control_flow(wake.control_flow());
     }
 

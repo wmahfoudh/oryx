@@ -133,6 +133,10 @@ Line numbers show in the margin of code and text files, and of a markdown file w
 
 Word count shows the words, characters, lines and reading time in the bottom right corner, for the whole file or for the selection. It counts the text as the page shows it, without the markdown marks. For a code file, it shows the lines and characters.
 
+### Busy dot
+
+While Oryx is busy with the open file, a small dot shows in the bottom right corner, at the left of the word count when it is on. Oryx is busy while it reads, measures or colors a big file, counts its words or exports it to PDF. You can read and type meanwhile. The dot goes out when the work is done.
+
 ### Zoom, display scale and touch
 
 `Ctrl+Plus` and `Ctrl+Minus` zoom in and out, and so does the mouse wheel with `Ctrl` held.
