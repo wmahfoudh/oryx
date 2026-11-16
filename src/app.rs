@@ -3058,7 +3058,12 @@ impl App {
         busy::Work {
             parse: self.parse_pending,
             measure: self.pass_active(),
-            coloring: self.highlighter.is_running(),
+            // A key cancels the sweep and the loop's next turn starts
+            // it again: the coloring it owes is work between the two.
+            // This holds while `REHIGHLIGHT_REST` is shorter than the
+            // dot's delay: a longer rest would light the dot after a
+            // key in a small file, with nothing running.
+            coloring: self.highlighter.is_running() || self.rehighlight_at.is_some(),
             count: Arc::strong_count(&self.count_live) > 1,
             export: self.export.is_some(),
         }
