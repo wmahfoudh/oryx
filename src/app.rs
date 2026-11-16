@@ -931,6 +931,16 @@ fn row_y(lay: &LayoutDoc, doc: &Document, offset: usize) -> Option<f32> {
     scroll::table_row_top(lay, doc, block, offset)
 }
 
+/// Whether `offset` is inside a piece of a line longer than
+/// `LONG_LINE`, on a page that draws the rows of its editor: a code or
+/// text file. A fenced block of a rendered page is placed in pieces
+/// too, and its lines land as the other lines of the page do.
+fn in_source_piece(lay: &LayoutDoc, doc: &Document, offset: usize) -> bool {
+    (doc.code_file || doc.plain_file)
+        && doc.is_one_code_block()
+        && scroll::offset_piece(lay, doc, offset).is_some()
+}
+
 /// The scroll that shows the source line at `offset` with its row
 /// `below` the top of a view `view_h` tall (`App::line_landing`).
 fn line_landing(
@@ -943,7 +953,7 @@ fn line_landing(
     // Inside a line longer than `LONG_LINE` the block table places the
     // piece, and the row can be a hundred rows under its top: the row
     // the layout holds answers, as in the editor.
-    if scroll::offset_piece(lay, doc, offset).is_some() {
+    if in_source_piece(lay, doc, offset) {
         return row_y(lay, doc, offset).map(|y| caret::seated(y, below));
     }
     let row = caret::line_top(lay, doc, offset).or_else(|| scroll::line_estimate(lay, doc, offset));
@@ -9517,13 +9527,13 @@ impl App {
     /// slide draws it. A line of code is placed by the block table, and
     /// a line that draws no row, an image's, stands its block whole in
     /// the view, or from its top when taller. A blank line after a
-    /// block taller than the view stands at the end of that block. A
-    /// place inside a line longer than `LONG_LINE` is a row of the
-    /// editor, which the page of a code or text file draws the same:
-    /// it lands as in the editor (`row_landing`).
+    /// block taller than the view stands at the end of that block. In
+    /// a code or text file, a place inside a line longer than
+    /// `LONG_LINE` is a row of the editor, which the page draws the
+    /// same: it lands as in the editor (`row_landing`).
     fn line_landing(&mut self, offset: usize, below: f32) -> Option<f32> {
         let lay = self.layout.as_ref()?;
-        if scroll::offset_piece(lay, &self.document, offset).is_some() {
+        if in_source_piece(lay, &self.document, offset) {
             return self.row_landing(offset, below);
         }
         line_landing(lay, &self.document, offset, below, self.viewport_h())
@@ -12054,6 +12064,39 @@ mod tests {
             line_landing(&lay, &doc, last, below, view_h),
             scroll::offset_top(&lay, &doc, last).map(|y| caret::seated(y, below)),
         );
+    }
+
+    #[test]
+    fn a_line_landing_in_a_fenced_long_line_of_a_page_is_placed_by_the_table() {
+        use super::{caret, line_landing, scroll};
+        let long: String = (0..3_000).map(|i| format!("word{i} ")).collect();
+        let head = "# Title\n\nA paragraph.\n\n```\n";
+        let doc = oryx::doc::markdown::parse(format!("{head}{long}\n```\n\nAfter.\n"));
+        assert!(!doc.code_file && !doc.plain_file);
+        let mut fonts = super::FontStore::new();
+        let mut media = super::MediaCache::offline(std::path::PathBuf::from("."));
+        let lay = oryx::layout::layout(
+            &doc,
+            &super::Theme::default_dark(),
+            &mut fonts,
+            &mut media,
+            &oryx::layout::ViewConfig::default(),
+            600.0,
+        );
+        let (below, view_h) = (100.0, 400.0);
+        // Deep in the second piece of the fenced line, and the closing
+        // fence, which the table gives to the block's last line.
+        let inside = head.len() + 14_000;
+        let fence = head.len() + long.len() + 2;
+        assert!(scroll::offset_piece(&lay, &doc, inside).is_some());
+        for at in [inside, fence] {
+            let fitted = scroll::fitted_below(&lay, &doc, at, below, view_h);
+            assert_eq!(
+                line_landing(&lay, &doc, at, below, view_h),
+                scroll::offset_top(&lay, &doc, at).map(|y| caret::seated(y, fitted)),
+                "a rendered page lands the place {at} as the block table places it"
+            );
+        }
     }
 
     #[test]
