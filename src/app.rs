@@ -940,6 +940,12 @@ fn line_landing(
     below: f32,
     view_h: f32,
 ) -> Option<f32> {
+    // Inside a line longer than `LONG_LINE` the block table places the
+    // piece, and the row can be a hundred rows under its top: the row
+    // the layout holds answers, as in the editor.
+    if scroll::offset_piece(lay, doc, offset).is_some() {
+        return row_y(lay, doc, offset).map(|y| caret::seated(y, below));
+    }
     let row = caret::line_top(lay, doc, offset).or_else(|| scroll::line_estimate(lay, doc, offset));
     if let Some(y) = row {
         return Some(caret::seated(y, below));
@@ -2605,7 +2611,8 @@ impl App {
     /// longer than `LONG_LINE` that answer is the top of the place's
     /// piece. It is enough to judge whether a row is in view, and
     /// which edge it is beyond (`seat_caret_line`, `keep_view_with`,
-    /// `edit_view`): a piece that crosses the view is held whole, so a
+    /// `edit_view`): once the pass has ended and the window has slid
+    /// to the view, a piece that crosses the view is held whole, so a
     /// row in view answers exactly. The height of a row out of view is
     /// read with `row_y_in_piece`.
     fn editor_row_y(&self, offset: usize) -> Option<f32> {
@@ -9510,8 +9517,15 @@ impl App {
     /// slide draws it. A line of code is placed by the block table, and
     /// a line that draws no row, an image's, stands its block whole in
     /// the view, or from its top when taller. A blank line after a
-    /// block taller than the view stands at the end of that block.
-    fn line_landing(&self, lay: &LayoutDoc, offset: usize, below: f32) -> Option<f32> {
+    /// block taller than the view stands at the end of that block. A
+    /// place inside a line longer than `LONG_LINE` is a row of the
+    /// editor, which the page of a code or text file draws the same:
+    /// it lands as in the editor (`row_landing`).
+    fn line_landing(&mut self, offset: usize, below: f32) -> Option<f32> {
+        let lay = self.layout.as_ref()?;
+        if scroll::offset_piece(lay, &self.document, offset).is_some() {
+            return self.row_landing(offset, below);
+        }
         line_landing(lay, &self.document, offset, below, self.viewport_h())
     }
 
@@ -9812,14 +9826,14 @@ impl App {
             // worker's delivery brings the rest.
             let covered = offset < self.document.source.len() || !self.parse_pending;
             if covered {
-                let placed = self.layout.as_ref().and_then(|lay| {
-                    if place.line {
-                        self.line_landing(lay, offset, below)
-                    } else {
+                let placed = if place.line {
+                    self.line_landing(offset, below)
+                } else {
+                    self.layout.as_ref().and_then(|lay| {
                         scroll::offset_top(lay, &self.document, offset)
                             .map(|y| caret::seated(y, below))
-                    }
-                });
+                    })
+                };
                 match placed {
                     Some(y) if scroll::reached(y, height, vh) || !self.layout_pending() => {
                         self.pending_offset = None;
@@ -11997,6 +12011,49 @@ mod tests {
             })
             .collect();
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    #[test]
+    fn a_line_landing_inside_a_long_line_stands_on_its_row() {
+        use super::{caret, line_landing, scroll};
+        let long: String = (0..3_000).map(|i| format!("word{i} ")).collect();
+        assert!(long.len() > 2 * oryx::style::highlight::LONG_LINE);
+        let base = format!("first\n{long}\nlast line\n");
+        let path =
+            std::env::temp_dir().join(format!("oryx-line-landing-{}.txt", std::process::id()));
+        std::fs::write(&path, &base).unwrap();
+        let doc = oryx::doc::load::open(&path, None).unwrap().document;
+        std::fs::remove_file(&path).ok();
+        let mut fonts = super::FontStore::new();
+        let mut media = super::MediaCache::offline(std::path::PathBuf::from("."));
+        let lay = oryx::layout::layout(
+            &doc,
+            &super::Theme::default_dark(),
+            &mut fonts,
+            &mut media,
+            &oryx::layout::ViewConfig::default(),
+            600.0,
+        );
+        let (below, view_h) = (100.0, 400.0);
+        // Deep in the second piece of the long line.
+        let at = "first\n".len() + 14_000;
+        let row = caret::row_top(&lay, &doc, at).expect("the layout holds the row");
+        let piece = scroll::offset_top(&lay, &doc, at).expect("the table places the piece");
+        assert!(
+            row > piece + 40.0,
+            "the row {row} is under its piece's top {piece}"
+        );
+        assert_eq!(
+            line_landing(&lay, &doc, at, below, view_h),
+            Some(caret::seated(row, below)),
+            "the row itself stands at the height asked, not the top of its piece"
+        );
+        // A line of at most `LONG_LINE` is placed by the block table.
+        let last = base.len() - 3;
+        assert_eq!(
+            line_landing(&lay, &doc, last, below, view_h),
+            scroll::offset_top(&lay, &doc, last).map(|y| caret::seated(y, below)),
+        );
     }
 
     #[test]
