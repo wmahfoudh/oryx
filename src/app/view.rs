@@ -1046,6 +1046,16 @@ impl View {
         self.steps_held = 0;
     }
 
+    /// As `drop_waits`, for a request that is neither a movement nor a
+    /// letter: the editor opened or left. The steps of the history
+    /// that wait are places of the file, the same in both, and are
+    /// still asked for.
+    pub(super) fn drop_waits_keep_steps(&mut self) {
+        let steps = self.steps_held;
+        self.drop_waits();
+        self.steps_held = steps;
+    }
+
     /// A step of the history asked while the layout still owes
     /// places: it waits for the end of the measure. The place the step
     /// leaves is read from the layout, and so is the place it lands
@@ -1626,10 +1636,15 @@ mod tests {
         fn resolve_pending(&mut self) {
             self.view.release_thumb_landing();
             self.view.release_parked_row();
-            if self.view.waits() {
-                let (view, mut page) = self.page();
-                view.land(&mut page);
+            if !self.view.waits() {
+                return;
             }
+            let (view, mut page) = self.page();
+            view.land(&mut page);
+        }
+
+        /// `App::make_held_steps`, in one file with no dialog.
+        fn make_held_steps(&mut self) {
             let steps = {
                 let (view, page) = self.page();
                 view.take_steps(&page)
@@ -1644,6 +1659,8 @@ mod tests {
         /// landing's row, the caret, the releases, the picture. Answers
         /// what the picture of the wait would show.
         fn frame(&mut self) -> Option<WantedPlace> {
+            // The event loop between two frames, `App::about_to_wait`.
+            self.make_held_steps();
             // `start_pass`.
             if self.lay.is_none() || self.laid_width != self.width {
                 let (view, page) = self.page();
@@ -1888,7 +1905,13 @@ mod tests {
         /// file.
         fn back(&mut self) -> bool {
             if !self.page().1.whole() {
-                let waits = self.view.steps_held != 0 || self.history.peek(false, None).is_some();
+                let waits = self.view.steps_held != 0 || {
+                    let here = self.here();
+                    self.history
+                        .peek(false, here.as_ref())
+                        .or_else(|| self.history.peek(false, None))
+                        .is_some()
+                };
                 if waits {
                     self.view.hold_step(false);
                 }
@@ -2370,6 +2393,19 @@ mod tests {
         let after = bench.line_start(300) + 1;
         assert_eq!(bench.caret.map(|caret| caret.offset), Some(after));
         assert_eq!(bench.caret_row_shown(true), Ok(()));
+    }
+
+    #[test]
+    fn the_editor_opened_or_left_keeps_the_steps_that_wait() {
+        let mut view = View {
+            steps_held: -2,
+            kept_view: Some(Kept::Distance(40.0)),
+            ..View::default()
+        };
+        view.drop_waits_keep_steps();
+        assert_eq!((view.steps_held, view.kept_view), (-2, None));
+        view.drop_waits();
+        assert_eq!(view.steps_held, 0);
     }
 
     /// An action of the reader, between two frames.

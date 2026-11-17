@@ -2055,7 +2055,7 @@ impl App {
         // A jump to the end that still waits is the reader's last
         // movement, and opening the editor is not one.
         let end_waits = self.view.end_waits();
-        self.view.drop_waits();
+        self.view.drop_waits_keep_steps();
         let (offset, below, image_bottom) = match (waiting, self.layout.as_ref()) {
             (Some(place), _) => {
                 let caret = waiting_caret(&self.document.source, place, remembered);
@@ -2306,7 +2306,7 @@ impl App {
             // stands its block at that height.
             // What waited in the source view, a view kept at an edit
             // among it, counts the rows of the editor: it goes with it.
-            self.view.drop_waits();
+            self.view.drop_waits_keep_steps();
             self.view.scroll_y = parked.scroll_y;
             if let Some(offset) = left_at {
                 match self
@@ -6973,17 +6973,21 @@ impl App {
     /// edits, and the history moves only once the file really opens.
     fn step_history(&mut self, forward: bool) {
         // While the layout still owes places, a step inside the open
-        // file waits for the end of the measure (`View::hold_step`).
-        // A step to another file opens it now. The place the reader
-        // stands on is not read here: the view is clamped to what is
-        // placed, and that place can equal the one the step goes to,
-        // which a step passes over.
+        // file waits for the end of the measure (`View::hold_step`),
+        // and so does a step asked after one that waits. A step to
+        // another file opens it now. The place the step goes to is
+        // read as the step will read it, past the place the reader
+        // stands on. During the measure the view is clamped to what
+        // is placed, and that place can wrongly equal the only one
+        // the history has: the history is then read with no place.
         if !self.page().1.whole() {
-            let waits = self.view.steps_held != 0
-                || self
-                    .history
-                    .peek(forward, None)
-                    .is_some_and(|target| target.file == self.path);
+            let waits = self.view.steps_held != 0 || {
+                let here = self.here();
+                self.history
+                    .peek(forward, here.as_ref())
+                    .or_else(|| self.history.peek(forward, None))
+                    .is_some_and(|target| target.file == self.path)
+            };
             if waits {
                 self.view.hold_step(forward);
                 self.request_redraw();
@@ -7483,6 +7487,7 @@ impl App {
         self.view.pending_row = None;
         self.pending_goto = None;
         self.view.bottom_hold.clear();
+        self.view.steps_held = 0;
         // A remembered file resumes where reading stopped, once placed:
         // a book from the persisted store, a plain file from the
         // session's map. A file about to resume editing returns through
@@ -8916,18 +8921,41 @@ impl App {
                 self.go_to(target);
             }
         }
-        if self.view.waits() {
-            let (view, mut page) = self.page();
-            view.land(&mut page);
-            self.after_scroll();
+        if !self.view.waits() {
+            return;
         }
-        // The steps of the history that waited for the measure, after
-        // what waited before them has landed.
+        let (view, mut page) = self.page();
+        view.land(&mut page);
+        self.after_scroll();
+    }
+
+    /// Makes the steps of the history that waited for the measure
+    /// (`View::hold_step`), once the layout is whole and what waited
+    /// before them has landed. Asked by the event loop between two
+    /// frames, never from inside one: a step can open another file or
+    /// a folded section, which drops the layout a frame is drawing.
+    /// Nothing while a question, a dialog, the path field or the help
+    /// page is open: the steps wait for it to close, or a step to
+    /// another file would replace the question on screen. A step that
+    /// starts a measure, in another file or in a section it opened,
+    /// ends the walk: the steps after it were asked in a document that
+    /// is no longer the one on screen.
+    fn make_held_steps(&mut self) {
+        let busy = self.confirm.is_some()
+            || self.overlay.is_some()
+            || self.path_ask.is_some()
+            || self.help_stash.is_some();
+        if self.view.steps_held == 0 || busy {
+            return;
+        }
         let steps = {
             let (view, page) = self.page();
             view.take_steps(&page)
         };
         for _ in 0..steps.map_or(0, i32::abs) {
+            if !self.page().1.whole() {
+                break;
+            }
             self.step_history(steps > Some(0));
         }
     }
@@ -9555,6 +9583,7 @@ impl ApplicationHandler for App {
             event_loop.exit();
             return;
         }
+        self.make_held_steps();
         let mut wake = Wake::default();
         if !self.pending_recolor.is_empty() {
             let due = self.last_recolor + RECOLOR_WAVE;
