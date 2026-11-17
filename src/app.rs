@@ -2052,6 +2052,9 @@ impl App {
         // move the view away from the caret later.
         let waiting = waiting_place(self.view.pending_row, self.view.pending_offset, None)
             .filter(|_| sel.is_none());
+        // A jump to the end that still waits is the reader's last
+        // movement, and opening the editor is not one.
+        let end_waits = self.view.end_waits();
         self.view.drop_waits();
         let (offset, below, image_bottom) = match (waiting, self.layout.as_ref()) {
             (Some(place), _) => {
@@ -2125,6 +2128,10 @@ impl App {
                 below,
                 line: false,
             });
+        } else if end_waits {
+            // The file keeps its document and no seat is made: the
+            // view still goes to the end when the measure reaches it.
+            self.view.hold_end();
         }
         // The caret owns the keys; a sidebar holding them would strand
         // the arrows. Same funnel as the Right key's explicit handoff.
@@ -5439,11 +5446,14 @@ impl App {
         } else {
             // A step of the search is the reader's movement, whether
             // or not the match is already in view: what waited for the
-            // layout before it is dropped. A match that the bar finds
-            // again by itself, after an edit or a new layout, moves
-            // the view as before and drops nothing.
-            self.view.drop_waits();
-            self.scroll_match_into_view();
+            // layout before it is dropped. A match the layout has no
+            // place for yet shows nothing, and what waits stays. A
+            // match that the bar finds again by itself, after an edit
+            // or a new layout, moves the view as before and drops
+            // nothing.
+            if self.scroll_match_into_view() {
+                self.view.drop_waits();
+            }
         }
         self.request_redraw();
     }
@@ -5778,12 +5788,14 @@ impl App {
     /// Centers the current match vertically when it sits off screen. A
     /// cold match scrolls to its recorded top from the block table and
     /// settles on the exact anchor once the slide materializes it.
-    fn scroll_match_into_view(&mut self) {
+    /// False when there is no match, or the layout has no place for it
+    /// yet.
+    fn scroll_match_into_view(&mut self) -> bool {
         let (Some(lay), Some(state)) = (self.layout.as_ref(), self.search.as_ref()) else {
-            return;
+            return false;
         };
         let Some(m) = state.matches.get(state.current) else {
-            return;
+            return false;
         };
         let anchor = selection::match_anchor(lay, &self.document, m);
         let (top, size) = match anchor {
@@ -5792,7 +5804,7 @@ impl App {
                 let pos = m.ordered().0;
                 match lay.approx_top_at(pos.block, pos.span, pos.byte) {
                     Some(top) => (top, self.cfg.body_size * self.cfg.zoom),
-                    None => return,
+                    None => return false,
                 }
             }
         };
@@ -5806,6 +5818,7 @@ impl App {
         if top < self.view.scroll_y || top + line_h > self.view.scroll_y + vh {
             self.scroll_to(top - (vh - line_h) / 2.0);
         }
+        true
     }
 
     /// Finishes a cold match's landing: once the slide materializes the
@@ -8531,8 +8544,13 @@ impl App {
                     self.open_file(&path, false);
                     // The link names its place: the heading, not the
                     // place the file was left at on an earlier visit.
+                    // A file that opens in its editor again has no
+                    // heading to land on, and the seat of its caret
+                    // stays.
                     if let Some(fragment) = fragment {
-                        self.view.land_at_anchor(format!("#{fragment}"));
+                        if self.mode == edit::Mode::Read {
+                            self.view.land_at_anchor(format!("#{fragment}"));
+                        }
                     }
                 }
             } else if let Err(err) = open::that_detached(&path) {

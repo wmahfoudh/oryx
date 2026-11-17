@@ -1034,6 +1034,18 @@ impl View {
         self.caret_seat = None;
     }
 
+    /// Whether a jump to the end waits for the measure to end.
+    pub(super) fn end_waits(&self) -> bool {
+        self.bottom_hold.held_at(self.scroll_y)
+    }
+
+    /// Holds the end again from where the view is, after a request
+    /// that is not a movement dropped what waited (`end_waits`, read
+    /// before it).
+    pub(super) fn hold_end(&mut self) {
+        self.bottom_hold.take(self.scroll_y, false);
+    }
+
     /// How many requests wait for the layout. The caret's owed view is
     /// not counted: it follows the request that put the caret there.
     fn waiting(&self) -> usize {
