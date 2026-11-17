@@ -636,28 +636,34 @@ impl View {
         }
     }
 
+    /// The wheel, a page key, a pan: the view moves by `delta` from
+    /// where it is, and stays where the hand leaves it.
     pub(super) fn scroll_by(&mut self, page: &Page, delta: f32) {
         // A step the clamp leaves in place, the wheel turned up at the
-        // top, still asks for the page: the scroll alone would not say
-        // so to a seat of the editor that waits.
+        // top, is still the reader's hand: the scroll alone would not
+        // say so to what waits.
         if delta != 0.0 {
-            self.drop_parked_row();
+            self.drop_waits();
         }
         self.scroll_to(page, self.scroll_y + delta);
     }
 
+    /// A movement to a height of the page that the layout holds: a
+    /// step of the search, a link to a heading, the scrollbar of a
+    /// page that is not measured.
+    pub(super) fn jump_to(&mut self, page: &Page, y: f32) {
+        self.drop_waits();
+        self.scroll_to(page, y);
+    }
+
     /// The Top command: the start of the page.
     pub(super) fn go_top(&mut self, page: &Page) {
-        self.drop_thumb_landing();
-        self.scroll_to(page, 0.0);
+        self.jump_to(page, 0.0);
     }
 
     /// The Bottom command: the end of the page.
     pub(super) fn go_bottom(&mut self, page: &Page) {
-        // The end of the measured part is where a drop of the
-        // thumb left the page: the scroll alone would not say
-        // that the reader asked for the end.
-        self.drop_thumb_landing();
+        self.drop_waits();
         self.scroll_to(page, page.height());
         // The placed height is all Oryx knows, so on a document
         // still streaming this lands short of the file's end;
@@ -760,6 +766,14 @@ impl View {
             self.thumb_landing.is_none() || self.pending_offset.is_some(),
             "a landing of the thumb with no offset that waits"
         );
+        debug_assert!(
+            self.waiting() <= 1,
+            "more than one request waits: kept {:?}, row {:?}, offset {:?}, anchor {:?}",
+            self.kept_view,
+            self.pending_row,
+            self.pending_offset,
+            self.pending_anchor
+        );
     }
 
     /// Brings the view to the caret after it moved. A row the layout
@@ -784,6 +798,7 @@ impl View {
         }
         self.caret_seat = None;
         self.leave_edit_view();
+        self.caret_takes_over();
         let (Some(caret), Some(lay)) = (page.caret, page.lay) else {
             return;
         };
@@ -799,7 +814,12 @@ impl View {
             // The kept view brings the caret back where it stood: no
             // seat is made beside it.
             CaretRow::Guess if self.keeps_caret_row() => false,
-            CaretRow::Guess | CaretRow::Unknown => self.seat_caret_line(page),
+            // The seat of the caret's line is the request that waits:
+            // a row kept at its height was the place the caret left.
+            CaretRow::Guess | CaretRow::Unknown => {
+                self.kept_view = None;
+                self.seat_caret_line(page)
+            }
         };
         self.caret_snap = snap_still_owed(owed, settled);
     }
@@ -924,18 +944,29 @@ impl View {
     pub(super) fn owe_caret(&mut self) {
         self.caret_snap = true;
         self.caret_seat = None;
-        // A view kept from before the edit, at a zoom step made with
-        // the caret out of view, is no longer the reader's place.
-        self.kept_view = self.kept_view.and_then(|kept| kept.under_snap(true));
+        self.caret_takes_over();
     }
 
-    /// A click placed the caret: a seat that waited for the place it
-    /// left is no longer owed, nor its snap.
+    /// The view goes to the caret, after an edit or a caret key: what
+    /// waits for another place is dropped. That is the place of a drop
+    /// of the thumb, a link's, a jump to the end, and a view kept by
+    /// its top or its distance, which is the view the caret leaves: in
+    /// a big file it would take the view back seconds later. The
+    /// caret's own view stays: its row kept at its height, the view of
+    /// an edit, the seat of its line.
+    fn caret_takes_over(&mut self) {
+        self.pending_anchor = None;
+        self.pending_offset = None;
+        self.thumb_landing = None;
+        self.landing_settle = None;
+        self.bottom_hold.clear();
+        self.kept_view = self.kept_view.filter(|kept| kept.shows_caret());
+    }
+
+    /// A click placed the caret, and the view stays where the click
+    /// found it.
     pub(super) fn caret_clicked(&mut self) {
-        self.leave_edit_view();
-        self.pending_row = None;
-        self.caret_snap = false;
-        self.caret_seat = None;
+        self.drop_waits();
     }
 
     /// Releases the landing a drop of the thumb left waiting, once the
@@ -953,29 +984,26 @@ impl View {
         }
     }
 
-    /// Drops the landing a drop of the thumb left waiting, for a key
-    /// that leaves the view where it is and still means another place.
-    pub(super) fn drop_thumb_landing(&mut self) {
-        if self.thumb_landing.take().is_some() {
-            self.pending_offset = None;
-        }
-    }
-
     /// The thumb of the scrollbar names `offset` in a file that is
     /// still measured: the view lands there when the measure reaches
     /// it.
     pub(super) fn thumb_names(&mut self, offset: usize) {
-        self.pending_row = None;
-        self.kept_view = None;
-        // A caret's seat still owed would ask for its row again on
-        // the next frame, and the preview would show it.
-        self.caret_snap = false;
-        self.caret_seat = None;
-        // A held `Ctrl+End` would be spent at the page's end, where
-        // the drop leaves the page.
-        self.bottom_hold.clear();
-        self.thumb_landing = None;
-        self.pending_offset = Some(Place::top(offset));
+        self.land_at(Place::top(offset));
+    }
+
+    /// The view lands on `place` of the source once the layout reaches
+    /// it: a link, an entry of the outline, a step of the history
+    /// while reading, the thumb of the scrollbar.
+    pub(super) fn land_at(&mut self, place: Place) {
+        self.drop_waits();
+        self.pending_offset = Some(place);
+    }
+
+    /// The view lands on the heading `anchor` names once the layout
+    /// places it.
+    pub(super) fn land_at_anchor(&mut self, anchor: String) {
+        self.drop_waits();
+        self.pending_anchor = Some(anchor);
     }
 
     /// The place the thumb named still waits after `land`: the page
@@ -988,15 +1016,37 @@ impl View {
         }
     }
 
-    /// Drops the landings that still wait for the layout. A new landing
-    /// replaces them, or an older one would move the view after it.
-    pub(super) fn drop_waiting_landings(&mut self) {
-        self.thumb_landing = None;
-        self.row_parked = None;
+    /// Drops what waits for the layout: a landing, a kept view, a
+    /// jump to the end, the view owed to the caret. One request waits,
+    /// the last one. A movement of the reader drops what waited before
+    /// it, then asks for its own place: an older request would move the
+    /// view after it, seconds later in a big file.
+    pub(super) fn drop_waits(&mut self) {
         self.kept_view = None;
         self.pending_anchor = None;
         self.pending_offset = None;
+        self.thumb_landing = None;
         self.pending_row = None;
+        self.row_parked = None;
+        self.landing_settle = None;
+        self.bottom_hold.clear();
+        self.caret_snap = false;
+        self.caret_seat = None;
+    }
+
+    /// How many requests wait for the layout. The caret's owed view is
+    /// not counted: it follows the request that put the caret there.
+    fn waiting(&self) -> usize {
+        [
+            self.kept_view.is_some(),
+            self.pending_row.is_some(),
+            self.pending_offset.is_some(),
+            self.pending_anchor.is_some(),
+            self.bottom_hold.held_at(self.scroll_y),
+        ]
+        .into_iter()
+        .filter(|waits| *waits)
+        .count()
     }
 
     /// Where the reader stands, as the history files it: the offset,
@@ -1667,7 +1717,7 @@ mod tests {
         fn go_to(&mut self, line: usize) {
             let offset = self.line_start(line);
             self.push_jump();
-            self.view.drop_waiting_landings();
+            self.view.drop_waits();
             if self.editing {
                 self.caret = Some(Caret::at(offset));
             }
@@ -1763,7 +1813,7 @@ mod tests {
             }
             let (view, page) = self.page();
             let target = share * (page.height() - page.view_h).max(0.0);
-            view.scroll_to(&page, target);
+            view.jump_to(&page, target);
         }
 
         /// `Alt+Left`: `App::step_history` and `App::land_on`, in one
@@ -1774,7 +1824,7 @@ mod tests {
                 return false;
             };
             self.history.step(false, here);
-            self.view.drop_waiting_landings();
+            self.view.drop_waits();
             let (view_h, row_h) = (self.view_h, self.row_h());
             if self.editing {
                 let offset = caret::clamp(&self.doc, target.offset);
@@ -1829,6 +1879,164 @@ mod tests {
         assert!(slow > 1000.0, "the view went down the file, to {slow}");
         assert_eq!(slow, whole, "the wait changes where the jump lands");
         assert_eq!(state.2, None, "no row waits once the measure has ended");
+    }
+
+    /// The editor of a file measured three lines a frame, the caret
+    /// put on line 200 by a jump and a click in the view, the measure
+    /// ended.
+    fn editor_at_200() -> Bench {
+        let mut bench = Bench::new(numbered(LINES), true, 3);
+        bench.frame();
+        bench.go_to(200);
+        bench.settle(REST);
+        bench.click(40.0, 100.0);
+        bench.frame();
+        bench
+    }
+
+    #[test]
+    fn the_wheel_after_a_letter_is_not_undone_by_the_measure() {
+        let mut bench = editor_at_200();
+        bench.letter();
+        for _ in 0..4 {
+            bench.frame();
+        }
+        bench.wheel(2.0);
+        bench.frame();
+        let left = bench.view.scroll_y;
+        bench.settle(REST);
+        assert_eq!(
+            bench.view.scroll_y, left,
+            "the wheel left the view at {left}, and the measure moved it"
+        );
+    }
+
+    #[test]
+    fn the_wheel_after_a_jump_while_reading_is_not_undone() {
+        let mut bench = Bench::new(numbered(LINES), false, 3);
+        bench.frame();
+        bench.go_to(300);
+        for _ in 0..10 {
+            bench.frame();
+        }
+        bench.wheel(2.0);
+        bench.frame();
+        let left = bench.view.scroll_y;
+        assert!(left > 0.0, "the wheel moved the view");
+        bench.settle(REST);
+        assert_eq!(
+            bench.view.scroll_y, left,
+            "the wheel left the view at {left}, and the jump that waited moved it"
+        );
+    }
+
+    #[test]
+    fn the_wheel_after_a_drop_of_the_thumb_and_a_zoom_step_is_not_undone() {
+        let mut bench = Bench::new(numbered(LINES), true, 3);
+        bench.frame();
+        bench.thumb(0.5);
+        bench.frame();
+        bench.zoom(1.25);
+        for _ in 0..10 {
+            bench.frame();
+        }
+        bench.wheel(2.0);
+        bench.frame();
+        let left = bench.view.scroll_y;
+        bench.settle(REST);
+        assert_eq!(
+            bench.view.scroll_y, left,
+            "the wheel left the view at {left}, and the place of the drop took it"
+        );
+    }
+
+    #[test]
+    fn the_end_asked_after_a_jump_that_waits_is_where_the_view_ends() {
+        // G1 of Task 408.
+        let ends = |pace: usize| {
+            let mut bench = Bench::new(numbered(LINES), false, pace);
+            bench.frame();
+            bench.go_to(17);
+            bench.frame();
+            bench.go_edge(true);
+            bench.settle(REST);
+            bench.view.scroll_y
+        };
+        assert_eq!(
+            ends(3),
+            ends(usize::MAX),
+            "the jump that waited landed after the end"
+        );
+    }
+
+    #[test]
+    fn the_top_asked_after_a_jump_that_waits_is_where_the_view_ends() {
+        let mut bench = Bench::new(numbered(LINES), false, 3);
+        bench.frame();
+        bench.go_to(300);
+        bench.frame();
+        bench.go_edge(false);
+        bench.settle(REST);
+        assert_eq!(
+            bench.view.scroll_y, 0.0,
+            "the jump that waited landed after the top"
+        );
+    }
+
+    #[test]
+    fn a_letter_after_a_drop_of_the_thumb_stays_in_view() {
+        // G2 of Task 408.
+        let mut bench = Bench::new(numbered(LINES), true, 3);
+        bench.frame();
+        bench.thumb(0.14);
+        bench.frame();
+        bench.letter();
+        bench.settle(REST);
+        assert_eq!(bench.caret_row_shown(true), Ok(()));
+    }
+
+    #[test]
+    fn a_caret_key_after_a_drop_of_the_thumb_stays_in_view() {
+        let mut bench = Bench::new(numbered(LINES), true, 3);
+        bench.frame();
+        bench.thumb(0.5);
+        bench.frame();
+        bench.key(Motion::Down);
+        bench.settle(REST);
+        assert_eq!(bench.caret_row_shown(true), Ok(()));
+    }
+
+    #[test]
+    fn the_wheel_at_the_top_releases_a_jump_to_the_end_that_waits() {
+        // G5 of Task 408: the clamp leaves the step in place.
+        let mut bench = Bench::new(numbered(LINES), false, 3);
+        bench.frame();
+        bench.go_edge(true);
+        bench.frame();
+        bench.wheel(-1.0);
+        bench.settle(REST);
+        assert_eq!(
+            bench.view.scroll_y, 0.0,
+            "the view went to the end after the wheel"
+        );
+    }
+
+    #[test]
+    fn a_jump_to_a_height_after_a_letter_is_not_undone_by_the_measure() {
+        let mut bench = editor_at_200();
+        bench.letter();
+        for _ in 0..4 {
+            bench.frame();
+        }
+        let (view, page) = bench.page();
+        view.jump_to(&page, 40.0);
+        bench.frame();
+        let left = bench.view.scroll_y;
+        bench.settle(REST);
+        assert_eq!(
+            bench.view.scroll_y, left,
+            "the jump left the view at {left}, and the measure moved it"
+        );
     }
 
     /// An action of the reader, between two frames.
@@ -1962,22 +2170,11 @@ mod tests {
         fn gap(&self, act: Act) -> Option<&'static str> {
             let waits = self.view.waits();
             match act {
-                // `Ctrl+End` or `Ctrl+Home` while reading leaves a jump
-                // that waits, and the view ends at the jump's place.
-                Act::End | Act::Home if !self.editing && waits => Some("edge"),
-                // Task 411: a click while the file is measured or the
+                // Task 412: a click while the file is measured or the
                 // view waits puts the caret on a row the layout holds,
                 // not under the pointer, and a landing that waited then
                 // takes the view from it.
                 Act::Click(..) if self.editing && (waits || self.pass_active()) => Some("click"),
-                // A letter or a caret key while a drop of the thumb
-                // waits, in a file of lines: the place of the drop
-                // still lands, and takes the view from the caret.
-                Act::Letter | Act::Key(_) | Act::End | Act::Home
-                    if self.editing && self.view.pending_offset.is_some() =>
-                {
-                    Some("thumb then caret")
-                }
                 // Not a fault, a limit of the comparison. While
                 // reading, a zoom step or a new width keeps the top of
                 // the view, and a jump that still waits keeps its line
@@ -2015,6 +2212,27 @@ mod tests {
             end - start > 40
         }
 
+        /// Whether the caret's row is in the view: whole, or only cut
+        /// by an edge after a click, which moves no view.
+        fn caret_row_shown(&mut self, whole: bool) -> Result<(), String> {
+            let (view_h, scroll) = (self.view_h, self.view.scroll_y);
+            let lay = self.lay.as_ref().expect("a layout");
+            let found = self
+                .caret
+                .and_then(|caret| caret.geometry(lay, &self.doc, &mut self.fonts));
+            let shown = found.is_some_and(|b| match whole {
+                true => b.y >= scroll && b.y + b.h <= scroll + view_h,
+                false => b.y + b.h > scroll && b.y < scroll + view_h,
+            });
+            if shown {
+                return Ok(());
+            }
+            Err(format!(
+                "the caret's row {:?} is not in the view at {scroll}",
+                found.map(|b| (b.y, b.h))
+            ))
+        }
+
         /// The scroll is within the page and the caret is in the text,
         /// on a character.
         fn bounds(&self) -> Result<(), String> {
@@ -2044,12 +2262,6 @@ mod tests {
     /// to come to rest.
     const REST: usize = 4;
 
-    /// The hand wins over a view that still waits: false until Task
-    /// 410, since the wheel releases only a seat of the editor, a drop
-    /// of the thumb and a held jump to the end. Until then the check
-    /// is made where the wheel left nothing waiting.
-    const HAND_RELEASES_ALL: bool = false;
-
     fn acts() -> impl Strategy<Value = Vec<Act>> {
         let act = prop_oneof![
             4 => (1usize..6).prop_map(Act::Frames),
@@ -2074,7 +2286,7 @@ mod tests {
         let mut bench = Bench::new(numbered(LINES), editing, pace);
         bench.frame();
         // The scroll the reader's hand left, when the hand was the last
-        // to act and a check can be made of it.
+        // to act: whatever waited before it, the view ends there.
         let mut hand = None;
         let mut gap = None;
         // In the editor, the last action put the caret somewhere and
@@ -2083,13 +2295,7 @@ mod tests {
         let mut caret_shown = None;
         for (index, &act) in acts.iter().enumerate() {
             gap = gap.or(bench.gap(act));
-            let before = bench.view.scroll_y;
             let put = bench.act(act);
-            let waited = bench.view.waits();
-            // A step the clamp leaves in place releases a seat of the
-            // editor only: a held jump to the end and a drop of the
-            // thumb are released by a scroll that moved.
-            let moved = bench.view.scroll_y != before;
             bench.frame();
             bench
                 .bounds()
@@ -2106,9 +2312,7 @@ mod tests {
             }
             match act {
                 Act::Frames(_) => {}
-                _ if act.is_hand(editing) && (HAND_RELEASES_ALL || (moved && !waited)) => {
-                    hand = Some(bench.view.scroll_y);
-                }
+                _ if act.is_hand(editing) => hand = Some(bench.view.scroll_y),
                 _ => hand = None,
             }
         }
@@ -2150,21 +2354,9 @@ mod tests {
             }
         }
         if let (Some(whole), None) = (caret_shown, gap) {
-            let (view_h, scroll) = (bench.view_h, bench.view.scroll_y);
-            let lay = bench.lay.as_ref().expect("a layout at rest");
-            let found = bench
-                .caret
-                .and_then(|caret| caret.geometry(lay, &bench.doc, &mut bench.fonts));
-            let shown = found.is_some_and(|b| match whole {
-                true => b.y >= scroll && b.y + b.h <= scroll + view_h,
-                false => b.y + b.h > scroll && b.y < scroll + view_h,
-            });
-            if !shown {
-                return Err(format!(
-                    "at rest the caret's row {:?} is not in the view at {scroll}",
-                    found.map(|b| (b.y, b.h))
-                ));
-            }
+            bench
+                .caret_row_shown(whole)
+                .map_err(|what| format!("at rest {what}"))?;
         }
         // In the editor the view follows the caret from where it was,
         // so only the caret is the same whatever the measure. While
@@ -2202,9 +2394,14 @@ mod tests {
             );
             // The wait changes nothing: actions that name their place
             // end where they end in a file measured whole at each
-            // frame.
+            // frame. While reading, the last movement decides alone
+            // when it names its place, whatever came before it: the
+            // wheel, the thumb or a step back, which depend on the
+            // view they found.
             let known = matches!(ended, Ok((_, _, Some(_))));
-            if !known && acts.iter().all(|act| act.names_its_place()) {
+            let last = acts.iter().rev().find(|act| !matches!(act, Act::Frames(_)));
+            let decides = !editing && matches!(last, Some(Act::GoTo(_) | Act::End | Act::Home));
+            if !known && (decides || acts.iter().all(|act| act.names_its_place())) {
                 let whole = check(&acts, editing, usize::MAX);
                 prop_assert_eq!(
                     &ended,

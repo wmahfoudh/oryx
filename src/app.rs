@@ -2052,7 +2052,7 @@ impl App {
         // move the view away from the caret later.
         let waiting = waiting_place(self.view.pending_row, self.view.pending_offset, None)
             .filter(|_| sel.is_none());
-        self.view.drop_waiting_landings();
+        self.view.drop_waits();
         let (offset, below, image_bottom) = match (waiting, self.layout.as_ref()) {
             (Some(place), _) => {
                 let caret = waiting_caret(&self.document.source, place, remembered);
@@ -2292,6 +2292,9 @@ impl App {
             // far. A line the page shows no row for, an image or a
             // blank line, goes through the pending target too, which
             // stands its block at that height.
+            // What waited in the source view, a view kept at an edit
+            // among it, counts the rows of the editor: it goes with it.
+            self.view.drop_waits();
             self.view.scroll_y = parked.scroll_y;
             if let Some(offset) = left_at {
                 match self
@@ -2630,7 +2633,7 @@ impl App {
             self.caret = Some(Caret::at(caret::clamp(&self.document, caret.offset)));
         }
         self.rehighlight_at = None;
-        self.view.drop_waiting_landings();
+        self.view.drop_waits();
         self.swapped_document(None, None);
         self.request_redraw();
     }
@@ -2736,7 +2739,7 @@ impl App {
             state.stale = true;
         }
         if !visible {
-            self.view.pending_offset = Some(Place::top(caret));
+            self.view.land_at(Place::top(caret));
         }
         self.count_after_edit();
         self.arm_pause_save();
@@ -5187,7 +5190,7 @@ impl App {
         }
         let offset = goto::offset(&self.document.source, target);
         self.push_jump();
-        self.view.drop_waiting_landings();
+        self.view.drop_waits();
         if self.mode == edit::Mode::Edit {
             self.selection = None;
             self.sel_anchor = None;
@@ -5218,8 +5221,8 @@ impl App {
                 if folded {
                     self.restart_layout();
                 }
-                self.view.pending_offset =
-                    Some(Place::centered(line_end, self.viewport_h(), self.row_h()).by_line(true));
+                let place = Place::centered(line_end, self.viewport_h(), self.row_h());
+                self.view.land_at(place.by_line(true));
                 self.request_redraw();
                 return;
             }
@@ -5434,6 +5437,12 @@ impl App {
             }
             self.restart_layout();
         } else {
+            // A step of the search is the reader's movement, whether
+            // or not the match is already in view: what waited for the
+            // layout before it is dropped. A match that the bar finds
+            // again by itself, after an edit or a new layout, moves
+            // the view as before and drops nothing.
+            self.view.drop_waits();
             self.scroll_match_into_view();
         }
         self.request_redraw();
@@ -5890,7 +5899,9 @@ impl App {
         }
         let target =
             scrollbar::scroll_for_thumb(cursor_y - grab, thumb_h, vh, self.doc_height(), vh);
-        self.scroll_to(target);
+        let (view, page) = self.page();
+        view.jump_to(&page, target);
+        self.after_scroll();
     }
 
     /// Advances the multi-click chain for a document-area press and
@@ -6980,7 +6991,7 @@ impl App {
     /// folded section opened first. A caret's place shown on the page
     /// stands its block there instead, fitted to the view.
     fn land_on(&mut self, place: &history::Entry) {
-        self.view.drop_waiting_landings();
+        self.view.drop_waits();
         let (offset, below) = (place.offset, place.below);
         let editing = self.mode == edit::Mode::Edit;
         let (view_h, row_h) = (self.viewport_h(), self.row_h());
@@ -7005,7 +7016,7 @@ impl App {
             if let Some((path, mark)) = self.path.clone().zip(step_mark(place)) {
                 self.edit_marks.insert(path, mark);
             }
-            self.view.pending_offset = Some(
+            self.view.land_at(
                 Place::returned(offset, below, place.away, view_h, row_h, false)
                     .by_line(place.editing),
             );
@@ -7081,6 +7092,7 @@ impl App {
             };
             if let Some(offset) = offset.map(|at| caret::clamp(&self.document, at)) {
                 self.push_jump();
+                self.view.drop_waits();
                 self.caret = Some(Caret::at(offset));
                 self.seat_editor_on(Place::top(offset));
                 self.wake_caret();
@@ -7093,13 +7105,15 @@ impl App {
                 let target = format!("#{anchor}");
                 self.push_jump();
                 if let Some(y) = self.layout.as_ref().and_then(|l| l.anchor_y(&target)) {
-                    self.scroll_to(y);
+                    let (view, page) = self.page();
+                    view.jump_to(&page, y);
+                    self.after_scroll();
                     return;
                 }
                 if self.document.reveal(block) {
                     self.restart_layout();
                 }
-                self.view.pending_anchor = Some(target);
+                self.view.land_at_anchor(target);
                 self.request_redraw();
             }
             // A book outline entry lands on any block kind; the jump
@@ -7112,7 +7126,7 @@ impl App {
                 if self.document.reveal(block) {
                     self.restart_layout();
                 }
-                self.view.pending_offset = Some(Place::top(offset));
+                self.view.land_at(Place::top(offset));
                 self.request_redraw();
             }
             None => {}
@@ -8475,7 +8489,9 @@ impl App {
         };
         if let Some(anchor) = lay.anchor_y(&target) {
             self.push_jump();
-            self.scroll_to(anchor);
+            let (view, page) = self.page();
+            view.jump_to(&page, anchor);
+            self.after_scroll();
         } else if target == help::NEXT_TIP_LINK {
             self.next_tip();
         } else if target == help::MATH_LINK {
@@ -8497,7 +8513,7 @@ impl App {
                         self.restart_layout();
                     }
                 }
-                self.view.pending_offset = Some(Place::top(offset));
+                self.view.land_at(Place::top(offset));
                 self.request_redraw();
             }
         } else if target.starts_with("http://") || target.starts_with("https://") {
@@ -8513,8 +8529,10 @@ impl App {
             if load::is_text_file(&path) {
                 if self.guard_unsaved(confirm::Pending::Open(path.clone(), false)) {
                     self.open_file(&path, false);
+                    // The link names its place: the heading, not the
+                    // place the file was left at on an earlier visit.
                     if let Some(fragment) = fragment {
-                        self.view.pending_anchor = Some(format!("#{fragment}"));
+                        self.view.land_at_anchor(format!("#{fragment}"));
                     }
                 }
             } else if let Err(err) = open::that_detached(&path) {
@@ -8528,13 +8546,13 @@ impl App {
             if self.document.reveal(block) {
                 self.restart_layout();
             }
-            self.view.pending_anchor = Some(target);
+            self.view.land_at_anchor(target);
             self.request_redraw();
         } else if self.layout_pending() {
             // Not in the model yet either; the parse may still deliver
             // it, so the jump waits instead of doing nothing.
             self.push_jump();
-            self.view.pending_anchor = Some(target);
+            self.view.land_at_anchor(target);
         }
     }
 
