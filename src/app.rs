@@ -2128,9 +2128,14 @@ impl App {
                 below,
                 line: false,
             });
+        } else if end_waits && sel.is_none() {
+            // The end that waited is where the reader stands: the
+            // caret goes there as `Ctrl+End` puts it in the editor, and
+            // its line is seated when the measure reaches it.
+            self.step_caret(Motion::DocEnd);
         } else if end_waits {
-            // The file keeps its document and no seat is made: the
-            // view still goes to the end when the measure reaches it.
+            // The caret is on the selection, and the view still goes
+            // to the end when the measure reaches it.
             self.view.hold_end();
         }
         // The caret owns the keys; a sidebar holding them would strand
@@ -8056,7 +8061,7 @@ impl App {
             return;
         }
         if let Some(offset) = self.top_offset() {
-            self.view.pending_offset = Some(Place::top(offset));
+            self.view.land_at(Place::top(offset));
         }
         self.cfg.comic = fit;
         self.layout = None;

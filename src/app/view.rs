@@ -1039,9 +1039,10 @@ impl View {
         self.bottom_hold.held_at(self.scroll_y)
     }
 
-    /// Holds the end again from where the view is, after a request
-    /// that is not a movement dropped what waited (`end_waits`, read
-    /// before it).
+    /// Holds the end again from where the view is, after something
+    /// that is not a movement of the reader changed the scroll or
+    /// dropped what waited (`end_waits`, read before it): a zoom step,
+    /// the clamp of a new pass, the editor opened on a selection.
     pub(super) fn hold_end(&mut self) {
         self.bottom_hold.take(self.scroll_y, false);
     }
@@ -1101,7 +1102,7 @@ impl View {
     /// an earlier kept view waits, which is still the place of the
     /// reader.
     pub(super) fn keep_view_with(&mut self, page: &Page, row_h: f32) {
-        if self.landing_waits() || self.kept_view.is_some() {
+        if self.landing_waits() || self.end_waits() || self.kept_view.is_some() {
             return;
         }
         let Some(lay) = page.lay else {
@@ -1173,11 +1174,18 @@ impl View {
     /// place: the caret's row in the editor, the top of the view on
     /// the page.
     pub(super) fn zoom_step(&mut self, page: &Page, ratio: f32) {
+        let end_waits = self.end_waits();
         self.keep_view(page);
         self.kept_view = self.kept_view.map(|kept| kept.zoomed(ratio));
         // What the view shows while the pass runs, until the kept
         // place is reached.
         self.scroll_y *= ratio;
+        // A jump to the end that waits is told from a movement of the
+        // reader by the scroll it left, which the step has just
+        // changed: the end still waits.
+        if end_waits {
+            self.hold_end();
+        }
     }
 
     /// A new pass is about to start, with the layout of the old one
@@ -1190,7 +1198,9 @@ impl View {
         // A new width, of the window or of the sidebar, with the layout
         // of the old one still here: the view keeps its place.
         self.keep_view(page);
-        let landing_waits = self.landing_waits();
+        // A jump to the end that waits says where the view goes, as a
+        // landing does.
+        let landing_waits = self.landing_waits() || self.end_waits();
         if landing_waits {
             // The landing says where the view goes. A view kept before
             // it would move the page after it.
@@ -1337,7 +1347,14 @@ impl View {
     /// window of the layout slides to it.
     pub(super) fn clamp(&mut self, page: &Page) {
         if let Some(lay) = page.lay {
+            // The clamp of a new pass is not the reader's hand: a jump
+            // to the end that waits is held from where the clamp
+            // leaves the view.
+            let end_waits = self.end_waits();
             self.scroll_y = scroll::clamp(self.scroll_y, lay.height, page.view_h);
+            if end_waits {
+                self.hold_end();
+            }
             debug_assert!(
                 self.scroll_y >= 0.0 && self.scroll_y <= lay.height.max(0.0),
                 "the scroll {} is out of a page {} tall",
@@ -2049,6 +2066,181 @@ mod tests {
             bench.view.scroll_y, left,
             "the jump left the view at {left}, and the measure moved it"
         );
+    }
+
+    /// What starts the measure again under a request that waits: a
+    /// zoom step, or a new width of the window, which the sidebar and
+    /// a resize give.
+    #[derive(Debug, Clone, Copy)]
+    enum Again {
+        Zoom,
+        Width,
+    }
+
+    const AGAIN: [Again; 2] = [Again::Zoom, Again::Width];
+
+    impl Bench {
+        fn again(&mut self, how: Again) {
+            match how {
+                Again::Zoom => self.zoom(1.25),
+                Again::Width => self.width = 480.0,
+            }
+        }
+
+        /// The source row at the top of the view.
+        fn top_row(&self) -> usize {
+            let lay = self.lay.as_ref().expect("a layout");
+            scroll::source_row(
+                &self.doc,
+                0,
+                scroll::top_offset(lay, &self.doc, self.view.scroll_y),
+            )
+        }
+
+        /// Whether the row holding `offset` is whole in the view.
+        fn row_in_view(&mut self, offset: usize) -> bool {
+            let (row_h, view_h, scroll) = (self.row_h(), self.view_h, self.view.scroll_y);
+            let (_, page) = self.page();
+            page.editor_row_y(offset)
+                .is_some_and(|y| y >= scroll && y + row_h <= scroll + view_h)
+        }
+
+        /// The scroll that shows the end of the file.
+        fn end_scroll(&self) -> f32 {
+            let height = self.lay.as_ref().expect("a layout").height;
+            (height - self.view_h).max(0.0)
+        }
+    }
+
+    #[test]
+    fn a_jump_of_the_editor_that_waits_lands_after_a_new_measure() {
+        for how in AGAIN {
+            for end in [false, true] {
+                let mut bench = Bench::new(numbered(LINES), true, 3);
+                bench.frame();
+                if end {
+                    bench.key(Motion::DocEnd);
+                } else {
+                    bench.go_to(300);
+                }
+                let caret = bench.caret.expect("a caret").offset;
+                bench.frame();
+                bench.again(how);
+                bench.settle(REST);
+                assert_eq!(
+                    bench.caret.map(|caret| caret.offset),
+                    Some(caret),
+                    "{how:?}, end {end}"
+                );
+                assert_eq!(bench.caret_row_shown(true), Ok(()), "{how:?}, end {end}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_jump_while_reading_that_waits_lands_after_a_new_measure() {
+        for how in AGAIN {
+            let mut bench = Bench::new(numbered(LINES), false, 3);
+            bench.frame();
+            bench.go_to(300);
+            bench.frame();
+            bench.again(how);
+            bench.settle(REST);
+            let line = bench.line_start(300);
+            assert!(
+                bench.row_in_view(line),
+                "{how:?}: line 300 is not in the view at {}",
+                bench.view.scroll_y
+            );
+        }
+    }
+
+    #[test]
+    fn a_drop_of_the_thumb_that_waits_lands_after_a_new_measure() {
+        for how in AGAIN {
+            for editing in [false, true] {
+                let mut bench = Bench::new(numbered(LINES), editing, 3);
+                bench.frame();
+                bench.thumb(0.5);
+                let place = bench.view.pending_offset.expect("the drop waits").offset;
+                let row = scroll::source_row(&bench.doc, 0, place);
+                bench.frame();
+                bench.again(how);
+                bench.settle(REST);
+                assert_eq!(bench.top_row(), row, "{how:?}, editing {editing}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_end_that_waits_while_reading_is_reached_after_a_new_measure() {
+        // Where the view ends, and the scroll of the end, for a zoom
+        // step then for a new width.
+        let ends = AGAIN.map(|how| {
+            let mut bench = Bench::new(numbered(LINES), false, 3);
+            bench.frame();
+            for _ in 0..10 {
+                bench.frame();
+            }
+            bench.go_edge(true);
+            bench.frame();
+            bench.again(how);
+            bench.settle(REST);
+            (bench.view.scroll_y, bench.end_scroll())
+        });
+        for (how, (scroll, end)) in AGAIN.iter().zip(ends) {
+            assert_eq!(
+                scroll, end,
+                "{how:?}: the view is not at the end, of {ends:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_kept_view_that_waits_comes_back_after_a_second_new_measure() {
+        for how in AGAIN {
+            // While reading, the line at the top of the view.
+            let mut bench = Bench::new(numbered(LINES), false, 3);
+            bench.settle(REST);
+            bench.wheel(40.0);
+            bench.frame();
+            let top = bench.top_row();
+            assert!(top > 50, "the wheel went down the file, to row {top}");
+            bench.zoom(1.5);
+            bench.frame();
+            bench.again(how);
+            bench.settle(REST);
+            assert_eq!(bench.top_row(), top, "{how:?}, reading");
+            // In the editor, the caret's row.
+            let mut bench = editor_at_200();
+            bench.zoom(1.5);
+            bench.frame();
+            bench.again(how);
+            bench.settle(REST);
+            assert_eq!(bench.caret_row_shown(true), Ok(()), "{how:?}, editing");
+        }
+    }
+
+    #[test]
+    fn a_letter_stays_in_view_after_a_new_measure() {
+        for how in AGAIN {
+            // Typed in view.
+            let mut bench = editor_at_200();
+            bench.letter();
+            bench.frame();
+            bench.again(how);
+            bench.settle(REST);
+            assert_eq!(bench.caret_row_shown(true), Ok(()), "{how:?}, in view");
+            // Typed with the caret out of view.
+            let mut bench = editor_at_200();
+            bench.wheel(-40.0);
+            bench.frame();
+            bench.letter();
+            bench.frame();
+            bench.again(how);
+            bench.settle(REST);
+            assert_eq!(bench.caret_row_shown(true), Ok(()), "{how:?}, out of view");
+        }
     }
 
     /// An action of the reader, between two frames.
