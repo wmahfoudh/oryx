@@ -64,6 +64,12 @@ impl Page<'_> {
         self.pass_active() || self.parse_pending
     }
 
+    /// Whether the layout is there and owes nothing more: each place
+    /// of the document can be read in it.
+    pub(super) fn whole(&self) -> bool {
+        self.lay.is_some() && !self.pending()
+    }
+
     /// Whether the document is a code or text file of one block whose
     /// pass still measures it: the case the preview shows a place for
     /// (`View::wanted`).
@@ -220,6 +226,10 @@ pub(super) struct View {
     /// The seat made for the line of a caret that the layout did not
     /// hold, while its row is still owed (`caret_snap`).
     pub(super) caret_seat: Option<CaretSeat>,
+    /// The steps of the history asked while the layout still owed
+    /// places, a step back as minus one and a step forward as plus
+    /// one. They are made once the layout owes nothing (`take_steps`).
+    pub(super) steps_held: i32,
 }
 
 /// A place in the source the view shows once the layout reaches it.
@@ -960,6 +970,7 @@ impl View {
         self.thumb_landing = None;
         self.landing_settle = None;
         self.bottom_hold.clear();
+        self.steps_held = 0;
         self.kept_view = self.kept_view.filter(|kept| kept.shows_caret());
     }
 
@@ -1032,6 +1043,28 @@ impl View {
         self.bottom_hold.clear();
         self.caret_snap = false;
         self.caret_seat = None;
+        self.steps_held = 0;
+    }
+
+    /// A step of the history asked while the layout still owes
+    /// places: it waits for the end of the measure. The place the step
+    /// leaves is read from the layout, and so is the place it lands
+    /// on: both are exact only in a layout that is whole. What waits
+    /// already stays and lands first, and steps add up. A movement or
+    /// a letter made meanwhile is the last request, and drops them
+    /// (`drop_waits`, `caret_takes_over`).
+    pub(super) fn hold_step(&mut self, forward: bool) {
+        self.steps_held += if forward { 1 } else { -1 };
+    }
+
+    /// The steps of the history to make now, positive forward: the
+    /// ones that waited, once the layout owes nothing more. None
+    /// while it does.
+    pub(super) fn take_steps(&mut self, page: &Page) -> Option<i32> {
+        if self.steps_held == 0 || !page.whole() {
+            return None;
+        }
+        Some(std::mem::take(&mut self.steps_held))
     }
 
     /// Whether a jump to the end waits for the measure to end.
@@ -1593,11 +1626,17 @@ mod tests {
         fn resolve_pending(&mut self) {
             self.view.release_thumb_landing();
             self.view.release_parked_row();
-            if !self.view.waits() {
-                return;
+            if self.view.waits() {
+                let (view, mut page) = self.page();
+                view.land(&mut page);
             }
-            let (view, mut page) = self.page();
-            view.land(&mut page);
+            let steps = {
+                let (view, page) = self.page();
+                view.take_steps(&page)
+            };
+            for _ in 0..steps.map_or(0, i32::abs) {
+                self.back();
+            }
         }
 
         /// One frame, in the order of `App::redraw`: the start of a
@@ -1848,6 +1887,13 @@ mod tests {
         /// `Alt+Left`: `App::step_history` and `App::land_on`, in one
         /// file.
         fn back(&mut self) -> bool {
+            if !self.page().1.whole() {
+                let waits = self.view.steps_held != 0 || self.history.peek(false, None).is_some();
+                if waits {
+                    self.view.hold_step(false);
+                }
+                return false;
+            }
             let here = self.here();
             let Some(target) = self.history.peek(false, here.as_ref()).cloned() else {
                 return false;
@@ -2243,6 +2289,89 @@ mod tests {
         }
     }
 
+    /// Jumps to the lines of `jumps`, each one landed, then a zoom step
+    /// that starts the measure again, a frame, and `steps` steps back.
+    /// Answers the bench while the file is still measured.
+    fn stepped_back(editing: bool, pace: usize, jumps: &[usize], steps: usize) -> Bench {
+        let mut bench = Bench::new(numbered(LINES), editing, pace);
+        bench.frame();
+        for &line in jumps {
+            bench.go_to(line);
+            bench.settle(REST);
+        }
+        bench.zoom(1.25);
+        bench.frame();
+        for _ in 0..steps {
+            bench.back();
+        }
+        bench
+    }
+
+    #[test]
+    fn a_step_back_during_the_measure_ends_where_it_ends_in_a_measured_file() {
+        for editing in [false, true] {
+            for (jumps, steps) in [(&[300][..], 1), (&[100, 200, 300][..], 2)] {
+                let ends = |pace: usize| {
+                    let mut bench = stepped_back(editing, pace, jumps, steps);
+                    bench.settle(REST);
+                    (bench.view.scroll_y, bench.caret.map(|caret| caret.offset))
+                };
+                assert_eq!(
+                    ends(3),
+                    ends(usize::MAX),
+                    "editing {editing}, jumps {jumps:?}, {steps} steps back"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_step_back_during_the_measure_waits_for_its_end() {
+        let mut bench = stepped_back(true, 3, &[300], 1);
+        let at_300 = bench.line_start(300);
+        for _ in 0..5 {
+            bench.frame();
+            assert!(bench.pass_active(), "the file is still measured");
+            assert_eq!(
+                bench.caret.map(|caret| caret.offset),
+                Some(at_300),
+                "the step was made before the measure ended"
+            );
+        }
+        bench.settle(REST);
+        assert_eq!(bench.caret.map(|caret| caret.offset), Some(0));
+        assert_eq!(bench.caret_row_shown(true), Ok(()));
+    }
+
+    #[test]
+    fn the_wheel_drops_a_step_back_that_waits() {
+        let mut bench = stepped_back(true, 3, &[300], 1);
+        for _ in 0..10 {
+            bench.frame();
+        }
+        bench.wheel(2.0);
+        bench.frame();
+        let left = bench.view.scroll_y;
+        bench.settle(REST);
+        assert_eq!(
+            bench.view.scroll_y, left,
+            "the step back moved the view after the wheel"
+        );
+        let at_300 = bench.line_start(300);
+        assert_eq!(bench.caret.map(|caret| caret.offset), Some(at_300));
+    }
+
+    #[test]
+    fn a_letter_drops_a_step_back_that_waits() {
+        let mut bench = stepped_back(true, 3, &[300], 1);
+        bench.frame();
+        bench.letter();
+        bench.settle(REST);
+        let after = bench.line_start(300) + 1;
+        assert_eq!(bench.caret.map(|caret| caret.offset), Some(after));
+        assert_eq!(bench.caret_row_shown(true), Ok(()));
+    }
+
     /// An action of the reader, between two frames.
     #[derive(Debug, Clone, Copy, PartialEq)]
     enum Act {
@@ -2540,6 +2669,9 @@ mod tests {
         }
         if view.caret_snap {
             return Err("at rest the caret is still owed its view".to_string());
+        }
+        if view.steps_held != 0 {
+            return Err("at rest a step of the history still waits".to_string());
         }
         let rest = bench.snapshot();
         bench.frame();

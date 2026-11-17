@@ -6972,6 +6972,24 @@ impl App {
     /// file reopens it, through the unsaved question when there are
     /// edits, and the history moves only once the file really opens.
     fn step_history(&mut self, forward: bool) {
+        // While the layout still owes places, a step inside the open
+        // file waits for the end of the measure (`View::hold_step`).
+        // A step to another file opens it now. The place the reader
+        // stands on is not read here: the view is clamped to what is
+        // placed, and that place can equal the one the step goes to,
+        // which a step passes over.
+        if !self.page().1.whole() {
+            let waits = self.view.steps_held != 0
+                || self
+                    .history
+                    .peek(forward, None)
+                    .is_some_and(|target| target.file == self.path);
+            if waits {
+                self.view.hold_step(forward);
+                self.request_redraw();
+                return;
+            }
+        }
         let here = self.here();
         // A place whose file is gone is dropped, with every other place
         // of that file, and the walk goes on to the next; only the one
@@ -8898,12 +8916,20 @@ impl App {
                 self.go_to(target);
             }
         }
-        if !self.view.waits() {
-            return;
+        if self.view.waits() {
+            let (view, mut page) = self.page();
+            view.land(&mut page);
+            self.after_scroll();
         }
-        let (view, mut page) = self.page();
-        view.land(&mut page);
-        self.after_scroll();
+        // The steps of the history that waited for the measure, after
+        // what waited before them has landed.
+        let steps = {
+            let (view, page) = self.page();
+            view.take_steps(&page)
+        };
+        for _ in 0..steps.map_or(0, i32::abs) {
+            self.step_history(steps > Some(0));
+        }
     }
 
     fn redraw(&mut self) {
