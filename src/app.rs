@@ -7603,15 +7603,7 @@ impl App {
         let steps = self.view.steps_held;
         self.open_file(&path, false);
         self.give_steps_back(steps);
-        match dropped {
-            Some(place) => self.view.pending_offset = Some(place),
-            None => {
-                // The reload keeps its exact scroll; the revisit target
-                // would land it on the block's top instead.
-                self.view.pending_offset = None;
-                self.view.scroll_y = scroll;
-            }
-        }
+        self.view.after_reload(scroll, dropped);
     }
 
     /// Ctrl+Shift+R: a reload that also discards the remote images this

@@ -1055,6 +1055,21 @@ impl View {
         self.steps_held = steps;
     }
 
+    /// Gives the view back after a reload opened the file again: the
+    /// scroll, or the place a drop of the thumb still waits for. The
+    /// file opened again asked for a place of its own, the caret's line
+    /// in the editor, as a file the reader comes back to does. A reload
+    /// is not a return: that request is dropped.
+    pub(super) fn after_reload(&mut self, scroll: f32, dropped: Option<Place>) {
+        self.drop_waits_keep_steps();
+        match dropped {
+            Some(place) => self.pending_offset = Some(place),
+            // The reload keeps its exact scroll; the place the file
+            // remembers would land it on the block's top.
+            None => self.scroll_y = scroll,
+        }
+    }
+
     /// A step of the history asked while the layout still owes
     /// places: it waits for the end of the measure. The place the step
     /// leaves is read from the layout, and so is the place it lands
@@ -1901,6 +1916,44 @@ mod tests {
             view.jump_to(&page, target);
         }
 
+        /// `App::reload_now` on a text read again from disk.
+        fn reload(&mut self, text: String) {
+            let scroll = self.view.scroll_y;
+            let dropped = self
+                .view
+                .pending_offset
+                .filter(|_| self.view.thumb_landing.is_some());
+            let steps = self.view.steps_held;
+            self.open_file(text);
+            self.view.steps_held = steps;
+            self.view.after_reload(scroll, dropped);
+        }
+
+        /// What `App::open_file` does to the view for a file opened
+        /// again in the mode it was left in: the layout and what waits
+        /// are dropped, and the editor seats its caret's line.
+        fn open_file(&mut self, text: String) {
+            self.doc = edit::rendered_document(FileKind::Text, &text);
+            self.text = text;
+            self.lay = None;
+            self.pass = None;
+            self.laid_width = 0.0;
+            self.view.scroll_y = 0.0;
+            self.view.kept_view = None;
+            self.view.pending_anchor = None;
+            self.view.pending_row = None;
+            self.view.bottom_hold.clear();
+            self.view.steps_held = 0;
+            self.view.pending_offset = None;
+            if let Some(caret) = self.caret.filter(|_| self.editing) {
+                let offset = caret::clamp(&self.doc, caret.offset);
+                self.caret = Some(Caret::at(offset));
+                self.view.drop_waits_keep_steps();
+                let (view, mut page) = self.page();
+                view.seat_editor_on(&mut page, Place::top(offset));
+            }
+        }
+
         /// `Alt+Left`: `App::step_history` and `App::land_on`, in one
         /// file.
         fn back(&mut self) -> bool {
@@ -2296,6 +2349,43 @@ mod tests {
     }
 
     #[test]
+    fn a_reload_keeps_the_view() {
+        // While reading, then in the editor with the caret on line 200
+        // and the view moved away from it by the wheel.
+        for editing in [false, true] {
+            let mut bench = if editing {
+                editor_at_200()
+            } else {
+                let mut bench = Bench::new(numbered(LINES), false, 3);
+                bench.settle(REST);
+                bench
+            };
+            bench.wheel(30.0);
+            bench.frame();
+            let top = bench.top_row();
+            assert!(top > 50, "the wheel went down the file, to row {top}");
+            bench.reload(numbered(LINES));
+            bench.settle(REST);
+            assert_eq!(bench.top_row(), top, "editing {editing}");
+        }
+    }
+
+    #[test]
+    fn a_reload_keeps_a_drop_of_the_thumb_that_waits() {
+        for editing in [false, true] {
+            let mut bench = Bench::new(numbered(LINES), editing, 3);
+            bench.frame();
+            bench.thumb(0.5);
+            let place = bench.view.pending_offset.expect("the drop waits").offset;
+            let row = scroll::source_row(&bench.doc, 0, place);
+            bench.frame();
+            bench.reload(numbered(LINES));
+            bench.settle(REST);
+            assert_eq!(bench.top_row(), row, "editing {editing}");
+        }
+    }
+
+    #[test]
     fn a_letter_stays_in_view_after_a_new_measure() {
         for how in AGAIN {
             // Typed in view.
@@ -2570,7 +2660,7 @@ mod tests {
         fn gap(&self, act: Act) -> Option<&'static str> {
             let waits = self.view.waits();
             match act {
-                // Task 412: a click while the file is measured or the
+                // Task 415: a click while the file is measured or the
                 // view waits puts the caret on a row the layout holds,
                 // not under the pointer, and a landing that waited then
                 // takes the view from it.
