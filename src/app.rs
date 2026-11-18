@@ -4842,6 +4842,7 @@ impl App {
             rects_scroll: 0.0,
             current: 0,
             stale: true,
+            asked: false,
             settle: false,
         });
         self.band = None;
@@ -5268,6 +5269,7 @@ impl App {
         };
         state.regex = !state.regex;
         state.stale = true;
+        state.asked = true;
         let regex = state.regex;
         self.last_regex = regex;
         self.band = None;
@@ -5567,6 +5569,7 @@ impl App {
                         state.doc_intent = false;
                         if on_query {
                             state.stale = true;
+                            state.asked = true;
                             self.band = None;
                         }
                         self.request_redraw();
@@ -5611,6 +5614,7 @@ impl App {
                         state.doc_intent = false;
                         if on_query {
                             state.stale = true;
+                            state.asked = true;
                             self.band = None;
                         }
                         self.request_redraw();
@@ -5635,6 +5639,7 @@ impl App {
         state.doc_intent = false;
         if on_query {
             state.stale = true;
+            state.asked = true;
             self.band = None;
         }
         self.request_redraw();
@@ -5653,6 +5658,11 @@ impl App {
             return;
         };
         let scroll = self.view.scroll_y;
+        let caret = self
+            .caret
+            .filter(|_| self.mode == edit::Mode::Edit)
+            .map(|caret| caret.offset);
+        let waiting = self.view.waiting_offset(self.document.source.len(), caret);
         let state = self.search.as_mut().expect("search open");
         let prev = state.matches.get(state.current).copied();
         let found = if state.regex {
@@ -5663,7 +5673,11 @@ impl App {
         state.error = found.is_none();
         state.matches = found.unwrap_or_default();
         state.stale = false;
-        let seek = state.seek.take();
+        let asked = std::mem::take(&mut state.asked);
+        // A query the reader typed while a request waits for the layout
+        // is looked for from the place that request names: the view has
+        // not moved yet. The place of a replace comes first.
+        let seek = state.seek.take().or(waiting.filter(|_| asked));
         // When the recompute yields the same match (a recolor or layout
         // growth went stale, not the text or the query), the current one
         // keeps its identity and the view stays put. Otherwise a replace
@@ -5708,7 +5722,16 @@ impl App {
                     .unwrap_or(0),
                 None => below(&state.matches).unwrap_or(0),
             };
-            self.scroll_match_into_view();
+            // A query the reader typed is a movement of theirs, as a
+            // step of the search is: once its match shows, what waited
+            // for the layout before it is dropped. A match in the part
+            // of the file the measure has not reached cannot show yet:
+            // the view does not move, and what waits stays.
+            let far = asked && self.view.request_waits() && !self.match_reached();
+            let shown = !far && self.scroll_match_into_view();
+            if asked && shown {
+                self.view.drop_waits();
+            }
         }
         self.refresh_search_rects();
     }
@@ -5814,24 +5837,10 @@ impl App {
     /// False when there is no match, or the layout has no place for it
     /// yet.
     fn scroll_match_into_view(&mut self) -> bool {
-        let (Some(lay), Some(state)) = (self.layout.as_ref(), self.search.as_ref()) else {
+        let Some((top, size, exact)) = self.match_top() else {
             return false;
         };
-        let Some(m) = state.matches.get(state.current) else {
-            return false;
-        };
-        let anchor = selection::match_anchor(lay, &self.document, m);
-        let (top, size) = match anchor {
-            Some(exact) => exact,
-            None => {
-                let pos = m.ordered().0;
-                match lay.approx_top_at(pos.block, pos.span, pos.byte) {
-                    Some(top) => (top, self.cfg.body_size * self.cfg.zoom),
-                    None => return false,
-                }
-            }
-        };
-        if anchor.is_none() {
+        if !exact {
             if let Some(state) = self.search.as_mut() {
                 state.settle = true;
             }
@@ -5842,6 +5851,33 @@ impl App {
             self.scroll_to(top - (vh - line_h) / 2.0);
         }
         true
+    }
+
+    /// The top of the current match, the size of its text, and whether
+    /// the layout holds its rows: a cold match answers its recorded top
+    /// from the block table. None when there is no match, or the layout
+    /// has no place for it yet.
+    fn match_top(&self) -> Option<(f32, f32, bool)> {
+        let (lay, state) = (self.layout.as_ref()?, self.search.as_ref()?);
+        let m = state.matches.get(state.current)?;
+        match selection::match_anchor(lay, &self.document, m) {
+            Some((top, size)) => Some((top, size, true)),
+            None => {
+                let pos = m.ordered().0;
+                let top = lay.approx_top_at(pos.block, pos.span, pos.byte)?;
+                Some((top, self.cfg.body_size * self.cfg.zoom, false))
+            }
+        }
+    }
+
+    /// Whether the measure has reached the place that centers the
+    /// current match: the view can go there now.
+    fn match_reached(&self) -> bool {
+        let vh = self.viewport_h();
+        self.match_top().is_some_and(|(top, size, _)| {
+            let line_h = metrics::LINE_HEIGHT * size;
+            scroll::reached(top - (vh - line_h) / 2.0, self.doc_height(), vh)
+        })
     }
 
     /// Finishes a cold match's landing: once the slide materializes the

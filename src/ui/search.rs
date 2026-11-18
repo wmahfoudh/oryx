@@ -73,6 +73,10 @@ pub struct SearchState {
     pub rects_scroll: f32,
     pub current: usize,
     pub stale: bool,
+    /// The reader changed the query since the matches were last
+    /// computed: the run that follows is a request of theirs, as a step
+    /// of the search is.
+    pub asked: bool,
     /// The current match landed on its recorded block top because its
     /// region was cold; the exact anchor still owes a centering.
     pub settle: bool,

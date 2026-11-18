@@ -1205,6 +1205,31 @@ impl View {
         self.bottom_hold.take(self.scroll_y, false);
     }
 
+    /// The offset in the text of the place a request that waits for the
+    /// layout names: a landing's, the top of a kept view, the caret a
+    /// kept view holds in the editor, the end of the text for a jump to
+    /// the end. None when nothing waits, and for a view kept as a
+    /// distance.
+    pub(super) fn waiting_offset(&self, len: usize, caret: Option<usize>) -> Option<usize> {
+        if let Some(place) = self.pending_offset.or(self.pending_row) {
+            return Some(place.offset);
+        }
+        if self.end_waits() {
+            return Some(len);
+        }
+        match self.kept_view? {
+            Kept::Top(top) => Some(top.offset),
+            Kept::Caret(_) | Kept::Edit(_) => caret,
+            Kept::Distance(_) => None,
+        }
+    }
+
+    /// Whether a request waits for the layout: a landing, a kept view
+    /// or a jump to the end.
+    pub(super) fn request_waits(&self) -> bool {
+        self.waiting() > 0
+    }
+
     /// How many requests wait for the layout. The caret's owed view is
     /// not counted: it follows the request that put the caret there.
     fn waiting(&self) -> usize {
@@ -2660,6 +2685,45 @@ mod tests {
         assert_eq!(bench.view.steps_held, -1, "the step still waits");
         bench.settle(REST);
         assert_eq!(bench.top_row(), 0, "the step back was made");
+    }
+
+    #[test]
+    fn the_place_that_waits_is_named_for_the_search() {
+        let offset = |bench: &Bench| {
+            bench
+                .view
+                .waiting_offset(bench.text.len(), bench.caret.map(|caret| caret.offset))
+        };
+        // Nothing waits in a measured file.
+        let mut bench = Bench::new(numbered(LINES), false, 3);
+        bench.settle(REST);
+        assert_eq!(offset(&bench), None);
+        // A kept view names the line at its top.
+        bench.wheel(40.0);
+        bench.frame();
+        let top = scroll::top_offset(
+            bench.lay.as_ref().expect("a layout"),
+            &bench.doc,
+            bench.view.scroll_y,
+        );
+        bench.zoom(1.5);
+        bench.frame();
+        assert_eq!(offset(&bench), Some(top));
+        // A jump names its line, and the end names the end of the text.
+        let mut bench = Bench::new(numbered(LINES), false, 3);
+        bench.frame();
+        bench.go_to(300);
+        bench.frame();
+        assert_eq!(offset(&bench), Some(bench.line_start(300)));
+        bench.go_edge(true);
+        bench.frame();
+        assert_eq!(offset(&bench), Some(bench.text.len()));
+        // In the editor a kept view names the caret.
+        let mut bench = editor_at_200();
+        let caret = bench.caret.expect("a caret").offset;
+        bench.zoom(1.5);
+        bench.frame();
+        assert_eq!(offset(&bench), Some(caret));
     }
 
     #[test]
