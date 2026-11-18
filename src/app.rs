@@ -7553,6 +7553,15 @@ impl App {
         self.request_redraw();
     }
 
+    /// Holds again the steps of the history that waited before the
+    /// open document was read from disk again, unless the open failed:
+    /// the page that says why is not a place the reader asked to leave.
+    fn give_steps_back(&mut self, steps: i32) {
+        if !self.open_failed {
+            self.view.steps_held = steps;
+        }
+    }
+
     /// F5 and Ctrl+R: a reload discards the buffer, so unsaved edits
     /// put the confirm in front of it.
     fn reload(&mut self) {
@@ -7585,7 +7594,7 @@ impl App {
         // and of the ones before it: a reload is not another document.
         let steps = self.view.steps_held;
         self.open_file(&path, false);
-        self.view.steps_held = steps;
+        self.give_steps_back(steps);
         match dropped {
             Some(place) => self.view.pending_offset = Some(place),
             None => {
@@ -7962,7 +7971,7 @@ impl App {
             // After the open, which files nothing from the help page
             // and would clear the places of a page without a file.
             self.history = stash.history;
-            self.view.steps_held = stash.steps_held;
+            self.give_steps_back(stash.steps_held);
             return;
         }
         self.history = stash.history;
