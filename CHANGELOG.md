@@ -27,6 +27,11 @@
 - While Oryx still measures a big file, the view now stays where you last put it: with the wheel, the scrollbar, a page key, `Ctrl+End`, Go to line, a search step, a click or a typed letter. Before, the view could go back to a place you had asked for earlier, seconds later, when the measure reached it.
 - After `Ctrl+End` in a big file you are reading, the view now ends at the end of the file when you change the zoom or open the sidebar while Oryx still measures the file, and `Ctrl+E` puts the caret at the end. Before, the view ended in the middle of the file, and `Ctrl+E` put the caret at the top.
 - `Alt+Left` or `Alt+Right` inside a big file, pressed while Oryx still measures it, is now done when the measure ends, and the text stays on screen meanwhile. Before, the page went blank.
+- When a big file changes on disk while Oryx still measures it, Go to line and `Ctrl+End` are still done, in the new text. The same holds for F5. Before, the view stayed at the top or stopped in the middle of the file.
+- When a big file gets shorter on disk above the place you are reading, the view now shows the end of the file. Before, it went to the top.
+- A search typed while Oryx still measures a big file now shows its match. Before, after Go to line, the match was counted and the view went to the line.
+- In the editor, F5 now leaves the view where it is. Before, the view jumped to the line of the caret.
+- `Alt+Left` in a file that was deleted from disk now goes back inside its text, which Oryx still has. Before, it asked to save and opened the previous file.
 - In a file of one very long line, leaving the editor far from the place you entered it no longer slows the window while Oryx still measures the file. Before, each frame took at least 0.05 s more in a 200 MB file of one line.
 - The search in a big code or text file no longer blocks the window. In the same playlist, a single common letter in the search bar now answers in under a second, and `Escape` closes the bar at once. Before, the window was blocked for minutes.
 - A file opened at a line from the command line, as in `oryx notes.md:6`, no longer crashes Oryx when that line is inside a folded section. The section opens and the line is shown.
