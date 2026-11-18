@@ -339,6 +339,78 @@ pub(super) fn keeps_scroll(scroll_y: f32, landing_waits: bool) -> bool {
     scroll_y > 0.0 && !landing_waits
 }
 
+/// A place of the text by its line, kept through a reload. An offset
+/// counts the bytes of the text it was taken from, and the text read
+/// again can have other lines before the place, or fewer lines.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct LinePlace {
+    /// The line, from zero.
+    line: usize,
+    /// The bytes from the start of the line to the place.
+    column: usize,
+    below: f32,
+    by_line: bool,
+}
+
+impl LinePlace {
+    pub(super) fn of(source: &str, place: Place) -> LinePlace {
+        let offset = place.offset.min(source.len());
+        let before = &source.as_bytes()[..offset];
+        let start = memchr::memrchr(b'\n', before).map_or(0, |at| at + 1);
+        LinePlace {
+            line: memchr::memchr_iter(b'\n', &before[..start]).count(),
+            column: offset - start,
+            below: place.below,
+            by_line: place.line,
+        }
+    }
+
+    /// The place in `source`: the same line, or the last one in a text
+    /// with fewer lines, as the go to field answers a number past the
+    /// end; the same bytes into the line, or its end in a shorter one.
+    pub(super) fn place(self, source: &str) -> Place {
+        let bytes = source.as_bytes();
+        let start = match self.line.checked_sub(1) {
+            None => 0,
+            Some(breaks) => match memchr::memchr_iter(b'\n', bytes).nth(breaks) {
+                Some(at) => at + 1,
+                None => memchr::memrchr(b'\n', bytes).map_or(0, |at| at + 1),
+            },
+        };
+        let end = memchr::memchr(b'\n', &bytes[start..]).map_or(bytes.len(), |at| start + at);
+        let mut offset = (start + self.column).min(end);
+        while !source.is_char_boundary(offset) {
+            offset -= 1;
+        }
+        Place {
+            offset,
+            below: self.below,
+            line: self.by_line,
+        }
+    }
+}
+
+/// What a reload keeps of the view: the request that waited for the
+/// layout, else the scroll. A reload is not another document, and the
+/// request is still the reader's. Read before the file is opened again
+/// (`View::before_reload`) and given back after (`View::after_reload`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) enum Reload {
+    /// Nothing waited: the scroll.
+    Scroll(f32),
+    /// A view kept through a new pass, with the scroll of the moment.
+    Kept(Kept, f32),
+    /// The row of a code or text file, or of the editor.
+    Row(LinePlace),
+    /// A landing on the page: a link, a step of the history, a go to
+    /// line, a drop of the thumb.
+    Offset(LinePlace),
+    /// A jump to the end.
+    End,
+    /// The view owed to the caret.
+    Caret,
+}
+
 /// What a new layout pass keeps of the view, brought back once the
 /// layout reaches it. A new size or a new width changes the height of
 /// the page above the view, so a distance in pixels would show other
@@ -1055,18 +1127,47 @@ impl View {
         self.steps_held = steps;
     }
 
-    /// Gives the view back after a reload opened the file again: the
-    /// scroll, or the place a drop of the thumb still waits for. The
+    /// What a reload keeps of the view, read in the text on screen
+    /// before the file is opened again.
+    pub(super) fn before_reload(&self, source: &str) -> Reload {
+        if let Some(place) = self.pending_row {
+            Reload::Row(LinePlace::of(source, place))
+        } else if let Some(place) = self.pending_offset {
+            Reload::Offset(LinePlace::of(source, place))
+        } else if self.end_waits() {
+            Reload::End
+        } else if let Some(kept) = self.kept_view {
+            Reload::Kept(kept, self.scroll_y)
+        } else if self.caret_snap || self.caret_seat.is_some() {
+            Reload::Caret
+        } else {
+            Reload::Scroll(self.scroll_y)
+        }
+    }
+
+    /// Gives the view back after a reload opened the file again. The
     /// file opened again asked for a place of its own, the caret's line
     /// in the editor, as a file the reader comes back to does. A reload
-    /// is not a return: that request is dropped.
-    pub(super) fn after_reload(&mut self, scroll: f32, dropped: Option<Place>) {
+    /// is not a return: that request is dropped, and the one that
+    /// waited before the reload is asked again in the text read from
+    /// disk.
+    pub(super) fn after_reload(&mut self, page: &mut Page, reload: Reload) {
         self.drop_waits_keep_steps();
-        match dropped {
-            Some(place) => self.pending_offset = Some(place),
+        match reload {
             // The reload keeps its exact scroll; the place the file
             // remembers would land it on the block's top.
-            None => self.scroll_y = scroll,
+            Reload::Scroll(scroll) => self.scroll_y = scroll,
+            Reload::Kept(kept, scroll) => {
+                self.scroll_y = scroll;
+                self.kept_view = Some(kept);
+            }
+            Reload::Row(line) => {
+                let place = line.place(&page.doc.source);
+                self.seat_editor_on(page, place);
+            }
+            Reload::Offset(line) => self.pending_offset = Some(line.place(&page.doc.source)),
+            Reload::End => self.hold_end(),
+            Reload::Caret => self.caret_snap = true,
         }
     }
 
@@ -1327,8 +1428,11 @@ impl View {
                     self.scroll_y = scroll::clamp(y, height, vh);
                 }
                 // The pass ended short of a kept place, as after a zoom
-                // out near the end of the file: the view shows the end.
-                Some(y) if settled && !matches!(kept, Kept::Distance(_) | Kept::Edit(_)) => {
+                // out near the end of the file, or a reload of a file
+                // that is shorter now: the view shows the end, as it
+                // does in a file measured in one frame, where the clamp
+                // of the frame answers.
+                Some(y) if settled && !matches!(kept, Kept::Edit(_)) => {
                     self.kept_view = None;
                     self.scroll_y = scroll::clamp(y, height, vh);
                 }
@@ -1518,7 +1622,7 @@ mod tests {
     use oryx::ui::history::{Entry, History};
     use proptest::prelude::*;
 
-    use super::{Kept, Page, Place, View, WantedPlace};
+    use super::{Kept, LinePlace, Page, Place, View, WantedPlace};
 
     /// A text file in the window's place, with no window: the document,
     /// a real layout pass stepped a few lines a frame, the view, and
@@ -1918,15 +2022,12 @@ mod tests {
 
         /// `App::reload_now` on a text read again from disk.
         fn reload(&mut self, text: String) {
-            let scroll = self.view.scroll_y;
-            let dropped = self
-                .view
-                .pending_offset
-                .filter(|_| self.view.thumb_landing.is_some());
+            let reload = self.view.before_reload(&self.doc.source);
             let steps = self.view.steps_held;
             self.open_file(text);
             self.view.steps_held = steps;
-            self.view.after_reload(scroll, dropped);
+            let (view, mut page) = self.page();
+            view.after_reload(&mut page, reload);
         }
 
         /// What `App::open_file` does to the view for a file opened
@@ -2385,6 +2486,213 @@ mod tests {
         }
     }
 
+    /// The text of the bench with a line more, as a log grows.
+    fn grown() -> String {
+        numbered(LINES) + "a line more\n"
+    }
+
+    #[test]
+    fn a_jump_that_waits_lands_on_its_line_after_a_reload() {
+        for editing in [false, true] {
+            let mut bench = Bench::new(numbered(LINES), editing, 3);
+            bench.frame();
+            bench.go_to(300);
+            bench.frame();
+            assert!(bench.view.pending_row.is_some(), "the jump waits");
+            bench.reload(grown());
+            bench.settle(REST);
+            let line = bench.line_start(300);
+            assert!(
+                bench.row_in_view(line),
+                "editing {editing}: line 300 is not in the view at {}",
+                bench.view.scroll_y
+            );
+        }
+    }
+
+    #[test]
+    fn a_jump_that_waits_lands_on_its_line_in_a_text_with_lines_written_above() {
+        let mut bench = Bench::new(numbered(LINES), false, 3);
+        bench.frame();
+        bench.go_to(300);
+        bench.frame();
+        bench.reload("new\n".repeat(50) + &numbered(LINES));
+        bench.settle(REST);
+        // Line 300 of the new text is the old line 250.
+        let line = bench.line_start(300);
+        assert!(bench.text[line..].starts_with("line 250\n"));
+        assert!(
+            bench.row_in_view(line),
+            "line 300 of the new text is not in the view at {}",
+            bench.view.scroll_y
+        );
+    }
+
+    #[test]
+    fn a_jump_that_waits_lands_on_the_last_line_of_a_text_cut_short() {
+        for editing in [false, true] {
+            let mut bench = Bench::new(numbered(LINES), editing, 3);
+            bench.frame();
+            bench.go_to(300);
+            bench.frame();
+            bench.reload(numbered(100));
+            bench.settle(REST);
+            assert_eq!(
+                bench.view.scroll_y,
+                bench.end_scroll(),
+                "editing {editing}: the view is not at the end of the shorter text"
+            );
+            assert_eq!(bench.bounds(), Ok(()), "editing {editing}");
+        }
+    }
+
+    #[test]
+    fn the_end_that_waits_is_the_end_of_the_text_read_again() {
+        let mut bench = Bench::new(numbered(LINES), false, 3);
+        bench.frame();
+        for _ in 0..10 {
+            bench.frame();
+        }
+        bench.go_edge(true);
+        bench.frame();
+        assert!(bench.view.end_waits(), "the end waits");
+        bench.reload(grown());
+        bench.settle(REST);
+        assert_eq!(bench.view.scroll_y, bench.end_scroll());
+    }
+
+    #[test]
+    fn the_end_asked_in_the_editor_is_in_view_after_a_reload() {
+        let mut bench = Bench::new(numbered(LINES), true, 3);
+        bench.frame();
+        bench.key(Motion::DocEnd);
+        bench.frame();
+        bench.reload(grown());
+        bench.settle(REST);
+        assert_eq!(bench.caret_row_shown(true), Ok(()));
+    }
+
+    #[test]
+    fn a_kept_view_that_waits_comes_back_after_a_reload() {
+        let mut bench = Bench::new(numbered(LINES), false, 3);
+        bench.settle(REST);
+        bench.wheel(40.0);
+        bench.frame();
+        let top = bench.top_row();
+        assert!(top > 50, "the wheel went down the file, to row {top}");
+        bench.zoom(1.5);
+        bench.frame();
+        assert!(bench.view.kept_view.is_some(), "the view is kept");
+        bench.reload(grown());
+        bench.settle(REST);
+        assert_eq!(bench.top_row(), top);
+    }
+
+    #[test]
+    fn what_waits_in_a_text_cut_short_leaves_the_view_inside_the_text() {
+        // A drop of the thumb, a kept view and the end, each with the
+        // text cut to a tenth under it.
+        for what in 0..3 {
+            let mut bench = Bench::new(numbered(LINES), false, 3);
+            match what {
+                0 => {
+                    bench.frame();
+                    bench.thumb(0.8);
+                }
+                1 => {
+                    bench.settle(REST);
+                    bench.wheel(60.0);
+                    bench.frame();
+                    bench.zoom(1.5);
+                }
+                _ => {
+                    bench.frame();
+                    bench.go_edge(true);
+                }
+            }
+            bench.frame();
+            bench.reload(numbered(40));
+            bench.settle(REST);
+            assert_eq!(bench.bounds(), Ok(()), "case {what}");
+            assert!(!bench.view.waits(), "case {what}: nothing waits");
+        }
+    }
+
+    #[test]
+    fn a_reload_of_a_text_cut_short_under_the_view_shows_its_end() {
+        for editing in [false, true] {
+            let mut bench = Bench::new(numbered(LINES), editing, 3);
+            bench.settle(REST);
+            bench.wheel(100.0);
+            bench.frame();
+            assert!(bench.top_row() > 200, "the wheel went down the file");
+            bench.reload(numbered(100));
+            bench.settle(REST);
+            assert_eq!(
+                bench.view.scroll_y,
+                bench.end_scroll(),
+                "editing {editing}: the view is not at the end of the shorter text"
+            );
+            // The same file measured in one frame.
+            let mut whole = Bench::new(numbered(LINES), editing, usize::MAX);
+            whole.settle(REST);
+            whole.wheel(100.0);
+            whole.frame();
+            whole.reload(numbered(100));
+            whole.settle(REST);
+            assert_eq!(
+                bench.view.scroll_y, whole.view.scroll_y,
+                "editing {editing}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_reload_keeps_the_steps_and_the_request_beside_them() {
+        let mut bench = Bench::new(numbered(LINES), false, 3);
+        bench.settle(REST);
+        bench.go_to(300);
+        bench.settle(REST);
+        bench.zoom(1.5);
+        bench.frame();
+        assert!(!bench.back(), "the step waits for the measure");
+        bench.reload(grown());
+        assert_eq!(bench.view.steps_held, -1, "the step still waits");
+        bench.settle(REST);
+        assert_eq!(bench.top_row(), 0, "the step back was made");
+    }
+
+    #[test]
+    fn a_place_goes_to_its_line_in_another_text() {
+        let place = |offset| Place {
+            offset,
+            below: 12.0,
+            line: true,
+        };
+        let moved = |old: &str, new: &str, offset| LinePlace::of(old, place(offset)).place(new);
+        // The same text.
+        assert_eq!(moved("ab\ncd\nef", "ab\ncd\nef", 4), place(4));
+        // Lines written above: the same line number, on another text.
+        assert_eq!(moved("ab\ncd\nef", "x\ny\nab\ncd\nef", 4), place(3));
+        assert_eq!(moved("ab\ncd\nef", "x\nyz\nab\ncd\nef", 4), place(3));
+        // A text with fewer lines: the last one, and the row after a
+        // final line break as the go to field counts it.
+        assert_eq!(moved("ab\ncd\nef", "ab", 7), place(1));
+        assert_eq!(moved("ab\ncd\nef", "ab\n", 7), place(3));
+        assert_eq!(moved("ab\ncd\nef", "", 7), place(0));
+        // A shorter line: its end. CRLF: the break is not a place.
+        assert_eq!(moved("ab\ncdef\n", "ab\nc\n", 7), place(4));
+        assert_eq!(moved("ab\r\ncd\r\n", "ab\r\ncd\r\n", 5), place(5));
+        // A character of several bytes under the column.
+        assert_eq!(moved("ab\ncdef", "ab\n\u{e9}\u{e9}f", 6), place(5));
+        assert_eq!(moved("ab\ncdef", "ab\n\u{e9}\u{e9}f", 4), place(3));
+        // An offset past the end of the text it was taken from.
+        assert_eq!(moved("ab\ncd", "ab\ncd\nef", 99), place(5));
+        // The height under the top of the view and the kind are kept.
+        let kept = LinePlace::of("ab", Place::top(1)).place("ab");
+        assert_eq!(kept, Place::top(1));
+    }
+
     #[test]
     fn a_letter_stays_in_view_after_a_new_measure() {
         for how in AGAIN {
@@ -2557,6 +2865,8 @@ mod tests {
         Thumb(u8),
         /// `Alt+Left`.
         Back,
+        /// The file is read again from disk, its text the same.
+        Reload,
     }
 
     impl Act {
@@ -2573,6 +2883,7 @@ mod tests {
                     | Act::Letter
                     | Act::Zoom(_)
                     | Act::Width(_)
+                    | Act::Reload
             )
         }
 
@@ -2649,6 +2960,10 @@ mod tests {
                     false
                 }
                 Act::Back => self.back() && self.editing,
+                Act::Reload => {
+                    self.reload(self.text.clone());
+                    false
+                }
             }
         }
 
@@ -2766,6 +3081,7 @@ mod tests {
             1 => any::<bool>().prop_map(Act::Width),
             2 => (0u8..=100).prop_map(Act::Thumb),
             2 => Just(Act::Back),
+            1 => Just(Act::Reload),
         ];
         prop::collection::vec(act, 1..14)
     }

@@ -7591,19 +7591,24 @@ impl App {
             self.note_copy.clear();
             let _ = save::write_atomic(&path, b"");
         }
-        let scroll = self.view.scroll_y;
-        // A place a drop of the thumb still waits for is kept as that
-        // place: the scroll is only where the page was left meanwhile.
-        let dropped = self
-            .view
-            .pending_offset
-            .filter(|_| self.view.thumb_landing.is_some());
-        // The steps of the history that wait are places of this file
-        // and of the ones before it: a reload is not another document.
+        // A reload is not another document: the request that waits for
+        // the layout is still the reader's, a go to line typed while
+        // the page was parsed among them, and so are the steps of the
+        // history, places of this file and of the ones before it.
+        let reload = self.view.before_reload(&self.document.source);
+        let goto = self.pending_goto;
         let steps = self.view.steps_held;
         self.open_file(&path, false);
-        self.give_steps_back(steps);
-        self.view.after_reload(scroll, dropped);
+        if self.open_failed {
+            // The page that says why is not a place the reader asked
+            // to leave, nor one a request can land on.
+            return;
+        }
+        self.view.steps_held = steps;
+        self.pending_goto = goto;
+        let (view, mut page) = self.page();
+        view.after_reload(&mut page, reload);
+        self.after_scroll();
     }
 
     /// Ctrl+Shift+R: a reload that also discards the remote images this
