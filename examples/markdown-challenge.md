@@ -1,6 +1,6 @@
 # An 8 MB markdown file
 
-You will not meet a markdown file this big in real life. It exists to give your markdown editor a hard time: headings, tables, formulas, code, footnotes and lists, all real text, for eight megabytes. Most editors slow down, some give up. Try it in Oryx: open, scroll, search, edit, export to PDF, and see for yourself.
+You won't probably meet a markdown file this big in real life. Its purpose is to give your markdown editor a hard time: headings, tables, formulas, code, LaTeX, footnotes and lists, all real text, for eight megabytes. Most editors slow down, many give up and some will crash. Open it in Oryx, scroll, search, edit, export to PDF, and try for yourself.
 
 ## What is inside
 
