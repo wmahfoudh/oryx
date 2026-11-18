@@ -1543,6 +1543,10 @@ mod tests {
         /// How many steps of the pass a frame runs: a step places one
         /// line of the file.
         pace: usize,
+        /// A place of the history in a folded section: the step that
+        /// goes there opens the section, and the page is laid out
+        /// again.
+        folded: Option<usize>,
     }
 
     /// What a test compares of the view between two frames.
@@ -1577,6 +1581,7 @@ mod tests {
                 view: View::default(),
                 history: History::default(),
                 pace,
+                folded: None,
             }
         }
 
@@ -1649,7 +1654,12 @@ mod tests {
                 let (view, page) = self.page();
                 view.take_steps(&page)
             };
-            for _ in 0..steps.map_or(0, i32::abs) {
+            let count = steps.map_or(0, i32::abs);
+            for made in 0..count {
+                if !self.page().1.whole() {
+                    self.view.steps_held = made - count;
+                    break;
+                }
                 self.back();
             }
         }
@@ -1931,6 +1941,11 @@ mod tests {
                 let (view, mut page) = self.page();
                 view.seat_editor_on(&mut page, place);
             } else {
+                if self.folded.take_if(|at| *at == target.offset).is_some() {
+                    // `restart_layout`.
+                    self.lay = None;
+                    self.pass = None;
+                }
                 self.view.pending_offset = Some(
                     Place::returned(
                         target.offset,
@@ -2346,6 +2361,32 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn the_steps_after_a_step_into_a_folded_section_are_made() {
+        let ends = |pace: usize| {
+            let mut bench = Bench::new(numbered(LINES), false, pace);
+            bench.frame();
+            for line in [100, 200, 300] {
+                bench.go_to(line);
+                bench.settle(REST);
+                if line == 200 {
+                    bench.folded = bench.here().map(|place| place.offset);
+                }
+            }
+            bench.zoom(1.25);
+            bench.frame();
+            bench.back();
+            bench.back();
+            // The section opened starts a measure, after the first.
+            for _ in 0..3 {
+                bench.settle(REST);
+            }
+            assert_eq!(bench.folded, None, "no step went to the folded section");
+            bench.view.scroll_y
+        };
+        assert_eq!(ends(3), ends(usize::MAX));
     }
 
     #[test]

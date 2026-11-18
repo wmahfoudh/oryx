@@ -911,6 +911,10 @@ struct Stash {
     mode: edit::Mode,
     caret: Option<Caret>,
     scroll_y: f32,
+    /// The steps of the history that waited for the file's measure
+    /// (`View::steps_held`): the help page has the view meanwhile, and
+    /// a scroll on it would drop them.
+    steps_held: i32,
     layout: Option<LayoutDoc>,
     pass: Option<LayoutPass>,
     layout_width: f32,
@@ -2131,8 +2135,12 @@ impl App {
         } else if end_waits && sel.is_none() {
             // The end that waited is where the reader stands: the
             // caret goes there as `Ctrl+End` puts it in the editor, and
-            // its line is seated when the measure reaches it.
+            // its line is seated when the measure reaches it. The
+            // caret put there is not a caret key of the reader: the
+            // steps of the history that wait stay.
+            let steps = self.view.steps_held;
             self.step_caret(Motion::DocEnd);
+            self.view.steps_held = steps;
         } else if end_waits {
             // The caret is on the selection, and the view still goes
             // to the end when the measure reaches it.
@@ -7573,7 +7581,11 @@ impl App {
             .view
             .pending_offset
             .filter(|_| self.view.thumb_landing.is_some());
+        // The steps of the history that wait are places of this file
+        // and of the ones before it: a reload is not another document.
+        let steps = self.view.steps_held;
         self.open_file(&path, false);
+        self.view.steps_held = steps;
         match dropped {
             Some(place) => self.view.pending_offset = Some(place),
             None => {
@@ -7866,6 +7878,7 @@ impl App {
             mode,
             caret: self.caret.take(),
             scroll_y: self.view.scroll_y,
+            steps_held: std::mem::take(&mut self.view.steps_held),
             layout: self.layout.take(),
             pass: self.pass.take(),
             layout_width: self.layout_width,
@@ -7926,6 +7939,7 @@ impl App {
         self.sel_anchor = None;
         self.selection = None;
         std::mem::take(&mut self.history);
+        self.view.steps_held = 0;
         self.layout = None;
         self.pass = None;
         self.show_help_document(document, title);
@@ -7948,9 +7962,11 @@ impl App {
             // After the open, which files nothing from the help page
             // and would clear the places of a page without a file.
             self.history = stash.history;
+            self.view.steps_held = stash.steps_held;
             return;
         }
         self.history = stash.history;
+        self.view.steps_held = stash.steps_held;
         self.document = stash.document;
         self.path = stash.path;
         self.ledger = stash.ledger;
@@ -8934,17 +8950,16 @@ impl App {
     /// before them has landed. Asked by the event loop between two
     /// frames, never from inside one: a step can open another file or
     /// a folded section, which drops the layout a frame is drawing.
-    /// Nothing while a question, a dialog, the path field or the help
-    /// page is open: the steps wait for it to close, or a step to
-    /// another file would replace the question on screen. A step that
-    /// starts a measure, in another file or in a section it opened,
-    /// ends the walk: the steps after it were asked in a document that
-    /// is no longer the one on screen.
+    /// Nothing while a question, a dialog or the path field is open:
+    /// the steps wait for it to close, or a step to another file would
+    /// replace the question on screen. A step that starts a measure,
+    /// in another file or in a section it opened, ends the walk, and
+    /// the steps after it wait for that measure: they are places of
+    /// the history, which crosses files. A step that raises the
+    /// unsaved-changes question ends the walk too, and the steps after
+    /// it are dropped: the reader answers first.
     fn make_held_steps(&mut self) {
-        let busy = self.confirm.is_some()
-            || self.overlay.is_some()
-            || self.path_ask.is_some()
-            || self.help_stash.is_some();
+        let busy = self.confirm.is_some() || self.overlay.is_some() || self.path_ask.is_some();
         if self.view.steps_held == 0 || busy {
             return;
         }
@@ -8952,11 +8967,17 @@ impl App {
             let (view, page) = self.page();
             view.take_steps(&page)
         };
-        for _ in 0..steps.map_or(0, i32::abs) {
-            if !self.page().1.whole() {
+        let (count, forward) = (steps.map_or(0, i32::abs), steps > Some(0));
+        for made in 0..count {
+            if self.confirm.is_some() {
                 break;
             }
-            self.step_history(steps > Some(0));
+            if !self.page().1.whole() {
+                let left = count - made;
+                self.view.steps_held = if forward { left } else { -left };
+                break;
+            }
+            self.step_history(forward);
         }
     }
 
