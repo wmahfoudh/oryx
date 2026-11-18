@@ -729,6 +729,16 @@ fn step_mark(place: &history::Entry) -> Option<usize> {
     place.editing.then_some(place.offset)
 }
 
+/// Whether a place of the history went with its file, removed from
+/// disk since. A place of the document on screen (`open`) did not: its
+/// text is in memory.
+fn place_lost(place: &history::Entry, open: Option<&Path>) -> bool {
+    place
+        .file
+        .as_deref()
+        .is_some_and(|file| Some(file) != open && !file.exists())
+}
+
 /// The height of the row a jump or a step of the history lands: a file
 /// of lines, the editor's source view among them, draws its rows in
 /// the lines' face (`layout::line_face`), the code size unless the file
@@ -7006,19 +7016,17 @@ impl App {
         // A place whose file is gone is dropped, with every other place
         // of that file, and the walk goes on to the next; only the one
         // stepped to is looked up on disk, since a stat of every place
-        // held is slow on a network folder.
+        // held is slow on a network folder. The page that says a file
+        // cannot be opened is not that file's document.
+        let open = self.path.clone().filter(|_| !self.open_failed);
         let target = loop {
             let Some(target) = self.history.peek(forward, here.as_ref()).cloned() else {
                 return;
             };
-            match target.file.as_deref() {
-                Some(file) if !file.exists() => {
-                    let gone = file.to_path_buf();
-                    self.history
-                        .retain(|place| place.file.as_deref() != Some(gone.as_path()));
-                }
-                _ => break target,
+            if !place_lost(&target, open.as_deref()) {
+                break target;
             }
+            self.history.retain(|place| place.file != target.file);
         };
         if target.file == self.path {
             self.history.step(forward, here);
@@ -12148,6 +12156,37 @@ mod tests {
             "on Wayland the compositor places it, and the copy is still a second window"
         );
         assert_eq!(super::beside_step((100, 200)), (140, 240));
+    }
+
+    #[test]
+    fn a_place_of_the_open_document_needs_no_file_on_disk() {
+        let place = |file: Option<&str>| super::history::Entry {
+            file: file.map(std::path::PathBuf::from),
+            offset: 0,
+            below: 0.0,
+            editing: false,
+            away: false,
+        };
+        let gone = "/no/such/folder/gone.md";
+        let kept = concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml");
+        let open = Some(std::path::Path::new(gone));
+        assert!(
+            !super::place_lost(&place(Some(gone)), open),
+            "the file was removed while its document is on screen: the text is in memory"
+        );
+        assert!(
+            super::place_lost(&place(Some(gone)), None),
+            "the page that says the file is gone is on screen, not its document"
+        );
+        assert!(
+            super::place_lost(&place(Some(gone)), Some(std::path::Path::new(kept))),
+            "a place of another file, removed"
+        );
+        assert!(!super::place_lost(&place(Some(kept)), open));
+        assert!(
+            !super::place_lost(&place(None), open),
+            "a page with no file"
+        );
     }
 
     #[test]
