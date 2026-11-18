@@ -715,13 +715,12 @@ impl View {
                 self.pending_row = Some(place);
                 // In the editor, while the file is measured, the
                 // preview shows the place over the view, which stays
-                // where it is (`wanted`). A jump to the end
-                // still held from the page is older than the seat: spent
-                // at the measure's end, it would move the view, and the
-                // seat would be released as if the reader had.
+                // where it is (`wanted`). The request that seats the
+                // row dropped what waited before it, a jump to the end
+                // among it.
+                debug_assert!(!self.end_waits(), "a seat beside a held end");
                 self.row_parked = None;
                 if page.editing && page.measured() {
-                    self.bottom_hold.clear();
                     self.row_parked = Some(self.scroll_y);
                 }
             }
@@ -1242,13 +1241,13 @@ impl View {
         // of the old one still here: the view keeps its place.
         self.keep_view(page);
         // A jump to the end that waits says where the view goes, as a
-        // landing does.
+        // landing does, and no view is kept beside either.
         let landing_waits = self.landing_waits() || self.end_waits();
-        if landing_waits {
-            // The landing says where the view goes. A view kept before
-            // it would move the page after it.
-            self.kept_view = None;
-        } else if self.kept_view.is_none()
+        debug_assert!(
+            !landing_waits || self.kept_view.is_none(),
+            "a kept view beside a landing"
+        );
+        if self.kept_view.is_none()
             && keeps_scroll(self.scroll_y, landing_waits)
             && !self.snap_owed(page)
         {
@@ -1288,9 +1287,14 @@ impl View {
         if !self.waits() {
             return;
         }
+        // One request waits: a kept view or one landing, never a kept
+        // view that would move the page after a landing.
+        debug_assert!(
+            self.kept_view.is_none() || !self.landing_waits(),
+            "a kept view beside a landing"
+        );
         let height = page.height();
         let vh = page.view_h;
-        let before_landings = self.scroll_y;
         if let Some(kept) = self.kept_view {
             let target = match kept {
                 Kept::Distance(y) | Kept::Edit(y) => Some(y),
@@ -1326,9 +1330,6 @@ impl View {
             match target {
                 Some(y) if scroll::reached(y, height, vh) || !page.pending() => {
                     self.pending_row = None;
-                    // A kept view that still waits is older than the
-                    // landing, and would move the view after it.
-                    self.kept_view = None;
                     self.scroll_to(page, y);
                 }
                 None if page.lay.is_some() && !page.pending() => self.pending_row = None,
@@ -1351,7 +1352,6 @@ impl View {
                 match placed {
                     Some(y) if scroll::reached(y, height, vh) || !page.pending() => {
                         self.pending_offset = None;
-                        self.kept_view = None;
                         self.landing_settle = Some(place).filter(|place| place.line);
                         self.scroll_to(page, y);
                     }
@@ -1362,22 +1362,12 @@ impl View {
                 }
             }
         }
-        // A kept view that came back, or another landing that waited,
-        // is not the reader's move: a seat of the editor that still
-        // waits is counted from where they left the view.
-        if self.scroll_y != before_landings
-            && self.pending_row.is_some()
-            && self.row_parked.is_some()
-        {
-            self.row_parked = Some(self.scroll_y);
-        }
         let Some(name) = self.pending_anchor.clone() else {
             return;
         };
         match page.lay.and_then(|l| l.anchor_y(&name)) {
             Some(y) if scroll::reached(y, height, vh) || !page.pending() => {
                 self.pending_anchor = None;
-                self.kept_view = None;
                 self.scroll_to(page, y);
             }
             // The pass ended without ever placing that heading.
