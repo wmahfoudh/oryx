@@ -9004,6 +9004,18 @@ impl App {
             self.slice(budget);
         }
         self.resolve_pending();
+        // A go to line that waited for the parse, or the line a file
+        // was opened at, is made in `resolve_pending`. When its line
+        // is in a folded section, it opens the section and drops the
+        // layout: the frame lays the page out again and lands, before
+        // it reads the layout below.
+        if self.layout.is_none() {
+            self.start_pass(avail);
+            if self.export.is_none() {
+                self.slice(OPEN_SLICE);
+            }
+            self.resolve_pending();
+        }
         self.prefetch_comic();
         // An open search counts as interactive: every keystroke edits the
         // highlights, so frames paint direct and the expensive band

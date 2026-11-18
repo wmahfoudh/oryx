@@ -29,6 +29,7 @@
 - `Alt+Left` or `Alt+Right` inside a big file, pressed while Oryx still measures it, is now done when the measure ends, and the text stays on screen meanwhile. Before, the page went blank.
 - In a file of one very long line, leaving the editor far from the place you entered it no longer slows the window while Oryx still measures the file. Before, each frame took at least 0.05 s more in a 200 MB file of one line.
 - The search in a big code or text file no longer blocks the window. In the same playlist, a single common letter in the search bar now answers in under a second, and `Escape` closes the bar at once. Before, the window was blocked for minutes.
+- A file opened at a line from the command line, as in `oryx notes.md:6`, no longer crashes Oryx when that line is inside a folded section. The section opens and the line is shown.
 - A definition list with a tab before its colon no longer crashes Oryx. Before, Oryx crashed when the definition above it ended with an accented letter or a non-Latin character.
 - A list item that holds a link definition, followed by a line of spaces, no longer crashes Oryx.
 - A line of spaces or tabs after a link definition is now read as a blank line. Before, it was read as text, and the paragraph after it started with an empty line.
