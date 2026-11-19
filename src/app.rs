@@ -5470,15 +5470,10 @@ impl App {
             self.restart_layout();
         } else {
             // A step of the search is the reader's movement, whether
-            // or not the match is already in view: what waited for the
-            // layout before it is dropped. A match the layout has no
-            // place for yet shows nothing, and what waits stays. A
-            // match that the bar finds again by itself, after an edit
-            // or a new layout, moves the view as before and drops
-            // nothing.
-            if self.scroll_match_into_view() {
-                self.view.drop_waits();
-            }
+            // or not the match is already in view. A match that the
+            // bar finds again by itself, after an edit or a new
+            // layout, moves the view and drops nothing.
+            self.scroll_match_into_view(true);
         }
         self.request_redraw();
     }
@@ -5654,15 +5649,18 @@ impl App {
         if !self.search.as_ref().is_some_and(|s| s.stale) {
             return;
         }
+        // The picture of the wait says where the last view starts
+        // while the end of the text waits.
+        let picture = self.preview.take();
+        let waiting = {
+            let (view, page) = self.page();
+            view.waiting_offset(&page, picture.as_ref().map(|frame| &frame.preview))
+        };
+        self.preview = picture;
         let Some(lay) = self.layout.as_ref() else {
             return;
         };
         let scroll = self.view.scroll_y;
-        let caret = self
-            .caret
-            .filter(|_| self.mode == edit::Mode::Edit)
-            .map(|caret| caret.offset);
-        let waiting = self.view.waiting_offset(self.document.source.len(), caret);
         let state = self.search.as_mut().expect("search open");
         let prev = state.matches.get(state.current).copied();
         let found = if state.regex {
@@ -5723,15 +5721,8 @@ impl App {
                 None => below(&state.matches).unwrap_or(0),
             };
             // A query the reader typed is a movement of theirs, as a
-            // step of the search is: once its match shows, what waited
-            // for the layout before it is dropped. A match in the part
-            // of the file the measure has not reached cannot show yet:
-            // the view does not move, and what waits stays.
-            let far = asked && self.view.request_waits() && !self.match_reached();
-            let shown = !far && self.scroll_match_into_view();
-            if asked && shown {
-                self.view.drop_waits();
-            }
+            // step of the search is (`View::show_match`).
+            self.scroll_match_into_view(asked);
         }
         self.refresh_search_rects();
     }
@@ -5831,26 +5822,26 @@ impl App {
         }
     }
 
-    /// Centers the current match vertically when it sits off screen. A
-    /// cold match scrolls to its recorded top from the block table and
-    /// settles on the exact anchor once the slide materializes it.
-    /// False when there is no match, or the layout has no place for it
-    /// yet.
-    fn scroll_match_into_view(&mut self) -> bool {
+    /// Puts the current match in the middle of the view when it is out
+    /// of view (`View::show_match`). `asked` says the reader asked for
+    /// it, by a query typed or a step of the search. A match whose rows
+    /// the layout does not hold is placed by the block table, and
+    /// `settle_search_anchor` centers it once its rows are drawn.
+    fn scroll_match_into_view(&mut self, asked: bool) {
         let Some((top, size, exact)) = self.match_top() else {
-            return false;
+            return;
         };
+        let line_h = metrics::LINE_HEIGHT * size;
+        let (view, page) = self.page();
+        if !view.show_match(&page, top, line_h, asked) {
+            return;
+        }
         if !exact {
             if let Some(state) = self.search.as_mut() {
                 state.settle = true;
             }
         }
-        let line_h = metrics::LINE_HEIGHT * size;
-        let vh = self.viewport_h();
-        if top < self.view.scroll_y || top + line_h > self.view.scroll_y + vh {
-            self.scroll_to(top - (vh - line_h) / 2.0);
-        }
-        true
+        self.after_scroll();
     }
 
     /// The top of the current match, the size of its text, and whether
@@ -5868,16 +5859,6 @@ impl App {
                 Some((top, self.cfg.body_size * self.cfg.zoom, false))
             }
         }
-    }
-
-    /// Whether the measure has reached the place that centers the
-    /// current match: the view can go there now.
-    fn match_reached(&self) -> bool {
-        let vh = self.viewport_h();
-        self.match_top().is_some_and(|(top, size, _)| {
-            let line_h = metrics::LINE_HEIGHT * size;
-            scroll::reached(top - (vh - line_h) / 2.0, self.doc_height(), vh)
-        })
     }
 
     /// Finishes a cold match's landing: once the slide materializes the

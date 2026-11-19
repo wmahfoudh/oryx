@@ -4,11 +4,13 @@
 use oryx::doc::images::MediaCache;
 use oryx::doc::model::{BlockKind, Document};
 use oryx::edit::caret::{self, Caret, CaretBox};
-use oryx::layout::{LayoutDoc, LayoutPass, ViewConfig};
+use oryx::layout::{LayoutDoc, LayoutPass, TextRef, ViewConfig};
 use oryx::paint;
+use oryx::paint::preview::Preview;
 use oryx::paint::scroll;
 use oryx::style::fonts::FontStore;
 use oryx::style::theme::Theme;
+use oryx::ui::selection::{self, ModelPos};
 
 use super::row_height;
 
@@ -337,6 +339,60 @@ pub(super) fn waiting_place(
 /// distance would even be the other document's.
 pub(super) fn keeps_scroll(scroll_y: f32, landing_waits: bool) -> bool {
     scroll_y > 0.0 && !landing_waits
+}
+
+/// The source offset the last view of a code or text file starts at,
+/// read in the picture of its end (`paint::preview`), for a view
+/// `view_h` tall: the least offset in the first row whose top is at
+/// the top of that view or under it. The picture shapes the last rows
+/// as the layout will, and a measured file takes the first match whose
+/// top is at the top of the view or under it
+/// (`selection::first_match_from`): a search typed while the end waits
+/// starts here and finds the same match. A last view with no text, the
+/// blank lines at the end of a file, starts at the end of the text.
+/// None when the picture does not hold the end of `doc`.
+pub(super) fn end_top(picture: &Preview, doc: &Document, view_h: f32) -> Option<usize> {
+    let lines = match doc.blocks.first().map(|block| &block.kind) {
+        Some(BlockKind::CodeBlock { lines, .. }) if doc.blocks.len() == 1 => lines,
+        _ => return None,
+    };
+    let end = lines.line_range(lines.len().checked_sub(1)?)?.end;
+    let holds_end = picture.rows.end == lines.len()
+        && picture.piece.as_ref().is_none_or(|piece| piece.end == end);
+    if !holds_end {
+        return None;
+    }
+    let (lay, shown) = (&picture.lay, &picture.doc);
+    let top = scroll::clamp(lay.height, lay.height, view_h);
+    let first = lay
+        .runs
+        .iter()
+        .filter(|run| run.span != selection::MARKER_SPAN && run.y >= top)
+        .filter_map(|run| match run.text {
+            TextRef::Model { start, .. } => {
+                let pos = ModelPos {
+                    block: run.block,
+                    span: run.span,
+                    byte: start as usize,
+                };
+                Some((run.y, caret::model_offset(shown, &pos)?))
+            }
+            TextRef::Side { .. } => None,
+        })
+        .min_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+    Some(first.map_or(doc.source.len(), |(_, at)| at))
+}
+
+/// Where the last `rows` lines of `source` start: an estimate of the
+/// top of the last view of a text, for a search typed while the end of
+/// the text waits and no picture of the end says it (`end_top`). A
+/// line that wraps takes several rows, so the view starts at this line
+/// or under it.
+pub(super) fn tail_start(source: &str, rows: usize) -> usize {
+    let body = source.strip_suffix('\n').unwrap_or(source);
+    body.rmatch_indices('\n')
+        .nth(rows.saturating_sub(1))
+        .map_or(0, |(at, _)| at + 1)
 }
 
 /// A place of the text by its line, kept through a reload. An offset
@@ -1207,27 +1263,53 @@ impl View {
 
     /// The offset in the text of the place a request that waits for the
     /// layout names: a landing's, the top of a kept view, the caret a
-    /// kept view holds in the editor, the end of the text for a jump to
-    /// the end. None when nothing waits, and for a view kept as a
-    /// distance.
-    pub(super) fn waiting_offset(&self, len: usize, caret: Option<usize>) -> Option<usize> {
+    /// kept view holds in the editor, and for a jump to the end the
+    /// top of the last view, read in `picture`, the picture of the
+    /// wait (`end_top`), else taken as the start of the last lines
+    /// that fill a view (`tail_start`). None when nothing waits, and
+    /// for a view kept as a distance.
+    pub(super) fn waiting_offset(&self, page: &Page, picture: Option<&Preview>) -> Option<usize> {
         if let Some(place) = self.pending_offset.or(self.pending_row) {
             return Some(place.offset);
         }
         if self.end_waits() {
-            return Some(len);
+            let view_h = page.view_h;
+            let rows = (view_h / page.row_h().max(1.0)) as usize;
+            let top = picture.and_then(|picture| end_top(picture, page.doc, view_h));
+            return Some(top.unwrap_or_else(|| tail_start(&page.doc.source, rows)));
         }
         match self.kept_view? {
             Kept::Top(top) => Some(top.offset),
-            Kept::Caret(_) | Kept::Edit(_) => caret,
+            Kept::Caret(_) | Kept::Edit(_) => page
+                .caret
+                .filter(|_| page.editing)
+                .map(|caret| caret.offset),
             Kept::Distance(_) => None,
         }
     }
 
-    /// Whether a request waits for the layout: a landing, a kept view
-    /// or a jump to the end.
-    pub(super) fn request_waits(&self) -> bool {
-        self.waiting() > 0
+    /// The search bar shows its current match, whose line is `line_h`
+    /// tall with its top at `top`: the view goes to it when it is not
+    /// in view. `asked` says the reader asked for it, by a query typed
+    /// or a step of the search. It is then their last request, and what
+    /// waited before it is dropped. While a request or a step of the
+    /// history still waits, a match the measure has not reached cannot
+    /// show, since the scroll would stop at the end of the measured
+    /// part: nothing moves, what waits stays, and the answer is false.
+    pub(super) fn show_match(&mut self, page: &Page, top: f32, line_h: f32, asked: bool) -> bool {
+        let view_h = page.view_h;
+        let target = top - (view_h - line_h) / 2.0;
+        let waits = self.waiting() > 0 || self.steps_held != 0;
+        if asked && waits && !scroll::reached(target, page.height(), view_h) {
+            return false;
+        }
+        if top < self.scroll_y || top + line_h > self.scroll_y + view_h {
+            self.scroll_to(page, target);
+        }
+        if asked {
+            self.drop_waits();
+        }
+        true
     }
 
     /// How many requests wait for the layout. The caret's owed view is
@@ -1639,15 +1721,19 @@ mod tests {
     use oryx::edit;
     use oryx::edit::caret::{self, Caret, Motion};
     use oryx::layout::{
-        layout_begin, layout_more, layout_step, window_to, LayoutDoc, LayoutPass, ViewConfig,
+        layout_begin, layout_more, layout_step, metrics, window_to, LayoutDoc, LayoutPass,
+        ViewConfig,
     };
+    use oryx::paint::preview::{self, Preview};
     use oryx::paint::scroll;
     use oryx::style::fonts::FontStore;
     use oryx::style::theme::Theme;
     use oryx::ui::history::{Entry, History};
+    use oryx::ui::search;
+    use oryx::ui::selection::{self, Selection};
     use proptest::prelude::*;
 
-    use super::{Kept, LinePlace, Page, Place, View, WantedPlace};
+    use super::{tail_start, Kept, LinePlace, Page, Place, View, WantedPlace};
 
     /// A text file in the window's place, with no window: the document,
     /// a real layout pass stepped a few lines a frame, the view, and
@@ -1681,6 +1767,16 @@ mod tests {
         /// goes there opens the section, and the page is laid out
         /// again.
         folded: Option<usize>,
+        /// The search bar is open, with the matches of its query and
+        /// the current one.
+        searching: bool,
+        matches: Vec<Selection>,
+        current: usize,
+        /// What the picture of the wait showed in the last frame: its
+        /// row, the count of rows and the pieces of a very long line.
+        /// `App::preview` keeps the picture; the bench builds it when
+        /// a test reads it (`picture`).
+        shown: Option<(usize, usize, Option<std::ops::Range<usize>>)>,
     }
 
     /// What a test compares of the view between two frames.
@@ -1716,6 +1812,10 @@ mod tests {
                 history: History::default(),
                 pace,
                 folded: None,
+                searching: false,
+                matches: Vec::new(),
+                current: 0,
+                shown: None,
             }
         }
 
@@ -1737,7 +1837,7 @@ mod tests {
                     caret: self.caret,
                     parse_pending: false,
                     exporting: false,
-                    searching: false,
+                    searching: self.searching,
                     gesture: false,
                 },
             )
@@ -1871,7 +1971,39 @@ mod tests {
             view.show_waiting_row(&page);
             let shown = view.wanted(&page);
             view.moved = false;
+            self.shown = shown
+                .as_ref()
+                .map(|(_, row, total, piece, _)| (*row, *total, piece.clone()));
             shown
+        }
+
+        /// The preview `App::preview_frame` builds for what the last
+        /// frame showed: the rows around the place, else the pieces of
+        /// its very long line.
+        fn picture(&mut self) -> Option<Preview> {
+            let (row, total, piece) = self.shown.clone()?;
+            let rows = preview::rows_around(total, row, self.view_h, self.row_h());
+            let by_rows = preview::build(
+                &self.doc,
+                &self.theme,
+                &mut self.fonts,
+                &mut self.media,
+                &self.cfg,
+                self.laid_width,
+                rows,
+            );
+            by_rows.or_else(|| {
+                preview::build_pieces(
+                    &self.doc,
+                    &self.theme,
+                    &mut self.fonts,
+                    &mut self.media,
+                    &self.cfg,
+                    self.laid_width,
+                    row,
+                    piece?,
+                )
+            })
         }
 
         /// Frames until the pass has ended, then `more` frames.
@@ -2043,6 +2175,73 @@ mod tests {
             let (view, page) = self.page();
             let target = share * (page.height() - page.view_h).max(0.0);
             view.jump_to(&page, target);
+        }
+
+        /// `App::match_top`: the top of the current match and the
+        /// height of its line.
+        fn match_top(&self) -> Option<(f32, f32)> {
+            let lay = self.lay.as_ref()?;
+            let m = self.matches.get(self.current)?;
+            let (top, size) = match selection::match_anchor(lay, &self.doc, m) {
+                Some(exact) => exact,
+                None => {
+                    let pos = m.ordered().0;
+                    let top = lay.approx_top_at(pos.block, pos.span, pos.byte)?;
+                    (top, self.cfg.body_size * self.cfg.zoom)
+                }
+            };
+            Some((top, metrics::LINE_HEIGHT * size))
+        }
+
+        /// `App::scroll_match_into_view` for a match the reader asked
+        /// for.
+        fn scroll_match_into_view(&mut self) {
+            let Some((top, line_h)) = self.match_top() else {
+                return;
+            };
+            let (view, page) = self.page();
+            view.show_match(&page, top, line_h, true);
+        }
+
+        /// A query typed in the search bar: `App::sync_search` for a
+        /// query of the reader.
+        fn query(&mut self, text: &str) {
+            self.searching = true;
+            self.matches = search::matches(&self.doc, text);
+            let picture = self.picture();
+            let waiting = {
+                let (view, page) = self.page();
+                view.waiting_offset(&page, picture.as_ref())
+            };
+            let Some(lay) = self.lay.as_ref() else {
+                return;
+            };
+            self.current = match waiting {
+                Some(offset) => self.matches.iter().position(|sel| {
+                    caret::model_offset(&self.doc, &sel.ordered().0).is_some_and(|at| at >= offset)
+                }),
+                None => {
+                    selection::first_match_from(lay, &self.doc, &self.matches, self.view.scroll_y)
+                }
+            }
+            .unwrap_or(0);
+            self.scroll_match_into_view();
+        }
+
+        /// Enter in the search bar: `App::step_search`.
+        fn search_step(&mut self) {
+            if self.matches.is_empty() {
+                return;
+            }
+            self.current = search::step(self.current, self.matches.len(), true);
+            self.scroll_match_into_view();
+        }
+
+        /// The line the current match is on, counted from one.
+        fn match_line(&self) -> Option<usize> {
+            let m = self.matches.get(self.current)?;
+            let at = caret::model_offset(&self.doc, &m.ordered().0)?;
+            Some(scroll::source_row(&self.doc, 0, at) + 1)
         }
 
         /// `App::reload_now` on a text read again from disk.
@@ -2689,15 +2888,14 @@ mod tests {
 
     #[test]
     fn the_place_that_waits_is_named_for_the_search() {
-        let offset = |bench: &Bench| {
-            bench
-                .view
-                .waiting_offset(bench.text.len(), bench.caret.map(|caret| caret.offset))
+        let offset = |bench: &mut Bench| {
+            let (view, page) = bench.page();
+            view.waiting_offset(&page, None)
         };
         // Nothing waits in a measured file.
         let mut bench = Bench::new(numbered(LINES), false, 3);
         bench.settle(REST);
-        assert_eq!(offset(&bench), None);
+        assert_eq!(offset(&mut bench), None);
         // A kept view names the line at its top.
         bench.wheel(40.0);
         bench.frame();
@@ -2708,22 +2906,215 @@ mod tests {
         );
         bench.zoom(1.5);
         bench.frame();
-        assert_eq!(offset(&bench), Some(top));
-        // A jump names its line, and the end names the end of the text.
+        assert_eq!(offset(&mut bench), Some(top));
+        // A jump names its line.
         let mut bench = Bench::new(numbered(LINES), false, 3);
         bench.frame();
         bench.go_to(300);
         bench.frame();
-        assert_eq!(offset(&bench), Some(bench.line_start(300)));
+        assert_eq!(offset(&mut bench), Some(bench.line_start(300)));
+        // With no picture of the end, the end names the start of the
+        // last lines that fill a view.
         bench.go_edge(true);
         bench.frame();
-        assert_eq!(offset(&bench), Some(bench.text.len()));
+        let rows = (bench.view_h / bench.row_h()) as usize;
+        let tail = bench.line_start(LINES - rows + 1);
+        assert_eq!(offset(&mut bench), Some(tail));
         // In the editor a kept view names the caret.
         let mut bench = editor_at_200();
         let caret = bench.caret.expect("a caret").offset;
         bench.zoom(1.5);
         bench.frame();
-        assert_eq!(offset(&bench), Some(caret));
+        assert_eq!(offset(&mut bench), Some(caret));
+    }
+
+    /// A file measured three lines a frame, in reading mode, with a
+    /// jump to line 300 that waits: the measure has passed line 30.
+    fn jump_waits() -> Bench {
+        let mut bench = Bench::new(numbered(LINES), false, 3);
+        bench.frame();
+        bench.go_to(300);
+        for _ in 0..12 {
+            bench.frame();
+        }
+        assert!(bench.view.waits(), "the jump waits");
+        bench
+    }
+
+    /// Where the jump of `jump_waits` ends with nothing after it.
+    fn jump_alone() -> f32 {
+        let mut bench = jump_waits();
+        bench.settle(REST);
+        bench.view.scroll_y
+    }
+
+    #[test]
+    fn a_query_whose_match_is_measured_shows_it_and_drops_a_jump_that_waits() {
+        let mut bench = jump_waits();
+        // No line after line 300 has the query: the first match of the
+        // file is taken, which the measure has reached.
+        bench.query("line 7 ");
+        assert_eq!(bench.match_line(), Some(7));
+        assert!(!bench.view.waits(), "the jump still waits");
+        let shown = bench.view.scroll_y;
+        bench.settle(REST);
+        assert_eq!(bench.view.scroll_y, shown, "the view left the match");
+    }
+
+    #[test]
+    fn enter_on_a_match_that_is_measured_shows_it_and_drops_a_jump_that_waits() {
+        let mut bench = jump_waits();
+        // The query is on lines 21, 91, 161, 231, 301 and 371: the
+        // match from the jump is line 301, and a step from the last
+        // match goes round to line 21, which is measured.
+        bench.query("1 wraps");
+        assert_eq!(bench.match_line(), Some(301));
+        assert!(bench.view.waits(), "a match not measured dropped the jump");
+        bench.current = bench.matches.len() - 1;
+        bench.search_step();
+        assert_eq!(bench.match_line(), Some(21));
+        assert!(!bench.view.waits(), "the jump still waits");
+        let shown = bench.view.scroll_y;
+        assert!(shown > 0.0, "the view did not go to the match");
+        bench.settle(REST);
+        assert_eq!(bench.view.scroll_y, shown, "the view left the match");
+    }
+
+    #[test]
+    fn a_query_whose_match_is_not_measured_keeps_a_jump_that_waits() {
+        let mut bench = jump_waits();
+        let before = bench.snapshot();
+        bench.query("line 357 ");
+        assert_eq!(bench.match_line(), Some(357));
+        assert_eq!(bench.snapshot(), before, "the query moved the view");
+        bench.settle(REST);
+        assert_eq!(bench.view.scroll_y, jump_alone());
+    }
+
+    #[test]
+    fn a_query_with_nothing_waiting_goes_as_far_as_the_measure() {
+        // Today's answer, kept: with no request of the reader waiting,
+        // a match the measure has not reached takes the view to the end
+        // of the measured part.
+        let mut bench = Bench::new(numbered(LINES), false, 3);
+        bench.frame();
+        bench.frame();
+        bench.query("line 357 ");
+        let lay = bench.lay.as_ref().expect("a layout");
+        let end = (lay.height - bench.view_h).max(0.0);
+        assert!(bench.pass_active(), "the file is still measured");
+        assert_eq!(bench.view.scroll_y, end);
+    }
+
+    #[test]
+    fn enter_on_a_match_that_is_not_measured_keeps_a_jump_that_waits() {
+        let mut bench = jump_waits();
+        bench.query("1 wraps");
+        assert_eq!(bench.match_line(), Some(301));
+        let before = bench.snapshot();
+        bench.search_step();
+        assert_eq!(bench.match_line(), Some(371));
+        assert_eq!(bench.snapshot(), before, "the step moved the view");
+        bench.settle(REST);
+        assert_eq!(bench.view.scroll_y, jump_alone());
+    }
+
+    #[test]
+    fn a_query_whose_match_is_not_measured_keeps_a_step_back_that_waits() {
+        // The view kept by the zoom step has landed, the file is still
+        // measured, and the step back alone waits.
+        let mut bench = stepped_back(true, 3, &[300], 1);
+        while bench.view.waits() {
+            bench.frame();
+        }
+        assert!(bench.pass_active(), "the file is still measured");
+        assert_eq!(bench.view.steps_held, -1);
+        let before = bench.view.scroll_y;
+        bench.query("line 392 ");
+        assert_eq!(bench.match_line(), Some(392));
+        assert_eq!(bench.view.scroll_y, before, "the query moved the view");
+        assert_eq!(bench.view.steps_held, -1, "the query dropped the step");
+        bench.settle(REST);
+        assert_eq!(bench.caret.map(|caret| caret.offset), Some(0));
+    }
+
+    /// `Ctrl+End` while reading, once more than a view is measured,
+    /// then a query typed while the end waits, with its picture on
+    /// screen. Answers the scroll, the scroll of the end, and the
+    /// offset of the match taken.
+    fn end_then_query(text: String, pace: usize, query: &str) -> (f32, f32, usize) {
+        let mut bench = Bench::new(text, false, pace);
+        for _ in 0..12 {
+            bench.frame();
+        }
+        bench.go_edge(true);
+        bench.frame();
+        assert_eq!(bench.shown.is_some(), bench.pass_active());
+        bench.query(query);
+        bench.settle(REST);
+        let m = bench.matches.get(bench.current).expect("a match");
+        let at = caret::model_offset(&bench.doc, &m.ordered().0).expect("an offset");
+        (bench.view.scroll_y, bench.end_scroll(), at)
+    }
+
+    /// The view ends at the end, on the match a measured file takes,
+    /// the first of the last view.
+    fn ends_at_the_end(text: String, query: &str) {
+        let (scroll, end, at) = end_then_query(text.clone(), 3, query);
+        assert_eq!(scroll, end, "the view left the end, for the match at {at}");
+        let (_, measured_end, measured) = end_then_query(text, usize::MAX, query);
+        assert_eq!(end, measured_end);
+        assert_eq!(at, measured, "the match is not the one of a measured file");
+    }
+
+    #[test]
+    fn a_query_typed_after_the_end_is_asked_stays_at_the_end() {
+        ends_at_the_end(numbered(LINES), "line");
+    }
+
+    #[test]
+    fn a_query_typed_after_the_end_is_asked_stays_at_the_end_of_one_long_line() {
+        let text: String = (0..12_000).map(|n| format!("word{n} ")).collect();
+        ends_at_the_end(text, "word");
+    }
+
+    #[test]
+    fn a_query_typed_after_the_end_is_asked_stays_at_the_end_of_lines_that_wrap() {
+        let text: String = (1..=300)
+            .map(|n| format!("line {n} {}\n", "wraps and goes on ".repeat(4)))
+            .collect();
+        ends_at_the_end(text, "wraps");
+    }
+
+    #[test]
+    fn a_query_typed_after_the_end_of_a_text_that_ends_with_blank_lines_goes_round() {
+        // No match is in the last view, which is blank: the first
+        // match of the file is taken, as in a measured file.
+        // Twelve blank lines are more than a view of the bench, and
+        // fewer than the rows of its picture, which holds text too.
+        let text = numbered(LINES) + &"\n".repeat(12);
+        let (scroll, _, at) = end_then_query(text.clone(), 3, "line");
+        let (measured_scroll, _, measured) = end_then_query(text, usize::MAX, "line");
+        assert_eq!((scroll, at), (measured_scroll, measured));
+        assert_eq!(at, 0);
+    }
+
+    #[test]
+    fn the_last_lines_of_a_text_start_where_a_view_of_them_starts() {
+        let text = "one\ntwo\nthree\n";
+        assert_eq!(tail_start(text, 1), 8);
+        assert_eq!(tail_start(text, 2), 4);
+        assert_eq!(tail_start(text, 3), 0);
+        // Fewer lines than rows, a text with no final line break, a
+        // text of one line and an empty text.
+        assert_eq!(tail_start(text, 9), 0);
+        assert_eq!(tail_start("one\ntwo", 1), 4);
+        assert_eq!(tail_start("one", 1), 0);
+        assert_eq!(tail_start("", 4), 0);
+        // No row at all is taken as one.
+        assert_eq!(tail_start(text, 0), 8);
+        // A blank line at the end is a line.
+        assert_eq!(tail_start("one\n\n", 1), 4);
     }
 
     #[test]
