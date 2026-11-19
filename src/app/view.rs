@@ -138,6 +138,20 @@ impl Page<'_> {
     /// waits whatever the row is, and each frame of the wait would lay
     /// the piece out again.
     pub(super) fn row_landing(&mut self, offset: usize, below: f32) -> Option<f32> {
+        self.row_landing_under(offset, below, 0.0)
+    }
+
+    /// As `row_landing`, for a row known to stand `depth` under the
+    /// first row of its line: a lower row of a wrapped line that a
+    /// click found on the picture of the wait (`ClickMark`). The block
+    /// table answers the first row of a line, and the depth makes it
+    /// the row. A row the layout holds answers by itself.
+    pub(super) fn row_landing_under(
+        &mut self,
+        offset: usize,
+        below: f32,
+        depth: f32,
+    ) -> Option<f32> {
         let pending = self.pending();
         let view_h = self.view_h;
         let lay = self.lay?;
@@ -146,7 +160,7 @@ impl Page<'_> {
             return Some(caret::seated(y, below));
         }
         let block = doc.block_at_offset(offset)?;
-        let top = scroll::table_row_top(lay, doc, block, offset)?;
+        let top = scroll::table_row_top(lay, doc, block, offset)? + depth;
         let waits = caret::seated(top, below);
         if pending && !scroll::reached(waits, lay.height, view_h) {
             return Some(waits);
@@ -215,6 +229,9 @@ pub(super) struct View {
     /// A line landing made this frame, whose exact row `settle_landing`
     /// finds once the slide has drawn the rows around it.
     pub(super) landing_settle: Option<Place>,
+    /// The seat of a click on the picture of the wait, while it waits
+    /// (`ClickMark`).
+    pub(super) click_mark: Option<ClickMark>,
     /// A jump to the bottom of a document the pass had not finished
     /// placing, waiting for the whole document to seat it.
     pub(super) bottom_hold: scroll::BottomHold,
@@ -248,6 +265,28 @@ pub(super) struct Place {
     /// Never set for a place the page itself recorded, which comes back
     /// pixel for pixel through its block.
     pub(super) line: bool,
+}
+
+/// The mark a click on the picture of the wait leaves beside its seat
+/// (`View::caret_clicked_on_picture`). A seat lands by the block
+/// table, which knows the first row of a line, and the click can be on
+/// a lower row of a wrapped line: the landing adds `depth` to the
+/// table's answer (`Page::row_landing_under`), and the row is where
+/// the click found it from the landing on. The layout holds the row
+/// only at the end of the measure, so nothing waits for it.
+///
+/// The mark is there only while `pending_row` is its place. It goes
+/// when the seat lands or is dropped (`land`, `drop_waits`,
+/// `caret_takes_over`, `drop_parked_row`, another file opened), and
+/// at a new pass, whose rows are not the ones the depth was read in:
+/// the seat then lands as any seat does.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct ClickMark {
+    /// The seat: the caret's offset and the height the click found its
+    /// row at.
+    pub(super) place: Place,
+    /// How far that row is under the first row of its line.
+    pub(super) depth: f32,
 }
 
 impl Place {
@@ -488,12 +527,6 @@ pub(super) enum Kept {
     /// lines, and the view does not move under the hand that types.
     /// It lives until the caret moves by a key or a click.
     Edit(f32),
-    /// The line at the top of the picture of the wait, after a click
-    /// in the editor placed the caret on that picture. It is kept as
-    /// `Top` is, and its picture stays over a view the layout holds:
-    /// the reader looks at the picture, and the next press is read on
-    /// it.
-    Picture(scroll::TopPlace),
 }
 
 impl Kept {
@@ -669,22 +702,90 @@ pub(super) fn wanted_scroll(
     Some(scroll::frame_offset(scroll::clamp(y, lay.height, view_h)))
 }
 
+/// The source bytes a picture holds: its pieces of a line longer than
+/// `LONG_LINE`, else its rows.
+fn picture_bytes(picture: &Preview) -> Option<std::ops::Range<usize>> {
+    if let Some(piece) = &picture.piece {
+        return Some(piece.clone());
+    }
+    let BlockKind::CodeBlock { lines, .. } = &picture.doc.blocks.first()?.kind else {
+        return None;
+    };
+    let last = lines.len().checked_sub(1)?;
+    Some(lines.line_range(0)?.start..lines.line_range(last)?.end)
+}
+
+/// The start of the line of a picture whose row holds the height `y`
+/// of its layout, each line taken as one row: the answer for a picture
+/// of blank lines, which has no row of text to read a click on.
+fn picture_line_at(picture: &Preview, y: f32) -> Option<usize> {
+    let BlockKind::CodeBlock { lines, .. } = &picture.doc.blocks.first()?.kind else {
+        return None;
+    };
+    let first = picture.lay.code_line_seat(0, 0)?;
+    // The distance between two rows, which is more than the height of
+    // a seat.
+    let pitch = picture
+        .lay
+        .code_line_seat(0, 1)
+        .map_or(first.height, |second| second.y - first.y);
+    let row = ((y - first.y) / pitch.max(1.0)).floor().max(0.0) as usize;
+    let line = row.min(lines.len().checked_sub(1)?);
+    lines.line_range(line).map(|range| range.start)
+}
+
 /// A click at `x`, `y` of a view that shows `picture`, painted at the
 /// scroll `top` of its own layout: the caret at the character of the
-/// picture under the pointer, and the line at the top of the view. The
-/// file's layout does not hold these rows yet, and a click read there
-/// lands on a row it does hold, somewhere else in the file. Offsets
-/// mean in a picture what they mean in the file.
+/// picture under the pointer, and the seat of its row, at the height
+/// the picture shows it. The file's layout does not hold these rows
+/// yet, and a click read there lands on a row it does hold, somewhere
+/// else in the file. Offsets mean in a picture what they mean in the
+/// file, and the caret is among the bytes the picture holds: a picture
+/// with no row of text, blank lines alone, answers by its lines.
 pub(super) fn click_on_picture(
     picture: &Preview,
     fonts: &mut FontStore,
     top: f32,
     x: f32,
     y: f32,
-) -> Option<(Caret, scroll::TopPlace)> {
-    let placed = caret::place(&picture.lay, &picture.doc, fonts, x, y + top)?;
-    let place = scroll::TopPlace::of(&picture.lay, &picture.doc, top)?;
-    Some((placed, place))
+) -> Option<(Caret, ClickMark)> {
+    let held = picture_bytes(picture)?;
+    let offset = caret::place(&picture.lay, &picture.doc, fonts, x, y + top)
+        .map(|placed| placed.offset)
+        .filter(|offset| held.start <= *offset && *offset <= held.end)
+        .or_else(|| picture_line_at(picture, y + top))?;
+    debug_assert!(
+        held.start <= offset && offset <= held.end,
+        "a click on a picture of bytes {held:?} put the caret at {offset}"
+    );
+    let row = row_y(&picture.lay, &picture.doc, offset)?;
+    let place = Place {
+        offset,
+        below: row - top,
+        line: false,
+    };
+    let depth = row_depth(picture, offset, row);
+    Some((Caret::at(offset), ClickMark { place, depth }))
+}
+
+/// How far `row`, the top of the row of `offset` in a picture, is
+/// under the first row of its line. A picture by rows holds whole
+/// lines. Zero in a picture of the pieces of a line longer than
+/// `LONG_LINE`: there the block table answers a piece, and
+/// `Page::piece_depth` the row in it.
+fn row_depth(picture: &Preview, offset: usize, row: f32) -> f32 {
+    if picture.piece.is_some() {
+        return 0.0;
+    }
+    let Some(BlockKind::CodeBlock { lines, .. }) = picture.doc.blocks.first().map(|b| &b.kind)
+    else {
+        return 0.0;
+    };
+    let line = scroll::source_row(&picture.doc, 0, offset);
+    lines
+        .line_range(line)
+        .and_then(|range| row_y(&picture.lay, &picture.doc, range.start))
+        .map_or(0.0, |first| (row - first).max(0.0))
 }
 
 /// Whether the first row of a caret's line stands whole in the view.
@@ -885,7 +986,7 @@ impl View {
         // pass has placed; scrolling now would stop short, so the target
         // is held until the document is tall enough to show it.
         let (height, vh) = (page.height(), page.view_h);
-        let target = page.row_landing(place.offset, place.below);
+        let target = page.row_landing_under(place.offset, place.below, self.click_depth(place));
         match target {
             Some(y) if scroll::reached(y, height, vh) || !page.pending() => {
                 self.pending_row = None;
@@ -925,12 +1026,22 @@ impl View {
     }
 
     /// Drops a seat of the editor that waits for the measure of the
-    /// file, with the caret's owed view. Nothing for any other seat.
+    /// file, with the caret's owed view and the mark of a click, which
+    /// is the seat's. Nothing for any other seat.
     pub(super) fn drop_parked_row(&mut self) {
         if self.row_parked.take().is_some() && self.pending_row.take().is_some() {
             self.caret_snap = false;
             self.caret_seat = None;
+            self.click_mark = None;
         }
+    }
+
+    /// The depth a seat lands by: that of the mark a click left, when
+    /// the seat is the click's. Zero for any other seat.
+    fn click_depth(&self, place: Place) -> f32 {
+        self.click_mark
+            .filter(|mark| mark.place == place)
+            .map_or(0.0, |mark| mark.depth)
     }
 
     /// Shows again a seat of the editor that still waits after a new
@@ -954,6 +1065,13 @@ impl View {
         debug_assert!(
             self.thumb_landing.is_none() || self.pending_offset.is_some(),
             "a landing of the thumb with no offset that waits"
+        );
+        debug_assert!(
+            self.click_mark
+                .is_none_or(|mark| self.pending_row == Some(mark.place)),
+            "the mark {:?} of a click beside the seat {:?}",
+            self.click_mark,
+            self.pending_row
         );
         debug_assert!(
             self.waiting() <= 1,
@@ -1148,6 +1266,7 @@ impl View {
         self.pending_offset = None;
         self.thumb_landing = None;
         self.landing_settle = None;
+        self.click_mark = None;
         self.bottom_hold.clear();
         self.steps_held = 0;
         self.kept_view = self.kept_view.filter(|kept| kept.shows_caret());
@@ -1159,16 +1278,29 @@ impl View {
         self.drop_waits();
     }
 
-    /// A click placed the caret on the picture of the wait, whose top
-    /// line is `top` (`click_on_picture`). What waited is dropped, as
-    /// for any click, and the view is kept by that line
-    /// (`Kept::Picture`): the picture stays as the click found it, and
-    /// the view lands there when the measure reaches it. The view is
-    /// not kept by the caret's row, which a landing reads by the first
-    /// row of its line.
-    pub(super) fn caret_clicked_on_picture(&mut self, top: scroll::TopPlace) {
+    /// A click placed the caret on the picture of the wait, on the row
+    /// `mark` names (`click_on_picture`). What waited is dropped, as
+    /// for any click, and the editor is seated on the caret's row at
+    /// the height the picture shows it, as a go to line seats it: the
+    /// picture stays, the view lands there when the measure reaches
+    /// the row, and what reads a seat that waits reads this one, the
+    /// history, the leave of the editor and the search bar among them.
+    ///
+    /// This seat alone lands by the depth of its row in its line
+    /// (`ClickMark`), at once here or later in `land`: the mark stays
+    /// while the seat waits.
+    pub(super) fn caret_clicked_on_picture(&mut self, page: &mut Page, mark: ClickMark) {
+        debug_assert!(
+            page.caret
+                .is_some_and(|caret| caret.offset == mark.place.offset),
+            "the seat of a click is the caret's"
+        );
         self.drop_waits();
-        self.kept_view = Some(Kept::Picture(top));
+        self.click_mark = Some(mark);
+        self.seat_editor_on(page, mark.place);
+        if self.pending_row.is_none() {
+            self.click_mark = None;
+        }
     }
 
     /// Releases the landing a drop of the thumb left waiting, once the
@@ -1231,6 +1363,7 @@ impl View {
         self.pending_row = None;
         self.row_parked = None;
         self.landing_settle = None;
+        self.click_mark = None;
         self.bottom_hold.clear();
         self.caret_snap = false;
         self.caret_seat = None;
@@ -1343,7 +1476,7 @@ impl View {
             return Some(top.unwrap_or_else(|| tail_start(&page.doc.source, rows)));
         }
         match self.kept_view? {
-            Kept::Top(top) | Kept::Picture(top) => Some(top.offset),
+            Kept::Top(top) => Some(top.offset),
             Kept::Caret(_) | Kept::Edit(_) => page
                 .caret
                 .filter(|_| page.editing)
@@ -1524,6 +1657,9 @@ impl View {
         // drop of the thumb waits for stays, as a landing like another.
         self.thumb_landing = None;
         self.row_parked = None;
+        // The depth a click read is counted in the rows of the pass
+        // that ends here.
+        self.click_mark = None;
         // A new width, of the window or of the sidebar, with the layout
         // of the old one still here: the view keeps its place.
         self.keep_view(page);
@@ -1590,9 +1726,7 @@ impl View {
                     page.caret
                         .and_then(|caret| page.row_landing(caret.offset, below))
                 }
-                Kept::Top(place) | Kept::Picture(place) => {
-                    page.lay.and_then(|lay| place.scroll(lay, page.doc))
-                }
+                Kept::Top(place) => page.lay.and_then(|lay| place.scroll(lay, page.doc)),
             };
             let settled = !page.pending();
             match target {
@@ -1618,13 +1752,18 @@ impl View {
         // against rows rather than blocks, since the editor is indexed
         // by lines and a source view is one block.
         if let Some(place) = self.pending_row {
-            let target = page.row_landing(place.offset, place.below);
+            let depth = self.click_depth(place);
+            let target = page.row_landing_under(place.offset, place.below, depth);
             match target {
                 Some(y) if scroll::reached(y, height, vh) || !page.pending() => {
                     self.pending_row = None;
+                    self.click_mark = None;
                     self.scroll_to(page, y);
                 }
-                None if page.lay.is_some() && !page.pending() => self.pending_row = None,
+                None if page.lay.is_some() && !page.pending() => {
+                    self.pending_row = None;
+                    self.click_mark = None;
+                }
                 _ => {}
             }
         }
@@ -1736,13 +1875,11 @@ impl View {
         // page back, since a click reads the page.
         // With the search bar open the page shows too, with its
         // matches.
-        // A picture the reader clicked on stays the same way: the
-        // caret is in it, and the next press is read on it.
         let seat = !gesture
             && page.editing
             && !page.searching
-            && (self.pending_row.is_some() && self.row_parked.is_some()
-                || matches!(self.kept_view, Some(Kept::Picture(_))));
+            && self.pending_row.is_some()
+            && self.row_parked.is_some();
         if !seat && held(self.scroll_y)? && held(self.scroll_y + view_h - 2.0)? {
             return None;
         }
@@ -1752,7 +1889,7 @@ impl View {
             Some((Wanted::Row(place), row_of(place.offset)))
         } else if let Some(place) = self.pending_offset {
             Some((Wanted::Offset(place), row_of(place.offset)))
-        } else if let Some(Kept::Top(place) | Kept::Picture(place)) = self.kept_view {
+        } else if let Some(Kept::Top(place)) = self.kept_view {
             Some((Wanted::Top(place), row_of(place.offset)))
         } else if let (Some(Kept::Caret(below)), Some(caret)) = (self.kept_view, page.caret) {
             Some((Wanted::Caret(caret.offset, below), row_of(caret.offset)))
@@ -1802,8 +1939,8 @@ mod tests {
     use proptest::prelude::*;
 
     use super::{
-        click_on_picture, tail_start, wanted_scroll, Kept, LinePlace, Page, Place, View, Wanted,
-        WantedPlace,
+        click_on_picture, row_y, tail_start, wanted_scroll, Kept, LinePlace, Page, Place, View,
+        Wanted, WantedPlace,
     };
 
     /// A text file in the window's place, with no window: the document,
@@ -2215,11 +2352,12 @@ mod tests {
                     let placed =
                         wanted_scroll(&wanted, &picture.lay, &picture.doc, self.view_h, row_h)
                             .and_then(|top| click_on_picture(&picture, &mut self.fonts, top, x, y));
-                    let Some((placed, top)) = placed else {
+                    let Some((placed, mark)) = placed else {
                         return false;
                     };
                     self.caret = Some(placed);
-                    self.view.caret_clicked_on_picture(top);
+                    let (view, mut page) = self.page();
+                    view.caret_clicked_on_picture(&mut page, mark);
                     return true;
                 }
             }
@@ -2357,6 +2495,7 @@ mod tests {
             self.view.kept_view = None;
             self.view.pending_anchor = None;
             self.view.pending_row = None;
+            self.view.click_mark = None;
             self.view.bottom_hold.clear();
             self.view.steps_held = 0;
             self.view.pending_offset = None;
@@ -3383,14 +3522,15 @@ mod tests {
     }
 
     /// The caret a click at `x`, `y` of the view gives in `text`
-    /// measured whole, with the view where `wanted` puts it: what a
-    /// click on the picture of `wanted` must give.
-    fn whole_click(text: &str, wanted: &Wanted, x: f32, y: f32) -> usize {
+    /// measured whole, its view showing the row of `anchor` at `height`
+    /// under its top, as the picture does: what a click on that
+    /// picture must give.
+    fn whole_click(text: &str, anchor: usize, height: f32, x: f32, y: f32) -> usize {
         let mut whole = Bench::new(text.to_string(), true, usize::MAX);
         whole.frame();
-        let row_h = whole.row_h();
         let lay = whole.lay.as_ref().expect("a layout");
-        let top = wanted_scroll(wanted, lay, &whole.doc, whole.view_h, row_h).expect("a place");
+        let row = row_y(lay, &whole.doc, anchor).expect("the row of the anchor");
+        let top = scroll::frame_offset((row - height).max(0.0));
         // The layout holds the rows around the view: the view goes
         // there first, and a frame brings its rows.
         whole.view.scroll_y = top;
@@ -3403,28 +3543,44 @@ mod tests {
         whole.caret.expect("a caret").offset
     }
 
-    /// Clicks at three places of a view that shows a picture, each on
-    /// a bench `ready` made: the caret is the one the file measured
-    /// whole gives, and once the measure has ended the row under the
-    /// pointer is still the row that was clicked.
-    fn clicks_on_a_picture(text: &str, ready: impl Fn() -> Bench) {
-        for (x, y) in [(40.0, 100.0), (150.0, 30.0), (300.0, 150.0)] {
+    /// The places of a view the tests click at.
+    const POINTS: [(f32, f32); 3] = [(40.0, 100.0), (150.0, 30.0), (300.0, 150.0)];
+
+    /// Clicks at `points` of a view that shows a picture, each on a
+    /// bench `ready` made: the caret is the one the file measured
+    /// whole gives, and once the measure has ended the caret's row is
+    /// at the height the click found it, within a pixel.
+    fn clicks_on_a_picture(text: &str, points: &[(f32, f32)], ready: impl Fn() -> Bench) {
+        for &(x, y) in points {
             let mut bench = ready();
             assert!(bench.pass_active(), "the file is still measured");
             let wanted = bench.wanted.expect("the frame shows a picture");
+            let picture = bench.picture().expect("a picture");
+            let row_h = bench.row_h();
+            let top = wanted_scroll(&wanted, &picture.lay, &picture.doc, bench.view_h, row_h)
+                .expect("a place");
+            let anchor = match wanted {
+                Wanted::Row(place) | Wanted::Offset(place) => place.offset,
+                Wanted::Top(place) => place.offset,
+                Wanted::Caret(offset, _) => offset,
+                Wanted::Bottom => text.len(),
+            };
+            let height = row_y(&picture.lay, &picture.doc, anchor).expect("its row") - top;
             assert!(bench.click(x, y), "a click places a caret");
             let caret = bench.caret.expect("a caret").offset;
             assert_eq!(
                 caret,
-                whole_click(text, &wanted, x, y),
+                whole_click(text, anchor, height, x, y),
                 "a click at {x}, {y} on the picture of {wanted:?}"
             );
+            let found = row_y(&picture.lay, &picture.doc, caret).expect("the caret's row") - top;
             bench.settle(REST);
-            assert!(bench.click(x, y), "a second click places a caret");
-            assert_eq!(
-                bench.caret.expect("a caret").offset,
-                caret,
-                "after the measure, the row clicked at {x}, {y} is no longer under the pointer"
+            let lay = bench.lay.as_ref().expect("a layout");
+            let rests =
+                row_y(lay, &bench.doc, caret).expect("the caret's row") - bench.view.scroll_y;
+            assert!(
+                (rests - found).abs() <= 1.0,
+                "the click at {x}, {y} found its row {found} under the top, and it rests at {rests}"
             );
         }
     }
@@ -3434,7 +3590,7 @@ mod tests {
     #[test]
     fn a_click_on_the_picture_of_a_jump_lands_under_the_pointer() {
         let text = numbered(LINES);
-        clicks_on_a_picture(&text, || {
+        clicks_on_a_picture(&text, &POINTS, || {
             let mut bench = Bench::new(text.clone(), true, 3);
             bench.frame();
             bench.go_to(300);
@@ -3482,7 +3638,7 @@ mod tests {
     #[test]
     fn a_click_on_the_picture_of_the_end_lands_under_the_pointer() {
         let text = numbered(LINES);
-        clicks_on_a_picture(&text, || {
+        clicks_on_a_picture(&text, &POINTS, || {
             let mut bench = Bench::new(text.clone(), true, 3);
             bench.frame();
             bench.key(Motion::DocEnd);
@@ -3498,7 +3654,7 @@ mod tests {
     #[test]
     fn a_click_on_the_picture_of_a_thumb_drop_lands_under_the_pointer() {
         let text = numbered(LINES);
-        clicks_on_a_picture(&text, || {
+        clicks_on_a_picture(&text, &POINTS, || {
             let mut bench = Bench::new(text.clone(), true, 3);
             for _ in 0..40 {
                 bench.frame();
@@ -3509,6 +3665,357 @@ mod tests {
             bench.frame();
             bench
         });
+    }
+
+    /// A click on a picture that holds only blank lines, the end of a
+    /// file that ends with empty lines: the blank line under the
+    /// pointer, counted from the row the picture seats, not a line
+    /// counted from the top of the file. The file measured whole is no
+    /// reference here: far under wrapped lines, its click on a blank
+    /// line goes to the end of the file.
+    #[test]
+    fn a_click_on_a_picture_of_blank_lines_lands_under_the_pointer() {
+        let text = format!("{}{}", numbered(LINES), "\n".repeat(200));
+        for (x, y) in POINTS {
+            let mut bench = Bench::new(text.clone(), true, 3);
+            bench.frame();
+            bench.key(Motion::DocEnd);
+            for _ in 0..4 {
+                bench.frame();
+            }
+            assert!(bench.pass_active(), "the file is still measured");
+            let Some(Wanted::Row(seat)) = bench.wanted else {
+                panic!("the frame shows the picture of the seat");
+            };
+            // Each blank line is one byte and one row.
+            let row_h = bench.row_h();
+            let rows_above = ((seat.below - y) / row_h).ceil().max(0.0) as usize;
+            assert!(bench.click(x, y), "a click places a caret");
+            let caret = bench.caret.expect("a caret").offset;
+            assert_eq!(caret, seat.offset - rows_above, "a click at {x}, {y}");
+            let found = seat.below - rows_above as f32 * row_h;
+            bench.settle(REST);
+            let lay = bench.lay.as_ref().expect("a layout");
+            let rests =
+                row_y(lay, &bench.doc, caret).expect("the caret's row") - bench.view.scroll_y;
+            assert!(
+                (rests - found).abs() <= 1.0,
+                "the click at {x}, {y} found its row {found} under the top, and it rests at {rests}"
+            );
+        }
+    }
+
+    /// A click on the picture of a line too long for a picture by rows,
+    /// among ordinary lines, after a jump to it: the picture is of the
+    /// first pieces of the line and starts at its own top, and the
+    /// click is not lost.
+    #[test]
+    fn a_click_on_the_picture_of_a_long_line_lands_under_the_pointer() {
+        let long: String = (0..20000).map(|n| format!("word{n} ")).collect();
+        let text = format!("{}{long}\n{}", numbered(200), numbered(200));
+        clicks_on_a_picture(&text, &[(40.0, 100.0), (300.0, 150.0)], || {
+            let mut bench = Bench::new(text.clone(), true, 3);
+            bench.frame();
+            bench.go_to(201);
+            for _ in 0..4 {
+                bench.frame();
+            }
+            bench
+        });
+    }
+
+    /// A jump away from a click on a picture, then a step back: the
+    /// view and the caret end where they end in the file measured
+    /// whole. The history files the place of the click as it files the
+    /// place of a jump that waits.
+    #[test]
+    fn a_step_back_to_a_click_on_a_picture_lands_on_it() {
+        let ends = |pace: usize| {
+            let mut bench = Bench::new(numbered(LINES), true, pace);
+            bench.frame();
+            bench.go_to(300);
+            for _ in 0..4 {
+                bench.frame();
+            }
+            assert!(bench.click(150.0, 100.0));
+            bench.frame();
+            bench.go_to(20);
+            bench.frame();
+            bench.back();
+            bench.settle(REST);
+            (bench.view.scroll_y, bench.caret.map(|caret| caret.offset))
+        };
+        let ((paced, at), (whole, caret)) = (ends(3), ends(usize::MAX));
+        assert_eq!(
+            at, caret,
+            "the measure changed the caret a step back brings"
+        );
+        assert!(
+            (paced - whole).abs() <= 1.0,
+            "the step back lands at {whole} in the file measured whole, and at {paced}"
+        );
+    }
+
+    /// A text file of `lines` numbered lines that wrap to two rows or
+    /// more in the window of the bench, not all to the same count.
+    fn wrapped(lines: usize) -> String {
+        (1..=lines)
+            .map(|n| format!("line {n} {}\n", "wraps and goes on ".repeat(3 + n % 6)))
+            .collect()
+    }
+
+    /// A click on a lower row of a wrapped line, in the frames around
+    /// the landing of a go to line. When the measure has reached the
+    /// row and the layout does not hold it, the seat of the click
+    /// lands at once, by the block table; else it waits and lands
+    /// later. In both the caret's row is where the click found it from
+    /// the landing on: nothing waits for the layout to hold the row,
+    /// which it does at the end of the measure.
+    #[test]
+    fn a_click_on_a_lower_row_rests_there_whenever_its_seat_lands() {
+        let text = wrapped(60);
+        let ready = |line: usize, frames: usize| {
+            let mut bench = Bench::new(text.clone(), true, 1);
+            bench.frame();
+            bench.go_to(line);
+            for _ in 0..frames {
+                bench.frame();
+            }
+            bench
+        };
+        // The clicks on a lower row whose seat landed at once, and
+        // those whose seat waited.
+        let (mut at_once, mut later) = (0, 0);
+        for line in 36..=39 {
+            let mut bench = ready(line, 0);
+            let mut waits: usize = 0;
+            while bench.view.pending_row.is_some() {
+                bench.frame();
+                waits += 1;
+                assert!(waits < 10_000, "the go to line does not land");
+            }
+            assert!(waits > 2, "the go to line {line} waits {waits} frames");
+            // Before the go to line lands, the seat of a click waits
+            // as it does. After, the measure has passed the row: the
+            // seat of a click lands at once.
+            for after in [-2, -1, 1, 3] {
+                for (x, y) in [(150.0, 30.0), (300.0, 150.0)] {
+                    let mut bench = ready(line, waits.saturating_add_signed(after));
+                    let Some(wanted) = bench.wanted.filter(|_| bench.pass_active()) else {
+                        assert!(after > 0, "the frame shows a picture while the seat waits");
+                        continue;
+                    };
+                    let picture = bench.picture().expect("a picture");
+                    let row_h = bench.row_h();
+                    let top =
+                        wanted_scroll(&wanted, &picture.lay, &picture.doc, bench.view_h, row_h)
+                            .expect("a place");
+                    assert!(bench.click(x, y), "a click places a caret");
+                    let caret = bench.caret.expect("a caret").offset;
+                    let found = row_y(&picture.lay, &picture.doc, caret).expect("its row") - top;
+                    let start = text[..caret].rfind('\n').map_or(0, |at| at + 1);
+                    let first = row_y(&picture.lay, &picture.doc, start).expect("its line") - top;
+                    if found > first {
+                        match bench.view.pending_row {
+                            None => at_once += 1,
+                            Some(_) => later += 1,
+                        }
+                    }
+                    // The view once the seat has landed: at once, or on
+                    // the frame the measure reaches the row.
+                    let mut landed = None;
+                    while landed.is_none() {
+                        if bench.view.pending_row.is_none() {
+                            landed = Some(bench.view.scroll_y);
+                        } else {
+                            bench.frame();
+                        }
+                    }
+                    bench.settle(REST);
+                    let lay = bench.lay.as_ref().expect("a layout");
+                    let rests = row_y(lay, &bench.doc, caret).expect("the caret's row")
+                        - bench.view.scroll_y;
+                    assert!(
+                        (rests - found).abs() <= 1.0,
+                        "line {line}, {after} frames from the landing: the click at {x}, {y} \
+                         found its row {found} under the top, and it rests at {rests}"
+                    );
+                    let landed = landed.expect("a landing");
+                    assert!(
+                        (landed - bench.view.scroll_y).abs() <= 1.0,
+                        "line {line}, {after} frames from the landing: the click at {x}, {y} \
+                         landed at {landed}, and the view moved again to {}",
+                        bench.view.scroll_y
+                    );
+                }
+            }
+        }
+        assert!(
+            at_once > 0 && later > 0,
+            "{at_once} seats of a lower row landed at once and {later} waited"
+        );
+    }
+
+    /// A click on a row that an edge of the view cuts: the row rests
+    /// cut, as the click found it. A click moves no view.
+    #[test]
+    fn a_click_on_a_row_cut_by_an_edge_rests_cut() {
+        let text = numbered(LINES);
+        for at in [2.0, -2.0] {
+            let mut bench = Bench::new(text.clone(), true, 3);
+            bench.frame();
+            bench.go_to(300);
+            for _ in 0..4 {
+                bench.frame();
+            }
+            assert!(bench.pass_active(), "the file is still measured");
+            let (view_h, row_h) = (bench.view_h, bench.row_h());
+            let y = if at < 0.0 { view_h + at } else { at };
+            let wanted = bench.wanted.expect("the frame shows a picture");
+            let picture = bench.picture().expect("a picture");
+            let top =
+                wanted_scroll(&wanted, &picture.lay, &picture.doc, view_h, row_h).expect("a place");
+            assert!(bench.click(40.0, y), "a click places a caret");
+            let caret = bench.caret.expect("a caret").offset;
+            let found = row_y(&picture.lay, &picture.doc, caret).expect("its row") - top;
+            assert!(
+                found < 0.0 || found + row_h > view_h,
+                "the row clicked at {y} is whole in the view, at {found}"
+            );
+            bench.settle(REST);
+            let lay = bench.lay.as_ref().expect("a layout");
+            let rests =
+                row_y(lay, &bench.doc, caret).expect("the caret's row") - bench.view.scroll_y;
+            assert!(
+                (rests - found).abs() <= 1.0,
+                "the click at {y} found its row {found} under the top, and it rests at {rests}"
+            );
+        }
+    }
+
+    /// A seat whose row is outside the view, as a step back gives a
+    /// caret the reader had scrolled away from (`Place::returned`): it
+    /// lands where it lands in the file measured whole, the row outside
+    /// the view again. Only a click on a picture asks for more than
+    /// its seat.
+    #[test]
+    fn a_seat_outside_the_view_lands_as_in_the_file_measured_whole() {
+        let text = numbered(LINES);
+        for below in [-60.0, -300.0, 120.0] {
+            let ends = |pace: usize| {
+                let mut bench = Bench::new(text.clone(), true, pace);
+                bench.frame();
+                let offset = bench.line_start(200);
+                bench.caret = Some(Caret::at(offset));
+                bench.view.drop_waits();
+                let place = Place {
+                    offset,
+                    below,
+                    line: false,
+                };
+                let (view, mut page) = bench.page();
+                view.seat_editor_on(&mut page, place);
+                bench.settle(REST);
+                bench.view.scroll_y
+            };
+            let (paced, whole) = (ends(3), ends(usize::MAX));
+            assert!(
+                (paced - whole).abs() <= 1.0,
+                "a seat {below} under the top lands at {whole} in the file measured whole, \
+                 and at {paced}"
+            );
+        }
+    }
+
+    /// The mark a click on a picture leaves is its seat's
+    /// (`ClickMark`): it is there while the seat waits, and it goes
+    /// when the seat lands or is dropped, and at a new pass.
+    #[test]
+    fn the_mark_of_a_click_ends_with_its_seat() {
+        let text = wrapped(120);
+        let clicked = || {
+            let mut bench = Bench::new(text.clone(), true, 1);
+            bench.frame();
+            bench.go_to(100);
+            for _ in 0..4 {
+                bench.frame();
+            }
+            assert!(bench.click(300.0, 150.0), "a click places a caret");
+            assert!(
+                bench.view.pending_row.is_some(),
+                "the seat of the click waits"
+            );
+            bench
+        };
+        let mark = |bench: &Bench| bench.view.click_mark.map(|mark| mark.place);
+
+        // The seat waits, and its mark with it. The click was on a
+        // lower row of its line.
+        let mut bench = clicked();
+        assert_eq!(
+            mark(&bench),
+            bench.view.pending_row,
+            "the mark is the seat's"
+        );
+        assert!(
+            bench.view.click_mark.is_some_and(|mark| mark.depth > 0.0),
+            "the click was on the first row of its line"
+        );
+        bench.frame();
+        assert!(bench.view.pending_row.is_some(), "the seat still waits");
+        assert_eq!(mark(&bench), bench.view.pending_row, "the mark waits");
+
+        // The seat lands.
+        while bench.view.pending_row.is_some() {
+            bench.frame();
+        }
+        assert_eq!(mark(&bench), None, "the mark of a seat that landed");
+
+        // The search bar opens and drops the seat (`App::open_search`).
+        let mut bench = clicked();
+        bench.view.drop_parked_row();
+        assert_eq!(mark(&bench), None, "the mark of a dropped seat");
+
+        // The wheel.
+        let mut bench = clicked();
+        bench.wheel(1.0);
+        assert_eq!(mark(&bench), None, "the mark after the wheel");
+
+        // Another file opens while reading (`App::open_file`).
+        let mut bench = clicked();
+        bench.editing = false;
+        bench.caret = None;
+        bench.open_file(text.clone());
+        assert_eq!(mark(&bench), None, "the mark in another file");
+
+        // A zoom step starts a new pass, with other rows: the seat
+        // still waits, with no depth.
+        let mut bench = clicked();
+        bench.zoom(1.25);
+        bench.frame();
+        assert!(
+            bench.view.pending_row.is_some(),
+            "the seat waits after a zoom step"
+        );
+        assert_eq!(mark(&bench), None, "the mark after a zoom step");
+
+        // Escape in a code file leaves the seat and takes the caret
+        // (`App::leave_edit`): the seat lands at the same place.
+        let rests = |reading: bool| {
+            let mut bench = clicked();
+            if reading {
+                bench.editing = false;
+                bench.caret = None;
+            }
+            bench.settle(REST);
+            assert_eq!(mark(&bench), None, "the mark at rest");
+            bench.view.scroll_y
+        };
+        assert_eq!(
+            rests(true),
+            rests(false),
+            "the seat of a click lands elsewhere after Escape"
+        );
     }
 
     /// The smallest input `fuzz_view_wait` fails on when a

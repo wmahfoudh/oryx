@@ -4809,13 +4809,13 @@ impl App {
 
     /// A press in the text of the editor while the frame shows the
     /// picture of the wait: the caret goes to the character of the
-    /// picture under the pointer, and the view keeps its row where it
-    /// is (`View::caret_clicked_on_picture`). The file's layout does not
-    /// hold the rows the picture shows, so nothing of the press is read
-    /// there: a double click, a press with Shift and a drag select
-    /// nothing and place the caret as one click does. Answers false
-    /// when the frame shows the page, and the press is read on the
-    /// layout as ever.
+    /// picture under the pointer, and the editor is seated on its row
+    /// where the picture shows it (`View::caret_clicked_on_picture`).
+    /// The file's layout does not hold the rows the picture shows, so
+    /// nothing of the press is read there: a double click, a press
+    /// with Shift and a drag select nothing and place the caret as one
+    /// click does. Answers false when the frame shows the page, and
+    /// the press is read on the layout as ever.
     fn press_on_picture(&mut self) -> bool {
         let wanted = {
             let (view, page) = self.page();
@@ -4831,7 +4831,7 @@ impl App {
         };
         let top = f32::from_bits(top);
         let placed = click_on_picture(&frame.preview, &mut self.fonts, top, x, y);
-        if let Some((placed, top)) = placed {
+        if let Some((placed, mark)) = placed {
             debug_assert!(
                 self.document.source.is_char_boundary(placed.offset),
                 "a click on a picture put the caret at {}, not a place of a text of {} bytes",
@@ -4839,7 +4839,8 @@ impl App {
                 self.document.source.len()
             );
             self.caret = Some(placed);
-            self.view.caret_clicked_on_picture(top);
+            let (view, mut page) = self.page();
+            view.caret_clicked_on_picture(&mut page, mark);
             if self.selection.take().is_some() {
                 self.band = None;
             }
@@ -7569,6 +7570,7 @@ impl App {
         self.view.kept_view = None;
         self.view.pending_anchor = None;
         self.view.pending_row = None;
+        self.view.click_mark = None;
         self.pending_goto = None;
         self.view.bottom_hold.clear();
         self.view.steps_held = 0;
