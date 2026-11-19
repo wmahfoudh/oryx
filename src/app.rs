@@ -73,12 +73,13 @@ use winit::window::{CursorIcon, Window, WindowId};
 
 mod view;
 
-use view::{kept_caret_height, line_landing, row_y, waiting_place, Page, Place, View, Wanted};
+use view::{click_on_picture, waiting_place, wanted_scroll, Page, Place, View};
 // The tests of the plain parts of the view are in this file.
 #[cfg(test)]
 use view::{
     caret_due, caret_line_edge, caret_line_in_view, caret_row, filed_height, keeps_scroll,
-    snap_still_owed, waiting_height, CaretDue, CaretRow, CaretSeat, Kept,
+    kept_caret_height, line_landing, snap_still_owed, waiting_height, CaretDue, CaretRow,
+    CaretSeat, Kept,
 };
 
 /// How often owed recolors land while highlights wash in.
@@ -4806,6 +4807,50 @@ impl App {
         }
     }
 
+    /// A press in the text of the editor while the frame shows the
+    /// picture of the wait: the caret goes to the character of the
+    /// picture under the pointer, and the view keeps its row where it
+    /// is (`View::caret_clicked_on_picture`). The file's layout does not
+    /// hold the rows the picture shows, so nothing of the press is read
+    /// there: a double click, a press with Shift and a drag select
+    /// nothing and place the caret as one click does. Answers false
+    /// when the frame shows the page, and the press is read on the
+    /// layout as ever.
+    fn press_on_picture(&mut self) -> bool {
+        let wanted = {
+            let (view, page) = self.page();
+            view.wanted(&page).is_some()
+        };
+        let x = self.cursor.x as f32 - self.inset();
+        let y = self.cursor.y as f32;
+        let Some(frame) = self.preview.as_ref().filter(|_| wanted) else {
+            return false;
+        };
+        let Some((top, _)) = frame.painted else {
+            return false;
+        };
+        let top = f32::from_bits(top);
+        let placed = click_on_picture(&frame.preview, &mut self.fonts, top, x, y);
+        if let Some((placed, top)) = placed {
+            debug_assert!(
+                self.document.source.is_char_boundary(placed.offset),
+                "a click on a picture put the caret at {}, not a place of a text of {} bytes",
+                placed.offset,
+                self.document.source.len()
+            );
+            self.caret = Some(placed);
+            self.view.caret_clicked_on_picture(top);
+            if self.selection.take().is_some() {
+                self.band = None;
+            }
+            self.sel_anchor = None;
+            self.last_click = None;
+            self.wake_caret();
+            self.request_redraw();
+        }
+        true
+    }
+
     /// Opens the search bar with the last query standing selected, so
     /// typing replaces it; Ctrl+F on an open bar reselects the same way.
     fn open_search(&mut self) {
@@ -6195,7 +6240,13 @@ impl App {
             } else {
                 self.move_ownership(PaneAct::ClickDocument);
                 self.scrollbar_press();
-                if self.drag.is_none() && self.modifiers.shift_key() && self.shift_press() {
+                // A press on the picture of the wait is read on the
+                // picture alone, before any reading of the layout.
+                let on_picture =
+                    self.drag.is_none() && self.mode == edit::Mode::Edit && self.press_on_picture();
+                let taken = on_picture
+                    || (self.drag.is_none() && self.modifiers.shift_key() && self.shift_press());
+                if taken {
                 } else if self.drag.is_none() {
                     if self.mode == edit::Mode::Edit {
                         match self.register_click() {
@@ -8897,7 +8948,7 @@ impl App {
                 rows,
             );
             let preview = match (by_rows, piece) {
-                (Some(preview), _) => preview,
+                (Some(preview), _) => Some(preview),
                 (None, Some(bytes)) => paint::preview::build_pieces(
                     &self.document,
                     &self.theme,
@@ -8907,8 +8958,14 @@ impl App {
                     width as f32,
                     row,
                     bytes,
-                )?,
-                (None, None) => return None,
+                ),
+                (None, None) => None,
+            };
+            // A picture that cannot be built leaves none: the frame is
+            // the page's, and a press is read there.
+            let Some(preview) = preview else {
+                self.preview = None;
+                return None;
             };
             self.preview = Some(PreviewFrame {
                 preview,
@@ -8921,22 +8978,10 @@ impl App {
         }
         let frame = self.preview.as_mut()?;
         let (lay, doc) = (&frame.preview.lay, &frame.preview.doc);
-        let y = match wanted {
-            Wanted::Row(place) => {
-                row_y(lay, doc, place.offset).map(|y| caret::seated(y, place.below))
-            }
-            Wanted::Offset(place) if place.line => {
-                line_landing(lay, doc, place.offset, place.below, view_h)
-            }
-            Wanted::Offset(place) => {
-                scroll::offset_top(lay, doc, place.offset).map(|y| caret::seated(y, place.below))
-            }
-            Wanted::Top(place) => place.scroll(lay, doc),
-            Wanted::Caret(offset, below) => row_y(lay, doc, offset)
-                .map(|y| caret::seated(y, kept_caret_height(below, view_h, row_h))),
-            Wanted::Bottom => Some(lay.height),
-        }?;
-        let y = scroll::frame_offset(scroll::clamp(y, lay.height, view_h));
+        let Some(y) = wanted_scroll(&wanted, lay, doc, view_h, row_h) else {
+            frame.painted = None;
+            return None;
+        };
         let key = (y.to_bits(), height);
         if frame.painted != Some(key) {
             frame.pixels = paint::band_numbered(
