@@ -4,7 +4,7 @@
 use oryx::doc::images::MediaCache;
 use oryx::doc::model::{BlockKind, Document};
 use oryx::edit::caret::{self, Caret, CaretBox};
-use oryx::layout::{LayoutDoc, LayoutPass, TextRef, ViewConfig};
+use oryx::layout::{DocY, LayoutDoc, LayoutPass, TextRef, ViewConfig};
 use oryx::paint;
 use oryx::paint::preview::Preview;
 use oryx::paint::scroll;
@@ -48,7 +48,7 @@ pub(super) struct Page<'a> {
 
 impl Page<'_> {
     /// The height the pass has placed.
-    pub(super) fn height(&self) -> f32 {
+    pub(super) fn height(&self) -> DocY {
         self.lay.map(|l| l.height).unwrap_or(0.0)
     }
 
@@ -97,7 +97,7 @@ impl Page<'_> {
     /// to the view, a piece that crosses the view is held whole, so a
     /// row in view answers exactly. The height of a row out of view is
     /// read with `row_y_in_piece`.
-    pub(super) fn editor_row_y(&self, offset: usize) -> Option<f32> {
+    pub(super) fn editor_row_y(&self, offset: usize) -> Option<DocY> {
         row_y(self.lay?, self.doc, offset)
     }
 
@@ -109,7 +109,7 @@ impl Page<'_> {
     /// (`preview::row_in_piece`). The distance the history files for a
     /// caret out of view is counted from this row (`View::standing`),
     /// since `row_landing` brings it back to this row.
-    pub(super) fn row_y_in_piece(&mut self, offset: usize) -> Option<f32> {
+    pub(super) fn row_y_in_piece(&mut self, offset: usize) -> Option<DocY> {
         let lay = self.lay?;
         let doc = self.doc;
         if let Some(y) = caret::row_top(lay, doc, offset) {
@@ -122,7 +122,7 @@ impl Page<'_> {
 
     /// How far the row holding `offset` is under the top of its piece
     /// of a line longer than `LONG_LINE`. Zero anywhere else.
-    pub(super) fn piece_depth(&mut self, offset: usize) -> f32 {
+    pub(super) fn piece_depth(&mut self, offset: usize) -> DocY {
         let Some(lay) = self.lay else {
             return 0.0;
         };
@@ -138,7 +138,7 @@ impl Page<'_> {
     /// the pass has placed the table's answer: until then the landing
     /// waits whatever the row is, and each frame of the wait would lay
     /// the piece out again.
-    pub(super) fn row_landing(&mut self, offset: usize, below: f32) -> Option<f32> {
+    pub(super) fn row_landing(&mut self, offset: usize, below: DocY) -> Option<DocY> {
         self.row_landing_under(offset, below, 0.0)
     }
 
@@ -150,9 +150,9 @@ impl Page<'_> {
     pub(super) fn row_landing_under(
         &mut self,
         offset: usize,
-        below: f32,
-        depth: f32,
-    ) -> Option<f32> {
+        below: DocY,
+        depth: DocY,
+    ) -> Option<DocY> {
         let pending = self.pending();
         let view_h = self.view_h;
         let lay = self.lay?;
@@ -182,7 +182,7 @@ impl Page<'_> {
     /// a code or text file, a place inside a line longer than
     /// `LONG_LINE` is a row of the editor, which the page draws the
     /// same: it lands as in the editor (`row_landing`).
-    pub(super) fn line_landing(&mut self, offset: usize, below: f32) -> Option<f32> {
+    pub(super) fn line_landing(&mut self, offset: usize, below: DocY) -> Option<DocY> {
         let lay = self.lay?;
         if in_source_piece(lay, self.doc, offset) {
             return self.row_landing(offset, below);
@@ -205,7 +205,7 @@ pub(super) struct View {
     pub(super) moved: bool,
     /// The scroll of the page: how far its top is above the top of the
     /// view, in pixels.
-    pub(super) scroll_y: f32,
+    pub(super) scroll_y: DocY,
     /// What the running pass brings back of the view once it places it:
     /// the place taken before a new layout of the same text, or the
     /// scroll of a reload.
@@ -220,13 +220,13 @@ pub(super) struct View {
     /// `pending_offset` holds that place. A view that has moved since
     /// is the reader's: the landing is released, as a held `Ctrl+End`
     /// is.
-    pub(super) thumb_landing: Option<f32>,
+    pub(super) thumb_landing: Option<DocY>,
     /// The scroll of the view when a seat of the editor was left
     /// waiting for the measure of the file (`seat_editor_on`), while
     /// `pending_row` holds that place. The preview shows the place
     /// meanwhile, over the view. A view that has moved since is the
     /// reader's: the seat is released, as a drop of the thumb is.
-    pub(super) row_parked: Option<f32>,
+    pub(super) row_parked: Option<DocY>,
     /// A line landing made this frame, whose exact row `settle_landing`
     /// finds once the slide has drawn the rows around it.
     pub(super) landing_settle: Option<Place>,
@@ -259,7 +259,7 @@ pub(super) struct View {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct Place {
     pub(super) offset: usize,
-    pub(super) below: f32,
+    pub(super) below: DocY,
     /// The offset names a line to show, a caret's or a jump's, rather
     /// than what stood at the top of the page: on a rendered page the
     /// line's own row stands at `below`, not its block's top (`line_landing`).
@@ -287,7 +287,7 @@ pub(super) struct ClickMark {
     /// row at.
     pub(super) place: Place,
     /// How far that row is under the first row of its line.
-    pub(super) depth: f32,
+    pub(super) depth: DocY,
 }
 
 impl Place {
@@ -310,7 +310,7 @@ impl Place {
     pub(super) fn centered(offset: usize, view_h: f32, row_h: f32) -> Place {
         Place {
             offset,
-            below: ((view_h - row_h) / 2.0).max(0.0),
+            below: DocY::from(((view_h - row_h) / 2.0).max(0.0)),
             line: false,
         }
     }
@@ -327,7 +327,7 @@ impl Place {
     /// caret row that an edge only cut shows whole at that edge.
     pub(super) fn returned(
         offset: usize,
-        below: f32,
+        below: DocY,
         away: bool,
         view_h: f32,
         row_h: f32,
@@ -340,14 +340,14 @@ impl Place {
                 line: false,
             };
         }
-        let outside = below + row_h <= 0.0 || below >= view_h;
+        let outside = below + DocY::from(row_h) <= 0.0 || below >= DocY::from(view_h);
         if away && outside {
             return Place::centered(offset, view_h, row_h);
         }
-        let floor = if editing || away { 0.0 } else { f32::MIN };
+        let floor = if editing || away { 0.0 } else { DocY::MIN };
         Place {
             offset,
-            below: below.min((view_h - row_h).max(0.0)).max(floor),
+            below: below.min(DocY::from((view_h - row_h).max(0.0))).max(floor),
             line: false,
         }
     }
@@ -377,7 +377,7 @@ pub(super) fn waiting_place(
 /// view goes, and on a large file the kept distance would be applied
 /// after it. After a crossing between the page and the editor the kept
 /// distance would even be the other document's.
-pub(super) fn keeps_scroll(scroll_y: f32, landing_waits: bool) -> bool {
+pub(super) fn keeps_scroll(scroll_y: DocY, landing_waits: bool) -> bool {
     scroll_y > 0.0 && !landing_waits
 }
 
@@ -444,7 +444,7 @@ pub(super) struct LinePlace {
     line: usize,
     /// The bytes from the start of the line to the place.
     column: usize,
-    below: f32,
+    below: DocY,
     by_line: bool,
 }
 
@@ -493,9 +493,9 @@ impl LinePlace {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) enum Reload {
     /// Nothing waited: the scroll.
-    Scroll(f32),
+    Scroll(DocY),
     /// A view kept through a new pass, with the scroll of the moment.
-    Kept(Kept, f32),
+    Kept(Kept, DocY),
     /// The row of a code or text file, or of the editor.
     Row(LinePlace),
     /// A landing on the page: a link, a step of the history, a go to
@@ -515,11 +515,11 @@ pub(super) enum Reload {
 pub(super) enum Kept {
     /// The scroll as a distance from the top of the page, when no
     /// layout was there to read a place from: a reload.
-    Distance(f32),
+    Distance(DocY),
     /// In the editor, how far under the top of the view the caret's row
     /// stood. The caret is where the reader works, so its row keeps its
     /// height on the screen.
-    Caret(f32),
+    Caret(DocY),
     /// The block or the line at the top of the view.
     Top(scroll::TopPlace),
     /// The scroll, for the new pass an edit starts in a file that is
@@ -527,7 +527,7 @@ pub(super) enum Kept {
     /// edit keep their heights, so the same distance shows the same
     /// lines, and the view does not move under the hand that types.
     /// It lives until the caret moves by a key or a click.
-    Edit(f32),
+    Edit(DocY),
 }
 
 impl Kept {
@@ -537,9 +537,9 @@ impl Kept {
     /// left where it is: the view is kept by its top, as on the page.
     /// None at the top of the file, where the view stays.
     pub(super) fn of(
-        caret_row: Option<f32>,
+        caret_row: Option<DocY>,
         row_h: f32,
-        scroll_y: f32,
+        scroll_y: DocY,
         view_h: f32,
         top: impl FnOnce() -> Option<scroll::TopPlace>,
     ) -> Option<Kept> {
@@ -558,9 +558,9 @@ impl Kept {
     /// the layout. None for an edit out of view, whose caret the view
     /// goes to, and at the top of the file, where the view stays.
     pub(super) fn of_edit(
-        row: Option<f32>,
+        row: Option<DocY>,
         row_h: f32,
-        scroll_y: f32,
+        scroll_y: DocY,
         view_h: f32,
     ) -> Option<Kept> {
         let (_, away) = filed_height(row?, row_h, scroll_y, view_h);
@@ -600,8 +600,8 @@ impl Kept {
     /// in a row return to the place of the first one.
     pub(super) fn zoomed(self, ratio: f32) -> Kept {
         match self {
-            Kept::Distance(y) => Kept::Distance(y * ratio),
-            Kept::Edit(y) => Kept::Edit(y * ratio),
+            Kept::Distance(y) => Kept::Distance(y * DocY::from(ratio)),
+            Kept::Edit(y) => Kept::Edit(y * DocY::from(ratio)),
             place => place,
         }
     }
@@ -609,8 +609,8 @@ impl Kept {
 
 /// The height a kept caret row comes back at: where it stood, moved up
 /// when its rows grew taller and the bottom edge would cut it.
-pub(super) fn kept_caret_height(below: f32, view_h: f32, row_h: f32) -> f32 {
-    below.min((view_h - row_h).max(0.0)).max(0.0)
+pub(super) fn kept_caret_height(below: DocY, view_h: f32, row_h: f32) -> DocY {
+    below.min(DocY::from((view_h - row_h).max(0.0))).max(0.0)
 }
 
 /// What a preview shows: the landing that waits, as `View::land`
@@ -625,14 +625,14 @@ pub(super) enum Wanted {
     /// read from the scroll.
     Top(scroll::TopPlace),
     /// The caret's row at its height in the window.
-    Caret(usize, f32),
+    Caret(usize, DocY),
     /// The end of the file, a held `Ctrl+End`.
     Bottom,
 }
 
 /// The top of the editor row holding `offset`: the row the layout drew,
 /// else the line's place in the block table.
-pub(super) fn row_y(lay: &LayoutDoc, doc: &Document, offset: usize) -> Option<f32> {
+pub(super) fn row_y(lay: &LayoutDoc, doc: &Document, offset: usize) -> Option<DocY> {
     if let Some(y) = caret::row_top(lay, doc, offset) {
         return Some(y);
     }
@@ -656,9 +656,9 @@ pub(super) fn line_landing(
     lay: &LayoutDoc,
     doc: &Document,
     offset: usize,
-    below: f32,
+    below: DocY,
     view_h: f32,
-) -> Option<f32> {
+) -> Option<DocY> {
     // Inside a line longer than `LONG_LINE` the block table places the
     // piece, and the row can be a hundred rows under its top: the row
     // the layout holds answers, as in the editor.
@@ -686,7 +686,7 @@ pub(super) fn wanted_scroll(
     doc: &Document,
     view_h: f32,
     row_h: f32,
-) -> Option<f32> {
+) -> Option<DocY> {
     let y = match *wanted {
         Wanted::Row(place) => row_y(lay, doc, place.offset).map(|y| caret::seated(y, place.below)),
         Wanted::Offset(place) if place.line => {
@@ -719,7 +719,7 @@ fn picture_bytes(picture: &Preview) -> Option<std::ops::Range<usize>> {
 /// The start of the line of a picture whose row holds the height `y`
 /// of its layout, each line taken as one row: the answer for a picture
 /// of blank lines, which has no row of text to read a click on.
-fn picture_line_at(picture: &Preview, y: f32) -> Option<usize> {
+fn picture_line_at(picture: &Preview, y: DocY) -> Option<usize> {
     let BlockKind::CodeBlock { lines, .. } = &picture.doc.blocks.first()?.kind else {
         return None;
     };
@@ -729,7 +729,7 @@ fn picture_line_at(picture: &Preview, y: f32) -> Option<usize> {
     let pitch = picture
         .lay
         .code_line_seat(0, 1)
-        .map_or(first.height, |second| second.y - first.y);
+        .map_or(DocY::from(first.height), |second| second.y - first.y);
     let row = ((y - first.y) / pitch.max(1.0)).floor().max(0.0) as usize;
     let line = row.min(lines.len().checked_sub(1)?);
     lines.line_range(line).map(|range| range.start)
@@ -746,15 +746,15 @@ fn picture_line_at(picture: &Preview, y: f32) -> Option<usize> {
 pub(super) fn click_on_picture(
     picture: &Preview,
     fonts: &mut FontStore,
-    top: f32,
+    top: DocY,
     x: f32,
     y: f32,
 ) -> Option<(Caret, ClickMark)> {
     let held = picture_bytes(picture)?;
-    let offset = caret::place(&picture.lay, &picture.doc, fonts, x, y + top)
+    let offset = caret::place(&picture.lay, &picture.doc, fonts, x, DocY::from(y) + top)
         .map(|placed| placed.offset)
         .filter(|offset| held.start <= *offset && *offset <= held.end)
-        .or_else(|| picture_line_at(picture, y + top))?;
+        .or_else(|| picture_line_at(picture, DocY::from(y) + top))?;
     debug_assert!(
         held.start <= offset && offset <= held.end,
         "a click on a picture of bytes {held:?} put the caret at {offset}"
@@ -785,7 +785,7 @@ pub(super) enum PressReads {
 /// file of one block of `lines` lines: the line there is in the stretch
 /// the pass kept, and in a line longer than `LONG_LINE` the piece there
 /// is. None when the layout has no code block or no block is open.
-fn holds_row(lay: &LayoutDoc, pass: &LayoutPass, lines: usize, y: f32) -> Option<bool> {
+fn holds_row(lay: &LayoutDoc, pass: &LayoutPass, lines: usize, y: DocY) -> Option<bool> {
     let (line, byte) = lay.code_place_at(0, lines, y)?;
     pass.keeps(lay, line, byte)
 }
@@ -795,7 +795,7 @@ fn holds_row(lay: &LayoutDoc, pass: &LayoutPass, lines: usize, y: f32) -> Option
 /// lines. Zero for a line longer than `LONG_LINE`, in a picture of its
 /// pieces or by rows: the file's layout cuts it into pieces, the block
 /// table answers the piece, and `Page::piece_depth` the row in it.
-fn row_depth(picture: &Preview, offset: usize, row: f32) -> f32 {
+fn row_depth(picture: &Preview, offset: usize, row: DocY) -> DocY {
     if picture.piece.is_some() {
         return 0.0;
     }
@@ -812,18 +812,18 @@ fn row_depth(picture: &Preview, offset: usize, row: f32) -> f32 {
 }
 
 /// Whether the first row of a caret's line stands whole in the view.
-pub(super) fn caret_line_in_view(row_y: f32, row_h: f32, scroll_y: f32, view_h: f32) -> bool {
-    row_y >= scroll_y && row_y + row_h <= scroll_y + view_h
+pub(super) fn caret_line_in_view(row_y: DocY, row_h: f32, scroll_y: DocY, view_h: f32) -> bool {
+    row_y >= scroll_y && row_y + DocY::from(row_h) <= scroll_y + DocY::from(view_h)
 }
 
 /// The height the line of a far caret is seated at: the top edge of the
 /// view when the line is above it, else the bottom edge, as the view
 /// follows a caret that walks out of it.
-pub(super) fn caret_line_edge(row_y: f32, row_h: f32, scroll_y: f32, view_h: f32) -> f32 {
+pub(super) fn caret_line_edge(row_y: DocY, row_h: f32, scroll_y: DocY, view_h: f32) -> DocY {
     if row_y < scroll_y {
         0.0
     } else {
-        (view_h - row_h).max(0.0)
+        DocY::from((view_h - row_h).max(0.0))
     }
 }
 
@@ -845,7 +845,7 @@ pub(super) struct CaretSeat {
     /// The offset of the caret when its line was seated.
     pub(super) offset: usize,
     /// The scroll that the seat left.
-    pub(super) scroll: f32,
+    pub(super) scroll: DocY,
 }
 
 /// What the box of a caret (`Caret::geometry`) is worth to the code
@@ -867,9 +867,9 @@ pub(super) enum CaretRow {
 /// Reads a caret's box against the height the pass has placed.
 /// `pending` says that the pass still runs: once it has ended, the
 /// table is whole and each box is a row.
-pub(super) fn caret_row(found: Option<CaretBox>, placed: f32, pending: bool) -> CaretRow {
+pub(super) fn caret_row(found: Option<CaretBox>, placed: DocY, pending: bool) -> CaretRow {
     match found {
-        Some(b) if pending && b.y + b.h > placed => CaretRow::Guess,
+        Some(b) if pending && b.y + DocY::from(b.h) > placed => CaretRow::Guess,
         Some(b) => CaretRow::Placed(b),
         None => CaretRow::Unknown,
     }
@@ -900,7 +900,7 @@ pub(super) fn caret_due(
     has_box: bool,
     seat: Option<CaretSeat>,
     offset: usize,
-    scroll_y: f32,
+    scroll_y: DocY,
     pending: bool,
 ) -> CaretDue {
     match seat.filter(|seat| seat.offset == offset) {
@@ -918,7 +918,7 @@ pub(super) fn caret_due(
 /// files the height a step keeps inside the view. A row the reader
 /// scrolled away from files its true distance from the top of the view,
 /// so the step brings back the view that was left, not the caret.
-pub(super) fn filed_height(row_y: f32, row_h: f32, scroll_y: f32, view_h: f32) -> (f32, bool) {
+pub(super) fn filed_height(row_y: DocY, row_h: f32, scroll_y: DocY, view_h: f32) -> (DocY, bool) {
     let below = row_y - scroll_y;
     let held = caret::held(row_y, row_h, scroll_y, view_h);
     (below, below != held)
@@ -928,7 +928,7 @@ pub(super) fn filed_height(row_y: f32, row_h: f32, scroll_y: f32, view_h: f32) -
 /// the layout: the height the landing will stand its row at, and whether
 /// that height is outside the view or cut by one of its edges, the case
 /// of a step back to a caret the reader had scrolled away from.
-pub(super) fn waiting_height(place: Place, row_h: f32, view_h: f32) -> (f32, bool) {
+pub(super) fn waiting_height(place: Place, row_h: f32, view_h: f32) -> (DocY, bool) {
     // The height is counted from the top of the view the landing will
     // show, so that view starts at zero.
     filed_height(place.below, row_h, 0.0, view_h)
@@ -942,7 +942,7 @@ pub(super) type WantedPlace = (Wanted, usize, usize, Option<std::ops::Range<usiz
 impl View {
     /// Scrolls to `y`, clamped to the page. A scroll that moved is
     /// marked for `App` (`moved`).
-    pub(super) fn scroll_to(&mut self, page: &Page, y: f32) {
+    pub(super) fn scroll_to(&mut self, page: &Page, y: DocY) {
         let clamped = scroll::clamp(y, page.height(), page.view_h);
         if clamped != self.scroll_y {
             self.scroll_y = clamped;
@@ -959,13 +959,13 @@ impl View {
         if delta != 0.0 {
             self.drop_waits();
         }
-        self.scroll_to(page, self.scroll_y + delta);
+        self.scroll_to(page, self.scroll_y + DocY::from(delta));
     }
 
     /// A movement to a height of the page that the layout holds: a
     /// step of the search, a link to a heading, the scrollbar of a
     /// page that is not measured.
-    pub(super) fn jump_to(&mut self, page: &Page, y: f32) {
+    pub(super) fn jump_to(&mut self, page: &Page, y: DocY) {
         self.drop_waits();
         self.scroll_to(page, y);
     }
@@ -1061,7 +1061,7 @@ impl View {
 
     /// The depth a seat lands by: that of the mark a click left, when
     /// the seat is the click's. Zero for any other seat.
-    fn click_depth(&self, place: Place) -> f32 {
+    fn click_depth(&self, place: Place) -> DocY {
         self.click_mark
             .filter(|mark| mark.place == place)
             .map_or(0.0, |mark| mark.depth)
@@ -1516,14 +1516,14 @@ impl View {
     /// history still waits, a match the measure has not reached cannot
     /// show, since the scroll would stop at the end of the measured
     /// part: nothing moves, what waits stays, and the answer is false.
-    pub(super) fn show_match(&mut self, page: &Page, top: f32, line_h: f32, asked: bool) -> bool {
+    pub(super) fn show_match(&mut self, page: &Page, top: DocY, line_h: f32, asked: bool) -> bool {
         let view_h = page.view_h;
-        let target = top - (view_h - line_h) / 2.0;
+        let target = top - DocY::from((view_h - line_h) / 2.0);
         let waits = self.waiting() > 0 || self.steps_held != 0;
         if asked && waits && !scroll::reached(target, page.height(), view_h) {
             return false;
         }
-        if top < self.scroll_y || top + line_h > self.scroll_y + view_h {
+        if top < self.scroll_y || top + DocY::from(line_h) > self.scroll_y + DocY::from(view_h) {
             self.scroll_to(page, target);
         }
         if asked {
@@ -1553,7 +1553,7 @@ impl View {
     /// The caret while editing, else what shows at the top of the
     /// view. A landing that still waits for the layout answers before
     /// the screen, which has not moved yet (`waiting_place`).
-    pub(super) fn standing(&self, page: &mut Page) -> Option<(usize, f32, bool, bool)> {
+    pub(super) fn standing(&self, page: &mut Page) -> Option<(usize, DocY, bool, bool)> {
         let editing = page.editing && page.caret.is_some();
         let caret = page.caret.filter(|_| editing).map(|caret| caret.offset);
         let waiting = waiting_place(self.pending_row, self.pending_offset, caret);
@@ -1664,7 +1664,7 @@ impl View {
         self.kept_view = self.kept_view.map(|kept| kept.zoomed(ratio));
         // What the view shows while the pass runs, until the kept
         // place is reached.
-        self.scroll_y *= ratio;
+        self.scroll_y *= DocY::from(ratio);
         // A jump to the end that waits is told from a movement of the
         // reader by the scroll it left, which the step has just
         // changed: the end still waits.
@@ -1875,7 +1875,7 @@ impl View {
         let pass = page.pass?;
         // A view that reaches past what is placed is the pass's own
         // first frames.
-        if lay.height < self.scroll_y + view_h {
+        if lay.height < self.scroll_y + DocY::from(view_h) {
             return None;
         }
         let row_of = |offset: usize| scroll::source_row(doc, 0, offset).min(total - 1);
@@ -1884,7 +1884,7 @@ impl View {
         // `top_offset` reads one pixel under what it is given.
         // In a very long line the place is a piece of the line: the
         // layout holds the pieces around the view, not the line.
-        let held = |y: f32| holds_row(lay, pass, total, y + 1.0);
+        let held = |y: DocY| holds_row(lay, pass, total, y + 1.0);
         let top = row_of(scroll::top_offset(lay, doc, self.scroll_y));
         // A drag of the scrollbar's thumb names its own landing
         // (`thumb_names`): the view follows the hand to it.
@@ -1900,7 +1900,7 @@ impl View {
             && !page.searching
             && self.pending_row.is_some()
             && self.row_parked.is_some();
-        if !seat && held(self.scroll_y)? && held(self.scroll_y + view_h - 2.0)? {
+        if !seat && held(self.scroll_y)? && held(self.scroll_y + DocY::from(view_h) - 2.0)? {
             return None;
         }
         let landing = if gesture {
@@ -1954,7 +1954,7 @@ impl View {
         };
         let blank = match (page.lay, page.pass) {
             (Some(lay), Some(pass)) => {
-                holds_row(lay, pass, lines, self.scroll_y + y) == Some(false)
+                holds_row(lay, pass, lines, self.scroll_y + DocY::from(y)) == Some(false)
             }
             _ => false,
         };

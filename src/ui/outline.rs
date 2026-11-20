@@ -7,6 +7,7 @@
 use std::collections::HashSet;
 
 use crate::doc::model::{BlockKind, Document};
+use crate::layout::DocY;
 
 /// One heading of the document, in document order.
 pub struct Entry {
@@ -203,10 +204,10 @@ impl OutlineTree {
     /// is folded away or not yet placed.
     pub fn current_of(
         &self,
-        scroll_y: f32,
+        scroll_y: DocY,
         view_h: f32,
         at_end: bool,
-        top: impl Fn(usize) -> Option<f32>,
+        top: impl Fn(usize) -> Option<DocY>,
     ) -> Option<usize> {
         let placed = || {
             self.entries
@@ -215,7 +216,7 @@ impl OutlineTree {
                 .filter_map(|(i, e)| top(e.block).map(|y| (i, y)))
         };
         let reached = placed()
-            .filter(|&(_, y)| y >= scroll_y - 1.0 && y <= scroll_y + view_h / 2.0)
+            .filter(|&(_, y)| y >= scroll_y - 1.0 && y <= scroll_y + DocY::from(view_h / 2.0))
             // min_by keeps the first of equal minima; the indexes
             // reversed make that the last listed.
             .min_by(|a, b| a.1.total_cmp(&b.1).then_with(|| b.0.cmp(&a.0)));
@@ -223,7 +224,7 @@ impl OutlineTree {
             return Some(i);
         }
         let line = if at_end {
-            scroll_y + view_h
+            scroll_y + DocY::from(view_h)
         } else {
             scroll_y + 1.0
         };
@@ -236,7 +237,7 @@ impl OutlineTree {
             return above;
         }
         placed()
-            .filter(|&(_, y)| y <= scroll_y + view_h)
+            .filter(|&(_, y)| y <= scroll_y + DocY::from(view_h))
             .min_by(|a, b| a.1.total_cmp(&b.1).then_with(|| b.0.cmp(&a.0)))
             .map(|(i, _)| i)
     }
@@ -544,7 +545,7 @@ mod tests {
         // the lower half once the page cannot scroll further, and the
         // chapter before it is long above the view.
         let tree = book(&[("Six", 1), ("Conclusion", 9)]);
-        let tops = |block: usize| Some(block as f32 * 100.0);
+        let tops = |block: usize| Some(block as DocY * 100.0);
         let view_h = 400.0;
         assert_eq!(
             tree.current_of(600.0, view_h, false, tops),
@@ -620,7 +621,7 @@ mod tests {
             ("Top Itineraries", 9),
             ("Table of Contents", 0),
         ]);
-        let tops = |block: usize| Some(block as f32 * 1000.0);
+        let tops = |block: usize| Some(block as DocY * 1000.0);
         let view_h = 1000.0;
         assert_eq!(
             tree.current_of(0.0, view_h, false, tops),
@@ -641,7 +642,7 @@ mod tests {
         // A chapter and its first section often point at the same page:
         // the section, listed after, carries the highlight.
         let tree = book(&[("Chapter", 4), ("First section", 4), ("Second section", 7)]);
-        let tops = |block: usize| Some(block as f32 * 1000.0);
+        let tops = |block: usize| Some(block as DocY * 1000.0);
         let view_h = 1000.0;
         assert_eq!(tree.current_of(4000.0, view_h, false, tops), Some(1));
         assert_eq!(tree.current_of(6000.0, view_h, false, tops), Some(1));

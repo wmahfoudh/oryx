@@ -11,7 +11,7 @@ use cosmic_text::{Attrs, Buffer, Family, LayoutGlyph, Metrics, Shaping, Style, W
 
 use crate::doc::model::{BlockKind, Document, Span};
 use crate::edit::caret;
-use crate::layout::{metrics, LayoutDoc, TextRef, TextRun};
+use crate::layout::{metrics, DocY, LayoutDoc, TextRef, TextRun};
 use crate::style::fonts::FontStore;
 
 /// Marker runs (bullets, numbers, checkmarks, alert titles) carry this
@@ -720,14 +720,14 @@ pub fn pos_at(
     doc: &Document,
     fonts: &mut FontStore,
     x: f32,
-    y: f32,
+    y: DocY,
 ) -> Option<ModelPos> {
-    let mut best: Option<(f32, f32, usize)> = None;
+    let mut best: Option<(DocY, f32, usize)> = None;
     for (i, run) in lay.runs.iter().enumerate() {
         if run.span == MARKER_SPAN {
             continue;
         }
-        let bottom = run.y + metrics::LINE_HEIGHT * run.size;
+        let bottom = run.y + DocY::from(metrics::LINE_HEIGHT * run.size);
         let dy = if y < run.y {
             run.y - y
         } else if y > bottom {
@@ -783,7 +783,7 @@ pub fn rects(
     lay: &LayoutDoc,
     doc: &Document,
     fonts: &mut FontStore,
-) -> Vec<(f32, f32, f32, f32)> {
+) -> Vec<(f32, DocY, f32, f32)> {
     rects_cached(sel, lay, doc, fonts, &mut ShapeCache::default())
 }
 
@@ -813,7 +813,7 @@ pub fn rects_cached(
     doc: &Document,
     fonts: &mut FontStore,
     cache: &mut ShapeCache,
-) -> Vec<(f32, f32, f32, f32)> {
+) -> Vec<(f32, DocY, f32, f32)> {
     rects_for(sel, lay, doc, fonts, cache, 0..lay.runs.len())
 }
 
@@ -826,9 +826,9 @@ pub fn rects_window(
     doc: &Document,
     fonts: &mut FontStore,
     cache: &mut ShapeCache,
-    y0: f32,
-    y1: f32,
-) -> Vec<(f32, f32, f32, f32)> {
+    y0: DocY,
+    y1: DocY,
+) -> Vec<(f32, DocY, f32, f32)> {
     let (head, tail) = lay.runs_in(y0, y1);
     rects_for(sel, lay, doc, fonts, cache, head.chain(tail))
 }
@@ -847,10 +847,10 @@ pub fn rects_between(
     lay: &LayoutDoc,
     doc: &Document,
     fonts: &mut FontStore,
-    top: f32,
-    bottom: f32,
+    top: DocY,
+    bottom: DocY,
     margin: f32,
-) -> Vec<(f32, f32, f32, f32)> {
+) -> Vec<(f32, DocY, f32, f32)> {
     let mut cache = ShapeCache::default();
     let near = rects_near(
         sel,
@@ -858,12 +858,12 @@ pub fn rects_between(
         doc,
         fonts,
         &mut cache,
-        top - margin,
-        bottom + margin,
+        top - DocY::from(margin),
+        bottom + DocY::from(margin),
     );
     #[cfg(debug_assertions)]
     if lay.runs.len() <= 4096 {
-        let painted = |r: &&(f32, f32, f32, f32)| r.1 + r.3 > top && r.1 < bottom;
+        let painted = |r: &&(f32, DocY, f32, f32)| r.1 + DocY::from(r.3) > top && r.1 < bottom;
         let whole = rects(sel, lay, doc, fonts);
         debug_assert_eq!(
             near.iter().filter(painted).collect::<Vec<_>>(),
@@ -882,9 +882,9 @@ fn rects_near(
     doc: &Document,
     fonts: &mut FontStore,
     cache: &mut ShapeCache,
-    lo: f32,
-    hi: f32,
-) -> Vec<(f32, f32, f32, f32)> {
+    lo: DocY,
+    hi: DocY,
+) -> Vec<(f32, DocY, f32, f32)> {
     if breaks_only(doc, sel).is_some() {
         rects_cached(sel, lay, doc, fonts, cache)
     } else {
@@ -903,9 +903,9 @@ pub fn window_rects(
     doc: &Document,
     fonts: &mut FontStore,
     matches: &[Selection],
-    lo: f32,
-    hi: f32,
-) -> Vec<(usize, (f32, f32, f32, f32))> {
+    lo: DocY,
+    hi: DocY,
+) -> Vec<(usize, (f32, DocY, f32, f32))> {
     let held = held_matches(lay, doc, matches);
     let near = &matches[held.clone()];
     let mut rects = Vec::new();
@@ -996,7 +996,7 @@ pub fn held_parts(lay: &LayoutDoc, doc: &Document) -> Vec<(usize, usize, usize)>
 }
 
 /// The top of each match, the first value of `match_spans`.
-pub fn match_tops(lay: &LayoutDoc, doc: &Document, matches: &[Selection]) -> Vec<f32> {
+pub fn match_tops(lay: &LayoutDoc, doc: &Document, matches: &[Selection]) -> Vec<DocY> {
     match_spans(lay, doc, matches)
         .into_iter()
         .map(|(top, _)| top)
@@ -1012,7 +1012,7 @@ pub fn first_match_from(
     lay: &LayoutDoc,
     doc: &Document,
     matches: &[Selection],
-    y: f32,
+    y: DocY,
 ) -> Option<usize> {
     let index =
         matches.partition_point(|m| match_spans(lay, doc, std::slice::from_ref(m))[0].0 < y);
@@ -1024,8 +1024,8 @@ pub fn first_match_from(
 /// search into the sorted matches. A match with no placed run answers
 /// with its recorded block top for both, so a windowed layout still
 /// positions every match; `f32::MAX` only where nothing was ever placed.
-pub fn match_spans(lay: &LayoutDoc, doc: &Document, matches: &[Selection]) -> Vec<(f32, f32)> {
-    let mut spans = vec![(f32::MAX, f32::MIN); matches.len()];
+pub fn match_spans(lay: &LayoutDoc, doc: &Document, matches: &[Selection]) -> Vec<(DocY, DocY)> {
+    let mut spans = vec![(DocY::MAX, DocY::MIN); matches.len()];
     for (index, run) in lay.runs.iter().enumerate() {
         let Some((iv_start, mut iv_end)) = run_interval(run) else {
             continue;
@@ -1045,11 +1045,11 @@ pub fn match_spans(lay: &LayoutDoc, doc: &Document, matches: &[Selection]) -> Ve
         }
     }
     for (span, m) in spans.iter_mut().zip(matches) {
-        if span.0 == f32::MAX {
+        if span.0 == DocY::MAX {
             let pos = m.ordered().0;
             let y = lay
                 .approx_top_at(pos.block, pos.span, pos.byte)
-                .unwrap_or(f32::MAX);
+                .unwrap_or(DocY::MAX);
             *span = (y, y);
         }
     }
@@ -1059,14 +1059,14 @@ pub fn match_spans(lay: &LayoutDoc, doc: &Document, matches: &[Selection]) -> Ve
 /// Where the current match sits: the topmost overlapping run's y and
 /// text size, for scrolling it into view. None while nothing placed
 /// covers it.
-pub fn match_anchor(lay: &LayoutDoc, doc: &Document, m: &Selection) -> Option<(f32, f32)> {
+pub fn match_anchor(lay: &LayoutDoc, doc: &Document, m: &Selection) -> Option<(DocY, f32)> {
     let (a, b) = m.ordered();
     if breaks_only(doc, m).is_some() {
         // No run overlaps a match made of line breaks; the run ending
         // the piece before the first break stands for it.
         return piece_end_run(lay, a, 0..lay.runs.len()).map(|i| (lay.runs[i].y, lay.runs[i].size));
     }
-    let mut best: Option<(f32, f32)> = None;
+    let mut best: Option<(DocY, f32)> = None;
     for (index, run) in lay.runs.iter().enumerate() {
         let Some((s, mut e)) = run_interval(run) else {
             continue;
@@ -1276,7 +1276,7 @@ fn break_boxes(
     cache: &mut ShapeCache,
     indices: impl Iterator<Item = usize>,
     breaks: usize,
-) -> Vec<(f32, f32, f32, f32)> {
+) -> Vec<(f32, DocY, f32, f32)> {
     let (a, _) = sel.ordered();
     let mut out = Vec::new();
     let (first_end, y, height, space, left) = match piece_end_run(lay, a, indices) {
@@ -1327,7 +1327,7 @@ fn break_boxes(
     for k in 1..breaks {
         let (x, y) = match lay.code_line_seat(a.block, a.span + k) {
             Some(seat) => (seat.x, seat.y),
-            None => (left, y + k as f32 * height),
+            None => (left, y + k as DocY * DocY::from(height)),
         };
         out.push((x, y, space, height));
     }
@@ -1341,16 +1341,16 @@ fn rects_for(
     fonts: &mut FontStore,
     cache: &mut ShapeCache,
     indices: impl Iterator<Item = usize>,
-) -> Vec<(f32, f32, f32, f32)> {
+) -> Vec<(f32, DocY, f32, f32)> {
     let (a, b) = sel.ordered();
     if let Some(breaks) = breaks_only(doc, sel) {
         return break_boxes(sel, lay, doc, fonts, cache, indices, breaks);
     }
-    let mut out: Vec<(f32, f32, f32, f32)> = Vec::new();
+    let mut out: Vec<(f32, DocY, f32, f32)> = Vec::new();
     // The previous box's interval end and line top, kept while that box
     // reached its run's right edge, so a byte-contiguous neighbor on the
     // same line can bridge the gap justification stretched between them.
-    let mut prev: Option<(ModelPos, f32)> = None;
+    let mut prev: Option<(ModelPos, DocY)> = None;
     for index in indices {
         let run = &lay.runs[index];
         let Some((iv_start, mut iv_end)) = run_interval(run) else {

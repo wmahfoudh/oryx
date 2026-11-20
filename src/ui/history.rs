@@ -8,6 +8,8 @@
 
 use std::path::PathBuf;
 
+use crate::layout::DocY;
+
 /// How many places each direction keeps; the oldest goes first.
 const DEPTH: usize = 100;
 
@@ -20,7 +22,7 @@ pub struct Entry {
     /// How far under the top of the view the place's line stood, so a
     /// step brings the view back as it was left. Negative for a line cut
     /// by the top edge.
-    pub below: f32,
+    pub below: DocY,
     /// Taken in the editor, where `below` is the caret's row. The page
     /// has no row for most lines, and stands the line's block there.
     pub editing: bool,
@@ -116,7 +118,7 @@ mod tests {
         at_height(offset, 0.0)
     }
 
-    fn at_height(offset: usize, below: f32) -> Entry {
+    fn at_height(offset: usize, below: DocY) -> Entry {
         Entry {
             file: Some(PathBuf::from("/notes/a.md")),
             offset,

@@ -25,7 +25,7 @@ use oryx::input::{
 };
 use oryx::layout::{
     self, layout_begin, layout_extend, layout_more, metrics, recolor_batch, window_to, ComicFit,
-    DecoRect, DirectionMode, LayoutDoc, LayoutPass, ShapePool, ViewConfig, OPEN_SLICE, SLICE,
+    DecoRect, DirectionMode, DocY, LayoutDoc, LayoutPass, ShapePool, ViewConfig, OPEN_SLICE, SLICE,
 };
 use oryx::paint;
 use oryx::paint::painter::Painter;
@@ -555,7 +555,7 @@ fn outline_current(
     outline: &mut OutlineTree,
     side: &Sidebar,
     lay: &LayoutDoc,
-    scroll_y: f32,
+    scroll_y: DocY,
     view_h: f32,
     pending: bool,
 ) -> Option<usize> {
@@ -609,8 +609,8 @@ fn release_act(grabbed: bool, on_page: bool, selected: bool, reading: bool) -> R
 /// Whether the view shows the end of the page: the scroll stops where
 /// the page's end meets the view's bottom. While the layout is pending,
 /// the height is the part placed so far, and its edge is not the end.
-fn page_end_reached(scroll_y: f32, view_h: f32, height: f32, pending: bool) -> bool {
-    !pending && scroll_y + view_h >= height - 1.0
+fn page_end_reached(scroll_y: DocY, view_h: f32, height: DocY, pending: bool) -> bool {
+    !pending && scroll_y + DocY::from(view_h) >= height - 1.0
 }
 
 /// A link target naming a file on disk: resolved against the document's
@@ -641,7 +641,7 @@ fn draw_caret(
     width: u32,
     height: u32,
     inset: u32,
-    scroll_y: f32,
+    scroll_y: DocY,
     scale: f32,
     caret: CaretBox,
     color: Rgba,
@@ -669,7 +669,7 @@ fn draw_strip(
     width: u32,
     height: u32,
     inset: u32,
-    scroll_y: f32,
+    scroll_y: DocY,
     strip: &paint::gutter::Strip,
 ) {
     let top = (strip.y - scroll_y) as i64;
@@ -893,7 +893,7 @@ struct Parked {
     document: Document,
     layout: Option<LayoutDoc>,
     pass: Option<LayoutPass>,
-    scroll_y: f32,
+    scroll_y: DocY,
     layout_width: f32,
     /// The edits since the page was rendered, over the page's own
     /// text: the outline's offsets are the page's, and this ledger
@@ -921,7 +921,7 @@ struct Stash {
     lossy: bool,
     mode: edit::Mode,
     caret: Option<Caret>,
-    scroll_y: f32,
+    scroll_y: DocY,
     /// The steps of the history that waited for the file's measure
     /// (`View::steps_held`): the help page has the view meanwhile, and
     /// a scroll on it would drop them.
@@ -986,7 +986,7 @@ fn comic_fit_step(fit: ComicFit, dir: i32, height: f32) -> ComicFit {
 /// The next page top in the given direction, from the sorted tops of a
 /// comic layout. None past the last top going down; going up from
 /// anywhere below the first page answers the start.
-fn page_step_target(tops: &[f32], current: f32, dir: i32) -> Option<f32> {
+fn page_step_target(tops: &[DocY], current: DocY, dir: i32) -> Option<DocY> {
     if dir > 0 {
         tops.iter().copied().find(|&t| t > current + 1.0)
     } else {
@@ -1777,7 +1777,7 @@ impl App {
         row_height(&self.document, &self.cfg)
     }
 
-    fn doc_height(&self) -> f32 {
+    fn doc_height(&self) -> DocY {
         self.layout.as_ref().map(|l| l.height).unwrap_or(0.0)
     }
 
@@ -1788,7 +1788,7 @@ impl App {
             .unwrap_or(0.0)
     }
 
-    fn scroll_to(&mut self, y: f32) {
+    fn scroll_to(&mut self, y: DocY) {
         let (view, page) = self.page();
         view.scroll_to(&page, y);
         self.after_scroll();
@@ -2128,7 +2128,7 @@ impl App {
             // text under the image keeps its place instead.
             let below = image_bottom.map_or(below, |bottom| {
                 let row_h = row_height(&self.document, &self.cfg);
-                caret::held(bottom - row_h, row_h, page_scroll, view_h)
+                caret::held(bottom - DocY::from(row_h), row_h, page_scroll, view_h)
             });
             self.seat_editor_on(Place {
                 offset,
@@ -2752,7 +2752,9 @@ impl App {
             .layout
             .as_ref()
             .and_then(|l| caret::row_top(l, &self.document, caret))
-            .is_some_and(|y| y >= self.view.scroll_y && y < self.view.scroll_y + self.viewport_h());
+            .is_some_and(|y| {
+                y >= self.view.scroll_y && y < self.view.scroll_y + DocY::from(self.viewport_h())
+            });
         self.document = edit::rendered_document(load::detect_with_text(&path, &current), &current);
         self.restart_layout();
         self.outline = OutlineTree::build(&self.document);
@@ -4791,7 +4793,7 @@ impl App {
     /// A click while editing places the caret at the character.
     fn place_caret(&mut self) {
         let x = self.cursor.x as f32 - self.inset();
-        let y = self.cursor.y as f32 + self.view.scroll_y;
+        let y = DocY::from(self.cursor.y as f32) + self.view.scroll_y;
         let Some(lay) = self.layout.as_ref() else {
             return;
         };
@@ -4837,7 +4839,7 @@ impl App {
         let (Some(frame), Some((top, _))) = (self.preview.as_ref(), painted) else {
             return false;
         };
-        let top = f32::from_bits(top);
+        let top = DocY::from_bits(top);
         let placed = click_on_picture(&frame.preview, &mut self.fonts, top, x, y);
         if let Some((placed, mark)) = placed {
             debug_assert!(
@@ -5787,7 +5789,10 @@ impl App {
     /// the window refreshes it.
     fn refresh_search_rects(&mut self) {
         let vh = self.viewport_h();
-        let (lo, hi) = (self.view.scroll_y - 2.0 * vh, self.view.scroll_y + 3.0 * vh);
+        let (lo, hi) = (
+            self.view.scroll_y - 2.0 * DocY::from(vh),
+            self.view.scroll_y + 3.0 * DocY::from(vh),
+        );
         let scroll = self.view.scroll_y;
         let Some(lay) = self.layout.as_ref() else {
             return;
@@ -5824,7 +5829,7 @@ impl App {
         if !due {
             return;
         }
-        let (lo, hi) = (scroll - 2.0 * vh, scroll + 3.0 * vh);
+        let (lo, hi) = (scroll - 2.0 * DocY::from(vh), scroll + 3.0 * DocY::from(vh));
         let (Some(lay), Some(found)) = (self.layout.as_ref(), self.occurrences.as_mut()) else {
             return;
         };
@@ -5902,7 +5907,7 @@ impl App {
     /// the layout holds its rows: a cold match answers its recorded top
     /// from the block table. None when there is no match, or the layout
     /// has no place for it yet.
-    fn match_top(&self) -> Option<(f32, f32, bool)> {
+    fn match_top(&self) -> Option<(DocY, f32, bool)> {
         let (lay, state) = (self.layout.as_ref()?, self.search.as_ref()?);
         let m = state.matches.get(state.current)?;
         match selection::match_anchor(lay, &self.document, m) {
@@ -5935,8 +5940,10 @@ impl App {
         self.search.as_mut().expect("search open").settle = false;
         let line_h = metrics::LINE_HEIGHT * size;
         let vh = self.viewport_h();
-        if top < self.view.scroll_y || top + line_h > self.view.scroll_y + vh {
-            self.scroll_to(top - (vh - line_h) / 2.0);
+        if top < self.view.scroll_y
+            || top + DocY::from(line_h) > self.view.scroll_y + DocY::from(vh)
+        {
+            self.scroll_to(top - DocY::from((vh - line_h) / 2.0));
         }
     }
 
@@ -6041,7 +6048,7 @@ impl App {
     /// a following cursor move does not re-extend character-wise.
     fn select_unit(&mut self, paragraph: bool) {
         let x = self.cursor.x as f32 - self.inset();
-        let y = self.cursor.y as f32 + self.view.scroll_y;
+        let y = DocY::from(self.cursor.y as f32) + self.view.scroll_y;
         let Some(lay) = self.layout.as_ref() else {
             return;
         };
@@ -6080,7 +6087,7 @@ impl App {
     /// selection.
     fn begin_selection(&mut self) {
         let x = self.cursor.x as f32 - self.inset();
-        let y = self.cursor.y as f32 + self.view.scroll_y;
+        let y = DocY::from(self.cursor.y as f32) + self.view.scroll_y;
         let Some(lay) = self.layout.as_ref() else {
             return;
         };
@@ -6103,7 +6110,8 @@ impl App {
             return;
         };
         let x = self.cursor.x as f32 - self.inset();
-        let y = scroll::edge_clamp(self.cursor.y as f32, self.viewport_h()) + self.view.scroll_y;
+        let y = DocY::from(scroll::edge_clamp(self.cursor.y as f32, self.viewport_h()))
+            + self.view.scroll_y;
         let Some(lay) = self.layout.as_ref() else {
             return;
         };
@@ -6567,7 +6575,7 @@ impl App {
         let visible = layout::code_lines_in(
             lay,
             &self.document,
-            self.view.scroll_y - view_h..self.view.scroll_y + 2.0 * view_h,
+            self.view.scroll_y - DocY::from(view_h)..self.view.scroll_y + 2.0 * DocY::from(view_h),
         );
         let Some((block, band)) = speculation_target(
             &self.document,
@@ -8226,7 +8234,7 @@ impl App {
         let Some(lay) = self.layout.as_ref() else {
             return;
         };
-        let mut tops: Vec<f32> = (0..self.document.blocks.len())
+        let mut tops: Vec<DocY> = (0..self.document.blocks.len())
             .filter_map(|i| lay.approx_top(i, 0))
             .collect();
         // Pair members share their row's top.
@@ -8249,7 +8257,10 @@ impl App {
             return;
         };
         let vh = self.viewport_h();
-        let (lo, hi) = (self.view.scroll_y - vh, self.view.scroll_y + 2.0 * vh);
+        let (lo, hi) = (
+            self.view.scroll_y - DocY::from(vh),
+            self.view.scroll_y + 2.0 * DocY::from(vh),
+        );
         let keys: Vec<String> = self
             .document
             .blocks
@@ -8625,7 +8636,7 @@ impl App {
             return;
         };
         let x = self.cursor.x as f32 - self.inset();
-        let y = self.cursor.y as f32 + self.view.scroll_y;
+        let y = DocY::from(self.cursor.y as f32) + self.view.scroll_y;
         if let Some(block) = lay.checkbox_at(x, y) {
             self.click_checkbox(block);
             return;
@@ -8730,7 +8741,7 @@ impl App {
             self.request_redraw();
         }
         let x = self.cursor.x as f32 - self.inset();
-        let y = self.cursor.y as f32 + self.view.scroll_y;
+        let y = DocY::from(self.cursor.y as f32) + self.view.scroll_y;
         let on_toggle = self.search.is_some()
             && self
                 .logical_width()
@@ -8885,13 +8896,13 @@ impl App {
     /// Content appended below the painted band leaves its pixels valid,
     /// and only its document height has to follow. Appending into the band
     /// drops it.
-    fn grow_band(&mut self, before: f32) {
+    fn grow_band(&mut self, before: DocY) {
         let after = self.doc_height();
         if after == before {
             return;
         }
         match self.band.as_mut() {
-            Some(band) if before < band.y_top + band.height as f32 => {
+            Some(band) if before < band.y_top + band.height as DocY => {
                 self.band = None;
                 self.pending_band_for = None;
             }
@@ -9206,7 +9217,8 @@ impl App {
         // brings blocks that had none), after a search step, and when the
         // view left the band they were built over.
         let drifted = self.search.as_ref().is_some_and(|state| {
-            !state.stale && (self.view.scroll_y - state.rects_scroll).abs() > self.viewport_h()
+            !state.stale
+                && (self.view.scroll_y - state.rects_scroll).abs() > DocY::from(self.viewport_h())
         });
         if slid || stepped || drifted {
             self.refresh_search_rects();
@@ -9251,12 +9263,12 @@ impl App {
                 lay,
                 &self.document,
                 &mut self.fonts,
-                frame_y - 4.0 * view_h,
-                frame_y + 5.0 * view_h,
+                frame_y - 4.0 * DocY::from(view_h),
+                frame_y + 5.0 * DocY::from(view_h),
                 reach,
             )
             .into_iter()
-            .map(|(x, y, w, h)| DecoRect::fill(x, y, w, h, self.theme.ui.selection_bg))
+            .map(|(x, y, w, h)| DecoRect::fill(x, y, w, DocY::from(h), self.theme.ui.selection_bg))
             .collect(),
             _ => Vec::new(),
         };
@@ -9267,7 +9279,7 @@ impl App {
                 } else {
                     self.theme.ui.search_match_bg
                 };
-                highlight.push(DecoRect::fill(x, y, w, h, color));
+                highlight.push(DecoRect::fill(x, y, w, DocY::from(h), color));
             }
         }
         if let Some(found) = self.occurrences.as_ref() {
@@ -9276,7 +9288,7 @@ impl App {
                 found
                     .rects
                     .iter()
-                    .map(|&(x, y, w, h)| DecoRect::fill(x, y, w, h, color)),
+                    .map(|&(x, y, w, h)| DecoRect::fill(x, y, w, DocY::from(h), color)),
             );
         }
 

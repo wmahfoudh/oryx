@@ -1,5 +1,6 @@
 //! Scrollbar geometry and drawing over the presented frame.
 
+use crate::layout::DocY;
 use crate::style::theme::Rgba;
 
 /// Total scrollbar strip width at the right window edge, in logical units.
@@ -11,19 +12,19 @@ pub const MIN_THUMB: f32 = 24.0;
 /// Thumb `(y, height)` in track pixels. None when the document fits.
 /// Geometry is proportional, so only the minimum height needs `scale`.
 pub fn thumb(
-    doc_height: f32,
+    doc_height: DocY,
     viewport_h: f32,
-    scroll_y: f32,
+    scroll_y: DocY,
     track_h: f32,
     scale: f32,
 ) -> Option<(f32, f32)> {
-    if doc_height <= viewport_h {
+    if doc_height <= DocY::from(viewport_h) {
         return None;
     }
     let height = ((viewport_h / doc_height) * track_h)
         .max(MIN_THUMB * scale)
         .min(track_h);
-    let max_scroll = (doc_height - viewport_h).max(1.0);
+    let max_scroll = (doc_height - DocY::from(viewport_h)).max(1.0);
     let y = (scroll_y / max_scroll).clamp(0.0, 1.0) * (track_h - height);
     Some((y, height))
 }
@@ -33,11 +34,12 @@ pub fn scroll_for_thumb(
     thumb_y: f32,
     thumb_h: f32,
     track_h: f32,
-    doc_height: f32,
+    doc_height: DocY,
     viewport_h: f32,
-) -> f32 {
+) -> DocY {
     let span = (track_h - thumb_h).max(1.0);
-    (thumb_y / span).clamp(0.0, 1.0) * (doc_height - viewport_h).max(0.0)
+    (DocY::from(thumb_y) / DocY::from(span)).clamp(0.0, 1.0)
+        * (doc_height - DocY::from(viewport_h)).max(0.0)
 }
 
 /// Fills the thumb into a 0RGB frame of `width x height`.

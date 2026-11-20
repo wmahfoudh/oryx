@@ -8,6 +8,7 @@ use std::time::Instant;
 use winit::keyboard::{Key, NamedKey};
 
 use crate::input::DOUBLE_CLICK;
+use crate::layout::DocY;
 use crate::paint::painter::Painter;
 use crate::style::fonts::BODY_FAMILY;
 use crate::style::theme::{self, Rgba, Theme};
@@ -145,9 +146,9 @@ impl ThemeBrowser {
     fn thumb(&self) -> Option<(f32, f32)> {
         let list_h = self.geometry.list_h;
         scrollbar::thumb(
-            self.rows.len() as f32 * ROW_H,
+            DocY::from(self.rows.len() as f32 * ROW_H),
             list_h,
-            self.scroll,
+            DocY::from(self.scroll),
             list_h,
             1.0,
         )
@@ -163,7 +164,7 @@ impl ThemeBrowser {
             y - self.geometry.list_top - grab,
             th,
             list_h,
-            self.rows.len() as f32 * ROW_H,
+            DocY::from(self.rows.len() as f32 * ROW_H),
             list_h,
         );
     }

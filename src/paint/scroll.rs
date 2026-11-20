@@ -6,12 +6,12 @@ use std::time::{Duration, Instant};
 
 use crate::doc::images::MediaCache;
 use crate::doc::model::{BlockKind, Document};
-use crate::layout::{DecoRect, LayoutDoc};
+use crate::layout::{DecoRect, DocY, LayoutDoc};
 use crate::style::fonts::FontStore;
 use crate::style::theme::Theme;
 
-pub fn clamp(y: f32, doc_height: f32, viewport_h: f32) -> f32 {
-    y.clamp(0.0, (doc_height - viewport_h).max(0.0))
+pub fn clamp(y: DocY, doc_height: DocY, viewport_h: f32) -> DocY {
+    y.clamp(0.0, (doc_height - DocY::from(viewport_h)).max(0.0))
 }
 
 /// How often the edge scroll of a selection drag advances the view: the
@@ -133,7 +133,7 @@ impl EdgeScroll {
 /// The block is looked up on the page, not in the order of the source:
 /// a footnote definition stands at the end of the page, and the blocks
 /// of a closed details group are not on it.
-pub fn top_offset(lay: &LayoutDoc, doc: &Document, scroll_y: f32) -> usize {
+pub fn top_offset(lay: &LayoutDoc, doc: &Document, scroll_y: DocY) -> usize {
     let at = lay
         .block_at(scroll_y + 1.0)
         .filter(|&index| index < doc.blocks.len());
@@ -170,7 +170,7 @@ fn line_place(doc: &Document, block: usize, offset: usize) -> Option<(usize, usi
 /// block whose lines answer for a source offset, or of its piece in a
 /// line longer than `LONG_LINE`. None before the pass places the
 /// block.
-pub fn offset_top(lay: &LayoutDoc, doc: &Document, offset: usize) -> Option<f32> {
+pub fn offset_top(lay: &LayoutDoc, doc: &Document, offset: usize) -> Option<DocY> {
     let block = doc.block_at_offset(offset)?;
     if let Some((line, byte)) = line_place(doc, block, offset) {
         return lay.approx_top_at(block, line, byte);
@@ -188,7 +188,7 @@ pub fn offset_top(lay: &LayoutDoc, doc: &Document, offset: usize) -> Option<f32>
 /// of a source offset, or its line inside a code block whose lines
 /// answer for a source offset, or its piece in a line longer than
 /// `LONG_LINE`. None before the pass places the block.
-pub fn offset_span(lay: &LayoutDoc, doc: &Document, offset: usize) -> Option<Range<f32>> {
+pub fn offset_span(lay: &LayoutDoc, doc: &Document, offset: usize) -> Option<Range<DocY>> {
     let block = doc.block_at_offset(offset)?;
     if let Some((line, byte)) = line_place(doc, block, offset) {
         return lay.code_span_at(block, line, byte);
@@ -289,10 +289,10 @@ pub struct TopPlace {
     pub offset: usize,
     /// How far under the top of that block or line the top edge of the
     /// view stood.
-    above: f32,
+    above: DocY,
     /// The height of that block or line in the layout the place was
     /// taken from.
-    height: f32,
+    height: DocY,
     /// The heights are those of the whole block, since its line did
     /// not hold the top edge.
     whole: bool,
@@ -308,10 +308,10 @@ impl TopPlace {
     /// of the file and inside the margin above the first block, where
     /// the distance itself is the place, and before the pass has placed
     /// a block.
-    pub fn of(lay: &LayoutDoc, doc: &Document, scroll_y: f32) -> Option<TopPlace> {
+    pub fn of(lay: &LayoutDoc, doc: &Document, scroll_y: DocY) -> Option<TopPlace> {
         let offset = top_offset(lay, doc, scroll_y);
         let block = doc.block_at_offset(offset)?;
-        let holds = |span: &Range<f32>| span.start <= scroll_y + 1.0 && scroll_y <= span.end;
+        let holds = |span: &Range<DocY>| span.start <= scroll_y + 1.0 && scroll_y <= span.end;
         let (span, whole) = match offset_span(lay, doc, offset).filter(holds) {
             Some(span) => (span, false),
             None => (lay.block_span(block)?, true),
@@ -338,14 +338,14 @@ impl TopPlace {
     /// from, the byte that stood at the top edge is placed again: the
     /// same share of the piece's bytes as of its height, in the old
     /// piece and in the new one.
-    pub fn scroll(&self, lay: &LayoutDoc, doc: &Document) -> Option<f32> {
+    pub fn scroll(&self, lay: &LayoutDoc, doc: &Document) -> Option<DocY> {
         if let Some((from, to)) = self.piece.filter(|_| self.height > 0.0) {
             let share = (self.above / self.height).clamp(0.0, 1.0);
-            let byte = (from + ((to - from) as f32 * share) as usize).min(to.saturating_sub(1));
+            let byte = (from + ((to - from) as DocY * share) as usize).min(to.saturating_sub(1));
             match offset_piece(lay, doc, byte) {
                 Some(piece) if piece != (from, to) => {
                     let span = offset_span(lay, doc, byte)?;
-                    let share = (byte - piece.0) as f32 / (piece.1 - piece.0).max(1) as f32;
+                    let share = (byte - piece.0) as DocY / (piece.1 - piece.0).max(1) as DocY;
                     return Some(span.start + (span.end - span.start) * share);
                 }
                 _ => {}
@@ -389,7 +389,7 @@ pub fn source_row(doc: &Document, block: usize, offset: usize) -> usize {
 /// The top of the row `source_row` answers for an offset, from the
 /// block table: its line's, or its piece's in a line longer than
 /// `LONG_LINE`.
-pub fn table_row_top(lay: &LayoutDoc, doc: &Document, block: usize, offset: usize) -> Option<f32> {
+pub fn table_row_top(lay: &LayoutDoc, doc: &Document, block: usize, offset: usize) -> Option<DocY> {
     let row = source_row(doc, block, offset);
     match line_place(doc, block, offset) {
         Some((line, byte)) if line == row => lay.approx_top_at(block, line, byte),
@@ -408,9 +408,9 @@ pub fn fitted_below(
     lay: &LayoutDoc,
     doc: &Document,
     offset: usize,
-    below: f32,
+    below: DocY,
     view_h: f32,
-) -> f32 {
+) -> DocY {
     let Some(block) = doc.block_at_offset(offset) else {
         return below;
     };
@@ -430,7 +430,7 @@ pub fn fitted_below(
 /// block drawn as rows of text, whose exact row the frame finds once
 /// the slide draws it (`caret::line_top`); None for a blank line, for
 /// the other blocks, and before the pass places the block.
-pub fn line_estimate(lay: &LayoutDoc, doc: &Document, offset: usize) -> Option<f32> {
+pub fn line_estimate(lay: &LayoutDoc, doc: &Document, offset: usize) -> Option<DocY> {
     // A code block is none of the blocks estimated below. Said before
     // the search for the line's ends, which would read a file of one
     // line whole.
@@ -465,16 +465,16 @@ pub fn line_estimate(lay: &LayoutDoc, doc: &Document, offset: usize) -> Option<f
         return None;
     }
     let span = lay.block_span(index)?;
-    let share = start.saturating_sub(block.range.start) as f32 / block.range.len().max(1) as f32;
+    let share = start.saturating_sub(block.range.start) as DocY / block.range.len().max(1) as DocY;
     Some(span.start + share.min(1.0) * (span.end - span.start))
 }
 
 /// A top the edge already cut keeps its height.
-fn fit(below: f32, block_h: f32, view_h: f32) -> f32 {
+fn fit(below: DocY, block_h: DocY, view_h: f32) -> DocY {
     if below <= 0.0 {
         return below;
     }
-    below.min((view_h - block_h).max(0.0))
+    below.min((DocY::from(view_h) - block_h).max(0.0))
 }
 
 /// The offset a frame paints the page at: the scroll position floored
@@ -483,7 +483,7 @@ fn fit(below: f32, block_h: f32, view_h: f32) -> f32 {
 /// scroll accumulates them; the frame reads this once and hands it to
 /// every path, the direct paint, the band, its slice and the overlays,
 /// so no two frames of one position land a pixel apart.
-pub fn frame_offset(scroll_y: f32) -> f32 {
+pub fn frame_offset(scroll_y: DocY) -> DocY {
     scroll_y.floor()
 }
 
@@ -493,7 +493,7 @@ pub const SETTLE: Duration = Duration::from_millis(150);
 /// A scroll position held while the pass streams is restorable once the
 /// placed document is tall enough to show it, which is exactly when
 /// clamping leaves it alone.
-pub fn reached(target: f32, doc_height: f32, viewport_h: f32) -> bool {
+pub fn reached(target: DocY, doc_height: DocY, viewport_h: f32) -> bool {
     clamp(target, doc_height, viewport_h) >= target
 }
 
@@ -510,13 +510,13 @@ pub struct BottomHold {
     held: bool,
     /// Where the jump left the view. Nothing moves it while the hold
     /// stands, so a different position means the reader took over.
-    seated: f32,
+    seated: DocY,
 }
 
 impl BottomHold {
     /// Records a jump that landed at `seated`. Against a complete pass
     /// the bottom is the document's own and nothing is held.
-    pub fn take(&mut self, seated: f32, pass_complete: bool) {
+    pub fn take(&mut self, seated: DocY, pass_complete: bool) {
         self.held = !pass_complete;
         self.seated = seated;
     }
@@ -527,7 +527,7 @@ impl BottomHold {
 
     /// Whether a jump to the bottom waits for the pass to end with the
     /// view still where the jump left it: the hold `settle` would spend.
-    pub fn held_at(&self, scroll_y: f32) -> bool {
+    pub fn held_at(&self, scroll_y: DocY) -> bool {
         self.held && scroll_y == self.seated
     }
 
@@ -535,7 +535,7 @@ impl BottomHold {
     /// document's bottom, which spends the hold. A view that has moved
     /// since the jump belongs to the reader again and releases the
     /// hold unspent.
-    pub fn settle(&mut self, scroll_y: f32, pass_complete: bool) -> bool {
+    pub fn settle(&mut self, scroll_y: DocY, pass_complete: bool) -> bool {
         if !self.held {
             return false;
         }
@@ -562,10 +562,10 @@ pub fn defer_relayout(last_pass: Duration, slice: Duration) -> bool {
 /// covering the viewport plus two viewport heights above and below.
 pub struct BandCache {
     pub pixels: Vec<u32>,
-    pub y_top: f32,
+    pub y_top: DocY,
     pub width: u32,
     pub height: u32,
-    pub doc_height: f32,
+    pub doc_height: DocY,
     /// Painted while the layout could not slide its window: the pass
     /// was inside a code block, so lines of the band may be missing,
     /// and the line numbers under the top of the block are.
@@ -585,14 +585,14 @@ impl BandCache {
         media: &mut MediaCache,
         extra: &[DecoRect],
         numbers: Option<crate::style::theme::Rgba>,
-        scroll_y: f32,
+        scroll_y: DocY,
         width: u32,
         viewport_h: u32,
     ) -> BandCache {
         let height = viewport_h * 5;
         let doc_height = layout.height;
-        let max_top = (doc_height - height as f32).max(0.0);
-        let y_top = (scroll_y - (2 * viewport_h) as f32)
+        let max_top = (doc_height - height as DocY).max(0.0);
+        let y_top = (scroll_y - (2 * viewport_h) as DocY)
             .clamp(0.0, max_top)
             .floor();
         let pixels = super::band_numbered(
@@ -609,13 +609,13 @@ impl BandCache {
     }
 
     /// True when the viewport nears a band edge that is not a document edge.
-    pub fn needs_repaint(&self, scroll_y: f32, viewport_h: f32) -> bool {
-        let bottom = self.y_top + self.height as f32;
-        let view_bottom = scroll_y + viewport_h;
+    pub fn needs_repaint(&self, scroll_y: DocY, viewport_h: f32) -> bool {
+        let bottom = self.y_top + self.height as DocY;
+        let view_bottom = scroll_y + DocY::from(viewport_h);
         if scroll_y < self.y_top || view_bottom > bottom {
             return true;
         }
-        let margin = viewport_h * 0.5;
+        let margin = DocY::from(viewport_h) * 0.5;
         (scroll_y - self.y_top < margin && self.y_top > 0.0)
             || (bottom - view_bottom < margin && bottom < self.doc_height)
     }
@@ -629,7 +629,7 @@ impl BandCache {
     }
 
     /// The viewport slice at `scroll_y`, without repainting.
-    pub fn view(&self, scroll_y: f32, viewport_h: u32) -> &[u32] {
+    pub fn view(&self, scroll_y: DocY, viewport_h: u32) -> &[u32] {
         let offset_rows =
             (((scroll_y - self.y_top).max(0.0)) as u32).min(self.height.saturating_sub(viewport_h));
         let start = (offset_rows * self.width) as usize;

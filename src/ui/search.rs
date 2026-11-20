@@ -7,6 +7,7 @@ use std::ops::Range;
 
 use crate::doc::model::{BlockKind, CodeBody, Document};
 use crate::edit::caret::word_char;
+use crate::layout::DocY;
 use crate::paint::painter::Painter;
 use crate::style::fonts::CODE_FAMILY;
 use crate::style::theme::{Rgba, Theme};
@@ -67,10 +68,10 @@ pub struct SearchState {
     pub matches: Vec<Selection>,
     /// Highlight rects for the matches inside the band window alone;
     /// the counter and navigation use the full match list.
-    pub rects: Vec<(usize, (f32, f32, f32, f32))>,
+    pub rects: Vec<(usize, (f32, DocY, f32, f32))>,
     /// The scroll position `rects` was computed around, so drifting a
     /// viewport past it triggers a refresh.
-    pub rects_scroll: f32,
+    pub rects_scroll: DocY,
     pub current: usize,
     pub stale: bool,
     /// The reader changed the query since the matches were last

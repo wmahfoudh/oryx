@@ -13,7 +13,7 @@ use cosmic_text::{Attrs, Buffer, Color, Family, Metrics, Shaping};
 use tiny_skia::Pixmap;
 
 use crate::doc::model::{BlockKind, Document};
-use crate::layout::{code_lines_in, metrics, LayoutDoc, LineSeat};
+use crate::layout::{code_lines_in, metrics, DocY, LayoutDoc, LineSeat};
 use crate::paint::band::blend_buffer;
 use crate::paint::painter::round_rect;
 use crate::style::fonts::FontStore;
@@ -95,9 +95,9 @@ pub(crate) fn paint(
     layout: &LayoutDoc,
     doc: &Document,
     color: Rgba,
-    y_top: f32,
+    y_top: DocY,
 ) {
-    let bottom = y_top + pixmap.height() as f32;
+    let bottom = y_top + pixmap.height() as DocY;
     let mut baseline = None;
     for (block, lines) in code_lines_in(layout, doc, y_top..bottom) {
         for line in lines {
@@ -123,7 +123,7 @@ pub struct Strip {
     pub width: u32,
     pub height: u32,
     /// The strip's top in document space, a whole pixel.
-    pub y: f32,
+    pub y: DocY,
 }
 
 /// The strip of line `line` of code block `block`, None before the pass
@@ -148,7 +148,7 @@ pub fn strip(
     let width = (seat.x - 0.5 * GAP * SCALE * layout.code_size)
         .floor()
         .max(1.0) as u32;
-    let height = ((seat.y + seat.height).floor() - y).max(1.0) as u32;
+    let height = ((seat.y + DocY::from(seat.height)).floor() - y).max(1.0) as u32;
     let mut pixmap = Pixmap::new(width, height)?;
     pixmap.fill(tiny_skia::Color::from_rgba8(paper.r, paper.g, paper.b, 255));
     let size = SCALE * layout.code_size;
@@ -241,7 +241,7 @@ fn number(
     line: usize,
     color: Rgba,
     text_baseline: f32,
-    y_top: f32,
+    y_top: DocY,
 ) {
     let size = SCALE * layout.code_size;
     let mut buffer = shaped(fonts, &(line + 1).to_string(), &layout.code_family, size);

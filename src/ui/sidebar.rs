@@ -15,6 +15,7 @@ use std::time::SystemTime;
 use serde::{Deserialize, Serialize};
 
 use crate::doc::load::{self, FileKind};
+use crate::layout::DocY;
 use crate::paint::painter::Painter;
 use crate::style::fonts::BODY_FAMILY;
 use crate::style::theme::{Rgba, Theme, Ui};
@@ -924,7 +925,13 @@ impl Sidebar {
     /// top, or None when the list fits its viewport.
     pub fn thumb(&self, outline: &OutlineTree) -> Option<(f32, f32)> {
         let (scroll, content_h) = self.list_extent(outline);
-        scrollbar::thumb(content_h, self.list_h, scroll, self.list_h, 1.0)
+        scrollbar::thumb(
+            DocY::from(content_h),
+            self.list_h,
+            DocY::from(scroll),
+            self.list_h,
+            1.0,
+        )
     }
 
     /// Records what the mouse rests on at panel coordinates: a row of
@@ -963,7 +970,7 @@ impl Sidebar {
             y - (PAD + CAPTION_H) - grab,
             th,
             self.list_h,
-            content_h,
+            DocY::from(content_h),
             self.list_h,
         );
         match self.tab {

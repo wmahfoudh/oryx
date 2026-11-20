@@ -3,6 +3,11 @@ pub mod metrics;
 pub mod pool;
 mod rows;
 
+/// A vertical position or height in the document's space: a top, a
+/// baseline, the scroll, a sum of heights. What the shaper or a font
+/// gives for one line or one glyph stays f32.
+pub type DocY = f32;
+
 pub use pool::{ShapeCtx, ShapePool, StepKey};
 
 pub(crate) use engine::{alert_color, alert_title, role_color};

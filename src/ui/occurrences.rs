@@ -10,6 +10,7 @@
 //! felt.
 
 use crate::doc::model::{BlockKind, Document};
+use crate::layout::DocY;
 use crate::ui::search::{self, LinePart};
 use crate::ui::selection::{self, ModelPos, Selection};
 
@@ -41,8 +42,8 @@ pub struct Occurrences {
     pub matches: Vec<Selection>,
     /// The rectangles of the matches around the view, and the scroll
     /// they were computed at; the same windowing as the search's.
-    pub rects: Vec<(f32, f32, f32, f32)>,
-    pub rects_scroll: f32,
+    pub rects: Vec<(f32, DocY, f32, f32)>,
+    pub rects_scroll: DocY,
     /// The rectangles no longer fit the layout.
     pub stale: bool,
     /// The rectangles were built while the layout held the view alone,
@@ -58,9 +59,12 @@ impl Occurrences {
     /// (`partial_window` says what it holds now). A scroll past a view
     /// from where they were built asks for them again too, on the same
     /// places.
-    pub fn rects_due(&self, scroll: f32, view: f32, partial_window: bool) -> (bool, bool) {
+    pub fn rects_due(&self, scroll: DocY, view: f32, partial_window: bool) -> (bool, bool) {
         let relaid = self.stale || (self.partial && !partial_window);
-        (relaid || (scroll - self.rects_scroll).abs() > view, relaid)
+        (
+            relaid || (scroll - self.rects_scroll).abs() > DocY::from(view),
+            relaid,
+        )
     }
 
     /// In a one-block document, keeps the matches of the line starts

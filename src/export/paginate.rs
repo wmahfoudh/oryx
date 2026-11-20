@@ -6,22 +6,22 @@ use std::ops::Range;
 
 use crate::doc::model::{BlockKind, Document};
 use crate::export::PageGeometry;
-use crate::layout::{code_framed, metrics, DecoRect, ImagePlace, LayoutDoc, MathGlyph};
+use crate::layout::{code_framed, metrics, DecoRect, DocY, ImagePlace, LayoutDoc, MathGlyph};
 
 /// Float slack for comparing positions that arithmetic should have made
 /// equal.
-const SLACK: f32 = 0.01;
+const SLACK: DocY = 0.01;
 
 /// One page: where it starts in document coordinates, the runs, images
 /// and math glyphs it carries, and its rectangles already split at the
 /// break.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Page {
-    pub top: f32,
+    pub top: DocY,
     /// Where this page's content ends. Not the next page's top: a code
     /// panel continued overleaf keeps its inner padding at both edges, so
     /// the two pages each carry a little of the same rectangle.
-    pub bottom: f32,
+    pub bottom: DocY,
     pub runs: Range<usize>,
     pub images: Vec<ImagePlace>,
     pub rects: Vec<DecoRect>,
@@ -38,8 +38,8 @@ struct Item {
     runs: Range<usize>,
     images: Vec<usize>,
     math: Range<usize>,
-    top: f32,
-    bottom: f32,
+    top: DocY,
+    bottom: DocY,
 }
 
 impl Item {
@@ -78,7 +78,7 @@ fn group_into(
     }
     let (mut run, mut image, mut math) = (*run_seen, *image_seen, *math_seen);
     loop {
-        let mut take: Option<(f32, Take)> = None;
+        let mut take: Option<(DocY, Take)> = None;
         if let Some(r) = layout.runs.get(run) {
             take = Some((r.y, Take::Run));
         }
@@ -98,7 +98,7 @@ fn group_into(
         match take {
             Take::Run => {
                 let piece = &layout.runs[run];
-                let bottom = piece.y + metrics::LINE_HEIGHT * piece.size;
+                let bottom = piece.y + DocY::from(metrics::LINE_HEIGHT * piece.size);
                 match out.last_mut() {
                     Some(item) if piece.y < item.bottom - SLACK => {
                         item.runs.end = run + 1;
@@ -117,7 +117,7 @@ fn group_into(
             }
             Take::Image => {
                 let piece = &layout.images[image];
-                let bottom = piece.y + piece.height;
+                let bottom = piece.y + DocY::from(piece.height);
                 match out.last_mut() {
                     Some(item) if piece.y < item.bottom - SLACK => {
                         item.images.push(image);
@@ -174,7 +174,7 @@ fn extend_items(doc: &Document, layout: &LayoutDoc, content: f32, items: &mut [I
 
 /// One item's extended bottom over its raw shaped one, the value the
 /// fit is measured against.
-fn extended_bottom(doc: &Document, layout: &LayoutDoc, content: f32, item: &Item) -> f32 {
+fn extended_bottom(doc: &Document, layout: &LayoutDoc, content: f32, item: &Item) -> DocY {
     let block = item.block(layout);
     let mut bottom = item.bottom;
     let row = layout
@@ -182,7 +182,7 @@ fn extended_bottom(doc: &Document, layout: &LayoutDoc, content: f32, item: &Item
         .partition_point(|band| band.top <= item.top + SLACK)
         .saturating_sub(1);
     if let Some(band) = layout.table_rows.get(row) {
-        let fits = band.bottom - band.top <= content + SLACK;
+        let fits = band.bottom - band.top <= DocY::from(content) + SLACK;
         if fits && item.top >= band.top - SLACK && item.top < band.bottom {
             bottom = bottom.max(band.bottom);
         }
@@ -194,14 +194,14 @@ fn extended_bottom(doc: &Document, layout: &LayoutDoc, content: f32, item: &Item
     let code = code_framed(doc)
         && block.is_some_and(|block| matches!(doc.blocks[block].kind, BlockKind::CodeBlock { .. }));
     if code {
-        bottom += metrics::CODE_PAD;
+        bottom += DocY::from(metrics::CODE_PAD);
     }
     // A run with an Image block is a placeholder's alt text; the box
     // closes one padding below it and the fit carries the border too.
     let placeholder =
         block.is_some_and(|block| matches!(doc.blocks[block].kind, BlockKind::Image { .. }));
     if placeholder {
-        bottom += metrics::PLACEHOLDER_PAD;
+        bottom += DocY::from(metrics::PLACEHOLDER_PAD);
     }
     bottom
 }
@@ -311,7 +311,7 @@ fn page_top(
     content: f32,
     i: usize,
     first: bool,
-) -> f32 {
+) -> DocY {
     let item = &items[i];
     if let Some(block) = item.block(layout) {
         // A code line starts its page one padding up whether the panel
@@ -320,12 +320,12 @@ fn page_top(
         // of it on the page before. A frameless file has no rect to
         // open, so its page starts at the line.
         if code_framed(doc) && matches!(doc.blocks[block].kind, BlockKind::CodeBlock { .. }) {
-            return item.top - metrics::CODE_PAD;
+            return item.top - DocY::from(metrics::CODE_PAD);
         }
         // A placeholder's alt text brings its whole box: the border
         // opens one padding above the text.
         if matches!(doc.blocks[block].kind, BlockKind::Image { .. }) {
-            return item.top - metrics::PLACEHOLDER_PAD;
+            return item.top - DocY::from(metrics::PLACEHOLDER_PAD);
         }
     }
     let row = layout
@@ -336,7 +336,7 @@ fn page_top(
     if let Some(band) = layout.table_rows.get(row) {
         // An over-tall band flows across pages, so a page opening inside
         // it starts at its own first line, not back at the band.
-        let fits = band.bottom - band.top <= content + SLACK;
+        let fits = band.bottom - band.top <= DocY::from(content) + SLACK;
         if fits && item.top > band.top && item.top < band.bottom {
             top = band.top;
         }
@@ -350,7 +350,7 @@ fn page_top(
             .iter()
             .map(|rect| rect.y)
             .filter(|y| *y < top)
-            .fold(top, f32::min);
+            .fold(top, DocY::min);
     }
     top
 }
@@ -371,7 +371,7 @@ pub fn paginate(doc: &Document, layout: &LayoutDoc, geometry: &PageGeometry) -> 
     while i < items.len() {
         let top = page_top(doc, layout, &items, content, i, i == 0);
         let mut j = i;
-        while j < items.len() && items[j].bottom - top <= content + SLACK {
+        while j < items.len() && items[j].bottom - top <= DocY::from(content) + SLACK {
             j += 1;
         }
         // An item taller than the whole content box is placed anyway. It
@@ -407,7 +407,7 @@ pub fn paginate(doc: &Document, layout: &LayoutDoc, geometry: &PageGeometry) -> 
             .collect();
         pages.push(Page {
             top,
-            bottom: f32::INFINITY,
+            bottom: DocY::INFINITY,
             runs: cursor..end,
             images: carried
                 .iter()
@@ -423,7 +423,7 @@ pub fn paginate(doc: &Document, layout: &LayoutDoc, geometry: &PageGeometry) -> 
     if pages.is_empty() {
         pages.push(Page {
             top: 0.0,
-            bottom: f32::INFINITY,
+            bottom: DocY::INFINITY,
             runs: 0..0,
             images: Vec::new(),
             rects: Vec::new(),
@@ -510,10 +510,10 @@ impl Paginator {
             out.push(page);
         }
         if complete && !self.started && self.emitted == 0 && out.is_empty() {
-            let rects = self.assign_rects(layout, 0.0, f32::INFINITY, f32::INFINITY);
+            let rects = self.assign_rects(layout, 0.0, DocY::INFINITY, DocY::INFINITY);
             out.push(Page {
                 top: 0.0,
-                bottom: f32::INFINITY,
+                bottom: DocY::INFINITY,
                 runs: 0..0,
                 images: Vec::new(),
                 rects,
@@ -585,7 +585,7 @@ impl Paginator {
         }
         let top = page_top(doc, layout, &self.items, content, i, !self.started);
         let mut j = i;
-        while j < self.settled && self.items[j].bottom - top <= content + SLACK {
+        while j < self.settled && self.items[j].bottom - top <= DocY::from(content) + SLACK {
             j += 1;
         }
         if self.markers.is_none() {
@@ -654,7 +654,7 @@ impl Paginator {
             (next_top.max(self.items[last].bottom), next_top)
         } else {
             self.close_at = self.items.len();
-            (f32::INFINITY, f32::INFINITY)
+            (DocY::INFINITY, DocY::INFINITY)
         };
         let rects = self.assign_rects(layout, top, bottom, next_top);
         let math_end = self.items[j - 1].math.end.max(self.math_cursor);
@@ -738,9 +738,9 @@ impl Paginator {
     fn assign_rects(
         &mut self,
         layout: &LayoutDoc,
-        top: f32,
-        bottom: f32,
-        next_top: f32,
+        top: DocY,
+        bottom: DocY,
+        next_top: DocY,
     ) -> Vec<DecoRect> {
         // The pending list stays sorted by (y, index) as an invariant:
         // new arrivals sort alone and merge in, so a page that brings
@@ -823,7 +823,7 @@ fn scaled(doc: &Document, layout: &LayoutDoc, image: &ImagePlace, content: f32) 
         placed.width *= scale;
         placed.height *= scale;
         let factor = layout
-            .block_at(image.y + image.height / 2.0)
+            .block_at(image.y + DocY::from(image.height / 2.0))
             .and_then(|block| doc.blocks.get(block))
             .and_then(|block| block.align_factor())
             .unwrap_or(0.0);
@@ -871,7 +871,7 @@ fn place_rects(layout: &LayoutDoc, pages: &mut [Page]) {
         // A rectangle belongs to the page its top falls in, and is drawn
         // as far as that page's content reaches. The two differ only for
         // a panel that carries its padding past the break.
-        let next_top = pages.get(p + 1).map_or(f32::INFINITY, |q| q.top);
+        let next_top = pages.get(p + 1).map_or(DocY::INFINITY, |q| q.top);
         while next < order.len() && layout.rects[order[next]].y < next_top {
             open.push(order[next]);
             next += 1;

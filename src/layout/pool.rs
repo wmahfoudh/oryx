@@ -11,7 +11,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 
 use crate::doc::model::Block;
-use crate::layout::{LayoutDoc, ViewConfig};
+use crate::layout::{DocY, LayoutDoc, ViewConfig};
 use crate::style::fonts::FontSeed;
 use crate::style::highlight::SyntaxRole;
 use crate::style::theme::Theme;
@@ -190,7 +190,7 @@ pub(crate) struct Job {
 /// an emission batch's shaped runs.
 pub(crate) struct Shaped {
     pub scratch: LayoutDoc,
-    pub height: f32,
+    pub height: DocY,
     pub text: Vec<Vec<SegmentData>>,
 }
 
@@ -346,7 +346,7 @@ fn worker(shared: Arc<Shared>, mut fonts: crate::style::fonts::FontStore) {
                 line_height,
                 wrap_width,
                 prose,
-            } => super::engine::shape_code_line_step(
+            } => DocY::from(super::engine::shape_code_line_step(
                 &mut fonts,
                 &job.ctx.theme,
                 &job.ctx.cfg,
@@ -362,7 +362,7 @@ fn worker(shared: Arc<Shared>, mut fonts: crate::style::fonts::FontStore) {
                 *wrap_width,
                 *prose,
                 &mut scratch,
-            ),
+            )),
             Work::Text { runs } => {
                 text = runs
                     .iter()

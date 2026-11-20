@@ -7,7 +7,7 @@ use tiny_skia::{Pixmap, Rect, Transform};
 
 use crate::doc::images::MediaCache;
 use crate::doc::model::Document;
-use crate::layout::{metrics, DecoRect, LayoutDoc, MathGlyph, TextRun};
+use crate::layout::{metrics, DecoRect, DocY, LayoutDoc, MathGlyph, TextRun};
 use crate::style::fonts::FontStore;
 use crate::style::theme::{Rgba, Theme};
 
@@ -33,7 +33,7 @@ pub fn band(
     fonts: &mut FontStore,
     media: &mut MediaCache,
     extra: &[DecoRect],
-    y_top: f32,
+    y_top: DocY,
     width: u32,
     height: u32,
 ) -> Vec<u32> {
@@ -53,14 +53,14 @@ pub fn band_numbered(
     media: &mut MediaCache,
     extra: &[DecoRect],
     numbers: Option<Rgba>,
-    y_top: f32,
+    y_top: DocY,
     width: u32,
     height: u32,
 ) -> Vec<u32> {
     let mut pixmap = Pixmap::new(width.max(1), height.max(1)).expect("pixmap allocation");
     let bg = paper(doc, theme);
     pixmap.fill(tiny_skia::Color::from_rgba8(bg.r, bg.g, bg.b, 255));
-    let band_bottom = y_top + height as f32;
+    let band_bottom = y_top + height as DocY;
 
     let mut paint = tiny_skia::Paint {
         anti_alias: false,
@@ -115,7 +115,7 @@ pub fn band_numbered(
         .iter()
         .chain(&layout.images[image_tail])
     {
-        if image.y + image.height < y_top || image.y > band_bottom {
+        if image.y + DocY::from(image.height) < y_top || image.y > band_bottom {
             continue;
         }
         blit_image(&mut pixmap, media, image, y_top);
@@ -124,7 +124,7 @@ pub fn band_numbered(
     let (run_head, run_tail) = layout.runs_in(y_top, band_bottom);
     for run in layout.runs[run_head].iter().chain(&layout.runs[run_tail]) {
         let line_height = metrics::LINE_HEIGHT * run.size;
-        if run.y + line_height < y_top || run.y > band_bottom {
+        if run.y + DocY::from(line_height) < y_top || run.y > band_bottom {
             continue;
         }
         draw_run(
@@ -167,7 +167,7 @@ fn blit_image(
     pixmap: &mut Pixmap,
     media: &mut MediaCache,
     image: &crate::layout::ImagePlace,
-    y_top: f32,
+    y_top: DocY,
 ) {
     let tw = image.width.round().max(1.0) as u32;
     let th = image.height.round().max(1.0) as u32;
@@ -232,7 +232,7 @@ fn draw_run(
     run: &TextRun,
     text: &str,
     family: &str,
-    y_top: f32,
+    y_top: DocY,
 ) {
     let line_height = metrics::LINE_HEIGHT * run.size;
     let mut buffer = Buffer::new(&mut fonts.font_system, Metrics::new(run.size, line_height));
@@ -316,7 +316,7 @@ pub(super) fn blend_buffer(
 /// the math face; no shaping is involved, noad already positioned it. The
 /// glyph's `y` is its baseline; the cache answers placement offsets from
 /// that origin.
-fn draw_math_glyph(pixmap: &mut Pixmap, fonts: &mut FontStore, g: &MathGlyph, y_top: f32) {
+fn draw_math_glyph(pixmap: &mut Pixmap, fonts: &mut FontStore, g: &MathGlyph, y_top: DocY) {
     let (key, gx, gy) = cosmic_text::CacheKey::new(
         fonts.math_face,
         g.glyph,

@@ -18,7 +18,7 @@ use std::sync::Arc;
 use crate::doc::images::MediaCache;
 use crate::doc::model::{Block, BlockKind, Document};
 use crate::edit::caret;
-use crate::layout::{layout, LayoutDoc, ViewConfig};
+use crate::layout::{layout, DocY, LayoutDoc, ViewConfig};
 use crate::paint::scroll;
 use crate::style::fonts::FontStore;
 use crate::style::theme::Theme;
@@ -225,7 +225,7 @@ pub fn row_in_piece(
     cfg: &ViewConfig,
     width: f32,
     offset: usize,
-) -> Option<f32> {
+) -> Option<DocY> {
     let (from, to) = scroll::offset_piece(lay, doc, offset)?;
     let row = scroll::source_row(doc, 0, offset);
     let piece = build_pieces(doc, theme, fonts, media, cfg, width, row, from..to)?;
@@ -278,7 +278,7 @@ mod tests {
         let theme = Theme::default_dark();
         let mut media = MediaCache::offline(PathBuf::from("."));
         let top = lay.approx_top(0, row).unwrap();
-        let y = scroll::clamp(top - below, lay.height, 600.0);
+        let y = scroll::clamp(top - DocY::from(below), lay.height, 600.0);
         band_numbered(
             lay,
             doc,

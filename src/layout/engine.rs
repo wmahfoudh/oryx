@@ -16,6 +16,7 @@ use crate::doc::model::{
     SpanScript,
 };
 use crate::layout::pool::{Job, ShapeCtx, StepKey, Work};
+use crate::layout::DocY;
 use crate::style::fonts::{FontStore, BODY_FAMILY, CODE_FAMILY};
 use crate::style::highlight::{SyntaxRole, LONG_LINE};
 use crate::style::theme::{Rgba, Theme};
@@ -120,9 +121,9 @@ pub struct TextRun {
     pub text: TextRef,
     pub x: f32,
     /// Top of the line box.
-    pub y: f32,
+    pub y: DocY,
     /// Baseline y, used by glyph rasterization at paint.
-    pub baseline: f32,
+    pub baseline: DocY,
     pub width: f32,
     pub size: f32,
     /// Id into `LayoutDoc::families`.
@@ -172,9 +173,9 @@ fn model_text(doc: &Document, block: usize, span: usize) -> &str {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DecoRect {
     pub x: f32,
-    pub y: f32,
+    pub y: DocY,
     pub width: f32,
-    pub height: f32,
+    pub height: DocY,
     pub color: Rgba,
     /// Radius of the two top corners.
     pub radius_top: f32,
@@ -188,7 +189,7 @@ pub struct DecoRect {
 }
 
 impl DecoRect {
-    pub fn fill(x: f32, y: f32, width: f32, height: f32, color: Rgba) -> DecoRect {
+    pub fn fill(x: f32, y: DocY, width: f32, height: DocY, color: Rgba) -> DecoRect {
         DecoRect {
             x,
             y,
@@ -224,7 +225,7 @@ impl DecoRect {
 
 #[derive(Debug, Default)]
 pub struct LayoutDoc {
-    pub height: f32,
+    pub height: DocY,
     pub runs: Vec<TextRun>,
     pub rects: Vec<DecoRect>,
     /// Placed images, blitted by paint from the media cache.
@@ -236,7 +237,7 @@ pub struct LayoutDoc {
     /// painter and hit testing search instead of scanning.
     index: YIndex,
     /// Heading anchor slugs and their y positions.
-    pub anchors: Vec<(String, f32)>,
+    pub anchors: Vec<(String, DocY)>,
     /// The link each footnote definition's number carries, back to the
     /// first reference: the block index and the `fnref:` target. The
     /// number is a marker run, so it answers here and not in the model.
@@ -276,7 +277,7 @@ pub struct LayoutDoc {
 #[derive(Debug, Clone, Copy)]
 pub struct TaskBox {
     pub x: f32,
-    pub y: f32,
+    pub y: DocY,
     pub side: f32,
     pub block: u32,
 }
@@ -289,14 +290,14 @@ struct BlockEntry {
     /// Model block index.
     block: u32,
     /// Region top: where the block's output begins, alert title included.
-    y: f32,
+    y: DocY,
     /// Where the block's own emission splices, past any alert title; a
     /// code block's panel top.
-    content_y: f32,
+    content_y: DocY,
     /// Emission height: the shaped kind's, or the code panel's.
-    height: f32,
+    height: DocY,
     /// Quote decoration top; NaN when the block paints no quote panel.
-    deco_top: f32,
+    deco_top: DocY,
     /// Code blocks: the line height every unwrapped line advances by,
     /// and the panel padding above the first line.
     line_height: f32,
@@ -315,7 +316,7 @@ const ENTRY_ALERT_TITLE: u8 = 4;
 
 impl BlockEntry {
     /// The bottom of the block's own emission, decorations included.
-    fn bottom(&self) -> f32 {
+    fn bottom(&self) -> DocY {
         self.content_y + self.height
     }
 }
@@ -337,9 +338,9 @@ pub(crate) struct BlockTable {
     /// wrapped lines up to and including it: the sum a walk from the
     /// position's first entry would reach, added in the same order, so
     /// a line's top is one lookup and equal to the walk bit for bit.
-    tall_extra: Vec<f32>,
+    tall_extra: Vec<DocY>,
     /// The footnote rule's order position and y, once placed.
-    notes_rule: Option<(usize, f32)>,
+    notes_rule: Option<(usize, DocY)>,
     /// The pass geometry blocks were placed against, for re-shaping.
     margin: f32,
     content_width: f32,
@@ -750,7 +751,7 @@ impl BlockTable {
 
     /// Backfills what only the block's tail knows: its shaped height
     /// and, when quoted, its decoration top.
-    fn finish(&mut self, height: f32, deco_top: f32) {
+    fn finish(&mut self, height: DocY, deco_top: DocY) {
         let entry = self.entries.last_mut().expect("a block was placed");
         entry.height = height;
         entry.deco_top = deco_top;
@@ -765,7 +766,7 @@ impl BlockTable {
             }
             _ => 0.0,
         };
-        let extra = before + (height - self.entries[position].line_height);
+        let extra = before + (DocY::from(height) - DocY::from(self.entries[position].line_height));
         self.tall.push((position as u32, line, height));
         self.tall_extra.push(extra);
     }
@@ -785,7 +786,7 @@ impl BlockTable {
             if self.tall[k].0 != position {
                 break;
             }
-            extra += self.tall[k].2 - line_height;
+            extra += DocY::from(self.tall[k].2) - DocY::from(line_height);
             self.tall_extra[k] = extra;
         }
     }
@@ -796,7 +797,7 @@ impl BlockTable {
         if self.tall.len() != self.tall_extra.len() {
             return false;
         }
-        let mut extra = 0.0_f32;
+        let mut extra: DocY = 0.0;
         let mut prev: Option<(u32, u32)> = None;
         for (k, &(position, line, height)) in self.tall.iter().enumerate() {
             match prev {
@@ -807,7 +808,7 @@ impl BlockTable {
                 }
                 _ => extra = 0.0,
             }
-            extra += height - self.entries[position as usize].line_height;
+            extra += DocY::from(height) - DocY::from(self.entries[position as usize].line_height);
             if extra.to_bits() != self.tall_extra[k].to_bits() {
                 return false;
             }
@@ -818,7 +819,7 @@ impl BlockTable {
 
     /// The extra height of the wrapped lines of `position` above
     /// `line`, and how many of the position's entries they are.
-    fn extra_above(&self, position: usize, line: usize) -> (f32, usize) {
+    fn extra_above(&self, position: usize, line: usize) -> (DocY, usize) {
         let p = position as u32;
         let lo = self.tall.partition_point(|&(tp, _, _)| tp < p);
         let above = self.tall[lo..].partition_point(|&(tp, l, _)| tp == p && (l as usize) < line);
@@ -840,22 +841,27 @@ impl BlockTable {
     /// The recorded top of unit `unit`, reproducing the placement
     /// arithmetic bit for bit: the shared advance in closed form, plus
     /// the wrapped units' extra heights as the pass accumulated them.
-    fn unit_top(&self, position: usize, unit: usize) -> f32 {
+    fn unit_top(&self, position: usize, unit: usize) -> DocY {
         let entry = &self.entries[position];
         let (extra, _) = self.extra_above(position, unit);
-        code_line_y(entry.content_y + entry.pad, unit, entry.line_height, extra)
+        code_line_y(
+            entry.content_y + DocY::from(entry.pad),
+            unit,
+            entry.line_height,
+            extra,
+        )
     }
 
     /// The recorded top of line `line`: its first unit's.
-    fn code_line_top(&self, position: usize, line: usize) -> f32 {
+    fn code_line_top(&self, position: usize, line: usize) -> DocY {
         self.unit_top(position, self.unit_of(position, line))
     }
 }
 
 /// A code line's top from the panel's first-line base: one shared
 /// expression, so placement, the table and re-entry agree bit for bit.
-fn code_line_y(base: f32, line: usize, line_height: f32, extra: f32) -> f32 {
-    base + line as f32 * line_height + extra
+fn code_line_y(base: DocY, line: usize, line_height: f32, extra: DocY) -> DocY {
+    base + line as DocY * DocY::from(line_height) + extra
 }
 
 /// Materialized positions while retention is bounded: a contiguous
@@ -950,7 +956,7 @@ impl LayoutDoc {
 
     /// The expansion of the abbreviation under (`x`, `y`), if a run
     /// standing for one sits there.
-    pub fn abbr_at<'a>(&'a self, doc: &'a Document, x: f32, y: f32) -> Option<&'a str> {
+    pub fn abbr_at<'a>(&'a self, doc: &'a Document, x: f32, y: DocY) -> Option<&'a str> {
         let (head, tail) = self.runs_in(y, y);
         self.runs[head]
             .iter()
@@ -959,7 +965,7 @@ impl LayoutDoc {
                 let inside = x >= r.x
                     && x <= r.x + r.width
                     && y >= r.y
-                    && y <= r.y + metrics::LINE_HEIGHT * r.size;
+                    && y <= r.y + DocY::from(metrics::LINE_HEIGHT * r.size);
                 if !inside {
                     return None;
                 }
@@ -1016,7 +1022,7 @@ impl LayoutDoc {
         (side_base, family_map)
     }
 
-    pub fn splice(&mut self, scratch: &mut LayoutDoc, top: f32) {
+    pub fn splice(&mut self, scratch: &mut LayoutDoc, top: DocY) {
         let base_runs = self.runs.len();
         let (side_base, family_map) = self.merge_refs(scratch);
         self.runs.extend(scratch.runs.drain(..).map(|mut run| {
@@ -1084,15 +1090,15 @@ impl LayoutDoc {
 
     /// The task block whose checkbox square holds the point, a small
     /// halo included so the square is easy to hit.
-    pub fn checkbox_at(&self, x: f32, y: f32) -> Option<usize> {
+    pub fn checkbox_at(&self, x: f32, y: DocY) -> Option<usize> {
         let pad = 2.0;
         self.checkboxes
             .iter()
             .find(|c| {
                 x >= c.x - pad
                     && x <= c.x + c.side + pad
-                    && y >= c.y - pad
-                    && y <= c.y + c.side + pad
+                    && y >= c.y - DocY::from(pad)
+                    && y <= c.y + DocY::from(c.side) + DocY::from(pad)
             })
             .map(|c| c.block as usize)
     }
@@ -1123,11 +1129,11 @@ impl LayoutDoc {
 pub struct MathGlyph {
     pub glyph: u16,
     pub x: f32,
-    pub y: f32,
+    pub y: DocY,
     pub size: f32,
     pub ch: Option<char>,
-    pub top: f32,
-    pub bottom: f32,
+    pub top: DocY,
+    pub bottom: DocY,
     /// The left and right edges of the formula's box, as `top` and
     /// `bottom` are its vertical edges: a table's measuring pass and the
     /// alignment of a line read them, a space or a phantom that opens or
@@ -1143,10 +1149,10 @@ impl MathGlyph {
     /// the paint of a strip: its formula's box, which holds a sized
     /// delimiter and a display operator whole, and a margin around the
     /// baseline for a glyph whose ink passes the box.
-    pub fn ink(&self) -> (f32, f32) {
+    pub fn ink(&self) -> (DocY, DocY) {
         (
-            self.top.min(self.y - 1.2 * self.size),
-            self.bottom.max(self.y + 0.6 * self.size),
+            self.top.min(self.y - DocY::from(1.2 * self.size)),
+            self.bottom.max(self.y + DocY::from(0.6 * self.size)),
         )
     }
 }
@@ -1155,8 +1161,8 @@ impl MathGlyph {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TableRow {
     pub block: usize,
-    pub top: f32,
-    pub bottom: f32,
+    pub top: DocY,
+    pub bottom: DocY,
 }
 
 /// One laid-out code line: the runs it produced and the inputs to
@@ -1176,14 +1182,14 @@ pub struct CodeLine {
     piece: bool,
     runs: Range<usize>,
     x0: f32,
-    y0: f32,
+    y0: DocY,
     size: f32,
     line_height: f32,
     wrap_width: f32,
 }
 
 /// Height of one index bucket in layout units.
-const BUCKET_H: f32 = 512.0;
+const BUCKET_H: DocY = 512.0;
 
 /// Coarse y buckets over the layout's element vectors. Filled in append
 /// order behind a watermark; queries answer with a conservative indexed
@@ -1206,7 +1212,7 @@ struct Buckets {
 }
 
 impl Buckets {
-    fn note(&mut self, index: usize, y0: f32, y1: f32) {
+    fn note(&mut self, index: usize, y0: DocY, y1: DocY) {
         let b0 = (y0.max(0.0) / BUCKET_H) as usize;
         let b1 = (y1.max(y0).max(0.0) / BUCKET_H) as usize;
         if self.spans.len() <= b1 {
@@ -1221,7 +1227,7 @@ impl Buckets {
         }
     }
 
-    fn query(&self, y0: f32, y1: f32, len: usize) -> (Range<usize>, Range<usize>) {
+    fn query(&self, y0: DocY, y1: DocY, len: usize) -> (Range<usize>, Range<usize>) {
         let tail = self.indexed.min(len)..len;
         if self.spans.is_empty() {
             return (0..0, tail);
@@ -1253,9 +1259,11 @@ impl LayoutDoc {
     pub fn index_more(&mut self) {
         let index = &mut self.index;
         for (i, run) in self.runs.iter().enumerate().skip(index.runs.indexed) {
-            index
-                .runs
-                .note(i, run.y, run.y + metrics::LINE_HEIGHT * run.size);
+            index.runs.note(
+                i,
+                run.y,
+                run.y + DocY::from(metrics::LINE_HEIGHT * run.size),
+            );
         }
         index.runs.indexed = self.runs.len();
         for (i, rect) in self.rects.iter().enumerate().skip(index.rects.indexed) {
@@ -1263,7 +1271,9 @@ impl LayoutDoc {
         }
         index.rects.indexed = self.rects.len();
         for (i, image) in self.images.iter().enumerate().skip(index.images.indexed) {
-            index.images.note(i, image.y, image.y + image.height);
+            index
+                .images
+                .note(i, image.y, image.y + DocY::from(image.height));
         }
         index.images.indexed = self.images.len();
         for (i, g) in self.math_glyphs.iter().enumerate().skip(index.math.indexed) {
@@ -1275,29 +1285,29 @@ impl LayoutDoc {
 
     /// Index ranges whose union holds every run touching `[y0, y1]`:
     /// the indexed head range and the unindexed tail.
-    pub fn runs_in(&self, y0: f32, y1: f32) -> (Range<usize>, Range<usize>) {
+    pub fn runs_in(&self, y0: DocY, y1: DocY) -> (Range<usize>, Range<usize>) {
         self.index.runs.query(y0, y1, self.runs.len())
     }
 
     /// As `runs_in`, over the decoration rectangles.
-    pub fn rects_in(&self, y0: f32, y1: f32) -> (Range<usize>, Range<usize>) {
+    pub fn rects_in(&self, y0: DocY, y1: DocY) -> (Range<usize>, Range<usize>) {
         self.index.rects.query(y0, y1, self.rects.len())
     }
 
     /// As `runs_in`, over the placed images.
-    pub fn images_in(&self, y0: f32, y1: f32) -> (Range<usize>, Range<usize>) {
+    pub fn images_in(&self, y0: DocY, y1: DocY) -> (Range<usize>, Range<usize>) {
         self.index.images.query(y0, y1, self.images.len())
     }
 
     /// As `runs_in`, over the typeset math glyphs.
-    pub fn math_in(&self, y0: f32, y1: f32) -> (Range<usize>, Range<usize>) {
+    pub fn math_in(&self, y0: DocY, y1: DocY) -> (Range<usize>, Range<usize>) {
         self.index.math.query(y0, y1, self.math_glyphs.len())
     }
 
     /// Link target under a point in document coordinates, if any.
     /// The hit box of a run spans its full line height. The index keeps
     /// this a search; it runs on every mouse move.
-    pub fn link_at<'a>(&'a self, doc: &'a Document, x: f32, y: f32) -> Option<&'a str> {
+    pub fn link_at<'a>(&'a self, doc: &'a Document, x: f32, y: DocY) -> Option<&'a str> {
         let (head, tail) = self.runs_in(y, y);
         let run_hit = self.runs[head]
             .iter()
@@ -1307,7 +1317,7 @@ impl LayoutDoc {
                 let inside = x >= r.x
                     && x <= r.x + r.width
                     && y >= r.y
-                    && y <= r.y + metrics::LINE_HEIGHT * r.size;
+                    && y <= r.y + DocY::from(metrics::LINE_HEIGHT * r.size);
                 inside.then_some(target)
             });
         run_hit.or_else(|| {
@@ -1317,7 +1327,10 @@ impl LayoutDoc {
                 .chain(&self.images[tail])
                 .find_map(|i| {
                     let target = i.link.as_deref()?;
-                    let inside = x >= i.x && x <= i.x + i.width && y >= i.y && y <= i.y + i.height;
+                    let inside = x >= i.x
+                        && x <= i.x + i.width
+                        && y >= i.y
+                        && y <= i.y + DocY::from(i.height);
                     inside.then_some(target)
                 })
         })
@@ -1326,7 +1339,7 @@ impl LayoutDoc {
     /// The details group of the summary row under `y`, when `x` sits at
     /// or right of the content column's start. The whole row toggles,
     /// the disclosure convention, so only the vertical band is tested.
-    pub fn summary_at(&self, doc: &Document, x: f32, y: f32) -> Option<u16> {
+    pub fn summary_at(&self, doc: &Document, x: f32, y: DocY) -> Option<u16> {
         if x < 0.0 {
             return None;
         }
@@ -1338,13 +1351,13 @@ impl LayoutDoc {
                 let BlockKind::Summary { group, .. } = &doc.blocks[r.block].kind else {
                     return None;
                 };
-                let inside = y >= r.y && y <= r.y + metrics::LINE_HEIGHT * r.size;
+                let inside = y >= r.y && y <= r.y + DocY::from(metrics::LINE_HEIGHT * r.size);
                 inside.then_some(*group)
             })
     }
 
     /// Y position of a `#anchor` link target or a `footnote:` reference.
-    pub fn anchor_y(&self, target: &str) -> Option<f32> {
+    pub fn anchor_y(&self, target: &str) -> Option<DocY> {
         let slug = target.strip_prefix('#').unwrap_or(target);
         self.anchors
             .iter()
@@ -1353,7 +1366,7 @@ impl LayoutDoc {
     }
 
     /// The y span of materialized geometry, None under full retention.
-    pub fn window_span(&self) -> Option<Range<f32>> {
+    pub fn window_span(&self) -> Option<Range<DocY>> {
         let window = self.window.as_ref()?;
         if window.marks.is_empty() {
             return Some(0.0..0.0);
@@ -1378,7 +1391,7 @@ impl LayoutDoc {
     /// The recorded top of a block, and of a line inside a code block,
     /// from the block table: the position of a cold region without its
     /// geometry. None before the pass places the block.
-    pub fn approx_top(&self, block: usize, span: usize) -> Option<f32> {
+    pub fn approx_top(&self, block: usize, span: usize) -> Option<DocY> {
         let position = *self.table.position_of_block.get(block)?;
         if position == u32::MAX {
             return None;
@@ -1398,7 +1411,7 @@ impl LayoutDoc {
     /// and a block folded inside a closed details group has no
     /// position. None above the first block, and before the pass
     /// places one.
-    pub fn block_at(&self, y: f32) -> Option<usize> {
+    pub fn block_at(&self, y: DocY) -> Option<usize> {
         let top = |position: usize| {
             let entry = &self.table.entries[position];
             if entry.flags & ENTRY_CODE != 0 {
@@ -1416,7 +1429,7 @@ impl LayoutDoc {
     /// block table: the last of its `lines` whose top is at or above
     /// `y`, the inverse of `approx_top`. None before the pass places
     /// the block, and for a block that is not code.
-    pub fn code_line_at(&self, block: usize, lines: usize, y: f32) -> Option<usize> {
+    pub fn code_line_at(&self, block: usize, lines: usize, y: DocY) -> Option<usize> {
         let position = *self.table.position_of_block.get(block)?;
         if position == u32::MAX {
             return None;
@@ -1440,7 +1453,7 @@ impl LayoutDoc {
 
     /// The recorded top and bottom of a block, from the block table.
     /// None before the pass places the block.
-    pub fn block_span(&self, block: usize) -> Option<Range<f32>> {
+    pub fn block_span(&self, block: usize) -> Option<Range<DocY>> {
         let position = *self.table.position_of_block.get(block)?;
         if position == u32::MAX {
             return None;
@@ -1482,7 +1495,7 @@ impl LayoutDoc {
     /// than `LONG_LINE`, the top of the piece holding byte `byte` of
     /// the line. The line's top for any other line, the block's for a
     /// block that is not code.
-    pub fn approx_top_at(&self, block: usize, span: usize, byte: usize) -> Option<f32> {
+    pub fn approx_top_at(&self, block: usize, span: usize, byte: usize) -> Option<DocY> {
         let position = *self.table.position_of_block.get(block)?;
         if position == u32::MAX {
             return None;
@@ -1499,7 +1512,7 @@ impl LayoutDoc {
     /// The top and the bottom of what `approx_top_at` answers for in a
     /// code block: a line, or the piece of a long line holding `byte`.
     /// None for a block that is not code.
-    pub fn code_span_at(&self, block: usize, line: usize, byte: usize) -> Option<Range<f32>> {
+    pub fn code_span_at(&self, block: usize, line: usize, byte: usize) -> Option<Range<DocY>> {
         let position = *self.table.position_of_block.get(block)?;
         if position == u32::MAX {
             return None;
@@ -1533,7 +1546,7 @@ impl LayoutDoc {
     /// `code_line_at` with the place inside the line: the line standing
     /// at height `y` and, in a line longer than `LONG_LINE`, the first
     /// byte of the piece there; zero for any other line.
-    pub fn code_place_at(&self, block: usize, lines: usize, y: f32) -> Option<(usize, usize)> {
+    pub fn code_place_at(&self, block: usize, lines: usize, y: DocY) -> Option<(usize, usize)> {
         let position = *self.table.position_of_block.get(block)?;
         if position == u32::MAX {
             return None;
@@ -1555,7 +1568,7 @@ impl LayoutDoc {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LineSeat {
     pub x: f32,
-    pub y: f32,
+    pub y: DocY,
     pub height: f32,
 }
 
@@ -1564,7 +1577,7 @@ pub struct LineSeat {
 pub struct ImagePlace {
     pub src: String,
     pub x: f32,
-    pub y: f32,
+    pub y: DocY,
     pub width: f32,
     pub height: f32,
     /// Click target when the image is wrapped in a link.
@@ -1589,7 +1602,7 @@ pub struct LayoutPass {
     covered: usize,
     notes_start: usize,
     has_notes: bool,
-    cursor: f32,
+    cursor: DocY,
     first: bool,
     prev_quote_depth: u8,
     prev_alert: Option<AlertKind>,
@@ -1620,7 +1633,7 @@ pub struct LayoutPass {
     seed_line: usize,
     /// Retention bound: scroll position and viewport height. None keeps
     /// every placed block, the export's and the tests' full layout.
-    retain: Option<(f32, f32)>,
+    retain: Option<(DocY, f32)>,
     /// The character widths of the code face, once a long code block's
     /// lines are measured past the kept ones: such a line of plain
     /// ASCII is counted, not shaped (`rows`). None in a face that
@@ -1710,7 +1723,7 @@ impl LayoutPass {
 
     /// Bounds retention around a scroll position: blocks outside the
     /// band and its margin are measured into the table and dropped.
-    pub fn retain_around(&mut self, scroll: f32, viewport_h: f32) {
+    pub fn retain_around(&mut self, scroll: DocY, viewport_h: f32) {
         self.retain = Some((scroll, viewport_h));
     }
 
@@ -1759,7 +1772,8 @@ impl LayoutPass {
 /// The y range retention keeps materialized around a scroll position:
 /// wide enough to cover the paint band wherever its clamping puts it,
 /// with a viewport of margin so a small scroll re-shapes nothing.
-pub fn retain_range(scroll: f32, viewport_h: f32) -> Range<f32> {
+pub fn retain_range(scroll: DocY, viewport_h: f32) -> Range<DocY> {
+    let viewport_h = DocY::from(viewport_h);
     scroll - 5.0 * viewport_h..scroll + 6.0 * viewport_h
 }
 
@@ -1887,7 +1901,7 @@ fn settle_retention(
 pub fn code_lines_in(
     lay: &LayoutDoc,
     doc: &Document,
-    range: Range<f32>,
+    range: Range<DocY>,
 ) -> Vec<(usize, Range<usize>)> {
     let mut out = Vec::new();
     for position in positions_over(&lay.table, &range) {
@@ -1908,7 +1922,7 @@ pub fn code_lines_in(
 }
 
 /// The placed positions whose emission overlaps `range`.
-fn positions_over(table: &BlockTable, range: &Range<f32>) -> Range<usize> {
+fn positions_over(table: &BlockTable, range: &Range<DocY>) -> Range<usize> {
     let start = table.entries.partition_point(|e| e.bottom() < range.start);
     let end = table.entries.partition_point(|e| e.y <= range.end);
     start..end.max(start)
@@ -1932,7 +1946,7 @@ impl BlockTable {
     /// Units of code position `position` overlapping `range`, out of
     /// `total` units. A unit's bottom is the next unit's top, since the
     /// units tile the panel.
-    fn lines_over(&self, position: usize, total: usize, range: &Range<f32>) -> Range<usize> {
+    fn lines_over(&self, position: usize, total: usize, range: &Range<DocY>) -> Range<usize> {
         let start = partition(total, |u| self.unit_top(position, u + 1) < range.start);
         let end = partition(total, |u| self.unit_top(position, u) <= range.end);
         start..end.max(start)
@@ -1961,7 +1975,7 @@ fn code_unit_count(doc: &Document, table: &BlockTable, position: usize) -> usize
 struct FillPlan {
     positions: Range<usize>,
     extend: Option<(usize, Range<usize>)>,
-    fill: Range<f32>,
+    fill: Range<DocY>,
 }
 
 impl FillPlan {
@@ -2017,7 +2031,7 @@ pub fn window_to(
     cfg: &ViewConfig,
     lay: &mut LayoutDoc,
     pool: Option<&std::sync::Arc<crate::layout::pool::ShapePool>>,
-    scroll: f32,
+    scroll: DocY,
     viewport_h: f32,
     fill_band: bool,
 ) -> bool {
@@ -2028,7 +2042,7 @@ pub fn window_to(
     let fill = if fill_band {
         range.clone()
     } else {
-        scroll..scroll + viewport_h
+        scroll..scroll + DocY::from(viewport_h)
     };
     let keep = positions_over(&lay.table, &range);
     let target = positions_over(&lay.table, &fill);
@@ -2113,8 +2127,8 @@ fn line_jump(
     lay: &LayoutDoc,
     kept: &Range<usize>,
     target: &Range<usize>,
-    range: &Range<f32>,
-    fill: &Range<f32>,
+    range: &Range<DocY>,
+    fill: &Range<DocY>,
 ) -> bool {
     let window = lay.window.as_ref().expect("windowed layout");
     let jump = |position: usize| {
@@ -2142,7 +2156,7 @@ fn plan_line_evictions(
     doc: &Document,
     lay: &LayoutDoc,
     kept: &Range<usize>,
-    range: &Range<f32>,
+    range: &Range<DocY>,
 ) -> (Option<usize>, Option<usize>) {
     let window = lay.window.as_ref().expect("windowed layout");
     let mark_of = |position: usize| &window.marks[position - window.start];
@@ -2177,7 +2191,7 @@ fn plan_fill_front(
     lay: &LayoutDoc,
     kept: &Range<usize>,
     target: &Range<usize>,
-    fill: &Range<f32>,
+    fill: &Range<DocY>,
 ) -> FillPlan {
     let positions = target.start..kept.start.min(target.end).max(target.start);
     let mut extend = None;
@@ -2205,7 +2219,7 @@ fn plan_fill_back(
     lay: &LayoutDoc,
     kept: &Range<usize>,
     target: &Range<usize>,
-    fill: &Range<f32>,
+    fill: &Range<DocY>,
 ) -> FillPlan {
     let positions = kept.end.max(target.start)..target.end.max(kept.end);
     let mut extend = None;
@@ -2247,7 +2261,7 @@ struct Frame {
     x_base: f32,
     avail: f32,
     gap: f32,
-    region_top: f32,
+    region_top: DocY,
     base_size: f32,
     is_list: bool,
 }
@@ -2267,7 +2281,7 @@ struct OpenCode {
     /// Whether the block draws its panel; a whole-file code document
     /// does not.
     framed: bool,
-    y0: f32,
+    y0: DocY,
     pad: f32,
     size: f32,
     line_height: f32,
@@ -2275,7 +2289,7 @@ struct OpenCode {
     /// The next unit to place.
     unit: usize,
     /// Height beyond the shared line height accumulated by wrapped units.
-    extra: f32,
+    extra: DocY,
     /// Units inside the retention bound so far.
     kept: Option<Range<usize>>,
     /// Element state at the block's start, for dropping it whole.
@@ -2284,8 +2298,13 @@ struct OpenCode {
 
 impl OpenCode {
     /// The top of the next unit to place: the bottom of what is placed.
-    fn line_top(&self) -> f32 {
-        code_line_y(self.y0 + self.pad, self.unit, self.line_height, self.extra)
+    fn line_top(&self) -> DocY {
+        code_line_y(
+            self.y0 + DocY::from(self.pad),
+            self.unit,
+            self.line_height,
+            self.extra,
+        )
     }
 }
 
@@ -2452,7 +2471,7 @@ fn layout_comic(
     pass: &mut LayoutPass,
 ) {
     let viewport = pass.content_width + 2.0 * pass.margin;
-    let mut cursor = 0.0f32;
+    let mut cursor: DocY = 0.0;
     // A pair row stays open while its left page waits for the right.
     let mut open_row = false;
     let mut page = 0usize;
@@ -2465,7 +2484,7 @@ fn layout_comic(
                     y: cursor,
                     content_y: cursor,
                     height: 0.0,
-                    deco_top: f32::NAN,
+                    deco_top: DocY::NAN,
                     line_height: 0.0,
                     pad: 0.0,
                     x0: 0.0,
@@ -2491,7 +2510,7 @@ fn layout_comic(
                 let scale = (viewport / iw).min(slot / ih);
                 let (w, h) = (iw * scale, ih * scale);
                 let x = (viewport - w) / 2.0;
-                (x, cursor + (slot - h) / 2.0, w, h, cursor, slot)
+                (x, cursor + DocY::from((slot - h) / 2.0), w, h, cursor, slot)
             }
             ComicFit::Two { height } => {
                 let slot = height.max(50.0);
@@ -2499,7 +2518,7 @@ fn layout_comic(
                     let scale = (viewport / iw).min(slot / ih);
                     let (w, h) = (iw * scale, ih * scale);
                     let x = (viewport - w) / 2.0;
-                    (x, cursor + (slot - h) / 2.0, w, h, cursor, slot)
+                    (x, cursor + DocY::from((slot - h) / 2.0), w, h, cursor, slot)
                 } else {
                     let half = viewport / 2.0;
                     let scale = (half / iw).min(slot / ih);
@@ -2507,7 +2526,7 @@ fn layout_comic(
                     let first = page % 2 == 1;
                     let left = first != (cfg.direction == DirectionMode::Rtl);
                     let x = if left { half - w } else { half };
-                    let y = cursor + (slot - h) / 2.0;
+                    let y = cursor + DocY::from((slot - h) / 2.0);
                     // The first page of a spread holds its row open at
                     // the cursor; its pair closes it and the cursor
                     // moves on. Forced RTL seats the first page right.
@@ -2532,23 +2551,25 @@ fn layout_comic(
                 y: slot_top,
                 content_y: slot_top,
                 height: match cfg.comic {
-                    ComicFit::Width => h,
-                    ComicFit::Page { height } | ComicFit::Two { height } => height.max(50.0),
+                    ComicFit::Width => DocY::from(h),
+                    ComicFit::Page { height } | ComicFit::Two { height } => {
+                        DocY::from(height.max(50.0))
+                    }
                 },
-                deco_top: f32::NAN,
+                deco_top: DocY::NAN,
                 line_height: 0.0,
                 pad: 0.0,
                 x0: 0.0,
                 flags: 0,
             },
         );
-        cursor += advance;
+        cursor += DocY::from(advance);
         page += 1;
     }
     if open_row {
         // A last odd page left its row open; the row still spans a slot.
         if let ComicFit::Two { height } = cfg.comic {
-            cursor += height.max(50.0);
+            cursor += DocY::from(height.max(50.0));
         }
     }
     out.height = cursor;
@@ -2823,13 +2844,13 @@ pub fn layout_step(
 
 /// Height of what is placed: the running cursor, or the open code block's
 /// panel bottom while it fills.
-fn placed_height(pass: &LayoutPass) -> f32 {
+fn placed_height(pass: &LayoutPass) -> DocY {
     if pass.first {
         return 0.0;
     }
     match &pass.open {
-        Some(open) => open.line_top() + open.pad + pass.vertical_margin,
-        None => pass.cursor + pass.vertical_margin,
+        Some(open) => open.line_top() + DocY::from(open.pad) + DocY::from(pass.vertical_margin),
+        None => pass.cursor + DocY::from(pass.vertical_margin),
     }
 }
 
@@ -2850,16 +2871,16 @@ fn place_block(
 
     if pass.has_notes && position == pass.notes_start && !pass.first {
         let size = cfg.body_size * cfg.zoom;
-        pass.cursor += metrics::space_above(None, size);
+        pass.cursor += DocY::from(metrics::space_above(None, size));
         out.rects.push(DecoRect::fill(
             pass.margin,
             pass.cursor,
             pass.content_width,
-            (1.0 * cfg.zoom).max(1.0),
+            DocY::from((1.0 * cfg.zoom).max(1.0)),
             theme.blocks.rule,
         ));
         out.table.notes_rule = Some((position, pass.cursor));
-        pass.cursor += (1.0 * cfg.zoom).max(1.0);
+        pass.cursor += DocY::from((1.0 * cfg.zoom).max(1.0));
     }
     let Some((heading, is_list, base_size)) = block_metrics(block, cfg, doc.plain_file) else {
         out.table.push(
@@ -2869,7 +2890,7 @@ fn place_block(
                 y: pass.cursor,
                 content_y: pass.cursor,
                 height: 0.0,
-                deco_top: f32::NAN,
+                deco_top: DocY::NAN,
                 line_height: 0.0,
                 pad: 0.0,
                 x0: 0.0,
@@ -2881,17 +2902,17 @@ fn place_block(
     };
     let mut gap = 0.0;
     if pass.first {
-        pass.cursor = pass.vertical_margin;
+        pass.cursor = DocY::from(pass.vertical_margin);
         pass.first = false;
     } else if doc.plain_file {
         // A plain file's rows are uniform: blank lines are real rows
         // inside the blocks, so blocks meet with no added gap.
     } else if is_list && pass.prev_is_list {
         gap = 0.25 * base_size;
-        pass.cursor += gap;
+        pass.cursor += DocY::from(gap);
     } else {
         gap = metrics::space_above(heading, base_size);
-        pass.cursor += gap;
+        pass.cursor += DocY::from(gap);
     }
     if let BlockKind::Heading { anchor, .. } = &block.kind {
         out.anchors.push((anchor.clone(), pass.cursor));
@@ -2925,7 +2946,7 @@ fn place_block(
             &mut scratch,
         );
         out.splice(&mut scratch, pass.cursor);
-        pass.cursor += title_h + 0.25 * base_size;
+        pass.cursor += title_h + DocY::from(0.25 * base_size);
     }
     let lines = Marks {
         rects: out.rects.len(),
@@ -2959,7 +2980,7 @@ fn place_block(
             y: region_top,
             content_y: pass.cursor,
             height: 0.0,
-            deco_top: f32::NAN,
+            deco_top: DocY::NAN,
             line_height: if is_code {
                 metrics::LINE_HEIGHT * size
             } else {
@@ -3064,7 +3085,7 @@ pub(crate) fn shape_kind(
     avail: f32,
     summary_open: bool,
     scratch: &mut LayoutDoc,
-) -> f32 {
+) -> DocY {
     match &block.kind {
         BlockKind::Summary { spans, .. } => layout_summary(
             fonts,
@@ -3117,7 +3138,7 @@ pub(crate) fn shape_kind(
         BlockKind::CodeBlock { .. } => 0.0,
         // The chapter seam: one blank body line, nothing drawn; the
         // block spacing on both sides completes the larger gap.
-        BlockKind::ChapterBreak { .. } => metrics::LINE_HEIGHT * base_size,
+        BlockKind::ChapterBreak { .. } => DocY::from(metrics::LINE_HEIGHT * base_size),
         // A page break takes the seam's blank line. On screen a dashed
         // hairline in the rule color shows where the page ends; the
         // export draws nothing, the break itself is the paginator's.
@@ -3132,13 +3153,17 @@ pub(crate) fn shape_kind(
                 let mut x = x_base;
                 while x < end {
                     let width = dash.min(end - x);
-                    scratch
-                        .rects
-                        .push(DecoRect::fill(x, y, width, thickness, theme.blocks.rule));
+                    scratch.rects.push(DecoRect::fill(
+                        x,
+                        DocY::from(y),
+                        width,
+                        DocY::from(thickness),
+                        theme.blocks.rule,
+                    ));
                     x += dash + gap;
                 }
             }
-            height
+            DocY::from(height)
         }
         BlockKind::Rule => {
             let thickness = (1.0 * cfg.zoom).max(1.0);
@@ -3146,10 +3171,10 @@ pub(crate) fn shape_kind(
                 x_base,
                 0.0,
                 avail,
-                thickness,
+                DocY::from(thickness),
                 theme.blocks.rule,
             ));
-            thickness
+            DocY::from(thickness)
         }
         BlockKind::Table {
             header,
@@ -3794,7 +3819,7 @@ fn replay_position(
     cfg: &ViewConfig,
     table: &BlockTable,
     position: usize,
-    fill: &Range<f32>,
+    fill: &Range<DocY>,
     take: &impl Fn(StepKey) -> Option<crate::layout::pool::Shaped>,
     out: &mut LayoutDoc,
 ) -> Range<usize> {
@@ -3805,7 +3830,7 @@ fn replay_position(
                 table.margin,
                 y,
                 table.content_width,
-                (1.0 * cfg.zoom).max(1.0),
+                DocY::from((1.0 * cfg.zoom).max(1.0)),
                 theme.blocks.rule,
             ));
         }
@@ -3953,7 +3978,7 @@ fn replay_code_lines(
     let x0 = x_base + entry.pad;
     let wrap_width = (avail - 2.0 * entry.pad).max(40.0);
     let size = code_face(doc.plain_file, cfg).1 * cfg.zoom;
-    let base = entry.content_y + entry.pad;
+    let base = entry.content_y + DocY::from(entry.pad);
     let tall = table.tall_of(position);
     let (mut extra, mut next_tall) = table.extra_above(position, lines.start);
     let mut scratch = LayoutDoc::default();
@@ -3989,7 +4014,7 @@ fn replay_code_lines(
             }
         }
         if next_tall < tall.len() && tall[next_tall].1 as usize == line {
-            extra += tall[next_tall].2 - entry.line_height;
+            extra += DocY::from(tall[next_tall].2) - DocY::from(entry.line_height);
             next_tall += 1;
         }
     }
@@ -4003,7 +4028,7 @@ fn finish_block(
     cfg: &ViewConfig,
     block: &Block,
     frame: Frame,
-    height: f32,
+    height: DocY,
     out: &mut LayoutDoc,
     pass: &mut LayoutPass,
     source: &str,
@@ -4025,7 +4050,7 @@ fn finish_block(
     // previous block continues the same region (quote or alert), so
     // consecutive quoted blocks read as one. Inserted at the block's rect
     // mark to paint under the block's own rects (pills, strikes, panels).
-    let mut deco_top = f32::NAN;
+    let mut deco_top = DocY::NAN;
     if block.quote_depth > 0 {
         let continues = pass.prev_quote_depth > 0 && pass.prev_alert == block.alert;
         // The previous block's trailing space belongs to the region
@@ -4033,7 +4058,7 @@ fn finish_block(
         // rounds abutting edges independently and a shared fractional
         // edge can otherwise leave an uncovered row.
         let top = if continues {
-            pass.cursor - frame.gap - pass.prev_space_below - 1.0
+            pass.cursor - DocY::from(frame.gap) - DocY::from(pass.prev_space_below) - 1.0
         } else {
             frame.region_top
         };
@@ -4058,7 +4083,7 @@ fn finish_block(
     } else {
         metrics::space_below(frame.base_size)
     };
-    pass.cursor += height + below;
+    pass.cursor += height + DocY::from(below);
     pass.prev_quote_depth = block.quote_depth;
     pass.prev_alert = block.alert;
     pass.prev_is_list = frame.is_list;
@@ -4079,7 +4104,7 @@ fn shape_alert_title(
     x_base: f32,
     avail: f32,
     scratch: &mut LayoutDoc,
-) -> f32 {
+) -> DocY {
     let title = [Span::plain(alert_title(kind))];
     let base = BlockStyle {
         size: cfg.body_size * cfg.zoom,
@@ -4110,8 +4135,8 @@ fn quote_decoration(
     block: &Block,
     margin: f32,
     content_width: f32,
-    top: f32,
-    bottom: f32,
+    top: DocY,
+    bottom: DocY,
     source: &str,
 ) -> Vec<DecoRect> {
     let panel_h = bottom - top;
@@ -4193,7 +4218,7 @@ fn open_code(
     let wrap_width = (frame.avail - 2.0 * pad).max(40.0);
     let y0 = pass.cursor;
     let panel = out.rects.len();
-    let height = 2.0 * pad;
+    let height = DocY::from(2.0 * pad);
     if framed {
         for rect in code_panel_rects(theme, cfg, frame.x_base, frame.avail, y0, height) {
             out.rects.push(rect);
@@ -4225,8 +4250,8 @@ fn code_panel_rects(
     cfg: &ViewConfig,
     x_base: f32,
     avail: f32,
-    y0: f32,
-    height: f32,
+    y0: DocY,
+    height: DocY,
 ) -> [DecoRect; 2] {
     let radius = metrics::CORNER_RADIUS * cfg.zoom;
     let blocks = &theme.blocks;
@@ -4258,7 +4283,7 @@ fn place_code_line(
     };
     let units = out.table.unit_of(open.position, lines.len());
     if open.unit >= units {
-        let height = open.line_top() - open.y0 + open.pad;
+        let height = open.line_top() - open.y0 + DocY::from(open.pad);
         finish_block(
             theme,
             cfg,
@@ -4298,7 +4323,7 @@ fn place_code_line(
         {
             let height = widths.height(unit.text, open.wrap_width, open.line_height);
             let range = retain_range(scroll, viewport_h);
-            let inside = top <= range.end && top + height >= range.start;
+            let inside = top <= range.end && top + DocY::from(height) >= range.start;
             let contiguous = open.kept.as_ref().is_none_or(|kept| kept.end == open.unit);
             (!(inside && contiguous)).then_some(height)
         }
@@ -4385,7 +4410,7 @@ fn place_code_line(
     // slide materializes it later.
     if let Some((scroll, viewport_h)) = pass.retain {
         let range = retain_range(scroll, viewport_h);
-        let inside = top <= range.end && top + advance >= range.start;
+        let inside = top <= range.end && top + DocY::from(advance) >= range.start;
         let contiguous = open.kept.as_ref().is_none_or(|kept| kept.end == open.unit);
         if inside && contiguous {
             match &mut open.kept {
@@ -4416,12 +4441,12 @@ fn place_code_line(
         }
     }
     if advance != open.line_height {
-        open.extra += advance - open.line_height;
+        open.extra += DocY::from(advance) - DocY::from(open.line_height);
     }
     open.unit += 1;
 
     if open.framed {
-        let height = open.line_top() - open.y0 + open.pad;
+        let height = open.line_top() - open.y0 + DocY::from(open.pad);
         out.rects[open.panel].height = height;
         out.rects[open.panel + 1].height = height;
     }
@@ -4572,10 +4597,10 @@ fn shape_block(
     model_spans: bool,
     base: &BlockStyle,
     x0: f32,
-    y0: f32,
+    y0: DocY,
     content_width: f32,
     out: &mut LayoutDoc,
-) -> f32 {
+) -> DocY {
     shape_block_lines(
         fonts,
         theme,
@@ -4605,11 +4630,11 @@ fn shape_block_lines(
     model_spans: bool,
     base: &BlockStyle,
     x0: f32,
-    y0: f32,
+    y0: DocY,
     content_width: f32,
     first_line_only: bool,
     out: &mut LayoutDoc,
-) -> f32 {
+) -> DocY {
     let line_height = metrics::LINE_HEIGHT * base.size;
     // Spans expand into pieces at this point only. Math literals expand
     // into sup/sub script segments with synthesized text (the model
@@ -4676,7 +4701,7 @@ fn shape_block_lines(
         }
     }
 
-    let mut height = 0.0_f32;
+    let mut height: DocY = 0.0;
     let mut segment: Vec<usize> = Vec::new();
     let mut i = 0;
     while i <= shaped.len() {
@@ -4705,7 +4730,7 @@ fn shape_block_lines(
                     break;
                 }
             } else if i < shaped.len() {
-                height += line_height;
+                height += DocY::from(line_height);
             }
         } else if !shaped[i].text(source).is_empty() {
             // A piece with no text (a span the flow masked out) joins no
@@ -4741,12 +4766,12 @@ fn shape_segment(
     segment: &[usize],
     base: &BlockStyle,
     x0: f32,
-    y0: f32,
+    y0: DocY,
     content_width: f32,
     line_height: f32,
     first_line_only: bool,
     out: &mut LayoutDoc,
-) -> f32 {
+) -> DocY {
     // Almost every segment is small and shapes whole; it pays one
     // length pass here and builds its own piece table inside the chunk
     // shaper, nothing more.
@@ -4786,7 +4811,7 @@ fn shape_segment(
         origin_starts.entry(origins[si]).or_insert(acc);
         acc += spans[si].text(source).len() as u32;
     }
-    let mut height = 0.0_f32;
+    let mut height: DocY = 0.0;
     let mut start = 0usize;
     while start < segment.len() {
         let mut end = start + 1;
@@ -4844,12 +4869,12 @@ fn shape_segment_chunk(
     origin_starts: Option<&HashMap<usize, u32>>,
     base: &BlockStyle,
     x0: f32,
-    y0: f32,
+    y0: DocY,
     content_width: f32,
     line_height: f32,
     first_line_only: bool,
     out: &mut LayoutDoc,
-) -> f32 {
+) -> DocY {
     let mut buffer = Buffer::new(&mut fonts.font_system, Metrics::new(base.size, line_height));
     buffer.set_size(&mut fonts.font_system, Some(content_width), None);
     let texts: Vec<std::borrow::Cow<str>> = segment
@@ -4979,8 +5004,8 @@ fn shape_segment_chunk(
             let st = &styles[span_index];
             let x = x0 + group.x;
             let width = group.width;
-            let y = y0 + run.line_top - st.rise;
-            let baseline = y0 + run.line_y - st.rise;
+            let y = y0 + DocY::from(run.line_top) - DocY::from(st.rise);
+            let baseline = y0 + DocY::from(run.line_y) - DocY::from(st.rise);
             match (st.pill, open_pill) {
                 (Some(pill), Some((at, color))) if color == pill => {
                     // The groups of a right-to-left line come from the
@@ -4997,9 +5022,9 @@ fn shape_segment_chunk(
                     out.rects.push(
                         DecoRect::fill(
                             x - 3.0,
-                            y + 0.1 * line_height,
+                            y + DocY::from(0.1 * line_height),
                             width + 6.0,
-                            0.8 * line_height,
+                            DocY::from(0.8 * line_height),
                             pill,
                         )
                         .rounded(radius, radius),
@@ -5044,18 +5069,18 @@ fn shape_segment_chunk(
             if st.strike {
                 out.rects.push(DecoRect::fill(
                     x,
-                    baseline - 0.3 * st.size,
+                    baseline - DocY::from(0.3 * st.size),
                     width,
-                    (0.06 * st.size).max(1.0),
+                    DocY::from((0.06 * st.size).max(1.0)),
                     st.color,
                 ));
             }
             if st.underline {
                 out.rects.push(DecoRect::fill(
                     x,
-                    baseline + 0.1 * st.size,
+                    baseline + DocY::from(0.1 * st.size),
                     width,
-                    (0.06 * st.size).max(1.0),
+                    DocY::from((0.06 * st.size).max(1.0)),
                     st.color,
                 ));
             }
@@ -5066,9 +5091,9 @@ fn shape_segment_chunk(
                 while dx + dot <= x + width {
                     out.rects.push(DecoRect::fill(
                         dx,
-                        baseline + 0.1 * st.size,
+                        baseline + DocY::from(0.1 * st.size),
                         dot,
-                        dot,
+                        DocY::from(dot),
                         st.color,
                     ));
                     dx += 2.0 * dot;
@@ -5076,7 +5101,7 @@ fn shape_segment_chunk(
             }
         }
     }
-    height
+    DocY::from(height)
 }
 
 /// Lays out a summary row: the fold chevron in the gutter, text
@@ -5095,7 +5120,7 @@ fn layout_summary(
     x0: f32,
     avail: f32,
     scratch: &mut LayoutDoc,
-) -> f32 {
+) -> DocY {
     let size = cfg.body_size * cfg.zoom;
     let line_height = metrics::LINE_HEIGHT * size;
     let indent = metrics::INDENT * cfg.zoom;
@@ -5116,7 +5141,7 @@ fn layout_summary(
     let h = flow_or_shape(
         fonts, theme, cfg, source, media, spans, &base, text_x, 0.0, text_w, scratch,
     );
-    h.max(line_height)
+    h.max(DocY::from(line_height))
 }
 
 /// Lays out one list item: marker (bullet, number, or checkbox) in the
@@ -5133,10 +5158,10 @@ fn layout_list_item(
     spans: &[Span],
     block_index: usize,
     x0: f32,
-    y0: f32,
+    y0: DocY,
     avail: f32,
     out: &mut LayoutDoc,
-) -> f32 {
+) -> DocY {
     let size = cfg.body_size * cfg.zoom;
     let line_height = metrics::LINE_HEIGHT * size;
     let indent = metrics::INDENT * cfg.zoom * (depth as f32 + 1.0);
@@ -5185,7 +5210,7 @@ fn layout_list_item(
             } else {
                 text_x - side - gutter
             };
-            let by = y0 + (line_height - side) / 2.0;
+            let by = y0 + DocY::from((line_height - side) / 2.0);
             // The square is the click's hit target, recorded with the
             // same values it is drawn from.
             out.push_checkbox(TaskBox {
@@ -5197,7 +5222,8 @@ fn layout_list_item(
             if *checked {
                 let radius = 3.0 * cfg.zoom;
                 out.rects.push(
-                    DecoRect::fill(bx, by, side, side, theme.text.link).rounded(radius, radius),
+                    DecoRect::fill(bx, by, side, DocY::from(side), theme.text.link)
+                        .rounded(radius, radius),
                 );
                 let (runs, width) = shape_marker(
                     fonts,
@@ -5210,12 +5236,18 @@ fn layout_list_item(
                 // A logical pixel down from the text's own line: the glyph
                 // sits high in its em box and reads off-center otherwise.
                 let lift = cfg.zoom;
-                place_marker(runs, bx + (side - width) / 2.0, y0 + lift, block_index, out);
+                place_marker(
+                    runs,
+                    bx + (side - width) / 2.0,
+                    y0 + DocY::from(lift),
+                    block_index,
+                    out,
+                );
             } else {
                 let t = (1.0 * cfg.zoom).max(1.0);
                 let radius = 3.0 * cfg.zoom;
                 out.rects.push(
-                    DecoRect::fill(bx, by, side, side, theme.blocks.rule)
+                    DecoRect::fill(bx, by, side, DocY::from(side), theme.blocks.rule)
                         .rounded(radius, radius)
                         .stroked(t),
                 );
@@ -5234,7 +5266,7 @@ fn layout_list_item(
     let height = flow_or_shape(
         fonts, theme, cfg, source, media, spans, &base, text_x, y0, text_w, out,
     );
-    height.max(line_height)
+    height.max(DocY::from(line_height))
 }
 
 /// Lays out a table: columns sized to their widest cell, capped at
@@ -5252,10 +5284,10 @@ fn layout_table(
     aligns: &[ColumnAlign],
     block_index: usize,
     x0: f32,
-    y0: f32,
+    y0: DocY,
     avail: f32,
     out: &mut LayoutDoc,
-) -> f32 {
+) -> DocY {
     // Cells keep their own natural direction whatever the file forces:
     // tables hold their column order, and forcing a cell's alignment
     // would tear the grid.
@@ -5372,7 +5404,7 @@ fn layout_table(
     let mut span_base = 0usize;
     for (row_index, (cells, is_header)) in all_rows.iter().enumerate() {
         let mut shaped: Vec<LayoutDoc> = Vec::new();
-        let mut row_h = line_height;
+        let mut row_h = DocY::from(line_height);
         for (c, col_width) in widths.iter().enumerate() {
             let spans = cells.get(c).unwrap_or(&empty_cell);
             let mut tmp = LayoutDoc::default();
@@ -5426,7 +5458,7 @@ fn layout_table(
             row_h = row_h.max(h);
             shaped.push(tmp);
         }
-        let full_h = row_h + 2.0 * vpad;
+        let full_h = row_h + DocY::from(2.0 * vpad);
         out.table_rows.push(TableRow {
             block: block_index,
             top: y,
@@ -5455,7 +5487,7 @@ fn layout_table(
         }
         for (c, mut tmp) in shaped.into_iter().enumerate() {
             let dx = col_x[c] + pad;
-            let dy = y + vpad;
+            let dy = y + DocY::from(vpad);
             let (side_base, family_map) = out.merge_refs(&mut tmp);
             for mut run in tmp.runs {
                 run.x += dx;
@@ -5497,7 +5529,8 @@ fn layout_table(
     let border = theme.blocks.table_border;
     let t = (1.0 * cfg.zoom).max(1.0);
     for by in &boundaries[1..boundaries.len().saturating_sub(1)] {
-        out.rects.push(DecoRect::fill(x0, *by, table_w, t, border));
+        out.rects
+            .push(DecoRect::fill(x0, *by, table_w, DocY::from(t), border));
     }
     for bx in &col_x[1..col_x.len().saturating_sub(1)] {
         out.rects.push(DecoRect::fill(*bx, y0, t, y - y0, border));
@@ -5589,10 +5622,10 @@ fn layout_image(
     alt: &str,
     block_index: usize,
     x0: f32,
-    y0: f32,
+    y0: DocY,
     avail: f32,
     out: &mut LayoutDoc,
-) -> f32 {
+) -> DocY {
     if let Some((iw, ih)) = media.dimensions(path) {
         let width = (iw as f32 * image_scale(cfg)).min(avail);
         let height = ih as f32 * width / iw as f32;
@@ -5604,7 +5637,7 @@ fn layout_image(
             height,
             link: None,
         });
-        return height;
+        return DocY::from(height);
     }
     let pad = metrics::PLACEHOLDER_PAD * cfg.zoom;
     let radius = metrics::CORNER_RADIUS * cfg.zoom;
@@ -5631,11 +5664,11 @@ fn layout_image(
         false,
         &base,
         x0 + pad,
-        y0 + pad,
+        y0 + DocY::from(pad),
         avail - 2.0 * pad,
         out,
     );
-    let box_h = text_h + 2.0 * pad;
+    let box_h = text_h + DocY::from(2.0 * pad);
     out.rects.splice(
         rects_mark..rects_mark,
         [
@@ -5890,10 +5923,10 @@ fn layout_frontmatter(
     entries: &[(String, String)],
     block_index: usize,
     x0: f32,
-    y0: f32,
+    y0: DocY,
     avail: f32,
     out: &mut LayoutDoc,
-) -> f32 {
+) -> DocY {
     let pad = 12.0 * cfg.zoom;
     let radius = metrics::CORNER_RADIUS * cfg.zoom;
     let mut spans = Vec::new();
@@ -5922,7 +5955,7 @@ fn layout_frontmatter(
         false,
         &base,
         x0 + pad,
-        y0 + pad,
+        y0 + DocY::from(pad),
         avail - 2.0 * pad,
         out,
     );
@@ -5931,7 +5964,7 @@ fn layout_frontmatter(
     for run in &mut out.runs[runs_mark..] {
         run.span /= 2;
     }
-    let box_h = text_h + 2.0 * pad;
+    let box_h = text_h + DocY::from(2.0 * pad);
     out.rects.splice(
         rects_mark..rects_mark,
         [
@@ -6028,7 +6061,7 @@ fn emit_math_layout(
     cfg: &ViewConfig,
     m: &noad::layout::MathLayout,
     x: f32,
-    baseline: f32,
+    baseline: DocY,
     block_index: usize,
     out: &mut LayoutDoc,
 ) {
@@ -6042,14 +6075,14 @@ fn emit_math_layout(
             a: 255,
         })
     };
-    let top = baseline - m.ascent;
-    let bottom = baseline + m.descent;
+    let top = baseline - DocY::from(m.ascent);
+    let bottom = baseline + DocY::from(m.descent);
     let right = x + m.width;
     for g in &m.glyphs {
         out.math_glyphs.push(MathGlyph {
             glyph: g.glyph.0,
             x: x + g.x,
-            y: baseline + g.y,
+            y: baseline + DocY::from(g.y),
             size: g.size,
             ch: g.ch,
             top,
@@ -6062,7 +6095,14 @@ fn emit_math_layout(
     }
     for r in &m.rules {
         out.rects.push(
-            DecoRect::fill(x + r.x, baseline + r.y, r.width, r.height, color(r.color)).smooth(),
+            DecoRect::fill(
+                x + r.x,
+                baseline + DocY::from(r.y),
+                r.width,
+                DocY::from(r.height),
+                color(r.color),
+            )
+            .smooth(),
         );
     }
     for lit in &m.literals {
@@ -6076,7 +6116,7 @@ fn emit_math_layout(
             out,
         );
         for mut run in runs {
-            let dy = (baseline + lit.y) - run.baseline;
+            let dy = (baseline + DocY::from(lit.y)) - run.baseline;
             run.x += x + lit.x;
             run.y += dy;
             run.baseline += dy;
@@ -6094,10 +6134,10 @@ fn layout_math_block(
     tex: &str,
     block_index: usize,
     x0: f32,
-    y0: f32,
+    y0: DocY,
     avail: f32,
     out: &mut LayoutDoc,
-) -> f32 {
+) -> DocY {
     let font = OryxMathFont::new();
     let size = cfg.body_size * cfg.zoom;
     let mut m = noad::layout::layout(tex.trim(), noad::layout::MathStyle::Display, size, &font);
@@ -6109,9 +6149,9 @@ fn layout_math_block(
         scale_math_layout(&mut m, s);
     }
     let x = x0 + ((avail - m.width) / 2.0).max(0.0);
-    let baseline = y0 + m.ascent;
+    let baseline = y0 + DocY::from(m.ascent);
     emit_math_layout(fonts, theme, cfg, &m, x, baseline, block_index, out);
-    (m.ascent + m.descent).max(metrics::LINE_HEIGHT * size)
+    DocY::from((m.ascent + m.descent).max(metrics::LINE_HEIGHT * size))
 }
 
 /// Scales flat math geometry uniformly. Layout is linear in the em size,
@@ -6168,10 +6208,10 @@ fn layout_footnote_def(
     base_size: f32,
     block_index: usize,
     x0: f32,
-    y0: f32,
+    y0: DocY,
     avail: f32,
     out: &mut LayoutDoc,
-) -> f32 {
+) -> DocY {
     if !continued && !out.footnote_backs.iter().any(|(b, _)| *b == block_index) {
         out.footnote_backs
             .push((block_index, format!("fnref:{label}")));
@@ -6254,7 +6294,7 @@ fn layout_footnote_def(
             out,
         )
     };
-    text_h.max(metrics::LINE_HEIGHT * base_size)
+    text_h.max(DocY::from(metrics::LINE_HEIGHT * base_size))
 }
 
 /// Chooses between plain shaping and mixed text-and-image flow.
@@ -6268,10 +6308,10 @@ fn flow_or_shape(
     spans: &[Span],
     base: &BlockStyle,
     x0: f32,
-    y0: f32,
+    y0: DocY,
     avail: f32,
     out: &mut LayoutDoc,
-) -> f32 {
+) -> DocY {
     if spans.iter().any(|s| s.image.is_some() || s.math) {
         layout_flow(
             fonts, theme, cfg, source, media, spans, base, x0, y0, avail, out,
@@ -6297,18 +6337,18 @@ struct LineMarks {
 /// text baseline when it carries one, and whether it is a standalone row
 /// rather than a text line.
 struct FlowLine {
-    top: f32,
-    height: f32,
+    top: DocY,
+    height: DocY,
     end_x: f32,
     /// Present on text lines and equation rows; image rows have none.
-    baseline: Option<f32>,
+    baseline: Option<DocY>,
     row: bool,
     marks: LineMarks,
 }
 
 /// Moves an open line's content down, TeX's baselineskip stretching to
 /// admit taller ink.
-fn shift_line_down(out: &mut LayoutDoc, marks: &LineMarks, dy: f32) {
+fn shift_line_down(out: &mut LayoutDoc, marks: &LineMarks, dy: DocY) {
     for run in &mut out.runs[marks.runs..] {
         run.y += dy;
         run.baseline += dy;
@@ -6328,8 +6368,8 @@ fn shift_line_down(out: &mut LayoutDoc, marks: &LineMarks, dy: f32) {
 
 /// A shaped chunk's last visual line: its top, its right edge, and its
 /// baseline, read off the chunk's runs.
-fn chunk_metrics(runs: &[TextRun], x0: f32, y: f32) -> (f32, f32, f32) {
-    let last_top = runs.iter().map(|r| r.y).fold(y, f32::max);
+fn chunk_metrics(runs: &[TextRun], x0: f32, y: DocY) -> (DocY, f32, DocY) {
+    let last_top = runs.iter().map(|r| r.y).fold(y, DocY::max);
     let end_x = runs
         .iter()
         .filter(|r| (r.y - last_top).abs() < 1.0)
@@ -6339,7 +6379,7 @@ fn chunk_metrics(runs: &[TextRun], x0: f32, y: f32) -> (f32, f32, f32) {
         .iter()
         .filter(|r| (r.y - last_top).abs() < 1.0)
         .map(|r| r.baseline)
-        .fold(0.0, f32::max);
+        .fold(0.0, DocY::max);
     (last_top, end_x, last_base)
 }
 
@@ -6367,12 +6407,12 @@ fn split_after_equation(
     line: &mut FlowLine,
     base: &BlockStyle,
     x0: f32,
-    y: f32,
+    y: DocY,
     avail: f32,
     runs_mark: usize,
     rects_mark: usize,
     out: &mut LayoutDoc,
-) -> (usize, usize, f32) {
+) -> (usize, usize, DocY) {
     let lb = line.baseline.expect("an open line with a baseline");
     let room = x0 + avail - line.end_x;
     out.runs.truncate(runs_mark);
@@ -6518,10 +6558,10 @@ fn cut_at_a_break(
 
 /// Closes the flow's open line: a row of its own, whose height the flow
 /// books when the line closes, moves the pen below it.
-fn close_line(line: &mut Option<FlowLine>, y: &mut f32, size: f32) {
+fn close_line(line: &mut Option<FlowLine>, y: &mut DocY, size: f32) {
     if let Some(l) = line.take() {
         if l.row {
-            *y = l.top + l.height + 0.25 * size;
+            *y = l.top + l.height + DocY::from(0.25 * size);
         }
     }
 }
@@ -6530,7 +6570,7 @@ fn close_line(line: &mut Option<FlowLine>, y: &mut f32, size: f32) {
 /// open after another break it leaves a blank line.
 fn hard_break(
     line: &mut Option<FlowLine>,
-    y: &mut f32,
+    y: &mut DocY,
     size: f32,
     line_height: f32,
     broke: &mut bool,
@@ -6538,7 +6578,7 @@ fn hard_break(
     if line.is_some() {
         close_line(line, y, size);
     } else if *broke {
-        *y += line_height;
+        *y += DocY::from(line_height);
     }
     *broke = true;
 }
@@ -6568,10 +6608,10 @@ fn layout_flow(
     spans: &[Span],
     base: &BlockStyle,
     x0: f32,
-    y0: f32,
+    y0: DocY,
     avail: f32,
     out: &mut LayoutDoc,
-) -> f32 {
+) -> DocY {
     let line_height = metrics::LINE_HEIGHT * base.size;
     let gap = 8.0 * cfg.zoom;
     let mut y = y0;
@@ -6661,7 +6701,7 @@ fn layout_flow(
                     fonts, theme, cfg, source, &masked, true, base, x0, y, avail, out,
                 );
                 let (_, end_x, last_base) = chunk_metrics(&out.runs[runs_mark..], x0, y);
-                let single_line = h <= 1.5 * line_height;
+                let single_line = h <= DocY::from(1.5 * line_height);
                 let merged = if let Some(l) = line.as_mut() {
                     let fits = l.end_x + (end_x - x0) <= x0 + avail;
                     match l.baseline {
@@ -6691,7 +6731,7 @@ fn layout_flow(
             if !merged {
                 if let Some(l) = line.take() {
                     if l.row {
-                        let below = l.top + l.height + 0.25 * base.size;
+                        let below = l.top + l.height + DocY::from(0.25 * base.size);
                         if below > y {
                             // The chunk shaped over the open row; it moves
                             // below, and the line metrics move with it so
@@ -6716,14 +6756,14 @@ fn layout_flow(
                 // marks like footnote references sit within half a size
                 // of its top.
                 let line_runs = (runs_mark..out.runs.len())
-                    .find(|&r| out.runs[r].y >= last_top - 0.5 * base.size)
+                    .find(|&r| out.runs[r].y >= last_top - DocY::from(0.5 * base.size))
                     .unwrap_or(runs_mark);
                 let line_rects = (rects_mark..out.rects.len())
-                    .find(|&r| out.rects[r].y >= last_top - 0.5 * base.size)
+                    .find(|&r| out.rects[r].y >= last_top - DocY::from(0.5 * base.size))
                     .unwrap_or(out.rects.len());
                 line = Some(FlowLine {
                     top: last_top,
-                    height: line_height,
+                    height: DocY::from(line_height),
                     end_x,
                     baseline: Some(last_base),
                     row: false,
@@ -6775,7 +6815,7 @@ fn layout_flow(
                 // Ink taller than the line's ascent shifts the whole line
                 // down, TeX's baselineskip stretching, so nothing reaches
                 // the line above.
-                let dy = (m.ascent - (lb - l.top)).max(0.0);
+                let dy = (DocY::from(m.ascent) - (lb - l.top)).max(0.0);
                 if dy > 0.0 {
                     shift_line_down(out, &l.marks, dy);
                     l.baseline = Some(lb + dy);
@@ -6789,14 +6829,14 @@ fn layout_flow(
                 if l.row {
                     l.height = l
                         .height
-                        .max((lb - l.top) + m.descent.max(0.25 * line_height));
+                        .max((lb - l.top) + DocY::from(m.descent.max(0.25 * line_height)));
                 } else {
-                    y = y.max(lb + m.descent + 0.25 * base.size);
+                    y = y.max(lb + DocY::from(m.descent) + DocY::from(0.25 * base.size));
                 }
             } else {
                 if let Some(l) = line.take() {
                     if l.row {
-                        y = l.top + l.height + 0.25 * base.size;
+                        y = l.top + l.height + DocY::from(0.25 * base.size);
                     }
                 }
                 let marks = LineMarks {
@@ -6805,12 +6845,12 @@ fn layout_flow(
                     images: out.images.len(),
                     math: out.math_glyphs.len(),
                 };
-                let baseline = y + m.ascent.max(0.75 * line_height);
+                let baseline = y + DocY::from(m.ascent.max(0.75 * line_height));
                 // A row of its own follows the block's alignment, as the
                 // text lines do: centered or at the right under a mark.
                 let x = x0 + (avail - w).max(0.0) * align_factor(base.align);
                 emit_math_layout(fonts, theme, cfg, &m, x, baseline, base.block_index, out);
-                let height = (baseline - y) + m.descent.max(0.25 * line_height);
+                let height = (baseline - y) + DocY::from(m.descent.max(0.25 * line_height));
                 line = Some(FlowLine {
                     top: y,
                     height,
@@ -6826,15 +6866,15 @@ fn layout_flow(
             let span = &spans[i];
             let image = span.image.as_ref().expect("image span");
             let (w, h, loaded) = image_size(fonts, media, span, image, cfg, source, avail);
-            let joins = line
-                .as_ref()
-                .is_some_and(|l| l.end_x + gap + w <= x0 + avail && (l.row || h <= l.height + 2.0));
+            let joins = line.as_ref().is_some_and(|l| {
+                l.end_x + gap + w <= x0 + avail && (l.row || DocY::from(h) <= l.height + 2.0)
+            });
             if joins {
                 let l = line.as_mut().expect("open line");
                 let iy = if l.row {
                     l.top
                 } else {
-                    l.top + 0.85 * l.height - h
+                    l.top + 0.85 * l.height - DocY::from(h)
                 };
                 place_image(
                     fonts,
@@ -6852,13 +6892,13 @@ fn layout_flow(
                     loaded,
                 );
                 l.end_x += gap + w;
-                if l.row && h > l.height {
-                    l.height = h;
+                if l.row && DocY::from(h) > l.height {
+                    l.height = DocY::from(h);
                 }
             } else {
                 if let Some(l) = line.take() {
                     if l.row {
-                        y = l.top + l.height + 0.25 * base.size;
+                        y = l.top + l.height + DocY::from(0.25 * base.size);
                     }
                 }
                 let marks = LineMarks {
@@ -6884,7 +6924,7 @@ fn layout_flow(
                 );
                 line = Some(FlowLine {
                     top: y,
-                    height: h,
+                    height: DocY::from(h),
                     end_x: x0 + w,
                     baseline: None,
                     row: true,
@@ -6899,7 +6939,7 @@ fn layout_flow(
             y = l.top + l.height;
         }
     }
-    (y - y0).max(line_height)
+    (y - y0).max(DocY::from(line_height))
 }
 
 /// The text a placeholder shows for an inline image: the span's text,
@@ -6975,7 +7015,7 @@ fn place_image(
     image: &SpanImage,
     block_index: usize,
     x: f32,
-    y: f32,
+    y: DocY,
     w: f32,
     h: f32,
     loaded: bool,
@@ -6991,10 +7031,15 @@ fn place_image(
     if loaded {
         return;
     }
+    out.rects.push(DecoRect::fill(
+        x,
+        y,
+        w,
+        DocY::from(h),
+        theme.blocks.frontmatter_bg,
+    ));
     out.rects
-        .push(DecoRect::fill(x, y, w, h, theme.blocks.frontmatter_bg));
-    out.rects
-        .push(DecoRect::fill(x, y, w, h, theme.blocks.code_border).stroked(1.0));
+        .push(DecoRect::fill(x, y, w, DocY::from(h), theme.blocks.code_border).stroked(1.0));
     let label = image_label(span, image, source);
     // The text takes the body size when the box has the height for it,
     // and shrinks to the box otherwise; below a legible size the box
@@ -7017,7 +7062,7 @@ fn place_image(
     }
     let line_height = metrics::LINE_HEIGHT * cfg.body_size * cfg.zoom;
     let text_x = x + pad + (inner - width).max(0.0) / 2.0;
-    let text_y = y + (h - line_height) / 2.0;
+    let text_y = y + DocY::from((h - line_height) / 2.0);
     place_marker(runs, text_x, text_y, block_index, out);
 }
 
@@ -7078,15 +7123,15 @@ fn align_lines(
 ) {
     // (top, bottom, kind, index) per element; kinds: 0 runs, 1 rects,
     // 2 images, 3 math glyphs.
-    let mut items: Vec<(f32, f32, u8, usize)> = Vec::new();
+    let mut items: Vec<(DocY, DocY, u8, usize)> = Vec::new();
     for (i, r) in out.runs.iter().enumerate().skip(runs_mark) {
-        items.push((r.y, r.y + metrics::LINE_HEIGHT * r.size, 0, i));
+        items.push((r.y, r.y + DocY::from(metrics::LINE_HEIGHT * r.size), 0, i));
     }
     for (i, r) in out.rects.iter().enumerate().skip(rects_mark) {
         items.push((r.y, r.y + r.height, 1, i));
     }
     for (i, im) in out.images.iter().enumerate().skip(images_mark) {
-        items.push((im.y, im.y + im.height, 2, i));
+        items.push((im.y, im.y + DocY::from(im.height), 2, i));
     }
     for (i, g) in out.math_glyphs.iter().enumerate().skip(math_mark) {
         items.push((g.top, g.bottom, 3, i));
@@ -7101,7 +7146,7 @@ fn align_lines(
             end += 1;
         }
         let group = &items[start..end];
-        let span_x = |item: &(f32, f32, u8, usize)| -> (f32, f32) {
+        let span_x = |item: &(DocY, DocY, u8, usize)| -> (f32, f32) {
             match item.2 {
                 0 => (out.runs[item.3].x, out.runs[item.3].width),
                 1 => (out.rects[item.3].x, out.rects[item.3].width),
@@ -7209,8 +7254,8 @@ fn shape_side_text(
         runs.push(TextRun {
             text,
             x: 0.0,
-            y: run.line_top,
-            baseline: run.line_y,
+            y: DocY::from(run.line_top),
+            baseline: DocY::from(run.line_y),
             width: run_width,
             size,
             family,
@@ -7225,7 +7270,7 @@ fn shape_side_text(
 }
 
 /// Marker runs use span `usize::MAX`: synthetic, excluded from selection.
-fn place_marker(runs: Vec<TextRun>, x: f32, y: f32, block_index: usize, out: &mut LayoutDoc) {
+fn place_marker(runs: Vec<TextRun>, x: f32, y: DocY, block_index: usize, out: &mut LayoutDoc) {
     for mut run in runs {
         run.x += x;
         run.y += y;
@@ -7454,14 +7499,14 @@ pub fn edit_code_lines(
 
     // What the touched units measured before the edit: the shared
     // advance plus their tall exceptions.
-    let mut old_h = old_units.len() as f32 * line_height;
+    let mut old_h = old_units.len() as DocY * DocY::from(line_height);
     let tall = lay.table.tall_of(position);
     let first = tall.partition_point(|&(_, l, _)| (l as usize) < old_units.start);
     for &(_, l, h) in &tall[first..] {
         if l as usize >= old_units.end {
             break;
         }
-        old_h += h - line_height;
+        old_h += DocY::from(h) - DocY::from(line_height);
     }
 
     // Shape the new touched lines once, for their heights alone; the
@@ -7477,7 +7522,7 @@ pub fn edit_code_lines(
     let wrap_width = (avail - 2.0 * pad).max(40.0);
     let size = code_face(doc.plain_file, cfg).1 * cfg.zoom;
     let mut scratch = LayoutDoc::default();
-    let mut new_h = 0.0_f32;
+    let mut new_h: DocY = 0.0;
     let mut new_tall: Vec<(u32, u32, f32)> = Vec::new();
     for line in new_units.clone() {
         let unit = unit_text(&lay.table, position, line, lines, highlights, &doc.source);
@@ -7507,7 +7552,7 @@ pub fn edit_code_lines(
         if advance != line_height {
             new_tall.push((position as u32, line as u32, advance));
         }
-        new_h += advance;
+        new_h += DocY::from(advance);
     }
     let dy = new_h - old_h;
     let line_delta = new_units.len() as isize - old_units.len() as isize;
@@ -7728,7 +7773,7 @@ fn shape_code_chunk(
     segments: &[(Range<usize>, SyntaxRole)],
     block_index: usize,
     x0: f32,
-    y0: f32,
+    y0: DocY,
     size: f32,
     line_height: f32,
     wrap_width: f32,
@@ -7788,8 +7833,8 @@ fn shape_code_chunk(
                     len: (end_byte - start_byte) as u32,
                 },
                 x: x0 + group.x,
-                y: y0 + run.line_top,
-                baseline: y0 + run.line_y,
+                y: y0 + DocY::from(run.line_top),
+                baseline: y0 + DocY::from(run.line_y),
                 width: group.width,
                 size,
                 family,
@@ -8019,7 +8064,7 @@ mod tests {
                 y: 0.0,
                 content_y: 12.5,
                 height: 0.0,
-                deco_top: f32::NAN,
+                deco_top: DocY::NAN,
                 line_height: 30.3,
                 pad: 14.0,
                 x0: 0.0,
@@ -8035,16 +8080,21 @@ mod tests {
 
     /// The top of a line as the pass adds it up: the extra height of
     /// each wrapped line above, one by one from the first.
-    fn top_by_walk(table: &BlockTable, line: usize) -> f32 {
+    fn top_by_walk(table: &BlockTable, line: usize) -> DocY {
         let entry = &table.entries[0];
-        let mut extra = 0.0_f32;
+        let mut extra: DocY = 0.0;
         for &(_, l, height) in table.tall_of(0) {
             if l as usize >= line {
                 break;
             }
-            extra += height - entry.line_height;
+            extra += DocY::from(height) - DocY::from(entry.line_height);
         }
-        code_line_y(entry.content_y + entry.pad, line, entry.line_height, extra)
+        code_line_y(
+            entry.content_y + DocY::from(entry.pad),
+            line,
+            entry.line_height,
+            extra,
+        )
     }
 
     #[test]
@@ -8712,7 +8762,7 @@ mod tests {
         )
     }
 
-    fn run_y(l: &LayoutDoc, doc: &Document, text: &str) -> f32 {
+    fn run_y(l: &LayoutDoc, doc: &Document, text: &str) -> DocY {
         l.runs
             .iter()
             .find(|r| l.run_text(doc, r) == text)

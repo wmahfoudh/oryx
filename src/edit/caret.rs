@@ -6,7 +6,7 @@
 //! text and code files, where display bytes equal source bytes.
 
 use crate::doc::model::{BlockKind, Document, Span};
-use crate::layout::{metrics, LayoutDoc, TextRef, TextRun};
+use crate::layout::{metrics, DocY, LayoutDoc, TextRef, TextRun};
 use crate::style::fonts::FontStore;
 use crate::style::highlight::LONG_LINE;
 use crate::ui::selection::{self, ModelPos, Selection, MARKER_SPAN};
@@ -289,7 +289,7 @@ pub fn word_left(text: &str, at: usize) -> usize {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CaretBox {
     pub x: f32,
-    pub y: f32,
+    pub y: DocY,
     pub h: f32,
 }
 
@@ -306,7 +306,7 @@ struct MappedRun {
 
 /// A visual line: the mappable runs sharing a y, in x order.
 struct Line {
-    y: f32,
+    y: DocY,
     h: f32,
     start: usize,
     end: usize,
@@ -444,7 +444,7 @@ pub fn selection_range(doc: &Document, sel: &Selection) -> Option<std::ops::Rang
 
 /// The visual lines of every mappable run, in reading order.
 fn lines_of(lay: &LayoutDoc, doc: &Document) -> Vec<Line> {
-    let mut flat: Vec<(f32, f32, MappedRun)> = Vec::new();
+    let mut flat: Vec<(DocY, f32, MappedRun)> = Vec::new();
     for (index, run) in lay.runs.iter().enumerate() {
         let Some((start, len)) = run_source(doc, run) else {
             continue;
@@ -500,7 +500,7 @@ fn lines_of(lay: &LayoutDoc, doc: &Document) -> Vec<Line> {
 /// the page here, so a reader returns to the line they were editing
 /// rather than to the one they came in from. None when the layout has
 /// not placed that far, which the pending target answers instead.
-pub fn row_top(lay: &LayoutDoc, doc: &Document, offset: usize) -> Option<f32> {
+pub fn row_top(lay: &LayoutDoc, doc: &Document, offset: usize) -> Option<DocY> {
     let lines = lines_of(lay, doc);
     locate(&lines, offset).map(|i| lines[i].y)
 }
@@ -510,7 +510,7 @@ pub fn row_top(lay: &LayoutDoc, doc: &Document, offset: usize) -> Option<f32> {
 /// paragraph starts on, whatever markup opens it. None for a line that
 /// draws no text, an image, a rule or a blank line, and for a row
 /// outside what the layout holds right now.
-pub fn line_top(lay: &LayoutDoc, doc: &Document, offset: usize) -> Option<f32> {
+pub fn line_top(lay: &LayoutDoc, doc: &Document, offset: usize) -> Option<DocY> {
     line_run(lay, doc, offset).map(|run| run.y)
 }
 
@@ -556,7 +556,7 @@ fn line_run<'l>(lay: &'l LayoutDoc, doc: &Document, offset: usize) -> Option<&'l
 /// top and a height, for a row whose bytes are not the source's own, so
 /// that `lines_of` does not hold it: a line of a code block that keeps a
 /// copy of its text, placed by the block table, or a row of a table.
-fn copied_row(lay: &LayoutDoc, doc: &Document, offset: usize) -> Option<(f32, f32)> {
+fn copied_row(lay: &LayoutDoc, doc: &Document, offset: usize) -> Option<(DocY, f32)> {
     let source = &doc.source;
     let offset = clamp(doc, offset);
     // The line's end lies inside the block the line belongs to, where
@@ -585,10 +585,10 @@ fn copied_row(lay: &LayoutDoc, doc: &Document, offset: usize) -> Option<(f32, f3
 fn first_copied_row(
     lay: &LayoutDoc,
     doc: &Document,
-    view_top: f32,
-    bottom: f32,
-) -> Option<(f32, usize)> {
-    let mut first: Option<(f32, f32, usize)> = None;
+    view_top: DocY,
+    bottom: DocY,
+) -> Option<(DocY, usize)> {
+    let mut first: Option<(DocY, f32, usize)> = None;
     // The spans of the block of the last run looked at: a table's cells
     // are collected once, not once per run.
     let mut spans: Option<(usize, Vec<&Span>)> = None;
@@ -596,7 +596,7 @@ fn first_copied_row(
         let TextRef::Model { start: at, .. } = run.text else {
             continue;
         };
-        if run.y < view_top || run.y + metrics::LINE_HEIGHT * run.size > bottom {
+        if run.y < view_top || run.y + DocY::from(metrics::LINE_HEIGHT * run.size) > bottom {
             continue;
         }
         if first.is_some_and(|(y, x, _)| (y, x) <= (run.y, run.x)) {
@@ -661,7 +661,7 @@ fn run_spans(kind: &BlockKind) -> Vec<&Span> {
 /// that fits in the view, which shows whole, for a line of the block's
 /// own, and for a code block whose lines answer, which places its last
 /// line. Asked only for a line that draws no row.
-pub fn tall_block_end(lay: &LayoutDoc, doc: &Document, offset: usize, view_h: f32) -> Option<f32> {
+pub fn tall_block_end(lay: &LayoutDoc, doc: &Document, offset: usize, view_h: f32) -> Option<DocY> {
     let index = doc.block_at_offset(offset)?;
     let block = &doc.blocks[index];
     if offset < block.range.end {
@@ -672,7 +672,7 @@ pub fn tall_block_end(lay: &LayoutDoc, doc: &Document, offset: usize, view_h: f3
         return None;
     }
     let span = lay.block_span(index)?;
-    (span.end - span.start > view_h).then_some(span.end)
+    (span.end - span.start > DocY::from(view_h)).then_some(span.end)
 }
 
 /// The bottom of a tall image whose top the page is scrolled past, for
@@ -681,7 +681,12 @@ pub fn tall_block_end(lay: &LayoutDoc, doc: &Document, offset: usize, view_h: f3
 /// the screen across the crossing. None while the image's top is in
 /// view or below it, where the top is the place, and for any other
 /// line.
-pub fn image_bottom(lay: &LayoutDoc, doc: &Document, offset: usize, scroll_y: f32) -> Option<f32> {
+pub fn image_bottom(
+    lay: &LayoutDoc,
+    doc: &Document,
+    offset: usize,
+    scroll_y: DocY,
+) -> Option<DocY> {
     let index = doc.block_at_offset(offset)?;
     let block = &doc.blocks[index];
     if offset >= block.range.end || !matches!(block.kind, BlockKind::Image { .. }) {
@@ -701,7 +706,7 @@ pub fn place_box(
     doc: &Document,
     offset: usize,
     view_h: f32,
-) -> Option<(f32, f32)> {
+) -> Option<(DocY, f32)> {
     let lines = lines_of(lay, doc);
     if let Some(i) = locate(&lines, offset) {
         return Some((lines[i].y, lines[i].h));
@@ -719,17 +724,17 @@ pub fn place_box(
 /// Where an offset without a row stands.
 enum Rowless {
     /// An empty line of a file that is one block of lines, by its index.
-    Line(Range<f32>),
+    Line(Range<DocY>),
     /// The whole block the offset belongs to.
-    Block(Range<f32>),
+    Block(Range<DocY>),
     /// The bottom of a block taller than the view, for a line after it.
-    End(f32),
+    End(DocY),
 }
 
 impl Rowless {
     /// A line shows when it is whole inside the view, as a row does; a
     /// block shows when any part of it is.
-    fn shows(&self, view_top: f32, bottom: f32) -> bool {
+    fn shows(&self, view_top: DocY, bottom: DocY) -> bool {
         match self {
             Rowless::Line(span) => span.start >= view_top && span.end <= bottom,
             Rowless::Block(span) => span.end >= view_top && span.start < bottom,
@@ -753,7 +758,7 @@ fn rowless(lay: &LayoutDoc, doc: &Document, offset: usize, view_h: f32) -> Optio
             _ => None,
         };
         if let Some(seat) = place.and_then(|(line, byte)| lay.code_seat_at(block, line, byte)) {
-            return Some(Rowless::Line(seat.y..seat.y + seat.height));
+            return Some(Rowless::Line(seat.y..seat.y + DocY::from(seat.height)));
         }
     }
     if let Some(end) = tall_block_end(lay, doc, offset, view_h) {
@@ -766,12 +771,12 @@ fn rowless(lay: &LayoutDoc, doc: &Document, offset: usize, view_h: f32) -> Optio
 /// crossing so the line keeps its place on the screen. A row the
 /// reader scrolled away from answers with the nearest edge, so it
 /// comes back whole inside the view.
-pub fn held(row_y: f32, row_h: f32, scroll_y: f32, view_h: f32) -> f32 {
-    (row_y - scroll_y).clamp(0.0, (view_h - row_h).max(0.0))
+pub fn held(row_y: DocY, row_h: f32, scroll_y: DocY, view_h: f32) -> DocY {
+    (row_y - scroll_y).clamp(0.0, DocY::from((view_h - row_h).max(0.0)))
 }
 
 /// The scroll that stands a line `below` the top of the view.
-pub fn seated(row_y: f32, below: f32) -> f32 {
+pub fn seated(row_y: DocY, below: DocY) -> DocY {
     row_y - below
 }
 
@@ -1082,9 +1087,9 @@ impl Caret {
                     }
                     _ => {
                         let goal_y = if motion == Motion::PageUp {
-                            line.y - page_h
+                            line.y - DocY::from(page_h)
                         } else {
-                            line.y + page_h
+                            line.y + DocY::from(page_h)
                         };
                         lines
                             .iter()
@@ -1153,7 +1158,7 @@ impl Caret {
                 + line_prefix_advance(fonts, lay, doc, line, offset)?;
             return Some(CaretBox {
                 x,
-                y: line.y + line.h * gap as f32,
+                y: line.y + DocY::from(line.h) * gap as DocY,
                 h: line.h,
             });
         }
@@ -1172,7 +1177,7 @@ impl Caret {
             + line_prefix_advance(fonts, lay, doc, below, offset)?;
         Some(CaretBox {
             x,
-            y: below.y - below.h * gap as f32,
+            y: below.y - DocY::from(below.h) * gap as DocY,
             h: below.h,
         })
     }
@@ -1305,11 +1310,11 @@ fn blank_page_at(
     lay: &LayoutDoc,
     doc: &Document,
     x: f32,
-    y: f32,
+    y: DocY,
 ) -> Option<usize> {
     let source = &doc.source;
     let first = lay.code_line_seat(0, 0)?;
-    let row = ((y - first.y) / first.height).floor().max(0.0) as usize;
+    let row = ((y - first.y) / DocY::from(first.height)).floor().max(0.0) as usize;
     let line = row.min(source.matches('\n').count());
     let mut start = 0;
     for _ in 0..line {
@@ -1383,13 +1388,16 @@ pub fn place(
     doc: &Document,
     fonts: &mut FontStore,
     x: f32,
-    y: f32,
+    y: DocY,
 ) -> Option<Caret> {
     let lines = lines_of(lay, doc);
     if lines.is_empty() {
         return blank_page_at(fonts, lay, doc, x, y).map(Caret::at);
     }
-    if let Some(li) = lines.iter().position(|l| y >= l.y && y < l.y + l.h) {
+    if let Some(li) = lines
+        .iter()
+        .position(|l| y >= l.y && y < l.y + DocY::from(l.h))
+    {
         return Some(Caret::at(offset_at_x(fonts, lay, doc, &lines[li], x)));
     }
     if let Some(offset) = blank_line_at(fonts, lay, doc, &lines, x, y) {
@@ -1399,9 +1407,9 @@ pub fn place(
         .iter()
         .enumerate()
         .min_by(|a, b| {
-            (a.1.y + a.1.h / 2.0 - y)
+            (a.1.y + DocY::from(a.1.h / 2.0) - y)
                 .abs()
-                .total_cmp(&(b.1.y + b.1.h / 2.0 - y).abs())
+                .total_cmp(&(b.1.y + DocY::from(b.1.h / 2.0) - y).abs())
         })
         .map(|(i, _)| i)?;
     Some(Caret::at(offset_at_x(fonts, lay, doc, &lines[li], x)))
@@ -1419,7 +1427,7 @@ fn blank_line_at(
     doc: &Document,
     lines: &[Line],
     x: f32,
-    y: f32,
+    y: DocY,
 ) -> Option<usize> {
     let source = &doc.source;
     // The starts of the source lines in `range` that own no row.
@@ -1454,7 +1462,7 @@ fn blank_line_at(
             start
         })
     };
-    if let Some(li) = lines.iter().rposition(|l| l.y + l.h <= y) {
+    if let Some(li) = lines.iter().rposition(|l| l.y + DocY::from(l.h) <= y) {
         let line = &lines[li];
         let until = lines.get(li + 1).map_or(source.len(), |next| next.start);
         // The row's own newline first, then one start per blank line.
@@ -1463,7 +1471,7 @@ fn blank_line_at(
         if blanks.is_empty() {
             return None;
         }
-        let row = ((y - line.y) / line.h).floor() as usize;
+        let row = ((y - line.y) / DocY::from(line.h)).floor() as usize;
         let j = row.saturating_sub(1).min(blanks.len() - 1);
         return seat(line, blanks[j], fonts);
     }
@@ -1472,7 +1480,7 @@ fn blank_line_at(
     if blanks.is_empty() {
         return None;
     }
-    let gap = ((below.y - y) / below.h).floor() as usize + 1;
+    let gap = ((below.y - y) / DocY::from(below.h)).floor() as usize + 1;
     let j = blanks.len().saturating_sub(gap);
     seat(below, blanks[j], fonts)
 }
@@ -1489,7 +1497,7 @@ pub fn landing(
     doc: &Document,
     selection: Option<&Selection>,
     remembered: Option<usize>,
-    view_top: f32,
+    view_top: DocY,
     view_h: f32,
 ) -> usize {
     if let Some(sel) = selection {
@@ -1499,9 +1507,9 @@ pub fn landing(
         }
     }
     let lines = lines_of(lay, doc);
-    let bottom = view_top + view_h;
+    let bottom = view_top + DocY::from(view_h);
     if let Some(offset) = remembered.map(|offset| clamp(doc, offset)) {
-        let whole = |y: f32, h: f32| y >= view_top && y + h <= bottom;
+        let whole = |y: DocY, h: f32| y >= view_top && y + DocY::from(h) <= bottom;
         let shows = match locate(&lines, offset) {
             Some(li) => whole(lines[li].y, lines[li].h),
             None => match copied_row(lay, doc, offset) {
@@ -1520,7 +1528,7 @@ pub fn landing(
     // source's own bytes and the others.
     let whole = lines
         .iter()
-        .find(|l| l.y >= view_top && l.y + l.h <= bottom);
+        .find(|l| l.y >= view_top && l.y + DocY::from(l.h) <= bottom);
     let copied = first_copied_row(lay, doc, view_top, bottom);
     match (whole, copied) {
         (Some(line), Some((y, offset))) => return if y < line.y { offset } else { line.start },
@@ -1528,7 +1536,9 @@ pub fn landing(
         (None, Some((_, offset))) => return offset,
         (None, None) => {}
     }
-    let cut = lines.iter().find(|l| l.y + l.h > view_top && l.y < bottom);
+    let cut = lines
+        .iter()
+        .find(|l| l.y + DocY::from(l.h) > view_top && l.y < bottom);
     if let Some(line) = cut {
         return line.start;
     }
@@ -1546,11 +1556,11 @@ pub fn landing(
 
 /// The scroll that keeps the caret in view: unchanged while the caret
 /// is visible, otherwise the minimal move that reveals it.
-pub fn snap(scroll_y: f32, view_h: f32, caret: CaretBox) -> f32 {
+pub fn snap(scroll_y: DocY, view_h: f32, caret: CaretBox) -> DocY {
     if caret.y < scroll_y {
         caret.y
-    } else if caret.y + caret.h > scroll_y + view_h {
-        caret.y + caret.h - view_h
+    } else if caret.y + DocY::from(caret.h) > scroll_y + DocY::from(view_h) {
+        caret.y + DocY::from(caret.h) - DocY::from(view_h)
     } else {
         scroll_y
     }

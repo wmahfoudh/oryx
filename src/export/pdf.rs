@@ -17,7 +17,7 @@ use crate::doc::model::{BlockKind, Document};
 use crate::export::paginate::Page;
 use crate::export::{ExportSettings, PageGeometry};
 use crate::layout::pool::{shape_text_data, SegmentData, TextJob};
-use crate::layout::{DecoRect, LayoutDoc, TextRun};
+use crate::layout::{DecoRect, DocY, LayoutDoc, TextRun};
 use crate::style::fonts::FontStore;
 use crate::style::theme::{Rgba, Theme};
 
@@ -180,7 +180,7 @@ struct Segment {
     size: f32,
     color: Rgba,
     x: f32,
-    baseline: f32,
+    baseline: DocY,
 }
 
 /// Everything an export needs that does not change from page to page.
@@ -206,7 +206,7 @@ struct Link {
 /// One drawn page, waiting for the objects that reference it.
 struct PageContent {
     id: Ref,
-    top: f32,
+    top: DocY,
     faces: Vec<FaceId>,
     alphas: Vec<u8>,
     images: Vec<(String, Ref)>,
@@ -372,7 +372,7 @@ impl Builder {
                 0.0,
                 image.height,
                 image.x,
-                device_y(image.y + image.height, page.top, geometry),
+                device_y(image.y + DocY::from(image.height), page.top, geometry),
             ]);
             content.x_object(Name(name.as_bytes()));
             content.restore_state();
@@ -434,7 +434,7 @@ impl Builder {
         lay: &LayoutDoc,
         run: &TextRun,
         shaped: Option<Vec<SegmentData>>,
-        top: f32,
+        top: DocY,
         geometry: &PageGeometry,
         fonts: &mut FontStore,
         used: &mut Vec<FaceId>,
@@ -570,7 +570,7 @@ impl Builder {
         &mut self,
         content: &mut Content,
         segment: &Segment,
-        top: f32,
+        top: DocY,
         geometry: &PageGeometry,
         fonts: &mut FontStore,
         images: &mut Vec<(String, Ref)>,
@@ -712,7 +712,14 @@ impl Builder {
                 // The number's baseline is already in device space;
                 // this top makes the segment's device_y answer it.
                 let top = baseline - (job.geometry.height - job.geometry.margin_y);
-                self.draw_bitmap_segment(content, segment, top, job.geometry, fonts, images);
+                self.draw_bitmap_segment(
+                    content,
+                    segment,
+                    DocY::from(top),
+                    job.geometry,
+                    fonts,
+                    images,
+                );
                 continue;
             }
             let ids = self.register(segment, &number.to_string());
@@ -842,7 +849,7 @@ fn collect_links(
         links.push(Link {
             rect: [
                 run.x,
-                device_y(run.y + height, page.top, geometry),
+                device_y(run.y + DocY::from(height), page.top, geometry),
                 run.x + run.width,
                 device_y(run.y, page.top, geometry),
             ],
@@ -856,7 +863,7 @@ fn collect_links(
         links.push(Link {
             rect: [
                 image.x,
-                device_y(image.y + image.height, page.top, geometry),
+                device_y(image.y + DocY::from(image.height), page.top, geometry),
                 image.x + image.width,
                 device_y(image.y, page.top, geometry),
             ],
@@ -913,7 +920,7 @@ fn finish(builder: Builder, job: &Job, fonts: &FontStore) -> Result<Option<Vec<u
     }
 
     let page_ids: Vec<Ref> = contents.iter().map(|_| alloc.next()).collect();
-    let tops: Vec<f32> = contents.iter().map(|content| content.top).collect();
+    let tops: Vec<DocY> = contents.iter().map(|content| content.top).collect();
 
     // Annotations are objects of their own, and an internal target needs
     // the page reference, so they can only be written now.
@@ -1025,7 +1032,7 @@ fn finish(builder: Builder, job: &Job, fonts: &FontStore) -> Result<Option<Vec<u
 
 /// Resolves an internal target to a page and a position on it. External
 /// targets and anchors the document does not carry answer None.
-fn place(job: &Job, tops: &[f32], target: &str) -> Option<(usize, f32)> {
+fn place(job: &Job, tops: &[DocY], target: &str) -> Option<(usize, f32)> {
     let anchor = target.strip_prefix('#').unwrap_or(target);
     let y = job
         .layout
@@ -1053,7 +1060,7 @@ fn write_outline(
     sink: &mut Sink,
     alloc: &mut Alloc,
     job: &Job,
-    tops: &[f32],
+    tops: &[DocY],
     page_ids: &[Ref],
 ) -> Option<Ref> {
     let mut items: Vec<Item> = Vec::new();
@@ -1210,7 +1217,7 @@ fn shape(fonts: &mut FontStore, doc: &Document, lay: &LayoutDoc, run: &TextRun) 
 }
 
 /// Wraps pooled segment data into segments with the run's paint state.
-fn segments_from(data: Vec<SegmentData>, size: f32, color: Rgba, baseline: f32) -> Vec<Segment> {
+fn segments_from(data: Vec<SegmentData>, size: f32, color: Rgba, baseline: DocY) -> Vec<Segment> {
     data.into_iter()
         .map(|segment| Segment {
             face: segment.face,
@@ -1245,7 +1252,7 @@ fn shape_text(
     size: f32,
     x: f32,
     width: f32,
-    baseline: f32,
+    baseline: DocY,
     color: Rgba,
 ) -> Vec<Segment> {
     let job = TextJob {
@@ -1295,7 +1302,7 @@ fn show(content: &mut Content, segment: &Segment, ids: &[(u16, f32)], index: usi
 fn draw_rect(
     content: &mut Content,
     rect: &DecoRect,
-    top: f32,
+    top: DocY,
     geometry: &PageGeometry,
     alphas: &mut Vec<u8>,
 ) {
@@ -1529,7 +1536,7 @@ fn write_face(
     Ok(())
 }
 
-fn device_y(y: f32, top: f32, geometry: &PageGeometry) -> f32 {
+fn device_y(y: DocY, top: DocY, geometry: &PageGeometry) -> f32 {
     geometry.height - geometry.margin_y - (y - top)
 }
 
