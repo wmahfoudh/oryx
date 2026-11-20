@@ -9,6 +9,7 @@ use oryx::paint;
 use oryx::paint::preview::Preview;
 use oryx::paint::scroll;
 use oryx::style::fonts::FontStore;
+use oryx::style::highlight::LONG_LINE;
 use oryx::style::theme::Theme;
 use oryx::ui::selection::{self, ModelPos};
 
@@ -791,9 +792,9 @@ fn holds_row(lay: &LayoutDoc, pass: &LayoutPass, lines: usize, y: f32) -> Option
 
 /// How far `row`, the top of the row of `offset` in a picture, is
 /// under the first row of its line. A picture by rows holds whole
-/// lines. Zero in a picture of the pieces of a line longer than
-/// `LONG_LINE`: there the block table answers a piece, and
-/// `Page::piece_depth` the row in it.
+/// lines. Zero for a line longer than `LONG_LINE`, in a picture of its
+/// pieces or by rows: the file's layout cuts it into pieces, the block
+/// table answers the piece, and `Page::piece_depth` the row in it.
 fn row_depth(picture: &Preview, offset: usize, row: f32) -> f32 {
     if picture.piece.is_some() {
         return 0.0;
@@ -805,6 +806,7 @@ fn row_depth(picture: &Preview, offset: usize, row: f32) -> f32 {
     let line = scroll::source_row(&picture.doc, 0, offset);
     lines
         .line_range(line)
+        .filter(|range| range.len() <= LONG_LINE)
         .and_then(|range| row_y(&picture.lay, &picture.doc, range.start))
         .map_or(0.0, |first| (row - first).max(0.0))
 }
@@ -3998,6 +4000,94 @@ mod tests {
                         bench.view.scroll_y
                     );
                 }
+            }
+        }
+        assert!(
+            at_once > 0 && later > 0,
+            "{at_once} seats of a lower row landed at once and {later} waited"
+        );
+    }
+
+    /// 200 numbered lines, a line of 2,500 words, longer than
+    /// `LONG_LINE` and short enough for a picture by rows to hold it
+    /// whole, 200 numbered lines.
+    fn mid_line_file() -> String {
+        let long: String = (0..2500).map(|n| format!("word{n} ")).collect();
+        format!("{}{long}\n{}", numbered(200), numbered(200))
+    }
+
+    /// A click on a lower row of a line longer than `LONG_LINE` that a
+    /// picture by rows shows whole, in the frames around the landing
+    /// of a go to that line. The file's layout cuts the line into
+    /// pieces: the block table answers the piece of the row, and the
+    /// landing adds the row in it. The row rests where the click found
+    /// it, whether its seat lands at once or later.
+    #[test]
+    fn a_click_on_a_lower_row_of_a_long_line_rests_there() {
+        let text = mid_line_file();
+        let start = Bench::new(text.clone(), true, 1).line_start(201);
+        let end = start + text[start..].find('\n').expect("the long line ends");
+        assert!(end - start > oryx::style::highlight::LONG_LINE);
+        let ready = |frames: usize| {
+            let mut bench = Bench::new(text.clone(), true, 1);
+            bench.frame();
+            bench.go_to(201);
+            for _ in 0..frames {
+                bench.frame();
+            }
+            bench
+        };
+        let mut bench = ready(0);
+        let mut waits: usize = 0;
+        while bench.view.pending_row.is_some() {
+            bench.frame();
+            waits += 1;
+            assert!(waits < 10_000, "the go to line does not land");
+        }
+        assert!(waits > 2, "the go to line waits {waits} frames");
+        let (mut at_once, mut later) = (0, 0);
+        for frames in [waits / 2, waits - 1, waits + 1, waits + 3] {
+            for rows in [2.5, 3.5] {
+                let mut bench = ready(frames);
+                let Some(wanted) = bench.wanted.filter(|_| bench.pass_active()) else {
+                    assert!(
+                        frames > waits,
+                        "the frame shows a picture while the seat waits"
+                    );
+                    continue;
+                };
+                let picture = bench.picture().expect("a picture");
+                assert!(
+                    picture.piece.is_none(),
+                    "the picture shows the rows around the line"
+                );
+                let row_h = bench.row_h();
+                let top = wanted_scroll(&wanted, &picture.lay, &picture.doc, bench.view_h, row_h)
+                    .expect("a place");
+                let first = row_y(&picture.lay, &picture.doc, start).expect("its line") - top;
+                let y = first + rows * row_h;
+                assert!(y < bench.view_h, "the line's rows start at {first}");
+                assert!(bench.click(300.0, y), "a click places a caret");
+                let caret = bench.caret.expect("a caret").offset;
+                assert!(
+                    start < caret && caret < end,
+                    "the click at {y} is on the long line"
+                );
+                let found = row_y(&picture.lay, &picture.doc, caret).expect("its row") - top;
+                assert!(found > first, "the click at {y} is on a lower row");
+                match bench.view.pending_row {
+                    None => at_once += 1,
+                    Some(_) => later += 1,
+                }
+                bench.settle(REST);
+                let lay = bench.lay.as_ref().expect("a layout");
+                let rests =
+                    row_y(lay, &bench.doc, caret).expect("the caret's row") - bench.view.scroll_y;
+                assert!(
+                    (rests - found).abs() <= 1.0,
+                    "{frames} frames after the go to line: the click at {y} found its row \
+                     {found} under the top, and it rests at {rests}"
+                );
             }
         }
         assert!(
