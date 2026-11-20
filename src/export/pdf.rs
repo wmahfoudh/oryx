@@ -17,7 +17,7 @@ use crate::doc::model::{BlockKind, Document};
 use crate::export::paginate::Page;
 use crate::export::{ExportSettings, PageGeometry};
 use crate::layout::pool::{shape_text_data, SegmentData, TextJob};
-use crate::layout::{DecoRect, DocY, LayoutDoc, TextRun};
+use crate::layout::{length_f32, relative_y, DecoRect, DocY, LayoutDoc, TextRun};
 use crate::style::fonts::FontStore;
 use crate::style::theme::{Rgba, Theme};
 
@@ -1320,11 +1320,14 @@ fn draw_rect(
     let x1 = rect.x + rect.width;
     let y1 = device_y(rect.y, top, geometry);
     let y0 = device_y(rect.y + rect.height, top, geometry);
-    let rt = rect.radius_top.min(rect.width / 2.0).min(rect.height / 2.0);
+    let rt = rect
+        .radius_top
+        .min(rect.width / 2.0)
+        .min(length_f32(rect.height / 2.0));
     let rb = rect
         .radius_bottom
         .min(rect.width / 2.0)
-        .min(rect.height / 2.0);
+        .min(length_f32(rect.height / 2.0));
     content.move_to(x0, y1 - rt);
     if rt > 0.0 {
         content.cubic_to(
@@ -1537,7 +1540,7 @@ fn write_face(
 }
 
 fn device_y(y: DocY, top: DocY, geometry: &PageGeometry) -> f32 {
-    geometry.height - geometry.margin_y - (y - top)
+    geometry.height - geometry.margin_y - relative_y(y, top)
 }
 
 fn set_fill(content: &mut Content, color: Rgba) {

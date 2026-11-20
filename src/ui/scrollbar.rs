@@ -1,6 +1,6 @@
 //! Scrollbar geometry and drawing over the presented frame.
 
-use crate::layout::DocY;
+use crate::layout::{length_f32, DocY};
 use crate::style::theme::Rgba;
 
 /// Total scrollbar strip width at the right window edge, in logical units.
@@ -21,11 +21,11 @@ pub fn thumb(
     if doc_height <= DocY::from(viewport_h) {
         return None;
     }
-    let height = ((viewport_h / doc_height) * track_h)
+    let height = length_f32((DocY::from(viewport_h) / doc_height) * DocY::from(track_h))
         .max(MIN_THUMB * scale)
         .min(track_h);
     let max_scroll = (doc_height - DocY::from(viewport_h)).max(1.0);
-    let y = (scroll_y / max_scroll).clamp(0.0, 1.0) * (track_h - height);
+    let y = length_f32((scroll_y / max_scroll).clamp(0.0, 1.0) * DocY::from(track_h - height));
     Some((y, height))
 }
 

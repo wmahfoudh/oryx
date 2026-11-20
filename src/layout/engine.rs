@@ -4373,7 +4373,7 @@ fn place_code_line(
                 let mut scratch = shaped.scratch;
                 out.splice(&mut scratch, top);
                 pass.scratch = scratch;
-                shaped.height
+                super::length_f32(shaped.height)
             }
             None => {
                 let mut scratch = std::mem::take(&mut pass.scratch);

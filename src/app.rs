@@ -650,7 +650,7 @@ fn draw_caret(
     let bar = ((1.5 * scale).round() as u32).max(1);
     let x0 = (caret.x.max(0.0) as u32).saturating_add(inset).min(width);
     let x1 = x0.saturating_add(bar).min(width);
-    let top = caret.y - scroll_y;
+    let top = layout::relative_y(caret.y, scroll_y);
     let y0 = (top.max(0.0) as u32).min(height);
     let y1 = ((top + caret.h).max(0.0) as u32).min(height);
     for y in y0..y1 {

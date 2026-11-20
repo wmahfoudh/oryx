@@ -15,7 +15,7 @@ use std::time::SystemTime;
 use serde::{Deserialize, Serialize};
 
 use crate::doc::load::{self, FileKind};
-use crate::layout::DocY;
+use crate::layout::{length_f32, DocY};
 use crate::paint::painter::Painter;
 use crate::style::fonts::BODY_FAMILY;
 use crate::style::theme::{Rgba, Theme, Ui};
@@ -966,13 +966,13 @@ impl Sidebar {
             return;
         };
         let (_, content_h) = self.list_extent(outline);
-        let scroll = scrollbar::scroll_for_thumb(
+        let scroll = length_f32(scrollbar::scroll_for_thumb(
             y - (PAD + CAPTION_H) - grab,
             th,
             self.list_h,
             DocY::from(content_h),
             self.list_h,
-        );
+        ));
         match self.tab {
             Tab::Files => self.scroll = scroll,
             Tab::Outline => outline.scroll = scroll,

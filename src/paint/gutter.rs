@@ -13,7 +13,7 @@ use cosmic_text::{Attrs, Buffer, Color, Family, Metrics, Shaping};
 use tiny_skia::Pixmap;
 
 use crate::doc::model::{BlockKind, Document};
-use crate::layout::{code_lines_in, metrics, DocY, LayoutDoc, LineSeat};
+use crate::layout::{code_lines_in, metrics, relative_y, DocY, LayoutDoc, LineSeat};
 use crate::paint::band::blend_buffer;
 use crate::paint::painter::round_rect;
 use crate::style::fonts::FontStore;
@@ -155,15 +155,18 @@ pub fn strip(
     let mut digits = shaped(fonts, &(line + 1).to_string(), &layout.code_family, size);
     let (digits_w, own_baseline) = line_metrics(&digits);
     let right = seat.x - GAP * size;
-    let origin_y = seat.y + text_baseline(fonts, layout, seat.height) - own_baseline - y;
+    let origin_y = relative_y(
+        seat.y + DocY::from(text_baseline(fonts, layout, seat.height)) - DocY::from(own_baseline),
+        y,
+    );
     let (pad, box_h) = (BOX_PAD * size, (BOX_HEIGHT * size).min(height as f32));
     // The box is centered on the digits' ink, not on the row: digits
     // stand on the baseline with nothing under it, so the row's middle
     // lies below theirs, by more as the size grows.
-    let middle = ink_rows(fonts, &mut digits)
-        .map_or((seat.y - y) + seat.height / 2.0, |(first, last)| {
-            origin_y.trunc() + (first + last + 1) as f32 / 2.0
-        });
+    let middle = ink_rows(fonts, &mut digits).map_or(
+        relative_y(seat.y, y) + seat.height / 2.0,
+        |(first, last)| origin_y.trunc() + (first + last + 1) as f32 / 2.0,
+    );
     let top = (middle - box_h / 2.0).clamp(0.0, height as f32 - box_h);
     let left = right - digits_w - pad;
     if let Some(path) = round_rect(left, top, right + pad - left, box_h, BOX_RADIUS * size) {
@@ -253,7 +256,10 @@ fn number(
         &mut buffer,
         Color::rgba(color.r, color.g, color.b, color.a),
         right - width,
-        seat.y + text_baseline - own_baseline - y_top,
+        relative_y(
+            seat.y + DocY::from(text_baseline) - DocY::from(own_baseline),
+            y_top,
+        ),
     );
 }
 

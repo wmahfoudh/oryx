@@ -6,7 +6,7 @@
 //! text and code files, where display bytes equal source bytes.
 
 use crate::doc::model::{BlockKind, Document, Span};
-use crate::layout::{metrics, DocY, LayoutDoc, TextRef, TextRun};
+use crate::layout::{length_f32, metrics, DocY, LayoutDoc, TextRef, TextRun};
 use crate::style::fonts::FontStore;
 use crate::style::highlight::LONG_LINE;
 use crate::ui::selection::{self, ModelPos, Selection, MARKER_SPAN};
@@ -715,7 +715,7 @@ pub fn place_box(
         return Some(row);
     }
     match rowless(lay, doc, offset, view_h)? {
-        Rowless::Line(span) => Some((span.start, span.end - span.start)),
+        Rowless::Line(span) => Some((span.start, length_f32(span.end - span.start))),
         Rowless::Block(span) => Some((span.start, 0.0)),
         Rowless::End(y) => Some((y, 0.0)),
     }

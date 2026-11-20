@@ -7,7 +7,7 @@ use tiny_skia::{Pixmap, Rect, Transform};
 
 use crate::doc::images::MediaCache;
 use crate::doc::model::Document;
-use crate::layout::{metrics, DecoRect, DocY, LayoutDoc, MathGlyph, TextRun};
+use crate::layout::{metrics, relative_y, DecoRect, DocY, LayoutDoc, MathGlyph, TextRun};
 use crate::style::fonts::FontStore;
 use crate::style::theme::{Rgba, Theme};
 
@@ -60,7 +60,8 @@ pub fn band_numbered(
     let mut pixmap = Pixmap::new(width.max(1), height.max(1)).expect("pixmap allocation");
     let bg = paper(doc, theme);
     pixmap.fill(tiny_skia::Color::from_rgba8(bg.r, bg.g, bg.b, 255));
-    let band_bottom = y_top + height as DocY;
+    let band_h = height as DocY;
+    let band_bottom = y_top + band_h;
 
     let mut paint = tiny_skia::Paint {
         anti_alias: false,
@@ -80,17 +81,13 @@ pub fn band_numbered(
         let smooth = rounded || rect.anti_alias;
         paint.anti_alias = smooth;
         if !smooth && rect.stroke == 0.0 {
-            if let Some(r) = Rect::from_xywh(
-                rect.x,
-                rect.y - y_top,
-                rect.width.max(0.5),
-                rect.height.max(0.5),
-            ) {
+            let (y, h) = band_span(rect.y, rect.height, y_top, band_h);
+            if let Some(r) = Rect::from_xywh(rect.x, y, rect.width.max(0.5), h.max(0.5)) {
                 pixmap.fill_rect(r, &paint, Transform::identity(), None);
             }
             continue;
         }
-        let Some(path) = rect_path(rect, y_top) else {
+        let Some(path) = rect_path(rect, y_top, band_h) else {
             continue;
         };
         if rect.stroke > 0.0 {
@@ -202,9 +199,27 @@ fn blit_image(
     }
 }
 
+/// A rectangle's top and height in a band of `band_h` pixels whose top
+/// is `y_top`. A rectangle that reaches more than a margin past the band
+/// is clipped to it first, in `DocY`, so that a code panel that starts
+/// far above the band keeps its bottom edge exact. The margin is wider
+/// than any corner radius or stroke, so a cut edge is not painted. A
+/// rectangle inside the margin keeps its own height.
+fn band_span(top: DocY, height: DocY, y_top: DocY, band_h: DocY) -> (f32, f32) {
+    const MARGIN: DocY = 256.0;
+    let bottom = top + height;
+    let first = top.max(y_top - MARGIN);
+    let last = bottom.min(y_top + band_h + MARGIN);
+    if first == top && last == bottom {
+        return (relative_y(top, y_top), crate::layout::length_f32(height));
+    }
+    (relative_y(first, y_top), relative_y(last, first))
+}
+
 /// Builds a rectangle path with independent top and bottom corner radii.
-fn rect_path(rect: &crate::layout::DecoRect, y_top: f32) -> Option<tiny_skia::Path> {
-    let (x, y, w, h) = (rect.x, rect.y - y_top, rect.width, rect.height);
+fn rect_path(rect: &crate::layout::DecoRect, y_top: DocY, band_h: DocY) -> Option<tiny_skia::Path> {
+    let (y, h) = band_span(rect.y, rect.height, y_top, band_h);
+    let (x, w) = (rect.x, rect.width);
     if w <= 0.0 || h <= 0.0 {
         return None;
     }
@@ -268,7 +283,10 @@ fn draw_run(
         .filter(|lr| lr.rtl)
         .map(|lr| run.width - lr.line_w)
         .unwrap_or(0.0);
-    let (origin_x, origin_y) = (run.x + anchor, run.baseline - paint_baseline - y_top);
+    let (origin_x, origin_y) = (
+        run.x + anchor,
+        relative_y(run.baseline - DocY::from(paint_baseline), y_top),
+    );
     blend_buffer(pixmap, fonts, &mut buffer, color, origin_x, origin_y);
 }
 
@@ -321,7 +339,7 @@ fn draw_math_glyph(pixmap: &mut Pixmap, fonts: &mut FontStore, g: &MathGlyph, y_
         fonts.math_face,
         g.glyph,
         g.size,
-        (g.x, g.y - y_top),
+        (g.x, relative_y(g.y, y_top)),
         cosmic_text::fontdb::Weight::NORMAL,
         cosmic_text::CacheKeyFlags::empty(),
     );
@@ -396,6 +414,53 @@ mod tests {
 
     fn packed(c: Rgba) -> u32 {
         crate::paint::pixel(c.r, c.g, c.b)
+    }
+
+    #[test]
+    fn a_rectangle_inside_the_margin_keeps_its_place_and_its_height() {
+        assert_eq!(band_span(1000.5, 20.25, 990.0, 600.0), (10.5, 20.25));
+        assert_eq!(band_span(750.0, 1100.0, 1000.0, 600.0), (-250.0, 1100.0));
+    }
+
+    #[test]
+    fn a_code_panel_that_starts_far_above_the_band_still_fills_it() {
+        let theme = Theme::default_dark();
+        let mut fonts = FontStore::new();
+        let mut media = MediaCache::offline(PathBuf::from("."));
+        let body: String = (0..3000).map(|i| format!("line {i}\n")).collect();
+        let doc = crate::doc::markdown::parse(format!("Text.\n\n```\n{body}```\n\nAfter.\n"));
+        let cfg = ViewConfig::default();
+        let lay = layout(&doc, &theme, &mut fonts, &mut media, &cfg, 400.0);
+        let panel = lay
+            .rects
+            .iter()
+            .filter(|r| r.color == theme.blocks.code_bg)
+            .max_by(|a, b| a.height.total_cmp(&b.height))
+            .expect("a code panel");
+        let y_top = (lay.height / 2.0).floor();
+        assert!(panel.y < y_top - 1000.0, "{} {}", panel.y, y_top);
+        assert!(panel.y + panel.height > y_top + 1600.0);
+        let pixels = band(
+            &lay,
+            &doc,
+            &theme,
+            &mut fonts,
+            &mut media,
+            &[],
+            y_top,
+            400,
+            600,
+        );
+        assert_eq!(pixels[300 * 400 + 200], packed(theme.blocks.code_bg));
+        assert_eq!(pixels[599 * 400 + 200], packed(theme.blocks.code_bg));
+    }
+
+    #[test]
+    fn a_rectangle_that_reaches_past_the_margin_is_clipped_to_it() {
+        // From 256 px above the band to 256 px under it.
+        assert_eq!(band_span(0.0, 10_000.0, 5_000.0, 600.0), (-256.0, 1_112.0));
+        assert_eq!(band_span(5_100.0, 5_000.0, 5_000.0, 600.0), (100.0, 756.0));
+        assert_eq!(band_span(0.0, 5_100.0, 5_000.0, 600.0), (-256.0, 356.0));
     }
 
     fn corner_pixel(doc: &Document) -> u32 {
