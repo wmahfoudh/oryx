@@ -768,6 +768,27 @@ pub(super) fn click_on_picture(
     Some((Caret::at(offset), ClickMark { place, depth }))
 }
 
+/// What a press in the text of the editor is read on
+/// (`View::press_reads`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PressReads {
+    /// The picture of the wait the last frame painted.
+    Picture,
+    /// The file's layout.
+    Page,
+    /// Nothing: the frame is blank under the pointer.
+    Nothing,
+}
+
+/// Whether the layout holds the row at height `y` of the page, in a
+/// file of one block of `lines` lines: the line there is in the stretch
+/// the pass kept, and in a line longer than `LONG_LINE` the piece there
+/// is. None when the layout has no code block or no block is open.
+fn holds_row(lay: &LayoutDoc, pass: &LayoutPass, lines: usize, y: f32) -> Option<bool> {
+    let (line, byte) = lay.code_place_at(0, lines, y)?;
+    pass.keeps(lay, line, byte)
+}
+
 /// How far `row`, the top of the row of `offset` in a picture, is
 /// under the first row of its line. A picture by rows holds whole
 /// lines. Zero in a picture of the pieces of a line longer than
@@ -1861,10 +1882,7 @@ impl View {
         // `top_offset` reads one pixel under what it is given.
         // In a very long line the place is a piece of the line: the
         // layout holds the pieces around the view, not the line.
-        let held = |y: f32| {
-            let (line, byte) = lay.code_place_at(0, total, y + 1.0)?;
-            pass.keeps(lay, line, byte)
-        };
+        let held = |y: f32| holds_row(lay, pass, total, y + 1.0);
         let top = row_of(scroll::top_offset(lay, doc, self.scroll_y));
         // A drag of the scrollbar's thumb names its own landing
         // (`thumb_names`): the view follows the hand to it.
@@ -1913,6 +1931,37 @@ impl View {
         let piece = scroll::pieces_around(lay, doc, anchor, before, after);
         Some((wanted, row, total, piece, anchor))
     }
+
+    /// What a press in the text of the editor at height `y` of the view
+    /// is read on: what the frame shows there. `pictured` says that the
+    /// last frame painted the picture of the wait. When the view asks
+    /// for a picture and none could be built or placed, the frame is
+    /// the layout's, blank where the layout does not hold the rows. A
+    /// reading of the layout there would answer the nearest row it
+    /// holds, far from the pointer, so the press is read on nothing.
+    pub(super) fn press_reads(&self, page: &Page, pictured: bool, y: f32) -> PressReads {
+        if self.wanted(page).is_none() {
+            return PressReads::Page;
+        }
+        if pictured {
+            return PressReads::Picture;
+        }
+        let lines = match page.doc.blocks.first().map(|block| &block.kind) {
+            Some(BlockKind::CodeBlock { lines, .. }) => lines.len(),
+            _ => return PressReads::Page,
+        };
+        let blank = match (page.lay, page.pass) {
+            (Some(lay), Some(pass)) => {
+                holds_row(lay, pass, lines, self.scroll_y + y) == Some(false)
+            }
+            _ => false,
+        };
+        if blank {
+            PressReads::Nothing
+        } else {
+            PressReads::Page
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1939,8 +1988,8 @@ mod tests {
     use proptest::prelude::*;
 
     use super::{
-        click_on_picture, row_y, tail_start, wanted_scroll, Kept, LinePlace, Page, Place, View,
-        Wanted, WantedPlace,
+        click_on_picture, row_y, tail_start, wanted_scroll, Kept, LinePlace, Page, Place,
+        PressReads, View, Wanted, WantedPlace,
     };
 
     /// A text file in the window's place, with no window: the document,
@@ -2345,20 +2394,33 @@ mod tests {
         /// A click in the text, at `x` and `y` of the view:
         /// `App::place_caret`.
         fn click(&mut self, x: f32, y: f32) -> bool {
-            // `App::press_on_picture`: the last frame showed a picture.
-            if let (true, Some(wanted)) = (self.editing, self.wanted) {
-                if let Some(picture) = self.picture() {
+            // `App::press_on_picture`: the picture the last frame
+            // painted, and what the frame shows under the pointer.
+            if self.editing {
+                let painted = self.wanted.and_then(|wanted| {
+                    let picture = self.picture()?;
                     let row_h = self.row_h();
-                    let placed =
-                        wanted_scroll(&wanted, &picture.lay, &picture.doc, self.view_h, row_h)
-                            .and_then(|top| click_on_picture(&picture, &mut self.fonts, top, x, y));
-                    let Some((placed, mark)) = placed else {
-                        return false;
-                    };
-                    self.caret = Some(placed);
-                    let (view, mut page) = self.page();
-                    view.caret_clicked_on_picture(&mut page, mark);
-                    return true;
+                    let top =
+                        wanted_scroll(&wanted, &picture.lay, &picture.doc, self.view_h, row_h)?;
+                    Some((picture, top))
+                });
+                let reads = {
+                    let (view, page) = self.page();
+                    view.press_reads(&page, painted.is_some(), y)
+                };
+                match (reads, painted) {
+                    (PressReads::Nothing, _) => return false,
+                    (PressReads::Picture, Some((picture, top))) => {
+                        let placed = click_on_picture(&picture, &mut self.fonts, top, x, y);
+                        let Some((placed, mark)) = placed else {
+                            return false;
+                        };
+                        self.caret = Some(placed);
+                        let (view, mut page) = self.page();
+                        view.caret_clicked_on_picture(&mut page, mark);
+                        return true;
+                    }
+                    _ => {}
                 }
             }
             let Some(lay) = self.lay.as_ref() else {
@@ -3722,6 +3784,94 @@ mod tests {
             }
             bench
         });
+    }
+
+    /// 200 numbered lines, a line too long for a picture by rows, 200
+    /// numbered lines.
+    fn long_line_file() -> String {
+        let long: String = (0..20000).map(|n| format!("word{n} ")).collect();
+        format!("{}{long}\n{}", numbered(200), numbered(200))
+    }
+
+    /// The long line's file after a go to the long line, at the first
+    /// frame that asks for a picture and has none: once the go to line
+    /// has landed, the place of the view is on the short line above
+    /// the long one, which has no pieces, the rows around it hold the
+    /// long line, and the layout holds no row of the view.
+    fn blank_frame() -> Bench {
+        let mut bench = Bench::new(long_line_file(), true, 3);
+        bench.frame();
+        bench.go_to(201);
+        for _ in 0..400 {
+            bench.frame();
+            if bench.wanted.is_some() && bench.picture().is_none() {
+                assert!(bench.pass_active(), "the file is still measured");
+                return bench;
+            }
+        }
+        panic!("no frame asks for a picture it cannot build");
+    }
+
+    /// A click on a frame that asks for a picture and shows none, where
+    /// the layout holds no row: nothing is under the pointer, and the
+    /// caret and what waits stay. The next letter goes to the line of
+    /// the go to line, not to the nearest row the layout holds.
+    #[test]
+    fn a_click_on_a_blank_frame_moves_nothing() {
+        for (x, y) in POINTS {
+            let mut bench = blank_frame();
+            let before = bench.snapshot();
+            assert!(
+                !bench.click(x, y),
+                "a click at {x}, {y} on a blank frame placed a caret"
+            );
+            assert_eq!(
+                bench.snapshot(),
+                before,
+                "a click at {x}, {y} on a blank frame"
+            );
+            bench.settle(REST);
+            assert_eq!(
+                bench.caret.map(|caret| caret.offset),
+                Some(bench.line_start(201)),
+                "after a click at {x}, {y} on a blank frame"
+            );
+        }
+    }
+
+    /// A seat that waits over a view the layout holds, with no picture
+    /// of its place, six lines above the long line: the frame is the
+    /// page, and a click is read there as on any page. The seat goes,
+    /// since a press brings the page back.
+    #[test]
+    fn a_click_on_a_page_with_no_picture_reads_the_page() {
+        let mut bench = Bench::new(long_line_file(), true, 3);
+        bench.frame();
+        bench.go_to(195);
+        bench.frame();
+        assert!(bench.pass_active(), "the file is still measured");
+        assert!(
+            matches!(bench.wanted, Some(Wanted::Row(_))),
+            "the frame asks for the picture of the seat"
+        );
+        assert!(bench.picture().is_none(), "no picture of the seat's place");
+        let (x, y) = (100.0, 100.0);
+        let lay = bench.lay.as_ref().expect("a layout");
+        let page = caret::place(
+            lay,
+            &bench.doc,
+            &mut bench.fonts,
+            x,
+            y + bench.view.scroll_y,
+        )
+        .expect("a place on the page")
+        .offset;
+        assert!(bench.click(x, y), "a click on the page places a caret");
+        assert_eq!(bench.caret.map(|caret| caret.offset), Some(page));
+        assert!(
+            bench.view.pending_row.is_none(),
+            "the click on the page dropped the seat"
+        );
     }
 
     /// A jump away from a click on a picture, then a step back: the

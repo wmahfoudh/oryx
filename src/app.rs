@@ -73,7 +73,7 @@ use winit::window::{CursorIcon, Window, WindowId};
 
 mod view;
 
-use view::{click_on_picture, waiting_place, wanted_scroll, Page, Place, View};
+use view::{click_on_picture, waiting_place, wanted_scroll, Page, Place, PressReads, View};
 // The tests of the plain parts of the view are in this file.
 #[cfg(test)]
 use view::{
@@ -4807,26 +4807,34 @@ impl App {
         }
     }
 
-    /// A press in the text of the editor while the frame shows the
-    /// picture of the wait: the caret goes to the character of the
-    /// picture under the pointer, and the editor is seated on its row
+    /// A press in the text of the editor while the view asks for the
+    /// picture of the wait, read on what the frame shows
+    /// (`View::press_reads`). On the picture, the caret goes to the
+    /// character under the pointer, and the editor is seated on its row
     /// where the picture shows it (`View::caret_clicked_on_picture`).
-    /// The file's layout does not hold the rows the picture shows, so
-    /// nothing of the press is read there: a double click, a press
-    /// with Shift and a drag select nothing and place the caret as one
-    /// click does. Answers false when the frame shows the page, and
-    /// the press is read on the layout as ever.
+    /// On a frame that is blank under the pointer, the press moves
+    /// nothing. The file's layout does not hold those rows, so nothing
+    /// of the press is read there: a double click, a press with Shift
+    /// and a drag select nothing, and act as one click does. Answers
+    /// false when the frame shows the page there, and the press is read
+    /// on the layout as ever.
     fn press_on_picture(&mut self) -> bool {
-        let wanted = {
-            let (view, page) = self.page();
-            view.wanted(&page).is_some()
-        };
         let x = self.cursor.x as f32 - self.inset();
         let y = self.cursor.y as f32;
-        let Some(frame) = self.preview.as_ref().filter(|_| wanted) else {
-            return false;
+        let painted = self.preview.as_ref().and_then(|frame| frame.painted);
+        let reads = {
+            let (view, page) = self.page();
+            view.press_reads(&page, painted.is_some(), y)
         };
-        let Some((top, _)) = frame.painted else {
+        match reads {
+            PressReads::Page => return false,
+            PressReads::Nothing => {
+                self.last_click = None;
+                return true;
+            }
+            PressReads::Picture => {}
+        }
+        let (Some(frame), Some((top, _))) = (self.preview.as_ref(), painted) else {
             return false;
         };
         let top = f32::from_bits(top);
@@ -6241,8 +6249,9 @@ impl App {
             } else {
                 self.move_ownership(PaneAct::ClickDocument);
                 self.scrollbar_press();
-                // A press on the picture of the wait is read on the
-                // picture alone, before any reading of the layout.
+                // While the view asks for the picture of the wait, a
+                // press is read on what the frame shows, before any
+                // reading of the layout.
                 let on_picture =
                     self.drag.is_none() && self.mode == edit::Mode::Edit && self.press_on_picture();
                 let taken = on_picture
@@ -8964,7 +8973,8 @@ impl App {
                 (None, None) => None,
             };
             // A picture that cannot be built leaves none: the frame is
-            // the page's, and a press is read there.
+            // the page's, and a press is read there where the layout
+            // holds the row (`View::press_reads`).
             let Some(preview) = preview else {
                 self.preview = None;
                 return None;
