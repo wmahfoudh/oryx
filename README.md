@@ -9,8 +9,9 @@
 </picture>
 </h1>
 
-**A fast, native markdown editor and reader.**<br>
-It also edits code, opens ebooks and comics, on Linux, Windows and macOS.
+**Native code and text editor with the fastest Markdown renderer.**<br>
+Full-spec Markdown, LaTeX math, and ebook or comic reading on a custom rendering engine  
+for Linux, Windows, and macOS.
 
 <a href="https://github.com/wmahfoudh/oryx/releases"><img alt="Release" src="https://img.shields.io/github/v/release/wmahfoudh/oryx?style=for-the-badge&label=RELEASE&color=purple"></a>
 <a href="https://www.rust-lang.org"><img alt="Language" src="https://img.shields.io/badge/LANGUAGE-RUST-orange?style=for-the-badge&logo=rust&logoColor=white"></a>
@@ -22,13 +23,13 @@ It also edits code, opens ebooks and comics, on Linux, Windows and macOS.
 
 </div>
 
-Oryx is a markdown editor and reader, made for a keyboard workflow. It also edits code and reads ebooks and comics. Oryx opens a file in reading mode, and `Ctrl+E` switches between reading and editing. With no menus and no toolbars, it suits those who want to focus on the content and on writing. Oryx is a native app with its own rendering engine (no browser inside), built for speed and beauty: an 8 MB markdown file shows in **milliseconds**.
+Oryx is a daily-driver code and text editor made for a keyboard-first workflow. Files open directly in reading mode, and `Ctrl+E` toggles instantly between reading and editing. With no menus and no toolbars, the interface stays out of your way so you can focus on your code, writing, and reading. As a true native app running its own rendering engine (with no embedded browser or Electron), it combines raw speed with clean typography: showing an **8 MB** Markdown file takes **milliseconds** (try it yourself with the `markdown-challenge.md` file in the [examples](examples/) folder).
 
 ## Install
 
 <a href="https://apps.microsoft.com/detail/9NQGHNSJF3VB"><picture><source media="(prefers-color-scheme: dark)" srcset="https://get.microsoft.com/images/en-us%20light.svg"><img alt="Get it from Microsoft" src="https://get.microsoft.com/images/en-us%20dark.svg" width="200"></picture></a>
 
-Every package is on the [releases page](https://github.com/wmahfoudh/oryx/releases). Pick the one for your system:
+Packages are on the [releases page](https://github.com/wmahfoudh/oryx/releases):
 
 - **Windows**: the Microsoft Store (badge above), `winget install Steerania.Oryx`, the MSI installer, or the zip to install in your user folder without administrator rights.
 - **macOS**: `brew install --cask wmahfoudh/tap/oryx`, or the `.dmg`. The app is not signed, so macOS asks you to approve it once ([how](INSTALL.md#macos)).
@@ -37,35 +38,35 @@ Every package is on the [releases page](https://github.com/wmahfoudh/oryx/releas
 - **Arch Linux**: `sudo pacman -U oryx-editor-bin-*.pkg.tar.zst`
 - **Any Linux**: the AppImage, or the tarball with its install script.
 
-On Linux, the command is `oryx`. On Windows and macOS, the installers do not add a terminal command (for the moment): [INSTALL.md](INSTALL.md#from-a-terminal) says how to call Oryx there. [INSTALL.md](INSTALL.md) also covers the requirements and building from source.
+For a detiled installation instructions and for building from source, please check [INSTALL.md](INSTALL.md).
 
 ## What Oryx does
 
 ### Fast with any file size
 
-When you open a file, Oryx lays out only the first screens and shows them. The rest of the file is read and laid out in the background, on all CPU cores. Scrolling does not make memory grow, because Oryx draws only the part of the document around the current position. A window that is not doing anything uses no CPU. This is why Oryx runs fine on an old laptop with no graphics card. I do check Oryx [performance](#performance) before every release.
+Oryx lays out only the first screens on open and processes the rest in the background across CPU cores. Memory stays flat while scrolling because only the visible region is drawn, and an idle window uses zero CPU. A lot of engineering went into making this scale without sluggishness, tested on files up to 200 MB, so Oryx runs smoothly even on an old laptop without a dedicated GPU. I do check Oryx [performance](#performance) before every release.
 
 ### Uses the file system
 
-Oryx opens files where they already are on your disk. There is no vault, no library and nothing to import. It's really up to you to organize your content the old simple way: in files and folders. You open a file from the sidebar, with `Ctrl+O`, by dropping a file or a folder on the window, or from a terminal with `oryx notes.md`. The sidebar shows the folder you are in, and an outline of the open file.
+Oryx works directly on your disk: no vault, no library, and nothing to import. Organize your files in plain folders, just as you always have. Open anything from the sidebar, with `Ctrl+O`, by dropping a file or folder onto the window, or from a terminal with `oryx notes.md`. The sidebar displays the current folder alongside an outline of the active file.
 
-Oryx opens files fast enough that it does not need tabs: you save, click another file in the sidebar, and when you come back, it remembers your location in the previous file. `Alt+Left` and `Alt+Right` go back and forward between the files you opened, or between locations in the same file just like in a browser. You can middle click on a file in the sidebar, or press `Ctrl+Enter`, to open it in another Oryx instance.
+Switch to another file in the sidebar and return later to find your exact scroll position preserved. `Alt+Left` and `Alt+Right` navigate backward and forward across your file history or jump between locations in the same document, just like a web browser. Middle-click any file in the sidebar, or press `Ctrl+Enter`, to open it in a separate Oryx window (no tabs for the moment 🙂).
 
 <p align="center"><img src="images/sidebar.png" alt="The Oryx sidebar on a folder of notes, with a note open" width="800"></p>
 
 ### All the Markdown, and more
 
-Oryx reads CommonMark and GitHub Flavored Markdown: tables, task lists, strikethrough, footnotes, alerts and math. It also renders the HTML that GitHub allows in a README, like centered blocks, badges and collapsible sections, so a README looks in Oryx the way it looks on GitHub. Remote images and badges are saved on disk: they still show when you are offline.
+Oryx supports CommonMark, GitHub Flavored Markdown, and Markdown Guide extensions, including tables, footnotes, alerts, definition lists, and abbreviations. It renders GitHub-style HTML such as badges, centered blocks, and collapsible sections, and caches remote images and badges locally so they stay visible offline.
 
-Oryx also reads the extended syntax of the Markdown Guide, which GitHub does not: highlight, subscript and superscript, definition lists and abbreviations. Math written in TeX is typeset with the STIX Two Math font, and it looks the same in the PDF. [SYNTAX.md](SYNTAX.md) shows the supported constructs, and [MATH.md](MATH.md) teaches the math and lists the commands. `F1` opens a mini help with the same reference, the math page and Oryx shortcuts.
+Math support covers TeX, LaTeX, AMS, KaTeX, and MediaWiki syntax, typeset with STIX Two Math and preserved consistently in PDF export. See [SYNTAX.md](SYNTAX.md) for supported constructs and [MATH.md](MATH.md) for math syntax and commands. Press `F1` to open a quick reference covering syntax, math, and shortcuts.
 
 <p align="center"><img src="images/markdown.png" alt="Oryx rendering an alert, a table and typeset math" width="800"></p>
 
 ### Themes and PDF export
 
-Oryx comes with 34 themes, 12 of them made for Oryx. Each theme sets 51 colors, so every markdown element can have its own color. `Ctrl+T` opens the list of themes. The arrow keys show each theme on the open document, `Enter` keeps it and `Escape` cancels. The theme editor lets you create new themes and edit existing ones, also with a live preview.
+Oryx includes 34 themes (12 exclusive to Oryx), each defining 51 color tokens so every Markdown and syntax element has distinct styling. Press `Ctrl+T` to browse themes with instant live preview using the arrow keys, `Enter` to apply, or `Escape` to cancel. A theme editor is also included to customize existing themes or create your own with live preview.
 
-`Ctrl+P` exports the document to PDF. The PDF is made by the same engine that draws the page, so it has the same layout, fonts, syntax colors and math, and the headings are converted to PDF outlines. Oryx avoids cutting a line, an image or a table row across two pages, and does not leave a heading alone at the bottom of a page. The export has its own theme, fonts and page size, set with `Ctrl+Shift+P`, so you can read in a dark theme and export in a light one without switching each time. A `black-and-white` theme exists, in case you prefer to have monochrome PDFs.
+`Ctrl+P` exports the current document using the same rendering engine that draws the screen, preserving exact layout, fonts, syntax highlighting, and math, while turning headings into PDF bookmarks. Oryx handles pagination cleanly: it avoids splitting text lines, images, or table rows across page breaks and prevents orphaned headings at the bottom of a page. Export theme, fonts, and page size are configured separately via `Ctrl+Shift+P` (including a `black-and-white` theme for monochrome output), so you can read in a dark theme and export to a light page without switching.
 
 <p align="center"><img src="images/themes.png" alt="The Oryx theme browser open over a document" width="800"></p>
 
@@ -73,13 +74,13 @@ Oryx comes with 34 themes, 12 of them made for Oryx. Each theme sets 51 colors, 
 
 ### Text and code, for quick edits
 
-Oryx opens any text file, and supports syntax colors in source files for more than a hundred extensions. Files without an extension, like `.bashrc` or a script that starts with `#!`, are recognized too.
+Oryx opens any text file and highlights syntax for more than a hundred file extensions, as well as extensionless files like `.bashrc` or scripts starting with a `#!` shebang.
 
-From a terminal, `oryx main.rs:412:10` opens a file at line 412, column 10, and `git diff | oryx` shows a diff in color.
+From the terminal, `oryx main.rs:412:10` jumps straight to line 412, column 10, while `git diff | oryx` renders a colored diff directly in the viewer.
 
-`Ctrl+E` enters edit mode, with the tools of a code editor: move, duplicate or delete lines, comment out in the style of the language, find and replace with or without regular expressions, go to a line, and show line numbers. Saving keeps the line endings of the file, so a Windows file stays a Windows file.
+Press `Ctrl+E` to enter edit mode with essential code-editing tools: move, duplicate, or delete lines, toggle language-aware comments, run plain or regex find-and-replace, jump to a line, and display line numbers. Saving preserves existing line endings, keeping CRLF and LF files intact.
 
-For everyday text files, Oryx is a good replacement for Notepad, Notepad++ and similar editors. In terms of features, Oryx is not designed to compete with specialized code editors like VS Code or Zed: it has no git integration, no agentic workflow and no plugins.
+For everyday text and code editing, Oryx replaces Notepad, Notepad++, and similar editors. While it starts and renders faster than heavyweights like VS Code or Zed, it does not try to match their full IDE feature set: there is no built-in Git client, agentic workflow, or plugin ecosystem.
 
 <p align="center"><img src="images/code.png" alt="Editing code in Oryx with line numbers and regex find and replace" width="800"></p>
 
@@ -87,9 +88,11 @@ For everyday text files, Oryx is a good replacement for Notepad, Notepad++ and s
 
 Oryx opens EPUB, MOBI, AZW3 (Kindle) and FB2 books. It shows them in the active theme and fonts instead of the book's own style, and justifies the text like a printed book (`Ctrl+J` turns it off). The sidebar shows the book's table of contents, and Oryx remembers your last reading position. To try it, *The Adventures of Sherlock Holmes* comes with Oryx in the examples folder.
 
-Arabic and Hebrew are read from right to left. Oryx finds the direction of each paragraph from its text, so in a book that mixes English and Arabic, each paragraph reads in its own direction. Two fonts made for these scripts are built in: Amiri for Arabic and David Libre for Hebrew.
+Oryx opens EPUB, MOBI, AZW3 (Kindle), and FB2 books, rendering them with your active theme and fonts rather than the publisher's styling. Text is justified like a printed book (`Ctrl+J` toggles justification if you dont like it), the sidebar displays the table of contents, and the reading position is saved automatically. *The Adventures of Sherlock Holmes* is included in the examples folder to test it out.
 
-Oryx also opens CBZ and CBR comics. A comic starts as a vertical strip of pages, which suits webtoons. `Ctrl+Minus` switches to one page per screen, and again to two pages side by side, like an open book. `Ctrl+D` toggles the page order for manga.
+For Arabic and Hebrew, Oryx detects text direction per paragraph, so mixed English and RTL passages flow properly on the same page. Amiri (Arabic) and David Libre (Hebrew) are bundled for clean rendering out of the box.
+
+Oryx also reads CBZ and CBR comics. Issues open as a continuous vertical strip suited to webtoons; `Ctrl+Minus` cycles to single-page view and two-page spread view, while `Ctrl+D` reverses page order for manga.
 
 <p align="center"><img src="images/book-arabic.png" alt="An Arabic book in Oryx, justified from right to left" width="800"></p>
 
@@ -97,9 +100,9 @@ Oryx also opens CBZ and CBR comics. A comic starts as a vertical strip of pages,
 
 ## Keyboard
 
-Oryx has no menus and no toolbars. Everything is done with the keyboard and mouse, using familiar shortcuts like `Ctrl+F` to find, `Ctrl+S` to save, `Ctrl+B` for bold, etc. The keyboard flow has no modes and is certainly less powerful than what Vim can offer, but it's a good compromise that can accommodate most people.
+Oryx has no menus and no toolbars. Everything relies on keyboard and mouse using standard shortcuts like `Ctrl+F` to find, `Ctrl+S` to save, and `Ctrl+B` for bold. There are no modal states: while less expressive than Vim, this modeless flow is easier for most people.
 
-A few rules apply everywhere: `Escape` closes whatever is open (when nothing is open, it quits Oryx), formatting shortcuts are toggles and in the dialogs the arrow keys move and change values. `F1` shows the full list of shortcuts and the supported markdown syntax, and can be searched. The shortcuts and the command line options are also listed in [SHORTCUTS.md](SHORTCUTS.md).
+A few consistent rules apply across the app: `Escape` closes the active overlay (or quits Oryx when nothing is open), formatting shortcuts act as toggles, and arrow keys navigate and adjust values inside dialogs. Press `F1` to open a searchable reference of all shortcuts and supported Markdown syntax, or check [SHORTCUTS.md](SHORTCUTS.md) for the full list of shortcuts and CLI flags.
 
 <img src="images/editor-tricks.gif" alt="Editing markdown in Oryx with the keyboard only: lists, tasks, headings, links, pictures, moving lines and find and replace">
 
@@ -117,13 +120,13 @@ A few rules apply everywhere: `Escape` closes whatever is open (when nothing is 
 | `Ctrl+Shift+P` | PDF export settings |
 | `F1` | All shortcuts and the markdown syntax |
 
-On macOS, use `Cmd` where this page says `Ctrl`, and `Cmd+[` / `Cmd+]` to go back and forward.
+On macOS, substitute `Cmd` for `Ctrl`, and use `Cmd+[` / `Cmd+]` to navigate back and forward.
 
 ## Is Oryx for me?
 
-Oryx is for people who want to read and write markdown fast, with the keyboard, in one window. It shows a file formatted, themed, as soon as you open it, and it performs well with huge files. Oryx also opens and edits code, and reads books and comics: it's a consequence of being a markdown viewer and editor as it uses the same engine with some tweaks.
+Oryx is made for people who want to read and write Markdown quickly from the keyboard in a single window. Files open formatted and themed immediately, even when they are huge. Code editing, ebook reading, and comic viewing follow naturally from the same underlying text and layout engine.
 
-Oryx suits work with LLMs and coding agents, which write a lot of markdown. It reloads a file that changed on disk as soon as you come back to the window, so an agent's plan or report shows formatted and up to date. `llm "your question" | oryx --as md` shows an answer piped from the terminal.
+It also fits workflows with LLMs and coding agents, which output large amounts of Markdown. Oryx reloads modified files from disk as soon as the window regains focus, keeping an agent's plan or report formatted and up to date, and you can pipe terminal output directly into it with `llm "your question" | oryx --as md`.
 
 For other needs, other tools might be a better fit:
 
@@ -136,9 +139,9 @@ For other needs, other tools might be a better fit:
 
 ## Performance
 
-Every release is measured on my machine, a 2019 laptop with an Intel Core i7-8565U, 16 GB of memory, an NVMe drive and no dedicated graphics card. A release ships only if it is as fast as the previous one, or slower for a reason I can explain. The tables below come from the last measure.
+Every release is benchmarked on my daily machine: a 2019 laptop with an Intel Core i7-8565U, 16 GB of RAM, an NVMe drive, and no dedicated GPU. A release ships only if it matches the previous version's speed, or if any regression has a clear, justified cause. The tables below show measurements from the latest release.
 
-The first table is about time. "First screen" is the time from reading the file to showing it, and it stays at 40 ms whatever the size of the file. The next three columns are work Oryx does in the background while you read: reading the markdown of the rest of the file (a source file has none, hence 0 ms), laying out the rest of the file, and coloring the code. "PDF export" is the export of the whole file.
+The first table tracks execution time. **First screen** measures the total time from reading the file to displaying the initial view, staying flat at 40 ms regardless of file size. The next three columns cover background work performed while you read: parsing Markdown for the remainder of the document (0 ms for plain source files), laying out the remaining content, and applying syntax highlighting. **PDF export** measures full-document export time.
 
 | File | First screen | Rest read | Rest laid out | Code colors | PDF export |
 |---|---|---|---|---|---|
@@ -147,7 +150,7 @@ The first table is about time. "First screen" is the time from reading the file 
 | 8 MB markdown | 40 ms | 246 ms | 1.5 s | 5.9 s | 9.3 s |
 | 8 MB source code | 40 ms | 0 ms | 0.85 s | 24.5 s | 8.0 s |
 
-The second table is about memory. "Once loaded" is what the file takes once all of this is done. "Highest" is the most it takes on the way there. "PDF export" is what an export adds while it runs.
+The second table tracks memory usage. **Once loaded** shows steady-state memory after background processing completes, **Peak** shows maximum memory used during loading, and **PDF export** shows the additional memory allocated while exporting.
 
 | File | Once loaded | Highest | PDF export |
 |---|---|---|---|
@@ -156,9 +159,9 @@ The second table is about memory. "Once loaded" is what the file takes once all 
 | 8 MB markdown | 172 MB | 255 MB | +34 MB |
 | 8 MB source code | 88 MB | 95 MB | +11 MB |
 
-The [examples](examples/) folder has an 8 MB markdown file of real text, `markdown-challenge.md`, to try a big file yourself.
+To test large-file performance yourself, the [examples](examples/) folder includes `markdown-challenge.md`, an 8 MB Markdown file of real text.
 
-Books open the same way: the first chapters show at once, and the rest loads in the background. The third table gives the time before the first chapters of a book, or the first pages of a comic, show.
+Books and comics follow the same progressive loading model: initial chapters or pages appear immediately while the rest loads in the background. The third table measures time to first display for ebooks and comics.
 
 | Book | Format | Opens in |
 |---|---|---|
@@ -170,19 +173,16 @@ Books open the same way: the first chapters show at once, and the rest loads in 
 
 The 211 pages of *The Adventures of Sherlock Holmes* export to PDF in 0.6 s.
 
-My goal is to make Oryx one of the fastest markdown editors and renderers. I benchmark Oryx performance against itself but also against other tools to improve it. The Oryx self-test files and the measures are in the repository:
+My goal is to make Oryx one of the fastest Markdown editors and renderers available. I benchmark Oryx not only across releases, but also against other tools to find and eliminate bottlenecks. The benchmark suite, test files, and results are all tracked in the repository:
 
 ```sh
 cargo test --release --test perf -- --ignored --nocapture --test-threads=1      # the timings
 cargo test --release --test perf_mem -- --ignored --nocapture --test-threads=1  # the memory
 ```
 
-> [!NOTE]
-> Oryx is not a markdown-to-PDF converter. Its export reproduces themed pages, at a few milliseconds per finished page whatever the document size. Raw conversion is a far faster job: a few milliseconds for a whole small file.
-
 ## Privacy
 
-Oryx has no account and no telemetry. It does not report what you open, what you do, or that it is installed. It uses the network to download the images that a markdown file links to by URL, like the badges of a README. These images are kept on your disk so the file opens fast the next time, and `oryx --clear-cache` removes them. More details in [PRIVACY.md](PRIVACY.md).
+Oryx requires no account and collects zero telemetry. It never reports what you open, how you use it, or even that it is installed. Network access is used solely to fetch remote images linked inside a Markdown file, such as README badges. Fetched images are cached locally so subsequent opens remain instant, and `oryx --clear-cache` clears the cache. See [PRIVACY.md](PRIVACY.md) for full details.
 
 ## Limitations
 
@@ -196,19 +196,19 @@ Oryx has no account and no telemetry. It does not report what you open, what you
 
 ## Why Oryx?
 
-Oryx started as a personal project. I read and write a lot of markdown files, and I tried many of the free solutions. Most take time to open, and slow down or crash on large files. Many are built on Electron or a browser engine, which makes them heavy for a fraction of what they offer. My ideal would have been a portable desktop app that shows formatted markdown, opens instantly on any machine and does not share my notes with somebody on the other side of the planet. A good-looking PDF export would have been a plus. The closest was Obsidian, but the vault constraint broke my flow.
+I read and write Markdown constantly and tried most of the free tools out there. Most open slowly, bog down or crash on large files, or wrap a browser engine or Electron around a fraction of what they actually do. I was thinking of a lightweight desktop app that renders formatted Markdown, opens immediately on any hardware, does not share my notes with somebody on the other side of the planet, and exports clean PDFs. Obsidian came closest, except its vault model got in the way of my workflow.
 
-So Oryx began as a renderer, not as an editor. Most markdown editors show the source and then render it. I think a document should first open formatted. A browser does not start by showing the raw HTML, right? Editing came later, as a consequence, then ebooks and comics, because the same engine could do them. Some ideas were explored and left out: reading PDF files would have added 5.5 MB to the app without doing any better than the existing readers. Git and AI agent integration will probably never come. Any new feature has to keep Oryx `Fast and Beautiful`.
+Because of that, Oryx started as a renderer rather than an editor. Most Markdown tools default to showing raw source first; a browser does not open pages as raw HTML, and a formatted document should not either. Editing followed naturally, along with ebooks and comics once the core engine could handle them. Some ideas were deliberately dropped: adding PDF reading would have cost 5 MB without beating dedicated PDF viewers, and Git or AI agent integrations are unlikely ever to land. Every future feature has to keep Oryx `Fast and Beautiful`.
 
 ## Feedback
 
-Bug reports and ideas are welcome in the [issues](https://github.com/wmahfoudh/oryx/issues). For a bug, the version (`F1`), your system, and if possible the file that shows the problem (or part of it) with some screenshots would be very helpful.
+Bug reports and feature ideas are welcome in the [issues](https://github.com/wmahfoudh/oryx/issues). When reporting a bug, please include your Oryx version (shown in `F1`), your operating system, and, if possible, screenshots alongside the file (or minimal snippet) that reproduces the issue.
 
 ## Credits
 
-Five fonts are built into Oryx: DejaVu Sans for text, Courier Prime for code, STIX Two Math for math, Amiri for Arabic and David Libre for Hebrew. DejaVu is under the DejaVu Fonts License, the other four under the SIL Open Font License. The settings (`Ctrl+,`) can switch the text and code fonts to any font installed on your system.
+Oryx bundles five fonts: DejaVu Sans for text, Courier Prime for code, STIX Two Math for math, Amiri for Arabic, and David Libre for Hebrew. DejaVu uses the DejaVu Fonts License, while the other four use the SIL Open Font License. Settings (`Ctrl+,`) let you switch text and code fonts to any font installed on your system if you don't like the defaults.
 
-The sample book in [examples](examples/) is the [Standard Ebooks](https://standardebooks.org) edition of *The Adventures of Sherlock Holmes*, in the public domain and dedicated with CC0 by its producers. The 8 MB file in the same folder is made of Wikipedia articles, under CC BY-SA 4.0, and of public-domain books from Project Gutenberg; its last section lists them.
+The sample ebook in [examples](examples/) is the [Standard Ebooks](https://standardebooks.org) edition of *The Adventures of Sherlock Holmes*, in the public domain and dedicated under CC0 by its producers. The 8 MB file in the same directory combines Wikipedia articles under CC BY-SA 4.0 with public-domain books from Project Gutenberg, listed in its final section.
 
 <details>
 <summary><b>Adapted theme palettes</b> (all MIT, with thanks to their authors)</summary>
