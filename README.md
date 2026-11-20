@@ -38,7 +38,7 @@ Packages are on the [releases page](https://github.com/wmahfoudh/oryx/releases):
 - **Arch Linux**: `sudo pacman -U oryx-editor-bin-*.pkg.tar.zst`
 - **Any Linux**: the AppImage, or the tarball with its install script.
 
-For a detiled installation instructions and for building from source, please check [INSTALL.md](INSTALL.md).
+For detailed installation instructions and for building from source, please check [INSTALL.md](INSTALL.md).
 
 ## What Oryx does
 
