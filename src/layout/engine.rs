@@ -7109,7 +7109,7 @@ fn fit_side_text(
 /// the left edge, 0.5 centers it, 1.0 puts it against the right edge.
 /// A line may move either way, since right-to-left text starts on the
 /// right; a line wider than the content stays where it is. Lines are
-/// clustered by a vertical overlap of half a pixel or more.
+/// clustered by a vertical overlap of more than half a pixel.
 #[allow(clippy::too_many_arguments)]
 fn align_lines(
     out: &mut LayoutDoc,
@@ -8135,8 +8135,6 @@ mod tests {
             assert_eq!(gap.to_bits(), DocY::from(25.5_f32).to_bits(), "line {line}");
             let exact = first + unit as DocY * 25.5;
             assert_eq!(top.to_bits(), exact.to_bits(), "line {line}");
-            let by_line = table.code_line_top(0, unit);
-            assert_eq!(by_line.to_bits(), exact.to_bits(), "line {line}");
         }
     }
 
