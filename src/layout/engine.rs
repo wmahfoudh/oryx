@@ -4743,14 +4743,24 @@ fn shape_block_lines(
 }
 
 /// A prose segment with more pieces than this, or more bytes, shapes
-/// in chunks cut at piece boundaries, each chunk its own buffer
-/// stacked under the previous one. cosmic-text's span list grows
-/// quadratic in the piece count: a paragraph of 32,000 inline spans
-/// took 6.5s. Bytes alone shape in linear time, so the byte cap sits
-/// far above the code line's, since a cut inside a book paragraph
-/// shows as a ragged line.
+/// in chunks, each chunk its own buffer stacked under the previous one.
+/// cosmic-text's span list grows quadratic in the piece count: a
+/// paragraph of 32,000 inline spans took 6.5s. A buffer also holds
+/// about 340 bytes per byte of its text while it is shaped, so a plain
+/// paragraph of 3 MB, one piece, took a gigabyte (Task 428).
 const LONG_SEGMENT_PIECES: usize = 1000;
 const LONG_SEGMENT_BYTES: usize = 8 * LONG_LINE;
+
+/// Where a chunk of a long segment starts and ends inside its pieces:
+/// the bytes of its first piece before it, and the bytes of its last
+/// piece inside it. A chunk that is not the segment's last leaves its
+/// last visual line for the next chunk, which starts at that line's
+/// first byte, so the lines are those of the whole segment.
+struct ChunkCut {
+    head: usize,
+    tail: usize,
+    leave_last: bool,
+}
 
 /// Shapes one hard-break segment of a block: the pieces `segment`
 /// indexes, as one buffer or as stacked chunks. Returns the height.
@@ -4788,6 +4798,7 @@ fn shape_segment(
             segment,
             0,
             None,
+            None,
             base,
             x0,
             y0,
@@ -4795,7 +4806,8 @@ fn shape_segment(
             line_height,
             first_line_only,
             out,
-        );
+        )
+        .0;
     }
     // Byte offset of each piece inside the whole segment, and of the
     // first piece of each origin span: the pieces of a split span
@@ -4812,17 +4824,31 @@ fn shape_segment(
         acc += spans[si].text(source).len() as u32;
     }
     let mut height: DocY = 0.0;
-    let mut start = 0usize;
-    while start < segment.len() {
-        let mut end = start + 1;
-        while end < segment.len()
-            && end - start < LONG_SEGMENT_PIECES
-            && (offsets[end] - offsets[start]) as usize + spans[segment[end]].text(source).len()
-                <= LONG_SEGMENT_BYTES
-        {
-            end += 1;
+    let mut from = 0u32;
+    while from < acc {
+        let first = offsets.partition_point(|&at| at <= from) - 1;
+        let mut to = (from as usize + LONG_SEGMENT_BYTES).min(acc as usize) as u32;
+        if let Some(&cap) = offsets.get(first + LONG_SEGMENT_PIECES) {
+            to = to.min(cap);
         }
-        height += shape_segment_chunk(
+        // The cut falls on a character boundary of the piece it is in.
+        let holder = offsets.partition_point(|&at| at <= to) - 1;
+        let text = spans[segment[holder]].text(source);
+        let mut inside = (to - offsets[holder]) as usize;
+        if inside < text.len() {
+            while !text.is_char_boundary(inside) {
+                inside -= 1;
+            }
+            to = offsets[holder] + inside as u32;
+        }
+        debug_assert!(to > from, "a chunk holds at least a character");
+        let last = offsets.partition_point(|&at| at < to) - 1;
+        let cut = ChunkCut {
+            head: (from - offsets[first]) as usize,
+            tail: (to - offsets[last]) as usize,
+            leave_last: to < acc && !first_line_only,
+        };
+        let (chunk_height, next) = shape_segment_chunk(
             fonts,
             cfg,
             source,
@@ -4830,9 +4856,10 @@ fn shape_segment(
             model,
             styles,
             origins,
-            &segment[start..end],
-            offsets[start],
+            &segment[first..=last],
+            from,
             Some(&origin_starts),
+            Some(cut),
             base,
             x0,
             y0 + height,
@@ -4841,10 +4868,13 @@ fn shape_segment(
             first_line_only,
             out,
         );
-        start = end;
+        height += chunk_height;
         if first_line_only && height > 0.0 {
             break;
         }
+        let at = next.unwrap_or(to);
+        debug_assert!(at > from, "a chunk of a long segment moves on");
+        from = at;
     }
     height
 }
@@ -4855,6 +4885,9 @@ fn shape_segment(
 /// whole segment, so a model reference lands on the span's own bytes
 /// whichever chunk shaped it. An unchunked segment passes None and the
 /// piece table is built here, over the whole segment it was handed.
+/// `cut` trims the first and the last piece to the chunk's bytes.
+/// Returns the height, and the segment offset of the last visual line
+/// when the cut leaves that line to the next chunk.
 #[allow(clippy::too_many_arguments)]
 fn shape_segment_chunk(
     fonts: &mut FontStore,
@@ -4867,6 +4900,7 @@ fn shape_segment_chunk(
     segment: &[usize],
     chunk_base: u32,
     origin_starts: Option<&HashMap<usize, u32>>,
+    cut: Option<ChunkCut>,
     base: &BlockStyle,
     x0: f32,
     y0: DocY,
@@ -4874,12 +4908,25 @@ fn shape_segment_chunk(
     line_height: f32,
     first_line_only: bool,
     out: &mut LayoutDoc,
-) -> DocY {
+) -> (DocY, Option<u32>) {
     let mut buffer = Buffer::new(&mut fonts.font_system, Metrics::new(base.size, line_height));
     buffer.set_size(&mut fonts.font_system, Some(content_width), None);
+    let last_piece = segment.len() - 1;
     let texts: Vec<std::borrow::Cow<str>> = segment
         .iter()
-        .map(|&si| crate::style::fonts::shapable(spans[si].text(source)))
+        .enumerate()
+        .map(|(k, &si)| {
+            let text = spans[si].text(source);
+            let end = match &cut {
+                Some(cut) if k == last_piece => cut.tail,
+                _ => text.len(),
+            };
+            let start = match &cut {
+                Some(cut) if k == 0 => cut.head,
+                _ => 0,
+            };
+            crate::style::fonts::shapable(&text[start..end])
+        })
         .collect();
     let rich: Vec<(&str, Attrs)> = segment
         .iter()
@@ -4985,10 +5032,23 @@ fn shape_segment_chunk(
         .iter()
         .map(|s| s.code && (!base.justify || !s.text(source).contains([' ', '\u{a0}'])))
         .collect();
+    let leave_last = cut.as_ref().is_some_and(|cut| cut.leave_last);
+    let lines = if leave_last {
+        buffer.layout_runs().count()
+    } else {
+        0
+    };
+    let mut next = None;
     let mut height = 0.0_f32;
     for (visual_line, run) in buffer.layout_runs().enumerate() {
         if first_line_only && visual_line > 0 {
             break;
+        }
+        if leave_last && visual_line > 0 && visual_line + 1 == lines {
+            if let Some(start) = run.glyphs.iter().map(|g| g.start).min() {
+                next = Some(line_offsets[run.line_i] + start as u32);
+                break;
+            }
         }
         height = height.max(run.line_top + line_height);
         let line_text = buffer.lines[run.line_i].text();
@@ -5101,7 +5161,7 @@ fn shape_segment_chunk(
             }
         }
     }
-    DocY::from(height)
+    (DocY::from(height), next)
 }
 
 /// Lays out a summary row: the fold chevron in the gutter, text

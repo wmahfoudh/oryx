@@ -1794,6 +1794,120 @@ fn each_line_of_an_aligned_paragraph_is_placed_on_its_own_at_a_zoom_step() {
     }
 }
 
+/// The text of each visual line of `l`, its runs joined in order, top
+/// to bottom, with the line's top.
+fn line_texts(l: &LayoutDoc, doc: &Document) -> Vec<(DocY, String)> {
+    let mut lines: Vec<(DocY, String)> = Vec::new();
+    for r in &l.runs {
+        let text = l.run_text(doc, r).trim();
+        match lines.iter_mut().find(|line| line.0 == r.y) {
+            Some(line) => {
+                line.1.push(' ');
+                line.1.push_str(text);
+            }
+            None => lines.push((r.y, text.to_string())),
+        }
+    }
+    lines.sort_by(|a, b| a.0.total_cmp(&b.0));
+    lines
+}
+
+/// A paragraph past the cap of pieces is shaped in chunks. A chunk's
+/// last line is shaped again at the head of the next one, so no line
+/// ends short where a chunk ends (Task 428).
+#[test]
+fn a_paragraph_past_the_cap_of_pieces_has_no_short_line_at_its_cuts() {
+    let source = vec!["[word](x)"; 2000].join(" ");
+    let (doc, l) = lay2(&source, 1000.0);
+    let lines = line_texts(&l, &doc);
+    let words: Vec<usize> = lines
+        .iter()
+        .map(|(_, text)| text.split_whitespace().count())
+        .collect();
+    assert_eq!(words.iter().sum::<usize>(), 2000);
+    let full = words[0];
+    for (n, count) in words[..words.len() - 1].iter().enumerate() {
+        assert_eq!(*count, full, "line {n} holds {count} words, not {full}");
+    }
+}
+
+/// A plain paragraph is one piece. Over 64 KB it is shaped in chunks
+/// cut inside that piece: the runs still read its text once and in
+/// order, each line is full but the last, and the rows are evenly
+/// spaced (Task 428).
+#[test]
+fn a_paragraph_of_one_huge_piece_reads_as_one_paragraph() {
+    let line = format!("{}\n", ["word"; 16].join(" "));
+    let source = line.repeat(200_000 / line.len());
+    let (doc, l) = lay2(&source, 1000.0);
+    let lines = line_texts(&l, &doc);
+    let read: Vec<&str> = lines
+        .iter()
+        .flat_map(|(_, text)| text.split_whitespace())
+        .collect();
+    assert_eq!(read.len(), source.split_whitespace().count());
+    assert!(read.iter().all(|w| *w == "word"));
+    let full = lines[0].1.split_whitespace().count();
+    for (n, (_, text)) in lines[..lines.len() - 1].iter().enumerate() {
+        let count = text.split_whitespace().count();
+        assert_eq!(count, full, "line {n} holds {count} words, not {full}");
+    }
+    let gap = lines[1].0 - lines[0].0;
+    for pair in lines.windows(2) {
+        assert!(
+            (pair[1].0 - pair[0].0 - gap).abs() < 0.01,
+            "a gap of {} at {}, not {gap}",
+            pair[1].0 - pair[0].0,
+            pair[0].0
+        );
+    }
+}
+
+/// The cut of a chunk falls on a character boundary: characters of two
+/// and three bytes read back whole and in order (Task 428).
+#[test]
+fn a_huge_paragraph_of_wide_characters_reads_back_whole() {
+    let line = format!("{}\n", ["été", "€uro", "ﬁn"].repeat(6).join(" "));
+    let source = line.repeat(100_000 / line.len());
+    let (doc, l) = lay2(&source, 1000.0);
+    let read: String = line_texts(&l, &doc)
+        .iter()
+        .flat_map(|(_, text)| text.chars().filter(|c| !c.is_whitespace()))
+        .collect();
+    let written: String = source.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(read == written, "the text read back differs from the text");
+}
+
+/// A justified paragraph over 64 KB: each line but the last reaches
+/// the right edge, the lines at the cuts of the chunks too (Task 428).
+#[test]
+fn a_huge_justified_paragraph_keeps_its_lines_justified() {
+    let line = format!("{}\n", ["word", "a", "longer", "of"].repeat(5).join(" "));
+    let source = line.repeat(120_000 / line.len());
+    let doc = markdown::parse(source.as_str());
+    let mut media = MediaCache::offline(PathBuf::from("."));
+    let c = ViewConfig {
+        justify: true,
+        ..cfg()
+    };
+    let l = layout(
+        &doc,
+        &Theme::default_dark(),
+        &mut fonts(),
+        &mut media,
+        &c,
+        1000.0,
+    );
+    let lines = line_spans(&l);
+    let right = lines[0].1;
+    for (n, (_, end)) in lines[..lines.len() - 1].iter().enumerate() {
+        assert!(
+            (end - right).abs() < 1.0,
+            "line {n} ends at {end}, not {right}"
+        );
+    }
+}
+
 #[test]
 fn inline_badge_joins_the_text_line() {
     let (doc, l) = lay2(

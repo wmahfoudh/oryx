@@ -106,12 +106,17 @@ fn mb(bytes: isize) -> f32 {
     bytes.max(0) as f32 / (1024.0 * 1024.0)
 }
 
+/// The tests that count run one at a time: the counter sees every
+/// thread of the binary.
+static COUNTING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// The arithmetic the memory columns rest on. Exact equality holds
 /// because this test's thread allocates alone between the probes; the
 /// ignored measurement tests never run beside it. Counting is off until
 /// a measurement enables it; the gate is asserted here first.
 #[test]
 fn allocator_tracks_live_and_peak() {
+    let _alone = COUNTING.lock().unwrap_or_else(|e| e.into_inner());
     let idle = alloc_track::live();
     let parked: Vec<u8> = Vec::with_capacity(1 << 16);
     assert_eq!(
@@ -159,6 +164,29 @@ fn allocator_tracks_live_and_peak() {
         "a reset pins peak to live"
     );
     alloc_track::set_enabled(false);
+}
+
+/// A plain paragraph is one piece of text, and cosmic-text keeps about
+/// 340 bytes per byte of a buffer while it shapes it. A paragraph of
+/// 300 KB is shaped in pieces, so the peak is a piece's (Task 428).
+#[test]
+fn a_huge_paragraph_is_laid_out_in_bounded_memory() {
+    let _alone = COUNTING.lock().unwrap_or_else(|e| e.into_inner());
+    let line = format!("{}\n", ["word"; 16].join(" "));
+    let source = line.repeat(300_000 / line.len());
+    let doc = oryx::doc::markdown::parse(source.as_str());
+    let mut fonts = FontStore::new();
+    let mut media = oryx::doc::images::MediaCache::offline(std::path::PathBuf::from("."));
+    let theme = oryx::style::theme::Theme::default_dark();
+    let cfg = oryx::layout::ViewConfig::default();
+    alloc_track::set_enabled(true);
+    alloc_track::reset_peak();
+    let base = alloc_track::live();
+    let l = oryx::layout::layout(&doc, &theme, &mut fonts, &mut media, &cfg, 1000.0);
+    let peak = alloc_track::peak() - base;
+    alloc_track::set_enabled(false);
+    assert!(l.runs.len() > 1000, "{} runs", l.runs.len());
+    assert!(mb(peak) < 40.0, "the layout peaked at {:.1} MB", mb(peak));
 }
 
 /// The memory tiers, counted by the allocator with nothing timed, so
