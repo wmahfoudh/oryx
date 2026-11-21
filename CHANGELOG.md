@@ -34,10 +34,13 @@
 - `Alt+Left` in a file that was deleted from disk now goes back inside its text, which Oryx still has. Before, it asked to save and opened the previous file.
 - In a file of one very long line, leaving the editor far from the place you entered it no longer slows the window while Oryx still measures the file. Before, each frame took at least 0.05 s more in a 200 MB file of one line.
 - The search in a big code or text file no longer blocks the window. In the same playlist, a single common letter in the search bar now answers in under a second, and `Escape` closes the bar at once. Before, the window was blocked for minutes.
+- In a very big file, the rows far down are now evenly spaced, and the line numbers stay on their lines. Before, past a few million lines of a 200 MB file, the rows were 16 and 32 px apart in turn.
+- A markdown paragraph of a few megabytes no longer takes gigabytes of memory. A paragraph of 2.9 MB now takes about 110 MB. Before, it took 1.7 GB, and at a high zoom more than 6 GB, where the page stopped at its top.
 - A file opened at a line from the command line, as in `oryx notes.md:6`, no longer crashes Oryx when that line is inside a folded section. The section opens and the line is shown.
 - A definition list with a tab before its colon no longer crashes Oryx. Before, Oryx crashed when the definition above it ended with an accented letter or a non-Latin character.
 - A list item that holds a link definition, followed by a line of spaces, no longer crashes Oryx.
 - A line of spaces or tabs after a link definition is now read as a blank line. Before, it was read as text, and the paragraph after it started with an empty line.
+- At a zoom step, each line of a centered or right-aligned paragraph is now in its place. Before, some lines moved sideways with the line above them.
 - `Alt+Escape` in the Go to line field, or in the field that asks for a file's path, now closes the field as `Escape` does. Before, it quit Oryx or left the editor.
 - On Linux without a desktop portal and without zenity, the Save of the unsaved-changes question on a note or on piped text is now followed by what the question announced, once you have given the path: Oryx quits, opens the file, or starts the new file or note. Before, the text was saved and nothing followed.
 - The case key (`Ctrl+U`) now changes the first word of a footnote's text. Before, that word was left as typed.
