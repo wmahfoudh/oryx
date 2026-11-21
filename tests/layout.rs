@@ -1837,16 +1837,20 @@ fn a_paragraph_past_the_cap_of_pieces_has_no_short_line_at_its_cuts() {
 /// spaced (Task 428).
 #[test]
 fn a_paragraph_of_one_huge_piece_reads_as_one_paragraph() {
-    let line = format!("{}\n", ["word"; 16].join(" "));
-    let source = line.repeat(200_000 / line.len());
+    // Numbered words: a run that points at other bytes reads another
+    // number.
+    let words: Vec<String> = (0..25_000).map(|n| format!("w{n:06}")).collect();
+    let source: String = words
+        .chunks(16)
+        .map(|line| format!("{}\n", line.join(" ")))
+        .collect();
     let (doc, l) = lay2(&source, 1000.0);
     let lines = line_texts(&l, &doc);
     let read: Vec<&str> = lines
         .iter()
         .flat_map(|(_, text)| text.split_whitespace())
         .collect();
-    assert_eq!(read.len(), source.split_whitespace().count());
-    assert!(read.iter().all(|w| *w == "word"));
+    assert!(read == words, "the words read back differ from the words");
     let full = lines[0].1.split_whitespace().count();
     for (n, (_, text)) in lines[..lines.len() - 1].iter().enumerate() {
         let count = text.split_whitespace().count();
@@ -1863,12 +1867,19 @@ fn a_paragraph_of_one_huge_piece_reads_as_one_paragraph() {
     }
 }
 
-/// The cut of a chunk falls on a character boundary: characters of two
-/// and three bytes read back whole and in order (Task 428).
+/// The cut of a chunk falls on a character boundary: a cut inside a
+/// character of several bytes moves back to its first byte, and the
+/// characters read back whole and in order (Task 428).
 #[test]
 fn a_huge_paragraph_of_wide_characters_reads_back_whole() {
     let line = format!("{}\n", ["été", "€uro", "ﬁn"].repeat(6).join(" "));
-    let source = line.repeat(100_000 / line.len());
+    let body = line.repeat(100_000 / line.len());
+    // The first chunk ends at 64 KB: a short word in front puts that
+    // byte inside a character.
+    let source = (1..8)
+        .map(|n| format!("{} {body}", "x".repeat(n)))
+        .find(|s| !s.is_char_boundary(65_536))
+        .unwrap();
     let (doc, l) = lay2(&source, 1000.0);
     let read: String = line_texts(&l, &doc)
         .iter()
@@ -1906,6 +1917,69 @@ fn a_huge_justified_paragraph_keeps_its_lines_justified() {
             "line {n} ends at {end}, not {right}"
         );
     }
+}
+
+/// The number of rows of `l` with a run on the model bytes `from..to`.
+fn rows_holding(l: &LayoutDoc, from: u32, to: u32) -> usize {
+    let mut tops: Vec<DocY> = l
+        .runs
+        .iter()
+        .filter_map(|r| match r.text {
+            TextRef::Model { start, len } if start < to && start + len > from => Some(r.y),
+            _ => None,
+        })
+        .collect();
+    tops.sort_by(|a, b| a.total_cmp(b));
+    tops.dedup();
+    tops.len()
+}
+
+/// A cluster of 70 KB, emoji joined by ZWJ, fills the first chunk from
+/// its first byte, and no line after the first starts on a byte of its
+/// own: the chunk keeps its lines, the next chunk starts at the cut, and
+/// the layout ends (Task 428, finding 1 of its read).
+#[test]
+fn a_joined_emoji_chain_longer_than_a_chunk_is_laid_out_once() {
+    let source = format!("{}😀", "😀\u{200d}".repeat(10_000));
+    let (_, l) = lay2(&source, 1000.0);
+    // The rows of one cluster all point at its bytes: the ranges, each
+    // taken once and in order, cover the paragraph.
+    let mut ranges: Vec<(u32, u32)> = l
+        .runs
+        .iter()
+        .filter_map(|r| match r.text {
+            TextRef::Model { start, len } => Some((start, start + len)),
+            TextRef::Side { .. } => None,
+        })
+        .collect();
+    ranges.sort();
+    ranges.dedup();
+    let mut at = 0;
+    for (start, end) in ranges {
+        assert_eq!(start, at, "bytes {start}..{end} after byte {at}");
+        at = end;
+    }
+    assert_eq!(at as usize, source.len());
+}
+
+/// A cluster wider than a line, emoji joined by ZWJ, crosses the cut
+/// of a chunk: the next chunk starts at the cluster's first row, and
+/// the cluster takes as many rows as alone in a short paragraph, none
+/// drawn twice (Task 428, finding 2 of its read).
+#[test]
+fn a_joined_emoji_chain_across_a_cut_is_drawn_once() {
+    let words: String = (0..9_290).map(|n| format!("w{n:05} ")).collect();
+    let chain = format!("{}😀", "😀\u{200d}".repeat(199));
+    let tail: String = (0..1_000).map(|n| format!(" t{n:05}")).collect();
+    assert!(words.len() < 65_536 && words.len() + chain.len() > 65_536);
+    let (_, l) = lay2(&format!("{words}{chain}{tail}"), 1000.0);
+    let (_, alone) = lay2(&format!("{chain}{tail}"), 1000.0);
+    let (at, len) = (words.len() as u32, chain.len() as u32);
+    assert_eq!(
+        rows_holding(&l, at, at + len),
+        rows_holding(&alone, 0, len),
+        "the rows of the chain, against the chain alone"
+    );
 }
 
 #[test]

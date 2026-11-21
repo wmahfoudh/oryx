@@ -4755,7 +4755,8 @@ const LONG_SEGMENT_BYTES: usize = 8 * LONG_LINE;
 /// the bytes of its first piece before it, and the bytes of its last
 /// piece inside it. A chunk that is not the segment's last leaves its
 /// last visual line for the next chunk, which starts at that line's
-/// first byte, so the lines are those of the whole segment.
+/// first byte, so the lines are those of the whole segment
+/// (`resume_line` has the rule).
 struct ChunkCut {
     head: usize,
     tail: usize,
@@ -4886,8 +4887,8 @@ fn shape_segment(
 /// whichever chunk shaped it. An unchunked segment passes None and the
 /// piece table is built here, over the whole segment it was handed.
 /// `cut` trims the first and the last piece to the chunk's bytes.
-/// Returns the height, and the segment offset of the last visual line
-/// when the cut leaves that line to the next chunk.
+/// Returns the height, and the segment offset the next chunk starts
+/// at when the cut leaves the chunk's last lines to it.
 #[allow(clippy::too_many_arguments)]
 fn shape_segment_chunk(
     fonts: &mut FontStore,
@@ -5032,23 +5033,18 @@ fn shape_segment_chunk(
         .iter()
         .map(|s| s.code && (!base.justify || !s.text(source).contains([' ', '\u{a0}'])))
         .collect();
-    let leave_last = cut.as_ref().is_some_and(|cut| cut.leave_last);
-    let lines = if leave_last {
-        buffer.layout_runs().count()
+    let resume = if cut.as_ref().is_some_and(|cut| cut.leave_last) {
+        resume_line(&buffer, &line_offsets, chunk_base)
     } else {
-        0
+        None
     };
-    let mut next = None;
     let mut height = 0.0_f32;
     for (visual_line, run) in buffer.layout_runs().enumerate() {
         if first_line_only && visual_line > 0 {
             break;
         }
-        if leave_last && visual_line > 0 && visual_line + 1 == lines {
-            if let Some(start) = run.glyphs.iter().map(|g| g.start).min() {
-                next = Some(line_offsets[run.line_i] + start as u32);
-                break;
-            }
+        if resume.is_some_and(|(line, _)| line == visual_line) {
+            break;
         }
         height = height.max(run.line_top + line_height);
         let line_text = buffer.lines[run.line_i].text();
@@ -5161,7 +5157,37 @@ fn shape_segment_chunk(
             }
         }
     }
-    (DocY::from(height), next)
+    (DocY::from(height), resume.map(|(_, at)| at))
+}
+
+/// The visual line where a chunk that leaves its end to the next chunk
+/// stops, and that line's first byte in the segment. It is the chunk's
+/// last line when that line starts on a byte no earlier line holds.
+/// The rows of a cluster wider than a line all hold its first byte:
+/// when the last line holds the end of such a cluster, the chunk stops
+/// at the last line that starts on a byte of its own, and the cluster's
+/// rows go to the next chunk together. None when the last line has no
+/// glyph, or when no line after the first starts on a byte of its own
+/// (one cluster from the first line to the last): the chunk keeps its
+/// lines and the next chunk starts at the cut.
+fn resume_line(buffer: &Buffer, line_offsets: &[u32], chunk_base: u32) -> Option<(usize, u32)> {
+    let mut held = chunk_base;
+    let mut resume = None;
+    let mut last_has_glyphs = false;
+    for (visual_line, run) in buffer.layout_runs().enumerate() {
+        let base = line_offsets[run.line_i];
+        let first = run.glyphs.iter().map(|g| base + g.start as u32).min();
+        last_has_glyphs = first.is_some();
+        let Some(first) = first else {
+            continue;
+        };
+        if visual_line > 0 && first >= held && first > chunk_base {
+            resume = Some((visual_line, first));
+        }
+        let end = run.glyphs.iter().map(|g| base + g.end as u32).max();
+        held = held.max(end.unwrap_or(first));
+    }
+    resume.filter(|_| last_has_glyphs)
 }
 
 /// Lays out a summary row: the fold chevron in the gutter, text
