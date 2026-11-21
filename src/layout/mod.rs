@@ -4,15 +4,15 @@ pub mod pool;
 mod rows;
 
 /// A vertical position or height in the document's space: a top, a
-/// baseline, the scroll, a sum of heights. What the shaper or a font
-/// gives for one line or one glyph stays f32.
-pub type DocY = f32;
+/// baseline, the scroll, a sum of heights. Past 2^24 px an f32 cannot
+/// hold each pixel, and a huge file is that tall far down. What the
+/// shaper or a font gives for one line or one glyph stays f32.
+pub type DocY = f64;
 
 /// A document height as a distance from `origin`, in the f32 that
 /// tiny-skia, cosmic-text and the PDF writer take. The subtraction is
 /// made in `DocY` first: far down a huge file both heights are large,
 /// while their difference near the screen or the page is small.
-#[expect(clippy::unnecessary_cast, reason = "a no-op while DocY is f32")]
 pub fn relative_y(y: DocY, origin: DocY) -> f32 {
     (y - origin) as f32
 }
@@ -20,7 +20,6 @@ pub fn relative_y(y: DocY, origin: DocY) -> f32 {
 /// A vertical length the caller knows is short (a row, a piece of a
 /// page, a distance clamped to the view), in f32. The debug build checks
 /// that it is under 2^24 px, where an f32 still holds each pixel.
-#[expect(clippy::unnecessary_cast, reason = "a no-op while DocY is f32")]
 pub fn length_f32(len: DocY) -> f32 {
     debug_assert!(
         len.abs() < 16_777_216.0,
@@ -56,6 +55,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(debug_assertions)]
     #[should_panic(expected = "is not short")]
     fn a_length_past_two_to_the_24_is_refused_in_the_debug_build() {
         length_f32(20_000_000.0);

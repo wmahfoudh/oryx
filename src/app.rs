@@ -702,7 +702,7 @@ struct PreviewFrame {
     colored: usize,
     width: u32,
     /// The scroll and the height of `pixels`.
-    painted: Option<(u32, u32)>,
+    painted: Option<(u64, u32)>,
     pixels: Vec<u32>,
 }
 
@@ -10397,6 +10397,8 @@ impl ApplicationHandler for App {
 
 #[cfg(test)]
 mod tests {
+    use oryx::layout::DocY;
+
     /// Two code blocks with a language, one line each, both cold: the
     /// shape of the help page's syntax section near the view.
     fn two_cold_blocks() -> super::Document {
@@ -11078,7 +11080,7 @@ mod tests {
             "at the top of the file the view stays"
         );
         assert_eq!(Kept::Edit(2000.0).zoomed(1.5), Kept::Edit(3000.0));
-        let row = |y: f32| oryx::edit::caret::CaretBox {
+        let row = |y: DocY| oryx::edit::caret::CaretBox {
             x: 80.0,
             y,
             h: row_h,
@@ -11171,7 +11173,7 @@ mod tests {
     fn a_box_past_the_placed_height_is_a_guess_while_the_pass_runs() {
         use super::{caret_row, CaretRow};
         use oryx::edit::caret::CaretBox;
-        let row = |y: f32| CaretBox {
+        let row = |y: DocY| CaretBox {
             x: 80.0,
             y,
             h: 33.0,
@@ -11656,9 +11658,9 @@ mod tests {
             .expect("the caret painted");
         // The band paints document y 100 at row 100 - floor(50.6); the
         // caret lands on that same row instead of one above it.
-        assert_eq!(first as f32, caret.y - frame_offset(scroll));
+        assert_eq!(first as DocY, caret.y - frame_offset(scroll));
         assert_ne!(
-            first as f32,
+            first as DocY,
             (caret.y - scroll).floor(),
             "the raw position sat a pixel off"
         );

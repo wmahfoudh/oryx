@@ -2427,13 +2427,13 @@ mod tests {
         l: &LayoutDoc,
         doc: &Document,
         fonts: &mut FontStore,
-    ) -> (f32, f32, f32, f32) {
+    ) -> (f32, DocY, f32, f32) {
         let boxes = rects(m, l, doc, fonts);
         assert_eq!(boxes.len(), 1, "one box for {m:?}: {boxes:?}");
         boxes[0]
     }
 
-    fn close(a: (f32, f32, f32, f32), b: (f32, f32, f32, f32)) -> bool {
+    fn close(a: (f32, DocY, f32, f32), b: (f32, DocY, f32, f32)) -> bool {
         (a.0 - b.0).abs() < 0.6
             && (a.1 - b.1).abs() < 0.6
             && (a.2 - b.2).abs() < 0.6
@@ -2610,11 +2610,12 @@ mod tests {
             let sel = select_all(&doc);
             let whole = rects(&sel, &l, &doc, &mut fonts);
             assert!(whole.len() > 100, "a selection of many lines");
-            let view = 600.0;
-            for top in [0.0, l.height / 3.0, l.height - view] {
-                let (top, bottom) = (top, top + view);
+            let view = 600.0_f32;
+            for top in [0.0, l.height / 3.0, l.height - DocY::from(view)] {
+                let (top, bottom) = (top, top + DocY::from(view));
                 let near = rects_between(&sel, &l, &doc, &mut fonts, top, bottom, view);
-                let painted = |r: &&(f32, f32, f32, f32)| r.1 + r.3 > top && r.1 < bottom;
+                let painted =
+                    |r: &&(f32, DocY, f32, f32)| r.1 + DocY::from(r.3) > top && r.1 < bottom;
                 assert_eq!(
                     near.iter().filter(painted).collect::<Vec<_>>(),
                     whole.iter().filter(painted).collect::<Vec<_>>(),
@@ -2663,16 +2664,16 @@ mod tests {
         // its line crosses, by more than the view.
         let mut frames = 0;
         for run in &l.runs {
-            let own = run.y + metrics::LINE_HEIGHT * run.size;
-            let line = run.y + line_height_at(&l, run);
+            let own = run.y + DocY::from(metrics::LINE_HEIGHT * run.size);
+            let line = run.y + DocY::from(line_height_at(&l, run));
             let edge = (own / 512.0).ceil() * 512.0;
-            if edge + view >= line {
+            if edge + DocY::from(view) >= line {
                 continue;
             }
             frames += 1;
-            let (top, bottom) = (edge + view, edge + 10.0 * view);
+            let (top, bottom) = (edge + DocY::from(view), edge + DocY::from(10.0 * view));
             let near = rects_between(&sel, &l, &doc, &mut fonts, top, bottom, margin);
-            let painted = |r: &&(f32, f32, f32, f32)| r.1 + r.3 > top && r.1 < bottom;
+            let painted = |r: &&(f32, DocY, f32, f32)| r.1 + DocY::from(r.3) > top && r.1 < bottom;
             assert_eq!(
                 near.iter().filter(painted).collect::<Vec<_>>(),
                 whole.iter().filter(painted).collect::<Vec<_>>(),
@@ -2816,7 +2817,7 @@ mod tests {
         assert!(
             rects
                 .iter()
-                .any(|(_, (_, y, _, h))| *y < scroll + 600.0 && *y + *h > scroll),
+                .any(|(_, (_, y, _, h))| *y < scroll + 600.0 && *y + DocY::from(*h) > scroll),
             "a box on the screen at {scroll}: {} boxes",
             rects.len()
         );
@@ -2975,9 +2976,9 @@ mod tests {
             "the empty line's box at its left edge"
         );
         assert!(
-            (y1 - (y0 + h0)).abs() < 0.6,
+            (y1 - (y0 + DocY::from(h0))).abs() < 0.6,
             "on the row below: {y1} against {}",
-            y0 + h0
+            y0 + DocY::from(h0)
         );
         assert!((w1 - w0).abs() < 0.6);
     }

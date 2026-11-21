@@ -1977,7 +1977,7 @@ mod tests {
     use oryx::edit;
     use oryx::edit::caret::{self, Caret, Motion};
     use oryx::layout::{
-        layout_begin, layout_more, layout_step, metrics, window_to, LayoutDoc, LayoutPass,
+        layout_begin, layout_more, layout_step, metrics, window_to, DocY, LayoutDoc, LayoutPass,
         ViewConfig,
     };
     use oryx::paint::preview::{self, Preview};
@@ -2042,15 +2042,35 @@ mod tests {
 
     /// What a test compares of the view between two frames.
     type Snapshot = (
-        f32,
+        DocY,
         Option<Kept>,
         Option<Place>,
         Option<Place>,
         Option<String>,
-        (Option<f32>, Option<f32>, Option<Place>),
+        (Option<DocY>, Option<DocY>, Option<Place>),
         (bool, bool, bool),
         Option<usize>,
     );
+
+    /// Far down a huge file a small step of the wheel or a pan still
+    /// moves the view (Task 418). The layout's height is set to stand for
+    /// a file of 6,900,000 lines at code size 17.
+    #[test]
+    fn a_small_step_far_down_a_huge_file_moves_the_view() {
+        let mut b = Bench::new("a\nb\n".to_string(), false, 1000);
+        b.settle(10);
+        let far: DocY = 44.0 + 6_900_000.0 * 25.5;
+        b.lay.as_mut().expect("a layout").height = far + 10_000.0;
+        let (view, page) = b.page();
+        view.scroll_to(&page, far);
+        assert_eq!(view.scroll_y, far);
+        view.scroll_by(&page, 1.0);
+        assert_eq!(view.scroll_y - far, 1.0);
+        for _ in 0..4 {
+            view.scroll_by(&page, 0.25);
+        }
+        assert_eq!(view.scroll_y - far, 2.0);
+    }
 
     impl Bench {
         fn new(text: String, editing: bool, pace: usize) -> Bench {
@@ -2428,7 +2448,7 @@ mod tests {
             let Some(lay) = self.lay.as_ref() else {
                 return false;
             };
-            let y = y + self.view.scroll_y;
+            let y = DocY::from(y) + self.view.scroll_y;
             let Some(placed) = caret::place(lay, &self.doc, &mut self.fonts, x, y) else {
                 return false;
             };
@@ -2465,13 +2485,13 @@ mod tests {
                 return;
             }
             let (view, page) = self.page();
-            let target = share * (page.height() - page.view_h).max(0.0);
+            let target = DocY::from(share) * (page.height() - DocY::from(page.view_h)).max(0.0);
             view.jump_to(&page, target);
         }
 
         /// `App::match_top`: the top of the current match and the
         /// height of its line.
-        fn match_top(&self) -> Option<(f32, f32)> {
+        fn match_top(&self) -> Option<(DocY, f32)> {
             let lay = self.lay.as_ref()?;
             let m = self.matches.get(self.current)?;
             let (top, size) = match selection::match_anchor(lay, &self.doc, m) {
@@ -2846,14 +2866,15 @@ mod tests {
         fn row_in_view(&mut self, offset: usize) -> bool {
             let (row_h, view_h, scroll) = (self.row_h(), self.view_h, self.view.scroll_y);
             let (_, page) = self.page();
-            page.editor_row_y(offset)
-                .is_some_and(|y| y >= scroll && y + row_h <= scroll + view_h)
+            page.editor_row_y(offset).is_some_and(|y| {
+                y >= scroll && y + DocY::from(row_h) <= scroll + DocY::from(view_h)
+            })
         }
 
         /// The scroll that shows the end of the file.
-        fn end_scroll(&self) -> f32 {
+        fn end_scroll(&self) -> DocY {
             let height = self.lay.as_ref().expect("a layout").height;
-            (height - self.view_h).max(0.0)
+            (height - DocY::from(self.view_h)).max(0.0)
         }
     }
 
@@ -3235,7 +3256,7 @@ mod tests {
     }
 
     /// Where the jump of `jump_waits` ends with nothing after it.
-    fn jump_alone() -> f32 {
+    fn jump_alone() -> DocY {
         let mut bench = jump_waits();
         bench.settle(REST);
         bench.view.scroll_y
@@ -3294,7 +3315,7 @@ mod tests {
         bench.frame();
         bench.query("line 357 ");
         let lay = bench.lay.as_ref().expect("a layout");
-        let end = (lay.height - bench.view_h).max(0.0);
+        let end = (lay.height - DocY::from(bench.view_h)).max(0.0);
         assert!(bench.pass_active(), "the file is still measured");
         assert_eq!(bench.view.scroll_y, end);
     }
@@ -3335,7 +3356,7 @@ mod tests {
     /// then a query typed while the end waits, with its picture on
     /// screen. Answers the scroll, the scroll of the end, and the
     /// offset of the match taken.
-    fn end_then_query(text: String, pace: usize, query: &str) -> (f32, f32, usize) {
+    fn end_then_query(text: String, pace: usize, query: &str) -> (DocY, DocY, usize) {
         let mut bench = Bench::new(text, false, pace);
         for _ in 0..12 {
             bench.frame();
@@ -3589,7 +3610,7 @@ mod tests {
     /// measured whole, its view showing the row of `anchor` at `height`
     /// under its top, as the picture does: what a click on that
     /// picture must give.
-    fn whole_click(text: &str, anchor: usize, height: f32, x: f32, y: f32) -> usize {
+    fn whole_click(text: &str, anchor: usize, height: DocY, x: f32, y: f32) -> usize {
         let mut whole = Bench::new(text.to_string(), true, usize::MAX);
         whole.frame();
         let lay = whole.lay.as_ref().expect("a layout");
@@ -3753,11 +3774,13 @@ mod tests {
             };
             // Each blank line is one byte and one row.
             let row_h = bench.row_h();
-            let rows_above = ((seat.below - y) / row_h).ceil().max(0.0) as usize;
+            let rows_above = ((seat.below - DocY::from(y)) / DocY::from(row_h))
+                .ceil()
+                .max(0.0) as usize;
             assert!(bench.click(x, y), "a click places a caret");
             let caret = bench.caret.expect("a caret").offset;
             assert_eq!(caret, seat.offset - rows_above, "a click at {x}, {y}");
-            let found = seat.below - rows_above as f32 * row_h;
+            let found = seat.below - DocY::from(rows_above as f32 * row_h);
             bench.settle(REST);
             let lay = bench.lay.as_ref().expect("a layout");
             let rests =
@@ -3868,7 +3891,10 @@ mod tests {
         )
         .expect("a place on the page")
         .offset;
-        assert!(bench.click(x, y), "a click on the page places a caret");
+        assert!(
+            bench.click(x, y as f32),
+            "a click on the page places a caret"
+        );
         assert_eq!(bench.caret.map(|caret| caret.offset), Some(page));
         assert!(
             bench.view.pending_row.is_none(),
@@ -4065,9 +4091,12 @@ mod tests {
                 let top = wanted_scroll(&wanted, &picture.lay, &picture.doc, bench.view_h, row_h)
                     .expect("a place");
                 let first = row_y(&picture.lay, &picture.doc, start).expect("its line") - top;
-                let y = first + rows * row_h;
-                assert!(y < bench.view_h, "the line's rows start at {first}");
-                assert!(bench.click(300.0, y), "a click places a caret");
+                let y = first + DocY::from(rows * row_h);
+                assert!(
+                    y < DocY::from(bench.view_h),
+                    "the line's rows start at {first}"
+                );
+                assert!(bench.click(300.0, y as f32), "a click places a caret");
                 let caret = bench.caret.expect("a caret").offset;
                 assert!(
                     start < caret && caret < end,
@@ -4119,7 +4148,7 @@ mod tests {
             let caret = bench.caret.expect("a caret").offset;
             let found = row_y(&picture.lay, &picture.doc, caret).expect("its row") - top;
             assert!(
-                found < 0.0 || found + row_h > view_h,
+                found < 0.0 || found + DocY::from(row_h) > DocY::from(view_h),
                 "the row clicked at {y} is whole in the view, at {found}"
             );
             bench.settle(REST);
@@ -4479,8 +4508,8 @@ mod tests {
                 .caret
                 .and_then(|caret| caret.geometry(lay, &self.doc, &mut self.fonts));
             let shown = found.is_some_and(|b| match whole {
-                true => b.y >= scroll && b.y + b.h <= scroll + view_h,
-                false => b.y + b.h > scroll && b.y < scroll + view_h,
+                true => b.y >= scroll && b.y + DocY::from(b.h) <= scroll + DocY::from(view_h),
+                false => b.y + DocY::from(b.h) > scroll && b.y < scroll + DocY::from(view_h),
             });
             if shown {
                 return Ok(());
@@ -4495,7 +4524,7 @@ mod tests {
         /// on a character.
         fn bounds(&self) -> Result<(), String> {
             let height = self.lay.as_ref().map_or(0.0, |lay| lay.height);
-            let most = (height - self.view_h).max(0.0);
+            let most = (height - DocY::from(self.view_h)).max(0.0);
             let scroll = self.view.scroll_y;
             if !(0.0..=most).contains(&scroll) {
                 return Err(format!("the scroll {scroll} is out of 0..={most}"));
@@ -4511,7 +4540,7 @@ mod tests {
 
     /// Where a sequence ends: the scroll, the caret, and the first
     /// known fault it met on its way (`Bench::gap`).
-    type Ended = (Option<f32>, Option<usize>, Option<&'static str>);
+    type Ended = (Option<DocY>, Option<usize>, Option<&'static str>);
 
     /// The lines of the file the fuzzer opens.
     const LINES: usize = 400;

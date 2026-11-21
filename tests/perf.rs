@@ -10,7 +10,7 @@ use std::time::Instant;
 
 use oryx::doc::images::MediaCache;
 use oryx::doc::model::BlockKind;
-use oryx::layout::{layout, layout_begin, layout_more, recolor_batch, window_to, ViewConfig};
+use oryx::layout::{layout, layout_begin, layout_more, recolor_batch, window_to, DocY, ViewConfig};
 use oryx::style::fonts::FontStore;
 use oryx::style::highlight;
 use oryx::style::theme::Theme;
@@ -126,8 +126,8 @@ fn interactive_paths_measured() {
         // A fixed sample keeps the linear column bounded; per-probe cost
         // is what matters and 2000 probes settle it.
         let count = 2000usize;
-        let step = lay.height / count as f32;
-        let probes: Vec<f32> = (0..count).map(|i| i as f32 * step).collect();
+        let step = lay.height / DocY::from(count as f32);
+        let probes: Vec<DocY> = (0..count).map(|i| i as DocY * step).collect();
         let mut hits = 0usize;
         let started = Instant::now();
         for y in &probes {
@@ -143,7 +143,7 @@ fn interactive_paths_measured() {
                 let inside = WIDTH / 2.0 >= r.x
                     && WIDTH / 2.0 <= r.x + r.width
                     && *y >= r.y
-                    && *y <= r.y + metrics::LINE_HEIGHT * r.size;
+                    && *y <= r.y + DocY::from(metrics::LINE_HEIGHT * r.size);
                 inside.then_some(target)
             });
             if linear.is_some() {
@@ -154,7 +154,7 @@ fn interactive_paths_measured() {
         let bands = 5u32;
         let started = Instant::now();
         for i in 0..bands {
-            let y = lay.height / (bands + 1) as f32 * (i + 1) as f32;
+            let y = lay.height / DocY::from((bands + 1) as f32) * DocY::from((i + 1) as f32);
             let _ = oryx::paint::band(
                 &lay,
                 &doc,
@@ -328,7 +328,7 @@ fn window_reentry_measured() {
             );
             measure_highlight(&mut doc);
             settle_recolor(&doc, &mut lay, &mut fonts);
-            let mut jump = |scroll: f32, lay: &mut oryx::layout::LayoutDoc| {
+            let mut jump = |scroll: DocY, lay: &mut oryx::layout::LayoutDoc| {
                 let started = Instant::now();
                 window_to(
                     &doc,
@@ -346,7 +346,7 @@ fn window_reentry_measured() {
             };
             let mid = lay.height / 2.0;
             let cold_ms = jump(mid, &mut lay);
-            let slide_ms = jump(mid + VIEWPORT_H, &mut lay);
+            let slide_ms = jump(mid + DocY::from(VIEWPORT_H), &mut lay);
             let back_ms = jump(0.0, &mut lay);
             println!(
                 "reentry {kind:<4} {name:>6}: cold {cold_ms:>4}ms, slide {slide_ms:>4}ms, \
@@ -1211,9 +1211,9 @@ fn top_offset_measured() {
     let (_, _, code) = measure_open(&large_gen::generate_code(8 * 1024 * 1024), "rs");
     let (_, code_lay) = measure_layout(&code, None);
     let (page_ms, page_top) =
-        best(&|| scroll::top_offset(&page_lay, &page, page_lay.height - VIEWPORT_H));
+        best(&|| scroll::top_offset(&page_lay, &page, page_lay.height - DocY::from(VIEWPORT_H)));
     let (code_ms, code_top) =
-        best(&|| scroll::top_offset(&code_lay, &code, code_lay.height - VIEWPORT_H));
+        best(&|| scroll::top_offset(&code_lay, &code, code_lay.height - DocY::from(VIEWPORT_H)));
     let blank = code
         .source
         .rfind("\n\n")

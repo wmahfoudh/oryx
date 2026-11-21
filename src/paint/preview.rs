@@ -376,7 +376,11 @@ mod tests {
                     // the piece holding `at`.
                     let place = |lay: &LayoutDoc, doc: &Document| {
                         let top = scroll::offset_top(lay, doc, at).unwrap();
-                        scroll::frame_offset(scroll::clamp(top - below, lay.height, 600.0))
+                        scroll::frame_offset(scroll::clamp(
+                            top - DocY::from(below),
+                            lay.height,
+                            600.0,
+                        ))
                     };
                     let mut paint = |lay: &LayoutDoc, doc: &Document| {
                         let y = place(lay, doc);
@@ -397,7 +401,8 @@ mod tests {
                     let part = paint(&preview.lay, &preview.doc);
                     // The pages differ where the view passes the pieces
                     // the preview holds; these places do not.
-                    let top = scroll::offset_top(&preview.lay, &preview.doc, at).unwrap() - below;
+                    let top = scroll::offset_top(&preview.lay, &preview.doc, at).unwrap()
+                        - DocY::from(below);
                     if top + 600.0 <= preview.lay.height && top >= 0.0 {
                         let differ = page.iter().zip(&part).filter(|(a, b)| a != b).count();
                         assert_eq!(differ, 0, "{name} at {at} below {below}");
@@ -443,10 +448,10 @@ mod tests {
             let top = scroll::offset_top(&preview.lay, &preview.doc, at).unwrap();
             // A window of text above the place, and one below it
             // unless the line ends there.
-            assert!(top >= view_h, "{top} above the place at {at}");
+            assert!(top >= DocY::from(view_h), "{top} above the place at {at}");
             if at < line.len() - 5 {
                 assert!(
-                    preview.lay.height - top >= view_h,
+                    preview.lay.height - top >= DocY::from(view_h),
                     "below the place at {at}"
                 );
             }

@@ -8097,6 +8097,83 @@ mod tests {
         )
     }
 
+    /// The table of a code file of plain lines whose rows are
+    /// `line_height` tall, under the 44 px of the user's file at code
+    /// size 17 (Task 418).
+    fn table_of_plain_lines(line_height: f32) -> BlockTable {
+        let mut table = BlockTable::default();
+        table.push(
+            0,
+            BlockEntry {
+                block: 0,
+                y: 0.0,
+                content_y: 44.0,
+                height: 0.0,
+                deco_top: DocY::NAN,
+                line_height,
+                pad: 0.0,
+                x0: 0.0,
+                flags: ENTRY_CODE,
+            },
+        );
+        table
+    }
+
+    /// At code size 17 a row is 25.5 px. The lines are those of the
+    /// user's report and the heights where an f32 starts to lose pixels.
+    #[test]
+    fn the_rows_far_down_a_huge_file_are_evenly_spaced() {
+        let table = table_of_plain_lines(25.5);
+        let first = table.unit_top(0, 0);
+        for line in [3, 658_000, 1_300_000, 2_600_000, 3_626_165, 6_912_603] {
+            let unit = line - 1;
+            let top = table.unit_top(0, unit);
+            let gap = top - table.unit_top(0, unit - 1);
+            assert_eq!(gap.to_bits(), DocY::from(25.5_f32).to_bits(), "line {line}");
+            let exact = first + unit as DocY * 25.5;
+            assert_eq!(top.to_bits(), exact.to_bits(), "line {line}");
+        }
+    }
+
+    /// At zoom 1.1 a row of code size 17 is 28.05 px, which binary
+    /// cannot hold: each row far down is still the row's height.
+    #[test]
+    fn the_rows_far_down_keep_a_height_that_binary_cannot_hold() {
+        let row = metrics::LINE_HEIGHT * 17.0 * 1.1;
+        let table = table_of_plain_lines(row);
+        for unit in [6_900_000, 6_900_001, 6_912_602] {
+            let gap = table.unit_top(0, unit) - table.unit_top(0, unit - 1);
+            assert!((gap - DocY::from(row)).abs() < 0.001, "{unit}: {gap}");
+        }
+    }
+
+    #[test]
+    fn a_line_past_two_to_the_24_has_a_top_of_its_own() {
+        let next = code_line_y(0.0, 16_777_217, 1.0, 0.0);
+        assert_eq!(next - code_line_y(0.0, 16_777_216, 1.0, 0.0), 1.0);
+        assert_eq!(code_line_y(0.0, 17_000_001, 25.5, 0.0), 433_500_025.5);
+    }
+
+    /// Ten lines that wrap to three rows, far down: the top of each line
+    /// is the walk's, and adds the rows above it exactly.
+    #[test]
+    fn wrapped_lines_far_down_add_their_rows_exactly() {
+        let mut table = table_of_plain_lines(25.5);
+        for line in (6_900_000..6_900_040).step_by(4) {
+            table.push_tall(0, line, 3.0 * 25.5);
+        }
+        for unit in 6_900_000..6_900_042 {
+            assert_eq!(
+                table.unit_top(0, unit).to_bits(),
+                top_by_walk(&table, unit).to_bits(),
+                "{unit}"
+            );
+        }
+        let gap = table.unit_top(0, 6_900_005) - table.unit_top(0, 6_900_004);
+        assert_eq!(gap, 3.0 * 25.5);
+        assert_eq!(table.unit_top(0, 6_900_041), 175_951_599.5);
+    }
+
     #[test]
     fn a_line_top_is_the_walk_of_the_wrapped_lines_to_the_bit() {
         let table = table_of_wrapped_lines(20_000);
@@ -8118,9 +8195,9 @@ mod tests {
         let lines = 1_400_000;
         let table = table_of_wrapped_lines(lines);
         let start = std::time::Instant::now();
-        let mut sum = 0.0_f64;
+        let mut sum: DocY = 0.0;
         for k in 0..2_000 {
-            sum += table.code_line_top(0, lines as usize - 1 - k) as f64;
+            sum += table.code_line_top(0, lines as usize - 1 - k);
         }
         let spent = start.elapsed();
         assert!(sum > 0.0);
@@ -8313,7 +8390,7 @@ mod tests {
                 &plain(chunk.len()),
                 0,
                 first.x0,
-                height,
+                DocY::from(height),
                 first.size,
                 first.line_height,
                 first.wrap_width,
@@ -8323,10 +8400,12 @@ mod tests {
         }
         let top = lay.approx_top(0, 1).unwrap();
         assert_eq!(first.y0.to_bits(), top.to_bits());
-        let near = |a: f32, b: f32| (a - b).abs() <= 4.0 * f32::EPSILON * a.abs().max(b.abs());
+        let near = |a: DocY, b: DocY| {
+            (a - b).abs() <= 4.0 * DocY::from(f32::EPSILON) * a.abs().max(b.abs())
+        };
         let placed_height = lay.approx_top(0, 2).unwrap() - top;
         assert!(
-            near(placed_height + top, height + top),
+            near(placed_height + top, DocY::from(height) + top),
             "the line's height: {placed_height} against {height}"
         );
         let last = records[records.len() - 1];
@@ -8350,8 +8429,14 @@ mod tests {
         // The lines around it are units as before, and the table
         // answers in lines.
         assert_eq!(lay.code_line_at(0, 3, top + 1.0), Some(1));
-        assert_eq!(lay.code_line_at(0, 3, top + height - 1.0), Some(1));
-        assert_eq!(lay.code_line_at(0, 3, top + height + 1.0), Some(2));
+        assert_eq!(
+            lay.code_line_at(0, 3, top + DocY::from(height) - 1.0),
+            Some(1)
+        );
+        assert_eq!(
+            lay.code_line_at(0, 3, top + DocY::from(height) + 1.0),
+            Some(2)
+        );
         assert_eq!(lay.code_line_at(0, 3, top - 1.0), Some(0));
         let middle = &records[chunks.len() / 2];
         for byte in [middle.bytes.start, middle.bytes.end - 1] {
@@ -8371,7 +8456,10 @@ mod tests {
         assert_eq!(lay.approx_top_at(0, 2, 0), lay.approx_top(0, 2));
         assert_eq!(lay.approx_top_at(0, 1, long.len()), Some(last.y0));
         assert_eq!(lay.code_place_at(0, 3, top - 1.0), Some((0, 0)));
-        assert_eq!(lay.code_place_at(0, 3, top + height + 1.0), Some((2, 0)));
+        assert_eq!(
+            lay.code_place_at(0, 3, top + DocY::from(height) + 1.0),
+            Some((2, 0))
+        );
     }
 
     /// An edit inside a long line cuts again the pieces it touches.
@@ -8786,7 +8874,7 @@ mod tests {
                 r.x >= word.x - 0.5
                     && r.x + r.width <= word.x + word.width + 0.5
                     && r.y > word.y
-                    && (r.width - r.height).abs() < 0.01
+                    && (DocY::from(r.width) - r.height).abs() < 0.01
                     && r.color == word.color
             })
             .collect();
@@ -8797,7 +8885,7 @@ mod tests {
         );
         let gap = dots[1].x - dots[0].x;
         assert!(gap > dots[0].width, "dots stand apart");
-        let mid_y = word.y + metrics::LINE_HEIGHT * word.size / 2.0;
+        let mid_y = word.y + DocY::from(metrics::LINE_HEIGHT * word.size / 2.0);
         assert_eq!(
             l.abbr_at(&doc, word.x + word.width / 2.0, mid_y),
             Some("Hyper Text Markup Language")
@@ -8888,7 +8976,7 @@ mod tests {
             .expect("the reference run");
         let back = l.anchor_y("fnref:n").expect("an anchor at the reference");
         assert!(
-            (back - reference.y).abs() < reference.size,
+            (back - reference.y).abs() < DocY::from(reference.size),
             "the anchor sits on the reference's line: {back} against {}",
             reference.y
         );
@@ -8916,7 +9004,7 @@ mod tests {
             .anchor_y("fnref:n")
             .expect("an anchor at the cell's reference");
         assert!(
-            (back - reference.y).abs() < reference.size,
+            (back - reference.y).abs() < DocY::from(reference.size),
             "the anchor sits on the cell's line: {back} against {}",
             reference.y
         );
@@ -8962,7 +9050,7 @@ mod tests {
         let advance = run_y(&l, &doc, "beta") - run_y(&l, &doc, "alpha");
         let line = metrics::LINE_HEIGHT * cfg.body_size;
         assert!(
-            (advance - 2.0 * line).abs() < 0.5,
+            (advance - DocY::from(2.0 * line)).abs() < 0.5,
             "the blank line is one row: {advance} vs {line}"
         );
     }

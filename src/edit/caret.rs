@@ -1878,10 +1878,10 @@ mod tests {
             .geometry(&l, &doc, &mut fonts)
             .expect("the row after the final newline");
         assert!(
-            (after.y - (abc.y + h)).abs() < 0.5,
+            (after.y - (abc.y + DocY::from(h))).abs() < 0.5,
             "one row below the last line: {} vs {}",
             after.y,
-            abc.y + h
+            abc.y + DocY::from(h)
         );
         assert!((after.x - abc.x).abs() < 0.5, "at the line's start");
         let two = code_doc("abc\n\n");
@@ -1890,10 +1890,10 @@ mod tests {
             .geometry(&l2, &two, &mut f2)
             .expect("the row after two newlines");
         assert!(
-            (third.y - (abc.y + 2.0 * h)).abs() < 0.5,
+            (third.y - (abc.y + DocY::from(2.0 * h))).abs() < 0.5,
             "two rows below: {} vs {}",
             third.y,
-            abc.y + 2.0 * h
+            abc.y + DocY::from(2.0 * h)
         );
     }
 
@@ -1928,19 +1928,19 @@ mod tests {
             .geometry(&lb, &blank, &mut fb)
             .expect("the second blank line");
         assert!(
-            (second.y - (a.y + h)).abs() < 0.5,
+            (second.y - (a.y + DocY::from(h))).abs() < 0.5,
             "one row per line: {} vs {}",
             second.y,
-            a.y + h
+            a.y + DocY::from(h)
         );
         let after = Caret::at(2)
             .geometry(&lb, &blank, &mut fb)
             .expect("after the final newline");
         assert!(
-            (after.y - (second.y + h)).abs() < 0.5,
+            (after.y - (second.y + DocY::from(h))).abs() < 0.5,
             "after the final newline the caret stands on a row of its own: {} vs {}",
             after.y,
-            second.y + h
+            second.y + DocY::from(h)
         );
 
         let spaced = code_doc("   ");
@@ -1971,24 +1971,24 @@ mod tests {
         let h = metrics::LINE_HEIGHT * a.size;
         let blank = code_doc("\n\n");
         let (lb, mut fb) = lay_of(&blank);
-        let mut click = |y: f32| place(&lb, &blank, &mut fb, a.x + 3.0, y).map(|c| c.offset);
-        assert_eq!(click(a.y + h * 0.5), Some(0));
-        assert_eq!(click(a.y + h * 1.5), Some(1));
-        assert_eq!(click(a.y + h * 2.5), Some(2));
+        let mut click = |y: DocY| place(&lb, &blank, &mut fb, a.x + 3.0, y).map(|c| c.offset);
+        assert_eq!(click(a.y + DocY::from(h * 0.5)), Some(0));
+        assert_eq!(click(a.y + DocY::from(h * 1.5)), Some(1));
+        assert_eq!(click(a.y + DocY::from(h * 2.5)), Some(2));
         assert_eq!(
-            click(a.y + h * 9.0),
+            click(a.y + DocY::from(h * 9.0)),
             Some(2),
             "below everything: the last line"
         );
         assert_eq!(
-            click(a.y - h * 9.0),
+            click(a.y - DocY::from(h * 9.0)),
             Some(0),
             "above everything: the first line"
         );
         let empty = code_doc("");
         let (le, mut fe) = lay_of(&empty);
         assert_eq!(
-            place(&le, &empty, &mut fe, a.x + 3.0, a.y + h * 0.5).map(|c| c.offset),
+            place(&le, &empty, &mut fe, a.x + 3.0, a.y + DocY::from(h * 0.5)).map(|c| c.offset),
             Some(0),
             "the empty page itself"
         );
@@ -2237,7 +2237,7 @@ mod tests {
         let doc = code_doc(&source);
         let (l, mut fonts) = lay_of(&doc);
         let advance = run(&l, &doc, "line 01").y - run(&l, &doc, "line 00").y;
-        let page = advance * 10.0;
+        let page = (advance * 10.0) as f32;
         let c =
             Caret::at(at(&doc, "line 02") + 3).step(Motion::PageDown, &l, &doc, &mut fonts, page);
         assert_eq!(c.offset, at(&doc, "line 12") + 3);
@@ -2306,9 +2306,9 @@ mod tests {
         let (l, mut fonts) = lay_of(&doc);
         let a = run(&l, &doc, "alpha");
         let h = metrics::LINE_HEIGHT * a.size;
-        let mid = |rows: f32| a.y + h * rows + h / 2.0;
+        let mid = |rows: f32| a.y + DocY::from(h * rows) + DocY::from(h / 2.0);
         let click =
-            |x: f32, y: f32, fonts: &mut FontStore| place(&l, &doc, fonts, x, y).unwrap().offset;
+            |x: f32, y: DocY, fonts: &mut FontStore| place(&l, &doc, fonts, x, y).unwrap().offset;
         assert_eq!(
             click(a.x + 3.0, mid(1.0), &mut fonts),
             6,
@@ -2335,34 +2335,34 @@ mod tests {
         let (l, mut fonts) = lay_of(&doc);
         let a = run(&l, &doc, "alpha");
         let h = metrics::LINE_HEIGHT * a.size;
-        let c = place(&l, &doc, &mut fonts, 0.0, a.y + h * 1.5).unwrap();
+        let c = place(&l, &doc, &mut fonts, 0.0, a.y + DocY::from(h * 1.5)).unwrap();
         assert_eq!(
             c.offset, 6,
             "a line of spaces, clicked at the margin: its start"
         );
-        let c = place(&l, &doc, &mut fonts, a.x + 900.0, a.y + h * 1.5).unwrap();
+        let c = place(&l, &doc, &mut fonts, a.x + 900.0, a.y + DocY::from(h * 1.5)).unwrap();
         assert_eq!(c.offset, 9, "clicked past its spaces: its end");
 
         let doc = code_doc("\n\nalpha\n");
         let (l, mut fonts) = lay_of(&doc);
         let a = run(&l, &doc, "alpha");
         let h = metrics::LINE_HEIGHT * a.size;
-        let c = place(&l, &doc, &mut fonts, a.x, a.y - h * 0.5).unwrap();
+        let c = place(&l, &doc, &mut fonts, a.x, a.y - DocY::from(h * 0.5)).unwrap();
         assert_eq!(c.offset, 1, "the blank line just above the first row");
-        let c = place(&l, &doc, &mut fonts, a.x, a.y - h * 1.5).unwrap();
+        let c = place(&l, &doc, &mut fonts, a.x, a.y - DocY::from(h * 1.5)).unwrap();
         assert_eq!(c.offset, 0, "the blank first line");
-        let c = place(&l, &doc, &mut fonts, a.x, a.y - h * 9.0).unwrap();
+        let c = place(&l, &doc, &mut fonts, a.x, a.y - DocY::from(h * 9.0)).unwrap();
         assert_eq!(c.offset, 0, "above everything: the first line");
 
         let doc = code_doc("alpha\n\n\n");
         let (l, mut fonts) = lay_of(&doc);
         let a = run(&l, &doc, "alpha");
         let h = metrics::LINE_HEIGHT * a.size;
-        let c = place(&l, &doc, &mut fonts, a.x, a.y + h * 1.5).unwrap();
+        let c = place(&l, &doc, &mut fonts, a.x, a.y + DocY::from(h * 1.5)).unwrap();
         assert_eq!(c.offset, 6, "the blank line after the last row");
-        let c = place(&l, &doc, &mut fonts, a.x, a.y + h * 2.5).unwrap();
+        let c = place(&l, &doc, &mut fonts, a.x, a.y + DocY::from(h * 2.5)).unwrap();
         assert_eq!(c.offset, 7, "the last blank line");
-        let c = place(&l, &doc, &mut fonts, a.x, a.y + h * 9.0).unwrap();
+        let c = place(&l, &doc, &mut fonts, a.x, a.y + DocY::from(h * 9.0)).unwrap();
         assert_eq!(
             c.offset, 7,
             "below everything: the last line, not the row after the final newline"
@@ -2372,7 +2372,7 @@ mod tests {
         let (l, mut fonts) = lay_of(&doc);
         let a = run(&l, &doc, "alpha");
         let h = metrics::LINE_HEIGHT * a.size;
-        let c = place(&l, &doc, &mut fonts, a.x + 900.0, a.y + h * 9.0).unwrap();
+        let c = place(&l, &doc, &mut fonts, a.x + 900.0, a.y + DocY::from(h * 9.0)).unwrap();
         assert_eq!(
             c.offset, 5,
             "no blank line below: the last row's end as before"
@@ -2496,12 +2496,12 @@ mod tests {
                 .geometry(&l, &doc, &mut f)
                 .expect("a seat on the empty row");
             assert!(
-                (seat.y - (b.y + rows * h)).abs() < 0.5 && (seat.x - b.x).abs() < 0.5,
+                (seat.y - (b.y + DocY::from(rows * h))).abs() < 0.5 && (seat.x - b.x).abs() < 0.5,
                 "offset {offset} {rows} rows below b: {} {} vs {} {}",
                 seat.x,
                 seat.y,
                 b.x,
-                b.y + rows * h
+                b.y + DocY::from(rows * h)
             );
         }
     }
@@ -2576,7 +2576,7 @@ mod tests {
             None,
             Some(at(&doc, "line 12")),
             view_top,
-            advance * 6.0,
+            (advance * 6.0) as f32,
         );
         assert_eq!(got, at(&doc, "line 12"));
     }
@@ -2594,7 +2594,7 @@ mod tests {
             None,
             Some(at(&doc, "line 25")),
             view_top,
-            advance * 6.0,
+            (advance * 6.0) as f32,
         );
         assert_eq!(
             got,
@@ -2894,7 +2894,7 @@ mod tests {
             None,
             Some(source.len() + 500),
             view_top,
-            advance * 6.0,
+            (advance * 6.0) as f32,
         );
         assert_eq!(
             got,
@@ -2929,7 +2929,7 @@ mod tests {
     }
 
     /// The top of the first run whose text starts with `text`.
-    fn run_top(l: &LayoutDoc, doc: &Document, text: &str) -> f32 {
+    fn run_top(l: &LayoutDoc, doc: &Document, text: &str) -> DocY {
         l.runs
             .iter()
             .find(|run| l.run_text(doc, run).starts_with(text))
@@ -2940,7 +2940,7 @@ mod tests {
     /// `line_top` as it read every document before a document of one
     /// code block answered without the search: the reference of the
     /// test below.
-    fn top_by_search(lay: &LayoutDoc, doc: &Document, offset: usize) -> Option<f32> {
+    fn top_by_search(lay: &LayoutDoc, doc: &Document, offset: usize) -> Option<DocY> {
         let source = &doc.source;
         let mut offset = offset.min(source.len());
         while !source.is_char_boundary(offset) {
@@ -3164,7 +3164,7 @@ mod tests {
         assert_eq!(tall_block_end(&l, &doc, blank, 600.0), Some(span.end));
         assert_eq!(place_box(&l, &doc, blank, 600.0), Some((span.end, 0.0)));
         assert_eq!(
-            tall_block_end(&l, &doc, blank, span.end - span.start + 1.0),
+            tall_block_end(&l, &doc, blank, (span.end - span.start + 1.0) as f32),
             None,
             "a table that fits in the view shows whole"
         );
@@ -3224,7 +3224,7 @@ mod tests {
         let (doc, l) = image_page();
         let image = at(&doc, "![oryx]");
         let place = l.images.first().expect("the image is placed");
-        let bottom = place.y + place.height;
+        let bottom = place.y + DocY::from(place.height);
         assert_eq!(
             image_bottom(&l, &doc, image, place.y + 40.0),
             Some(bottom),
@@ -3240,10 +3240,10 @@ mod tests {
             None,
             "a text line"
         );
-        let row_h = 30.0;
+        let row_h = 30.0_f32;
         assert_eq!(
-            held(bottom - row_h, row_h, place.y + 40.0, 2000.0),
-            place.height - 70.0,
+            held(bottom - DocY::from(row_h), row_h, place.y + 40.0, 2000.0),
+            DocY::from(place.height - 70.0),
             "the row ending at the bottom, held at its height"
         );
     }

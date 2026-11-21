@@ -67,9 +67,9 @@ pub fn measure_open(source: &str, ext: &str) -> (u128, u128, Document) {
 /// size what the pass materializes, which the paint scan walks.
 pub struct Laid {
     pub first_ms: u128,
-    pub first_height: f32,
+    pub first_height: oryx::layout::DocY,
     pub ms: u128,
-    pub height: f32,
+    pub height: oryx::layout::DocY,
     pub runs: usize,
     pub rects: usize,
 }
@@ -130,7 +130,8 @@ pub fn measure_layout(
 /// plus two viewport heights, or place the document outright.
 pub fn assert_first_frame_is_whole(laid: &Laid, what: &str) {
     assert!(
-        laid.first_height >= 3.0 * VIEWPORT_H || laid.first_height == laid.height,
+        laid.first_height >= oryx::layout::DocY::from(3.0 * VIEWPORT_H)
+            || laid.first_height == laid.height,
         "{what}: open slice placed {:.0}px, short of the first band",
         laid.first_height
     );

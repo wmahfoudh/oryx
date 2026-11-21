@@ -820,7 +820,7 @@ mod tests {
         let source = paragraphs(60);
         let doc = crate::doc::markdown::parse(source.as_str());
         let lay = lay_at(&doc, 1.0, 700.0);
-        for scroll in [120.0_f32, 1234.5, 3000.25, lay.height - 600.0] {
+        for scroll in [120.0, 1234.5, 3000.25, lay.height - 600.0] {
             let place = TopPlace::of(&lay, &doc, scroll).expect("a block stands at the top");
             assert_eq!(place.scroll(&lay, &doc), Some(scroll));
         }
@@ -1127,7 +1127,7 @@ mod tests {
     /// `line_estimate` as it read every document before a document of
     /// one code block answered without the search: the reference of
     /// the test below.
-    fn estimate_by_search(lay: &LayoutDoc, doc: &Document, offset: usize) -> Option<f32> {
+    fn estimate_by_search(lay: &LayoutDoc, doc: &Document, offset: usize) -> Option<DocY> {
         let source = &doc.source;
         let mut offset = offset.min(source.len());
         while !source.is_char_boundary(offset) {
@@ -1156,7 +1156,7 @@ mod tests {
         }
         let span = lay.block_span(index)?;
         let share =
-            start.saturating_sub(block.range.start) as f32 / block.range.len().max(1) as f32;
+            start.saturating_sub(block.range.start) as DocY / block.range.len().max(1) as DocY;
         Some(span.start + share.min(1.0) * (span.end - span.start))
     }
 
@@ -1346,7 +1346,7 @@ mod tests {
         assert!(defer_relayout(Duration::from_secs(5), slice));
     }
 
-    fn band(y_top: f32, height: u32, doc_height: f32) -> BandCache {
+    fn band(y_top: DocY, height: u32, doc_height: DocY) -> BandCache {
         BandCache {
             pixels: Vec::new(),
             y_top,

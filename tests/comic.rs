@@ -16,7 +16,7 @@ use oryx::doc::images::{self, BookSource, MediaCache};
 use oryx::doc::load::{self, FileKind};
 use oryx::doc::markdown;
 use oryx::doc::model::{BlockKind, Document};
-use oryx::layout::{layout, ComicFit, DirectionMode, LayoutDoc, ViewConfig};
+use oryx::layout::{layout, ComicFit, DirectionMode, DocY, LayoutDoc, ViewConfig};
 use oryx::style::fonts::FontStore;
 use oryx::style::theme::Theme;
 
@@ -297,7 +297,7 @@ fn comic_layout(entries: &[(&str, &[u8])], comic: ComicFit, width: f32) -> Layou
     )
 }
 
-fn rect(place: &oryx::layout::ImagePlace) -> (f32, f32, f32, f32) {
+fn rect(place: &oryx::layout::ImagePlace) -> (f32, DocY, f32, f32) {
     (place.x, place.y, place.width, place.height)
 }
 

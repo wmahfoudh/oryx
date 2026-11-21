@@ -11,6 +11,7 @@ use oryx::edit::manners::case_edit;
 use oryx::edit::splice::{combine, line_pieces, Ledger, Placed, Replay};
 use oryx::edit::undo::{Kind, Undo};
 use oryx::edit::{rendered_document, splice_document};
+use oryx::layout::DocY;
 use oryx::paint::scroll::{self, Edge, EdgeScroll};
 use oryx::ui::search;
 use proptest::prelude::*;
@@ -1218,7 +1219,7 @@ fn check_edge_scroll(view_h: f32, doc_h: f32, steps: &[EdgeStep]) -> Result<(), 
     let row_h = 24.0;
     let mut now = Instant::now();
     let mut edge = EdgeScroll::default();
-    let mut scroll_y = scroll::clamp(doc_h / 2.0, doc_h, view_h);
+    let mut scroll_y = scroll::clamp(DocY::from(doc_h / 2.0), DocY::from(doc_h), view_h);
     let mut at: Option<(Edge, f32)> = None;
     let mut since: Option<Instant> = None;
     for step in steps {
@@ -1261,9 +1262,10 @@ fn check_edge_scroll(view_h: f32, doc_h: f32, steps: &[EdgeStep]) -> Result<(), 
                     step,
                     expected
                 );
-                scroll_y = scroll::clamp(scroll_y + step, doc_h, view_h);
+                scroll_y = scroll::clamp(scroll_y + DocY::from(step), DocY::from(doc_h), view_h);
                 prop_assert!(
-                    scroll_y >= 0.0 && scroll_y <= (doc_h - view_h).max(0.0),
+                    scroll_y >= 0.0
+                        && scroll_y <= (DocY::from(doc_h) - DocY::from(view_h)).max(0.0),
                     "the view left the document: {}",
                     scroll_y
                 );
@@ -1821,7 +1823,7 @@ fn fuzz_cells() {
             prop_assert!(
                 l.table_rows
                     .iter()
-                    .any(|row| row.top - 0.01 <= r.y && r.y + r.size <= row.bottom + 0.01),
+                    .any(|row| row.top - 0.01 <= r.y && r.y + DocY::from(r.size) <= row.bottom + 0.01),
                 "a run at {} of size {} in a row of {:?}\n{md}",
                 r.y,
                 r.size,

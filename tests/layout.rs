@@ -8,8 +8,8 @@ use oryx::doc::model::{BlockKind, Document, Marker, SpanScript};
 use oryx::doc::stream::{self, Swap};
 use oryx::layout::{
     code_lines_in, layout, layout_begin, layout_extend, layout_more, layout_step, metrics,
-    recolor_batch, recolor_code_lines, window_to, DecoRect, DirectionMode, LayoutDoc, MathGlyph,
-    ShapePool, TextRef, TextRun, ViewConfig,
+    recolor_batch, recolor_code_lines, window_to, DecoRect, DirectionMode, DocY, LayoutDoc,
+    MathGlyph, ShapePool, TextRef, TextRun, ViewConfig,
 };
 use oryx::style::fonts::{FontStore, ARABIC_FAMILY, BODY_FAMILY, CODE_FAMILY, HEBREW_FAMILY};
 use oryx::style::highlight::{self, Arrival};
@@ -151,8 +151,8 @@ fn paragraphs_separated_lines_flush() {
         "alpha beta gamma delta epsilon zeta eta theta\n\nsecond paragraph",
         320.0,
     );
-    let tops: Vec<f32> = l.runs.iter().map(|r| r.y).collect();
-    let mut gaps: Vec<f32> = Vec::new();
+    let tops: Vec<DocY> = l.runs.iter().map(|r| r.y).collect();
+    let mut gaps: Vec<DocY> = Vec::new();
     for pair in tops.windows(2) {
         if pair[1] > pair[0] {
             gaps.push(pair[1] - pair[0]);
@@ -334,10 +334,10 @@ fn code_lines_wrap_inside_the_panel() {
     let bottom = l
         .runs
         .iter()
-        .map(|r| r.y + 1.5 * r.size)
-        .fold(0.0, f32::max);
+        .map(|r| r.y + DocY::from(1.5 * r.size))
+        .fold(0.0, DocY::max);
     assert!(
-        panel.y + panel.height >= bottom - 0.5,
+        panel.y + panel.height >= (bottom - 0.5),
         "panel covers the wrapped lines"
     );
 }
@@ -491,7 +491,7 @@ fn task_items_draw_checkboxes() {
         "box side {}",
         fill.width
     );
-    assert_eq!(fill.width, fill.height, "the box is square");
+    assert_eq!(DocY::from(fill.width), fill.height, "the box is square");
     let outline = l
         .rects
         .iter()
@@ -603,7 +603,7 @@ fn underline_and_mark_emit_their_rects() {
         l.rects.iter().any(|r| {
             r.color == lined.color
                 && r.y > lined.baseline
-                && r.y < lined.baseline + 0.3 * lined.size
+                && r.y < lined.baseline + DocY::from(0.3 * lined.size)
                 && (r.x - lined.x).abs() < 1.0
                 && (r.width - lined.width).abs() < 2.0
         }),
@@ -857,7 +857,7 @@ fn a_column_is_as_wide_as_its_formula() {
     assert_math_in_rows(&l);
     let row = l.table_rows[1];
     assert!(
-        row.bottom - row.top < 2.5 * metrics::LINE_HEIGHT * cfg().body_size,
+        row.bottom - row.top < DocY::from(2.5 * metrics::LINE_HEIGHT * cfg().body_size),
         "the formula on one line of the cell"
     );
 }
@@ -1106,24 +1106,30 @@ fn a_hard_break_before_a_formula_starts_a_new_line() {
         x.bottom
     );
     let band = l.table_rows[1].bottom - l.table_rows[1].top;
-    assert!(band > 1.6 * lh && band < 2.6 * lh, "two lines: {band}");
+    assert!(
+        band > DocY::from(1.6 * lh) && band < DocY::from(2.6 * lh),
+        "two lines: {band}"
+    );
 
     let (doc, l) = lay2("| a |\n|---|\n| text<br>$y$ |\n", 800.0);
     let text = find_text(&l, &doc, "text");
     let y = glyph_of(&l, '\u{1D466}');
     assert!(
-        y.top >= text.y + lh - 0.01,
+        y.top >= text.y + DocY::from(lh) - 0.01,
         "y below the text: {} against {}",
         y.top,
-        text.y + lh
+        text.y + DocY::from(lh)
     );
     let band = l.table_rows[1].bottom - l.table_rows[1].top;
-    assert!(band < 2.6 * lh, "no empty line: {band}");
+    assert!(band < DocY::from(2.6 * lh), "no empty line: {band}");
 
     let (doc, l) = lay2("text<br>$y$ after\n", 800.0);
     let text = find_text(&l, &doc, "text");
     let y = glyph_of(&l, '\u{1D466}');
-    assert!(y.top >= text.y + lh - 0.01, "paragraph: y below the text");
+    assert!(
+        y.top >= text.y + DocY::from(lh) - 0.01,
+        "paragraph: y below the text"
+    );
     let after = l
         .runs
         .iter()
@@ -1157,9 +1163,9 @@ fn text_after_a_formula_and_a_hard_break_starts_the_next_line() {
     );
     assert!(more.y >= x.bottom - 0.01, "below the formula");
     assert!(
-        more.y + lh <= l.table_rows[1].bottom + 0.01,
+        more.y + DocY::from(lh) <= l.table_rows[1].bottom + 0.01,
         "inside the row: {} against {}",
-        more.y + lh,
+        more.y + DocY::from(lh),
         l.table_rows[1].bottom
     );
 
@@ -1171,12 +1177,15 @@ fn text_after_a_formula_and_a_hard_break_starts_the_next_line() {
         find_word(&l, &doc, "Next"),
     );
     assert!((more.x - some.x).abs() < 1.0, "at the margin: {}", more.x);
-    assert!(more.y >= some.y + lh - 0.01, "below the first line");
     assert!(
-        next.y >= more.y + lh - 0.01,
+        more.y >= some.y + DocY::from(lh) - 0.01,
+        "below the first line"
+    );
+    assert!(
+        next.y >= more.y + DocY::from(lh) - 0.01,
         "the next paragraph below: {} against {}",
         next.y,
-        more.y + lh
+        more.y + DocY::from(lh)
     );
 }
 
@@ -1198,12 +1207,12 @@ fn a_break_that_opens_a_paragraph_leaves_a_blank_line_before_a_formula_too() {
     let plain = drop("Before\n\n<br>Line one\n");
     let formula = drop("Before\n\n<br>Line one $x$\n");
     assert!(
-        (formula - plain).abs() < 0.2 * lh,
+        (formula - plain).abs() < DocY::from(0.2 * lh),
         "as the paragraph without a formula: {formula} against {plain}"
     );
     let two = drop("Before\n\n<br><br>Line one $x$\n");
     assert!(
-        (two - formula - lh).abs() < 0.2 * lh,
+        (two - formula - DocY::from(lh)).abs() < DocY::from(0.2 * lh),
         "a second break, a second blank line: {two} against {formula}"
     );
 }
@@ -1218,13 +1227,13 @@ fn two_hard_breaks_between_two_formulas_leave_a_blank_line() {
     let one = gap("| a |\n|---|\n| $x$<br>$y$ |\n");
     let two = gap("| a |\n|---|\n| $x$<br><br>$y$ |\n");
     assert!(
-        (two - one - lh).abs() < 0.2 * lh,
+        (two - one - DocY::from(lh)).abs() < DocY::from(0.2 * lh),
         "a line more: {two} against {one}"
     );
     let two = gap("$x$<br><br>$y$\n");
     let one = gap("$x$<br>$y$\n");
     assert!(
-        (two - one - lh).abs() < 0.2 * lh,
+        (two - one - DocY::from(lh)).abs() < DocY::from(0.2 * lh),
         "in a paragraph: {two} against {one}"
     );
 }
@@ -1340,7 +1349,9 @@ fn table_columns_follow_their_alignment_marks() {
     let mut lines: Vec<f32> = l
         .rects
         .iter()
-        .filter(|r| r.color == t.blocks.table_border && r.stroke == 0.0 && r.height > r.width)
+        .filter(|r| {
+            r.color == t.blocks.table_border && r.stroke == 0.0 && r.height > DocY::from(r.width)
+        })
         .map(|r| r.x)
         .collect();
     lines.sort_by(f32::total_cmp);
@@ -1526,7 +1537,11 @@ fn link_at_returns_target_inside_run() {
         .iter()
         .find(|r| l.run_link(&doc, r).is_some())
         .unwrap();
-    let hit = l.link_at(&doc, link.x + link.width / 2.0, link.y + link.size / 2.0);
+    let hit = l.link_at(
+        &doc,
+        link.x + link.width / 2.0,
+        link.y + DocY::from(link.size / 2.0),
+    );
     assert_eq!(hit, Some("https://a.tld"));
 }
 
@@ -1598,11 +1613,11 @@ fn a_missing_inline_image_shows_its_alt_inside_the_box() {
         img.x + img.width
     );
     assert!(
-        run.baseline > img.y && run.baseline <= img.y + img.height,
+        run.baseline > img.y && run.baseline <= img.y + DocY::from(img.height),
         "on the box's line: baseline {} in {}..{}",
         run.baseline,
         img.y,
-        img.y + img.height
+        img.y + DocY::from(img.height)
     );
     let t = Theme::default_dark();
     assert!(
@@ -1730,7 +1745,7 @@ fn inline_badge_joins_the_text_line() {
     let img = &l.images[0];
     assert!(img.x >= text.x + text.width - 1.0, "badge after the text");
     assert!(
-        img.y >= text.y - 1.0 && img.y + img.height <= text.y + 34.0,
+        img.y >= text.y - 1.0 && img.y + DocY::from(img.height) <= text.y + 34.0,
         "badge inside the text line box"
     );
 }
@@ -1900,7 +1915,7 @@ fn math_glyphs_reach_the_pixels() {
     let bgpx = oryx::paint::pixel(bg.r, bg.g, bg.b);
     // Ink lands somewhere in the box around the first glyph's baseline.
     let mut inked = false;
-    for y in (g.y - g.size) as usize..(g.y + 0.4 * g.size) as usize {
+    for y in (g.y - DocY::from(g.size)) as usize..(g.y + DocY::from(0.4 * g.size)) as usize {
         for x in g.x as usize..(g.x + 2.0 * g.size) as usize {
             if pixels[y * 800 + x] != bgpx {
                 inked = true;
@@ -1970,8 +1985,8 @@ fn quote_region_paints_without_seam() {
             .filter(|r| r.color == t.blocks.quote_bg)
             .collect();
         assert_eq!(panels.len(), 2, "zoom {zoom}");
-        let top = panels.iter().map(|r| r.y).fold(f32::MAX, f32::min);
-        let bottom = panels.iter().map(|r| r.y + r.height).fold(0.0, f32::max);
+        let top = panels.iter().map(|r| r.y).fold(DocY::MAX, DocY::min);
+        let bottom = panels.iter().map(|r| r.y + r.height).fold(0.0, DocY::max);
         let pixels = oryx::paint::band(&l, &doc, &t, &mut fonts(), &mut media, &[], 0.0, 800, 900);
         let bg = t.surface.background;
         let bgpx = oryx::paint::pixel(bg.r, bg.g, bg.b);
@@ -2292,7 +2307,7 @@ fn height_grows_to_the_complete_height() {
     let whole = lay_doc(&doc, 800.0, &mut fonts);
     let mut media = MediaCache::offline(PathBuf::from("."));
     let (mut out, mut pass) = layout_begin(&doc, &cfg(), 800.0);
-    let mut previous = 0.0_f32;
+    let mut previous: DocY = 0.0;
     loop {
         let done = layout_step(
             &doc,
@@ -2344,7 +2359,7 @@ fn a_partial_code_panel_covers_the_placed_lines() {
         .find(|r| r.color == theme.blocks.code_bg)
         .expect("no partial code panel");
     let last = out.runs.last().expect("no placed run");
-    let bottom = last.y + metrics::LINE_HEIGHT * last.size;
+    let bottom = last.y + DocY::from(metrics::LINE_HEIGHT * last.size);
     assert!(
         panel.y + panel.height >= bottom,
         "panel stops above the lines it holds"
@@ -2435,13 +2450,14 @@ fn the_y_index_never_misses_an_element() {
         lay.index_more();
         assert!(lay.height > 2000.0, "the tour is tall enough to matter");
         let slices = 37;
-        let step = lay.height / slices as f32;
+        let step = lay.height / DocY::from(slices as f32);
         for i in 0..slices {
-            let y0 = step * i as f32;
+            let y0 = step * DocY::from(i as f32);
             let y1 = y0 + 300.0;
             let (head, tail) = lay.runs_in(y0, y1);
             for (index, run) in lay.runs.iter().enumerate() {
-                let touches = run.y <= y1 && run.y + metrics::LINE_HEIGHT * run.size >= y0;
+                let touches =
+                    run.y <= y1 && run.y + DocY::from(metrics::LINE_HEIGHT * run.size) >= y0;
                 assert!(
                     !touches || head.contains(&index) || tail.contains(&index),
                     "run {index} missed at width {width} slice {i}"
@@ -2464,7 +2480,7 @@ fn the_y_index_never_misses_an_element() {
             }
             let (image_head, image_tail) = lay.images_in(y0, y1);
             for (index, image) in lay.images.iter().enumerate() {
-                let touches = image.y <= y1 && image.y + image.height >= y0;
+                let touches = image.y <= y1 && image.y + DocY::from(image.height) >= y0;
                 assert!(
                     !touches || image_head.contains(&index) || image_tail.contains(&index),
                     "image {index} missed at width {width} slice {i}"
@@ -3258,9 +3274,9 @@ fn search_matches_need_no_layout() {
 
 /// The paint band at a scroll position: the viewport plus two viewport
 /// heights each side, clamped the way the band cache clamps it.
-fn band_at(scroll: f32, vh: f32, height: f32) -> (f32, f32) {
-    let band_h = 5.0 * vh;
-    let top = (scroll - 2.0 * vh).clamp(0.0, (height - band_h).max(0.0));
+fn band_at(scroll: DocY, vh: f32, height: DocY) -> (DocY, DocY) {
+    let band_h = DocY::from(5.0 * vh);
+    let top = (scroll - DocY::from(2.0 * vh)).clamp(0.0, (height - band_h).max(0.0));
     (top, (top + band_h).min(height))
 }
 
@@ -3269,7 +3285,7 @@ fn windowed_doc(
     doc: &Document,
     width: f32,
     fonts: &mut FontStore,
-    scroll: f32,
+    scroll: DocY,
     vh: f32,
 ) -> LayoutDoc {
     let mut media = MediaCache::offline(PathBuf::from("."));
@@ -3288,7 +3304,7 @@ fn windowed_doc(
     out
 }
 
-fn slide_to(doc: &Document, fonts: &mut FontStore, lay: &mut LayoutDoc, scroll: f32, vh: f32) {
+fn slide_to(doc: &Document, fonts: &mut FontStore, lay: &mut LayoutDoc, scroll: DocY, vh: f32) {
     let mut media = MediaCache::offline(PathBuf::from("."));
     window_to(
         doc,
@@ -3307,10 +3323,10 @@ fn slide_to(doc: &Document, fonts: &mut FontStore, lay: &mut LayoutDoc, scroll: 
 /// Every field of a run with its references resolved, so two layouts
 /// compare across their private side buffers and family tables.
 type RunKey = (
+    u64,
     u32,
     u32,
-    u32,
-    u32,
+    u64,
     u32,
     u16,
     bool,
@@ -3321,7 +3337,7 @@ type RunKey = (
     String,
 );
 
-fn run_keys_in(lay: &LayoutDoc, doc: &Document, y0: f32, y1: f32) -> Vec<RunKey> {
+fn run_keys_in(lay: &LayoutDoc, doc: &Document, y0: DocY, y1: DocY) -> Vec<RunKey> {
     let mut keys: Vec<RunKey> = lay
         .runs
         .iter()
@@ -3347,9 +3363,9 @@ fn run_keys_in(lay: &LayoutDoc, doc: &Document, y0: f32, y1: f32) -> Vec<RunKey>
     keys
 }
 
-type RectKey = (u32, u32, u32, u32, (u8, u8, u8, u8), u32, u32, u32);
+type RectKey = (u64, u32, u32, u64, (u8, u8, u8, u8), u32, u32, u32);
 
-fn rect_keys_in(lay: &LayoutDoc, y0: f32, y1: f32) -> Vec<RectKey> {
+fn rect_keys_in(lay: &LayoutDoc, y0: DocY, y1: DocY) -> Vec<RectKey> {
     let mut keys: Vec<RectKey> = lay
         .rects
         .iter()
@@ -3371,11 +3387,11 @@ fn rect_keys_in(lay: &LayoutDoc, y0: f32, y1: f32) -> Vec<RectKey> {
     keys
 }
 
-fn image_keys_in(lay: &LayoutDoc, y0: f32, y1: f32) -> Vec<(String, u32, u32, u32, u32)> {
-    let mut keys: Vec<(String, u32, u32, u32, u32)> = lay
+fn image_keys_in(lay: &LayoutDoc, y0: DocY, y1: DocY) -> Vec<(String, u32, u64, u32, u32)> {
+    let mut keys: Vec<(String, u32, u64, u32, u32)> = lay
         .images
         .iter()
-        .filter(|i| i.y < y1 && i.y + i.height > y0)
+        .filter(|i| i.y < y1 && i.y + DocY::from(i.height) > y0)
         .map(|i| {
             (
                 i.src.clone(),
@@ -3396,7 +3412,7 @@ fn assert_band_covered(
     windowed: &LayoutDoc,
     full: &LayoutDoc,
     doc: &Document,
-    scroll: f32,
+    scroll: DocY,
     vh: f32,
     what: &str,
 ) {
@@ -3429,9 +3445,9 @@ fn a_windowed_pass_covers_the_band_bit_for_bit() {
     let doc = tour_doc();
     let mut fonts = fonts();
     let full = lay_doc(&doc, 800.0, &mut fonts);
-    let vh = full.height / 30.0;
+    let vh = (full.height / 30.0) as f32;
     for frac in [0.0_f32, 0.4, 0.8] {
-        let scroll = (full.height * frac).min(full.height - vh);
+        let scroll = (full.height * DocY::from(frac)).min(full.height - DocY::from(vh));
         let windowed = windowed_doc(&doc, 800.0, &mut fonts, scroll, vh);
         assert_eq!(
             windowed.height, full.height,
@@ -3467,13 +3483,13 @@ fn sliding_the_window_reproduces_evicted_geometry() {
     let doc = tour_doc();
     let mut fonts = fonts();
     let full = lay_doc(&doc, 800.0, &mut fonts);
-    let vh = full.height / 30.0;
+    let vh = (full.height / 30.0) as f32;
     let mut windowed = windowed_doc(&doc, 800.0, &mut fonts, 0.0, vh);
     let (top0, top1) = band_at(0.0, vh, full.height);
     let before = run_keys_in(&windowed, &doc, top0, top1);
     assert!(!before.is_empty(), "the top band is materialized");
 
-    let bottom = full.height - vh;
+    let bottom = full.height - DocY::from(vh);
     slide_to(&doc, &mut fonts, &mut windowed, bottom, vh);
     assert_band_covered(&windowed, &full, &doc, bottom, vh, "after the slide down");
     assert!(
@@ -3495,10 +3511,10 @@ fn height_and_anchors_hold_wherever_the_window_sits() {
     let doc = tour_doc();
     let mut fonts = fonts();
     let full = lay_doc(&doc, 800.0, &mut fonts);
-    let vh = full.height / 30.0;
+    let vh = (full.height / 30.0) as f32;
     let mut windowed = windowed_doc(&doc, 800.0, &mut fonts, 0.0, vh);
     for frac in [0.15_f32, 0.35, 0.55, 0.75, 0.95] {
-        let scroll = (full.height * frac).min(full.height - vh);
+        let scroll = (full.height * DocY::from(frac)).min(full.height - DocY::from(vh));
         slide_to(&doc, &mut fonts, &mut windowed, scroll, vh);
         assert_eq!(
             windowed.height, full.height,
@@ -3544,7 +3560,7 @@ fn a_code_file_windows_by_line_range() {
     let doc = markdown::parse(source.as_str());
     let mut fonts = fonts();
     let full = lay_doc(&doc, 700.0, &mut fonts);
-    let vh = full.height / 30.0;
+    let vh = (full.height / 30.0) as f32;
     let scroll = full.height * 0.5;
     let windowed = windowed_doc(&doc, 700.0, &mut fonts, scroll, vh);
     assert_eq!(
@@ -3568,7 +3584,7 @@ fn a_code_file_windows_by_line_range() {
     // never the lines between the old window and the new.
     let mut sliding = windowed_doc(&doc, 700.0, &mut fonts, 0.0, vh);
     for frac in [0.5_f32, 1.0, 0.25] {
-        let stop = (full.height * frac).clamp(0.0, full.height - vh);
+        let stop = (full.height * DocY::from(frac)).clamp(0.0, full.height - DocY::from(vh));
         slide_to(&doc, &mut fonts, &mut sliding, stop, vh);
         assert!(
             sliding.code_lines.len() * 2 < full.code_lines.len(),
@@ -3632,8 +3648,8 @@ fn a_cold_highlight_arrival_is_a_model_only_no_op() {
         .iter()
         .filter(|r| r.block == code_block)
         .map(|r| r.y)
-        .fold(f32::MAX, f32::min);
-    let scroll = code_top.clamp(0.0, full.height - vh);
+        .fold(DocY::MAX, DocY::min);
+    let scroll = code_top.clamp(0.0, full.height - DocY::from(vh));
     slide_to(&doc, &mut fonts, &mut windowed, scroll, vh);
     assert_band_covered(
         &windowed,
@@ -3650,7 +3666,7 @@ fn a_pooled_slide_matches_the_serial_window() {
     let doc = tour_doc();
     let mut fonts = fonts();
     let full = lay_doc(&doc, 800.0, &mut fonts);
-    let vh = full.height / 30.0;
+    let vh = (full.height / 30.0) as f32;
     let pool = std::sync::Arc::new(ShapePool::new(3, &fonts.seed()));
     let mut media = MediaCache::offline(PathBuf::from("."));
     let (mut windowed, mut pass) = layout_begin(&doc, &cfg(), 800.0);
@@ -3681,10 +3697,10 @@ fn a_pooled_slide_matches_the_serial_window() {
         vh,
         false,
     );
-    let viewport = run_keys_in(&windowed, &doc, mid, mid + vh);
+    let viewport = run_keys_in(&windowed, &doc, mid, mid + DocY::from(vh));
     assert_eq!(
         viewport,
-        run_keys_in(&full, &doc, mid, mid + vh),
+        run_keys_in(&full, &doc, mid, mid + DocY::from(vh)),
         "the viewport fill"
     );
     assert!(!viewport.is_empty(), "the viewport holds runs");
@@ -3816,7 +3832,7 @@ fn zoom_rebuilds_the_table() {
         ..ViewConfig::default()
     };
     let full2 = layout(&doc, &theme(), &mut fonts, &mut media, &z2, 800.0);
-    let vh = full2.height / 30.0;
+    let vh = (full2.height / 30.0) as f32;
     let (mut windowed2, mut pass) = layout_begin(&doc, &z2, 800.0);
     pass.retain_around(0.0, vh);
     layout_more(
@@ -3852,7 +3868,7 @@ fn approx_top_answers_cold_positions() {
     let doc = tour_doc();
     let mut fonts = fonts();
     let full = lay_doc(&doc, 800.0, &mut fonts);
-    let vh = full.height / 30.0;
+    let vh = (full.height / 30.0) as f32;
     let windowed = windowed_doc(&doc, 800.0, &mut fonts, 0.0, vh);
     let deep_run = full
         .runs
@@ -3876,7 +3892,7 @@ fn approx_top_answers_cold_positions() {
                 .is_some_and(|s| s.script != SpanScript::None)
         })
         .map(|r| r.y)
-        .fold(f32::MAX, f32::min);
+        .fold(DocY::MAX, DocY::min);
     let approx = windowed
         .approx_top(deep_run.block, 0)
         .expect("the table answers a cold block");
@@ -3892,13 +3908,19 @@ fn approx_top_answers_cold_positions() {
     source.push_str("```\n");
     let code = markdown::parse(source.as_str());
     let code_full = lay_doc(&code, 700.0, &mut fonts);
-    let code_windowed = windowed_doc(&code, 700.0, &mut fonts, 0.0, code_full.height / 30.0);
+    let code_windowed = windowed_doc(
+        &code,
+        700.0,
+        &mut fonts,
+        0.0,
+        (code_full.height / 30.0) as f32,
+    );
     let line_top = code_full
         .runs
         .iter()
         .filter(|r| r.span == 300)
         .map(|r| r.y)
-        .fold(f32::MAX, f32::min);
+        .fold(DocY::MAX, DocY::min);
     assert_eq!(
         code_windowed.approx_top(0, 300),
         Some(line_top),
@@ -3932,8 +3954,8 @@ fn model_selection_survives_recolor_and_relayout() {
 
 fn assert_math_clear_of_text(l: &LayoutDoc) {
     for g in &l.math_glyphs {
-        let g_top = g.y - 0.8 * g.size;
-        let g_bottom = g.y + 0.2 * g.size;
+        let g_top = g.y - DocY::from(0.8 * g.size);
+        let g_bottom = g.y + DocY::from(0.2 * g.size);
         // Stretched bars and assembly pieces are far narrower than an em.
         let g_width = match g.ch {
             Some('|') | Some('\u{2016}') | None => 0.15 * g.size,
@@ -3941,8 +3963,8 @@ fn assert_math_clear_of_text(l: &LayoutDoc) {
         };
         for r in &l.runs {
             let x_overlap = g.x < r.x + r.width - 2.0 && r.x < g.x + g_width - 2.0;
-            let r_top = r.baseline - 0.75 * r.size;
-            let r_bottom = r.baseline + 0.2 * r.size;
+            let r_top = r.baseline - DocY::from(0.75 * r.size);
+            let r_bottom = r.baseline + DocY::from(0.2 * r.size);
             let y_overlap = g_top < r_bottom - 2.0 && r_top < g_bottom - 2.0;
             assert!(
                 !(x_overlap && y_overlap),
@@ -4033,7 +4055,7 @@ continuation is deliberately long enough that it cannot merge back as a \
 single line and must wrap onto several more lines below the equation.";
     let (doc, l) = lay2(src, 700.0);
     assert!(!l.math_glyphs.is_empty(), "the equation typesets");
-    let eq_base = l.math_glyphs.iter().map(|g| g.y).fold(0.0, f32::max);
+    let eq_base = l.math_glyphs.iter().map(|g| g.y).fold(0.0, DocY::max);
     let eq_end = l.math_glyphs.iter().map(|g| g.x).fold(0.0, f32::max);
     let period = l
         .runs
@@ -4055,12 +4077,12 @@ equation baseline {}",
         .runs
         .iter()
         .filter(|r| {
-            r.baseline > eq_base + 2.0 || (r.x >= eq_end && (r.baseline - eq_base).abs() < 2.0)
+            r.baseline > (eq_base + 2.0) || (r.x >= eq_end && (r.baseline - eq_base).abs() < 2.0)
         })
         .collect();
     after.sort_by(|a, b| (a.y, a.x).partial_cmp(&(b.y, b.x)).unwrap());
     assert!(
-        after.iter().any(|r| r.baseline > eq_base + 2.0),
+        after.iter().any(|r| r.baseline > (eq_base + 2.0)),
         "the long chunk wraps below"
     );
     let read: Vec<&str> = after.iter().map(|r| l.run_text(&doc, r)).collect();
@@ -4089,7 +4111,7 @@ fn flow_lines_stay_ordered_after_a_row_break() {
                     let x_overlap = g.x < r.x + r.width - 2.0 && r.x < g.x + g.size - 2.0;
                     let dy = (r.baseline - g.y).abs();
                     assert!(
-                        !(x_overlap && dy > 4.0 && dy < 0.7 * lh),
+                        !(x_overlap && dy > 4.0 && dy < DocY::from(0.7 * lh)),
                         "collision at zoom {zoom} width {width}: glyph y={} vs run y={} x={}..{}",
                         g.y,
                         r.baseline,
@@ -4120,9 +4142,9 @@ fn justified_paragraph_fills_the_line_and_leaves_the_last_natural() {
         &just_cfg,
         700.0,
     );
-    let first_y = plain.runs.iter().map(|r| r.y).fold(f32::MAX, f32::min);
-    let last_y = plain.runs.iter().map(|r| r.y).fold(f32::MIN, f32::max);
-    let right = |l: &LayoutDoc, y: f32| {
+    let first_y = plain.runs.iter().map(|r| r.y).fold(DocY::MAX, DocY::min);
+    let last_y = plain.runs.iter().map(|r| r.y).fold(DocY::MIN, DocY::max);
+    let right = |l: &LayoutDoc, y: DocY| {
         l.runs
             .iter()
             .filter(|r| (r.y - y).abs() < 0.5)
@@ -4158,7 +4180,7 @@ fn justified_word_runs_stay_byte_contiguous() {
         &just_cfg,
         700.0,
     );
-    let first_y = laid.runs.iter().map(|r| r.y).fold(f32::MAX, f32::min);
+    let first_y = laid.runs.iter().map(|r| r.y).fold(DocY::MAX, DocY::min);
     let mut line: Vec<&TextRun> = laid
         .runs
         .iter()
@@ -4211,7 +4233,7 @@ fn justify_leaves_headings_and_code_natural() {
         .collect();
     assert_eq!(untouched.len(), 2, "the fixture has a heading and a fence");
     for index in untouched {
-        let geo = |l: &LayoutDoc| -> Vec<(f32, f32, f32)> {
+        let geo = |l: &LayoutDoc| -> Vec<(f32, DocY, f32)> {
             l.runs
                 .iter()
                 .filter(|r| r.block == index)
@@ -4371,7 +4393,7 @@ fn typing_keeps_every_line_through_the_pooled_pass() {
 
 /// The app's windowed layout of a file document: begin, retain around
 /// the scroll, complete, slide the window there.
-fn windowed(doc: &Document, width: f32, scroll: f32, viewport: f32) -> LayoutDoc {
+fn windowed(doc: &Document, width: f32, scroll: DocY, viewport: f32) -> LayoutDoc {
     windowed_as(doc, None, width, scroll, viewport)
 }
 
@@ -4382,7 +4404,7 @@ fn windowed_as(
     doc: &Document,
     pieces: Option<&LayoutDoc>,
     width: f32,
-    scroll: f32,
+    scroll: DocY,
     viewport: f32,
 ) -> LayoutDoc {
     let mut fonts = fonts();
@@ -4431,7 +4453,7 @@ fn fast_keystroke(
     lay: &mut LayoutDoc,
     range: std::ops::Range<usize>,
     text: &str,
-    scroll: f32,
+    scroll: DocY,
     viewport: f32,
 ) {
     let removed = doc.source[range.clone()].matches('\n').count();
@@ -4628,7 +4650,7 @@ fn enters_at_the_end_of_a_code_file_add_placed_rows() {
         );
     }
     assert!(
-        ((lay.height - before) - 3.0 * row).abs() < 0.5,
+        ((lay.height - before) - DocY::from(3.0 * row)).abs() < 0.5,
         "three rows taller: {} against {}",
         lay.height - before,
         3.0 * row
@@ -4643,10 +4665,11 @@ fn enters_at_the_end_of_a_code_file_add_placed_rows() {
         .geometry(&lay, &doc, &mut fonts)
         .expect("the caret has a row");
     assert!(
-        (seat.y - (last.y + row)).abs() < 0.5 && seat.y + seat.h <= lay.height + 0.5,
+        (seat.y - (last.y + DocY::from(row))).abs() < 0.5
+            && seat.y + DocY::from(seat.h) <= lay.height + 0.5,
         "the caret stands one row below the last row, inside the page: {} vs {} in {}",
         seat.y,
-        last.y + row,
+        last.y + DocY::from(row),
         lay.height
     );
     let fresh = windowed(&reference, width, 0.0, viewport);
@@ -4776,12 +4799,12 @@ fn a_held_bottom_jump_reaches_the_document_end() {
         }
     }
     assert!(
-        landed_first < lay.height - viewport,
+        landed_first < lay.height - DocY::from(viewport),
         "the fixture must outlast one slice, or it proves nothing"
     );
     assert_eq!(
         scroll_y,
-        lay.height - viewport,
+        lay.height - DocY::from(viewport),
         "the held jump seats the view at the completed document's end"
     );
 }
@@ -4900,8 +4923,8 @@ fn lay_justified(source: &str, width: f32) -> (Document, LayoutDoc) {
 }
 
 /// Right extents of every visual line, keyed by the runs' line top.
-fn line_edges(l: &LayoutDoc) -> Vec<(f32, f32)> {
-    let mut lines: Vec<(f32, f32)> = Vec::new();
+fn line_edges(l: &LayoutDoc) -> Vec<(DocY, f32)> {
+    let mut lines: Vec<(DocY, f32)> = Vec::new();
     for r in &l.runs {
         match lines.iter_mut().find(|(y, _)| (*y - r.y).abs() < 0.5) {
             Some((_, edge)) => *edge = edge.max(r.x + r.width),
@@ -4941,7 +4964,7 @@ fn a_ragged_rtl_paragraph_stays_inside_the_column_and_ends_flush_right() {
 #[test]
 fn a_justified_rtl_paragraph_tiles_without_overlap() {
     let (doc, l) = lay_justified(ARABIC_PARAGRAPH, 500.0);
-    let mut lines: Vec<(f32, Vec<&TextRun>)> = Vec::new();
+    let mut lines: Vec<(DocY, Vec<&TextRun>)> = Vec::new();
     for r in &l.runs {
         match lines.iter_mut().find(|(y, _)| (*y - r.y).abs() < 0.5) {
             Some((_, runs)) => runs.push(r),
@@ -5121,7 +5144,7 @@ fn a_latin_list_item_under_forced_rtl_mirrors_its_bullet() {
 #[test]
 fn an_arabic_paragraph_under_forced_ltr_aligns_left() {
     let (_, l) = lay_dir(ARABIC_PARAGRAPH, 500.0, DirectionMode::Ltr);
-    let mut lines: Vec<(f32, f32)> = Vec::new();
+    let mut lines: Vec<(DocY, f32)> = Vec::new();
     for r in &l.runs {
         match lines.iter_mut().find(|(y, _)| (*y - r.y).abs() < 0.5) {
             Some((_, lo)) => *lo = lo.min(r.x),
@@ -5223,7 +5246,7 @@ fn a_chunked_code_line_tiles_its_bytes_once_in_order() {
     let runs = code_runs(&l, 0, 0);
     assert!(runs.len() > 10, "a wrapped long line shapes many runs");
     let mut cursor = 0usize;
-    let mut last_y = f32::MIN;
+    let mut last_y = DocY::MIN;
     for r in &runs {
         let TextRef::Model { start, len } = r.text else {
             panic!("a code run reads the model");
@@ -5322,7 +5345,7 @@ fn a_paragraph_with_thousands_of_inline_spans_keeps_every_span_in_order() {
     };
     assert!(spans > 1000, "the paragraph holds {spans} spans");
     let runs: Vec<&TextRun> = l.runs.iter().filter(|r| r.block == 0).collect();
-    let mut prev: Option<(usize, u32, f32, f32)> = None;
+    let mut prev: Option<(usize, u32, DocY, f32)> = None;
     let mut text = String::new();
     for r in &runs {
         let TextRef::Model { start, .. } = r.text else {
@@ -5366,7 +5389,7 @@ fn windowed_in(doc: &Document, theme: &Theme, scroll: f32, viewport: f32) -> Lay
     let mut fonts = fonts();
     let mut media = MediaCache::offline(PathBuf::from("."));
     let (mut out, mut pass) = layout_begin(doc, &cfg(), 900.0);
-    pass.retain_around(scroll, viewport);
+    pass.retain_around(DocY::from(scroll), viewport);
     layout_more(
         doc,
         theme,
@@ -5385,7 +5408,7 @@ fn windowed_in(doc: &Document, theme: &Theme, scroll: f32, viewport: f32) -> Lay
         &cfg(),
         &mut out,
         None,
-        scroll,
+        DocY::from(scroll),
         viewport,
         true,
     );
@@ -5425,8 +5448,8 @@ fn a_theme_change_refills_the_colors_and_moves_nothing() {
         let fresh = windowed_in(doc, &light, scroll, vh);
         let (y0, y1) = (scroll - vh, scroll + 2.0 * vh);
         assert_ne!(
-            run_keys_in(&lay, doc, y0, y1),
-            run_keys_in(&fresh, doc, y0, y1),
+            run_keys_in(&lay, doc, DocY::from(y0), DocY::from(y1)),
+            run_keys_in(&fresh, doc, DocY::from(y0), DocY::from(y1)),
             "the two themes color the page differently"
         );
         assert!(lay.rematerialize(), "the app's layout is windowed");
@@ -5440,17 +5463,20 @@ fn a_theme_change_refills_the_colors_and_moves_nothing() {
             &cfg(),
             &mut lay,
             None,
-            scroll,
+            DocY::from(scroll),
             vh,
             true,
         );
         lay.index_more();
         assert_eq!(lay.height, fresh.height);
         assert_eq!(
-            run_keys_in(&lay, doc, y0, y1),
-            run_keys_in(&fresh, doc, y0, y1)
+            run_keys_in(&lay, doc, DocY::from(y0), DocY::from(y1)),
+            run_keys_in(&fresh, doc, DocY::from(y0), DocY::from(y1))
         );
-        assert_eq!(rect_keys_in(&lay, y0, y1), rect_keys_in(&fresh, y0, y1));
+        assert_eq!(
+            rect_keys_in(&lay, DocY::from(y0), DocY::from(y1)),
+            rect_keys_in(&fresh, DocY::from(y0), DocY::from(y1))
+        );
     }
 }
 
@@ -5463,13 +5489,13 @@ struct Restart<'a> {
     pass: oryx::layout::LayoutPass,
     fonts: FontStore,
     media: MediaCache,
-    scroll_y: f32,
-    kept_scroll: Option<f32>,
+    scroll_y: DocY,
+    kept_scroll: Option<DocY>,
     vh: f32,
 }
 
 impl<'a> Restart<'a> {
-    fn new(doc: &'a Document, kept_scroll: f32, vh: f32) -> Restart<'a> {
+    fn new(doc: &'a Document, kept_scroll: DocY, vh: f32) -> Restart<'a> {
         let (out, pass) = layout_begin(doc, &cfg(), 900.0);
         Restart {
             doc,
@@ -5557,7 +5583,7 @@ fn a_band_painted_inside_an_open_code_block_is_painted_again_when_the_block_clos
     let doc = load::open(&path, None).unwrap().document;
     std::fs::remove_file(&path).ok();
     let vh = 600.0;
-    let kept_scroll = (2700.0 * metrics::LINE_HEIGHT * cfg().code_size).floor();
+    let kept_scroll = DocY::from((2700.0 * metrics::LINE_HEIGHT * cfg().code_size).floor());
     let mut frames = Restart::new(&doc, kept_scroll, vh);
     while frames.kept_scroll.is_some() {
         assert!(
@@ -5614,11 +5640,14 @@ fn a_page_that_got_much_shorter_under_the_view_shows_its_end() {
         ("a page", markdown::parse(page.as_str())),
         ("a file of lines", file),
     ];
-    let vh = 600.0;
+    let vh = 600.0_f32;
     for (what, doc) in &docs {
         let whole = lay_doc(doc, 900.0, &mut fonts());
-        assert!(whole.height > 6.0 * vh, "{what} is several screens long");
-        let old_scroll = whole.height + 8.0 * vh;
+        assert!(
+            whole.height > DocY::from(6.0 * vh),
+            "{what} is several screens long"
+        );
+        let old_scroll = whole.height + DocY::from(8.0 * vh);
         let mut frames = Restart::new(doc, old_scroll, vh);
         assert!(
             frames.frame(usize::MAX),
@@ -5627,7 +5656,7 @@ fn a_page_that_got_much_shorter_under_the_view_shows_its_end() {
         assert_eq!(frames.out.height, whole.height, "{what}");
         assert_eq!(
             frames.scroll_y,
-            whole.height - vh,
+            whole.height - DocY::from(vh),
             "{what}: the view stands at the end"
         );
         let band = frames.band();
@@ -5685,7 +5714,7 @@ fn the_window_follows_a_jump_of_the_bound_during_the_pass() {
         None,
     );
     assert!(
-        out.height > far + 6.0 * vh,
+        out.height > far + DocY::from(6.0 * vh),
         "the page reaches past the bound: {}",
         out.height
     );
@@ -5722,7 +5751,7 @@ fn no_line_starts_with_a_space_after_an_inline_formula() {
     let mut faults = Vec::new();
     for w in 400..=1200 {
         let l = lay_doc(&doc, w as f32, &mut fonts);
-        let mut lines: Vec<(f32, Vec<&TextRun>)> = Vec::new();
+        let mut lines: Vec<(DocY, Vec<&TextRun>)> = Vec::new();
         for r in &l.runs {
             match lines.iter_mut().find(|(y, _)| (*y - r.y).abs() < 0.5) {
                 Some((_, runs)) => runs.push(r),
@@ -5737,7 +5766,7 @@ fn no_line_starts_with_a_space_after_an_inline_formula() {
             let after_formula = l
                 .math_glyphs
                 .iter()
-                .any(|g| g.y > *y && g.y < *y + 40.0 && g.x < runs[0].x);
+                .any(|g| g.y > *y && g.y < (*y + 40.0) && g.x < runs[0].x);
             if text.starts_with(' ') && !after_formula {
                 faults.push((w, text.to_string()));
             }
@@ -5755,7 +5784,7 @@ fn the_words_that_fit_after_an_inline_formula_stay_on_its_line() {
         "The period $T$ depends on the length and on gravity and on nothing else at all.\n",
         400.0,
     );
-    let first_y = l.runs.iter().map(|r| r.y).fold(f32::MAX, f32::min);
+    let first_y = l.runs.iter().map(|r| r.y).fold(DocY::MAX, DocY::min);
     let first_line: Vec<&str> = l
         .runs
         .iter()
@@ -5766,7 +5795,7 @@ fn the_words_that_fit_after_an_inline_formula_stay_on_its_line() {
     let second = l
         .runs
         .iter()
-        .filter(|r| r.y > first_y + 0.5)
+        .filter(|r| r.y > (first_y + 0.5))
         .min_by(|a, b| a.y.partial_cmp(&b.y).unwrap())
         .expect("a second line");
     assert_eq!(second.x, l.runs[0].x, "at the margin");
@@ -5828,14 +5857,14 @@ fn a_right_to_left_paragraph_keeps_the_words_after_a_formula_below_its_row() {
     let src =
         "يعتمد زمن الدورة $T$ على طول الخيط وعلى الجاذبية الأرضية فقط ولا شيء آخر على الإطلاق هنا.\n";
     let (doc, l) = lay2(src, 400.0);
-    let row = l.math_glyphs.iter().map(|g| g.y).fold(0.0, f32::max);
+    let row = l.math_glyphs.iter().map(|g| g.y).fold(0.0, DocY::max);
     let after = l
         .runs
         .iter()
         .find(|r| l.run_text(&doc, r).contains("على طول"))
         .expect("the words after the formula");
     assert!(
-        after.baseline > row + 2.0,
+        after.baseline > (row + 2.0),
         "the words after the formula sit at baseline {} with the row at {row}",
         after.baseline
     );
@@ -5892,7 +5921,7 @@ fn the_words_up_to_a_hyphen_join_the_formula_line() {
         "The period of the swing $T$ is a well-known quantity of the pendulum and gravity.\n",
         500.0,
     );
-    let first_y = l.runs.iter().map(|r| r.y).fold(f32::MAX, f32::min);
+    let first_y = l.runs.iter().map(|r| r.y).fold(DocY::MAX, DocY::min);
     let first_line: Vec<&str> = l
         .runs
         .iter()
@@ -5903,7 +5932,7 @@ fn the_words_up_to_a_hyphen_join_the_formula_line() {
     let second = l
         .runs
         .iter()
-        .filter(|r| r.y > first_y + 0.5)
+        .filter(|r| r.y > (first_y + 0.5))
         .min_by(|a, b| a.y.partial_cmp(&b.y).unwrap())
         .expect("a second line");
     assert!(
@@ -5922,7 +5951,7 @@ fn chinese_text_after_a_formula_joins_its_line() {
         "摆的周期 $T$ 取决于摆的长度和重力加速度以及其他很多很多因素的影响程度大小和方向。\n",
         500.0,
     );
-    let first_y = l.runs.iter().map(|r| r.y).fold(f32::MAX, f32::min);
+    let first_y = l.runs.iter().map(|r| r.y).fold(DocY::MAX, DocY::min);
     let first_line: Vec<&str> = l
         .runs
         .iter()
@@ -5938,7 +5967,7 @@ fn chinese_text_after_a_formula_joins_its_line() {
     let second = l
         .runs
         .iter()
-        .filter(|r| r.y > first_y + 0.5)
+        .filter(|r| r.y > (first_y + 0.5))
         .min_by(|a, b| a.y.partial_cmp(&b.y).unwrap())
         .expect("a second line");
     assert_eq!(second.x, l.runs[0].x, "at the margin");
@@ -6433,8 +6462,8 @@ fn a_very_long_line_is_placed_a_chunk_at_a_step() {
             let lines = text.lines().count();
             for line in 0..=lines {
                 assert_eq!(
-                    out.approx_top(0, line).map(f32::to_bits),
-                    full.approx_top(0, line).map(f32::to_bits),
+                    out.approx_top(0, line).map(DocY::to_bits),
+                    full.approx_top(0, line).map(DocY::to_bits),
                     "{what} line {line}"
                 );
             }
@@ -6494,8 +6523,8 @@ fn a_long_code_file_counted_stands_where_the_shaped_one_does() {
             );
             for line in 0..=lines {
                 assert_eq!(
-                    counted.approx_top(0, line).map(f32::to_bits),
-                    full.approx_top(0, line).map(f32::to_bits),
+                    counted.approx_top(0, line).map(DocY::to_bits),
+                    full.approx_top(0, line).map(DocY::to_bits),
                     "width {width} scroll {scroll} line {line}"
                 );
             }
@@ -6544,10 +6573,13 @@ fn the_occurrences_of_the_held_lines_draw_what_the_whole_file_draws() {
     for matched in [Match::Word, Match::Text] {
         let mut found = occurrences::find(&doc, clicked, matched).expect("a set");
         let all = found.all_matches(&doc);
-        for scroll in [0.0f32, 4_000.0, 31_000.0, 45_000.0, 1.0e7] {
+        for scroll in [0.0, 4_000.0, 31_000.0, 45_000.0, 1.0e7] {
             let lay = windowed(&doc, 500.0, scroll, viewport);
             let mut fonts = fonts();
-            let (lo, hi) = (scroll - 2.0 * viewport, scroll + 3.0 * viewport);
+            let (lo, hi) = (
+                scroll - DocY::from(2.0 * viewport),
+                scroll + DocY::from(3.0 * viewport),
+            );
             let rects = |fonts: &mut FontStore, matches: &[Selection]| -> Vec<_> {
                 selection::window_rects(&lay, &doc, fonts, matches, lo, hi)
                     .into_iter()
@@ -6613,7 +6645,7 @@ fn a_long_line_is_held_by_its_pieces_around_the_view() {
     let top = scroll::top_offset(&lay, &doc, scroll);
     assert!(top > line_start + from && top < line_start + to, "{top}");
     let piece_top = scroll::offset_top(&lay, &doc, top).unwrap();
-    assert!(piece_top <= scroll + 1.0 && piece_top > scroll - 20.0 * viewport);
+    assert!(piece_top <= scroll + 1.0 && piece_top > scroll - DocY::from(20.0 * viewport));
     assert_eq!(scroll::top_offset(&lay, &doc, piece_top), top);
     let span = scroll::offset_span(&lay, &doc, top + 10).unwrap();
     assert_eq!(span.start, piece_top);
@@ -6658,7 +6690,10 @@ fn a_long_line_is_held_by_its_pieces_around_the_view() {
         found.search_held(&doc, held.clone());
         assert!(found.matches.len() < all.len().max(2) / 2 || all.len() < 4);
         let mut fonts = fonts();
-        let (lo, hi) = (scroll - 2.0 * viewport, scroll + 3.0 * viewport);
+        let (lo, hi) = (
+            scroll - DocY::from(2.0 * viewport),
+            scroll + DocY::from(3.0 * viewport),
+        );
         let rects = |fonts: &mut FontStore, matches: &[Selection]| -> Vec<_> {
             selection::window_rects(&lay, &doc, fonts, matches, lo, hi)
                 .into_iter()
@@ -6760,7 +6795,7 @@ fn a_landing_inside_a_long_line_is_on_its_row() {
         // rows where the other layout does.
         match caret::row_top(&far, &doc, at) {
             Some(held) => assert_eq!(held, drawn, "at {at}"),
-            None if drawn - table > 5.0 * row_h => deep += 1,
+            None if drawn - table > DocY::from(5.0 * row_h) => deep += 1,
             None => {}
         }
     }
@@ -6798,7 +6833,7 @@ fn a_view_in_a_long_line_is_kept_across_a_new_width_after_an_edit() {
         viewport,
     );
     // The byte of the first row at or under the top edge.
-    let top_byte = |lay: &LayoutDoc, scroll: f32| -> usize {
+    let top_byte = |lay: &LayoutDoc, scroll: DocY| -> usize {
         lay.runs
             .iter()
             .filter(|run| run.y >= scroll && run.span == 1)

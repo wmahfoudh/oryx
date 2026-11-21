@@ -341,7 +341,7 @@ mod tests {
 
     /// Whether any pixel of the margin left of `x`, on the rows from
     /// `top` to `bottom`, differs from the page's color.
-    fn inked(pixels: &[u32], paper: u32, x: f32, top: f32, bottom: f32) -> bool {
+    fn inked(pixels: &[u32], paper: u32, x: f32, top: DocY, bottom: DocY) -> bool {
         (top as usize..bottom as usize).any(|row| {
             let start = row * WIDTH as usize;
             pixels[start..start + x as usize]
@@ -360,7 +360,7 @@ mod tests {
         let numbered = painted(&doc, &lay, &mut fonts, true);
         for line in 0..3 {
             let seat = lay.code_line_seat(0, line).expect("placed");
-            let (top, bottom) = (seat.y, seat.y + seat.height);
+            let (top, bottom) = (seat.y, seat.y + DocY::from(seat.height));
             assert!(
                 !inked(&plain, paper, seat.x, top, bottom),
                 "line {line}: an empty margin without the setting"
@@ -398,7 +398,7 @@ mod tests {
         let first = lay.code_line_seat(0, 0).unwrap();
         let second = lay.code_line_seat(0, 1).unwrap();
         assert!(
-            second.y - first.y > 2.5 * first.height,
+            second.y - first.y > DocY::from(2.5 * first.height),
             "the long line wraps over several rows"
         );
         assert!(inked(
@@ -406,10 +406,16 @@ mod tests {
             paper,
             first.x,
             first.y,
-            first.y + first.height
+            first.y + DocY::from(first.height)
         ));
         assert!(
-            !inked(&numbered, paper, first.x, first.y + first.height, second.y),
+            !inked(
+                &numbered,
+                paper,
+                first.x,
+                first.y + DocY::from(first.height),
+                second.y
+            ),
             "the rows a line wraps onto carry no number"
         );
     }
@@ -513,7 +519,7 @@ mod tests {
         let last = lay.code_line_seat(0, 1).unwrap();
         let strip = strip(&mut fonts, &lay, &doc, 0, 2, page, theme.surface.foreground)
             .expect("the row below the last line");
-        assert_eq!(strip.y, (last.y + last.height).floor());
+        assert_eq!(strip.y, (last.y + DocY::from(last.height)).floor());
         assert!(
             strip.pixels.iter().any(|&p| p != packed(page)),
             "the strip carries the number 3"

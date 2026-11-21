@@ -9,6 +9,7 @@ use epub_common::{book, png_bytes, zip_declaring};
 use oryx::doc::epub::{self, Archive};
 use oryx::doc::load::{self, FileKind};
 use oryx::doc::model::{BlockKind, Document};
+use oryx::layout::DocY;
 
 /// Paragraph text in block order, one line per block; break markers and
 /// non-paragraph blocks contribute nothing.
@@ -946,7 +947,7 @@ fn book_paragraphs_justify_to_the_content_width() {
         ..ViewConfig::default()
     };
     let just = layout(&doc, &theme, &mut fonts, &mut media, &just_cfg, 700.0);
-    let first_y = plain.runs.iter().map(|r| r.y).fold(f32::MAX, f32::min);
+    let first_y = plain.runs.iter().map(|r| r.y).fold(DocY::MAX, DocY::min);
     let right = |l: &oryx::layout::LayoutDoc| {
         l.runs
             .iter()

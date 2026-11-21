@@ -15,7 +15,7 @@ use std::time::SystemTime;
 use serde::{Deserialize, Serialize};
 
 use crate::doc::load::{self, FileKind};
-use crate::layout::{length_f32, DocY};
+use crate::layout::DocY;
 use crate::paint::painter::Painter;
 use crate::style::fonts::BODY_FAMILY;
 use crate::style::theme::{Rgba, Theme, Ui};
@@ -966,13 +966,15 @@ impl Sidebar {
             return;
         };
         let (_, content_h) = self.list_extent(outline);
-        let scroll = length_f32(scrollbar::scroll_for_thumb(
+        // A list's scroll is a screen value and stays f32. A long list
+        // can pass 2^24 px, which length_f32 refuses.
+        let scroll = scrollbar::scroll_for_thumb(
             y - (PAD + CAPTION_H) - grab,
             th,
             self.list_h,
             DocY::from(content_h),
             self.list_h,
-        ));
+        ) as f32;
         match self.tab {
             Tab::Files => self.scroll = scroll,
             Tab::Outline => outline.scroll = scroll,

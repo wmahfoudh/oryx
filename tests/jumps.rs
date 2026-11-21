@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use oryx::doc::images::MediaCache;
 use oryx::doc::load;
 use oryx::doc::model::Document;
-use oryx::layout::{layout, LayoutDoc, ViewConfig};
+use oryx::layout::{layout, DocY, LayoutDoc, ViewConfig};
 use oryx::style::fonts::FontStore;
 use oryx::style::theme::Theme;
 
@@ -33,7 +33,7 @@ fn pushed_offset(doc: &Document, lay: &LayoutDoc, scroll_y: f32) -> usize {
     let mut offset = 0usize;
     for (index, block) in doc.blocks.iter().enumerate() {
         match lay.approx_top(index, 0) {
-            Some(top) if top <= scroll_y + 1.0 => offset = block.range.start,
+            Some(top) if top <= DocY::from(scroll_y + 1.0) => offset = block.range.start,
             _ => break,
         }
     }
@@ -42,7 +42,7 @@ fn pushed_offset(doc: &Document, lay: &LayoutDoc, scroll_y: f32) -> usize {
 
 /// The position the pop lands on, as the pending-offset path resolves
 /// it; None is the silent drop the reader experiences as a dead key.
-fn landing(doc: &Document, lay: &LayoutDoc, offset: usize) -> Option<f32> {
+fn landing(doc: &Document, lay: &LayoutDoc, offset: usize) -> Option<DocY> {
     doc.block_at_offset(offset)
         .and_then(|block| lay.approx_top(block, 0))
 }

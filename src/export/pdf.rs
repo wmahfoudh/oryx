@@ -1574,3 +1574,21 @@ fn image_name(index: usize) -> String {
 fn deflate(data: &[u8]) -> Vec<u8> {
     miniz_oxide::deflate::compress_to_vec_zlib(data, 6)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::export::{Orientation, PageSize};
+
+    /// A height far down a huge file lands at its place on its page
+    /// (Task 418).
+    #[test]
+    fn a_height_far_down_lands_at_its_place_on_the_page() {
+        let g = PageGeometry::new(PageSize::A4, Orientation::Portrait, 11.0);
+        let top: DocY = 33_554_432.0;
+        assert_eq!(
+            device_y(top + 100.25, top, &g),
+            g.height - g.margin_y - 100.25
+        );
+    }
+}

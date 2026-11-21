@@ -943,6 +943,36 @@ mod tests {
         markdown::parse("A paragraph that says something.\n\n".repeat(120).as_str())
     }
 
+    /// Far down a huge file the pages cut where they cut near its top,
+    /// each page's top at the same distance from the first line (Task
+    /// 418): the lines of 120 paragraphs, then the same lines 2^25 px down.
+    #[test]
+    fn pages_far_down_cut_as_near_the_top() {
+        let doc = many_paragraphs();
+        let l = laid_out(&doc);
+        let g = PageGeometry::new(PageSize::A4, Orientation::Portrait, 11.0);
+        let moved = |by: DocY| {
+            let mut out = LayoutDoc::default();
+            for run in &l.runs {
+                let mut run = run.clone();
+                run.y += by;
+                run.baseline += by;
+                out.runs.push(run);
+            }
+            out.height = l.height + by;
+            out
+        };
+        let far: DocY = 33_554_432.0;
+        let near = paginate(&doc, &moved(0.0), &g);
+        let down = paginate(&doc, &moved(far), &g);
+        assert!(near.len() > 1);
+        assert_eq!(near.len(), down.len());
+        for (p, q) in near.iter().zip(&down) {
+            assert_eq!(p.runs, q.runs);
+            assert_eq!((q.top - far).to_bits(), p.top.to_bits());
+        }
+    }
+
     #[test]
     fn no_page_cuts_a_line() {
         let doc = many_paragraphs();
@@ -953,9 +983,9 @@ mod tests {
         for page in &pages {
             for run in &l.runs[page.runs.clone()] {
                 assert!(run.y >= page.top - 0.01, "nothing sits above the page top");
-                let bottom = run.y + metrics::LINE_HEIGHT * run.size;
+                let bottom = run.y + DocY::from(metrics::LINE_HEIGHT * run.size);
                 assert!(
-                    bottom - page.top <= g.content_height() + 0.01,
+                    bottom - page.top <= DocY::from(g.content_height() + 0.01),
                     "no line is cut"
                 );
             }
@@ -1186,7 +1216,8 @@ mod rules {
         for page in &pages {
             for image in &l.images {
                 assert!(
-                    page.top <= image.y + SLACK || page.top >= image.y + image.height - SLACK,
+                    page.top <= image.y + SLACK
+                        || page.top >= image.y + DocY::from(image.height) - SLACK,
                     "a page starts inside an image"
                 );
             }
@@ -1226,7 +1257,8 @@ mod rules {
             for (index, page) in pages.iter().enumerate() {
                 for image in &page.images {
                     assert!(
-                        image.y + image.height - page.top <= g.content_height() + SLACK,
+                        image.y + DocY::from(image.height) - page.top
+                            <= DocY::from(g.content_height()) + SLACK,
                         "an image runs past the foot of page {index} with {filler} fillers"
                     );
                     // The telling case is the image sitting below text
@@ -1278,7 +1310,7 @@ mod rules {
             for (index, page) in pages.iter().enumerate() {
                 for rect in &page.rects {
                     assert!(
-                        rect.y + rect.height - page.top <= g.content_height() + SLACK,
+                        rect.y + rect.height - page.top <= DocY::from(g.content_height()) + SLACK,
                         "page {index} draws into the bottom margin with {filler} fillers"
                     );
                 }
@@ -1299,7 +1331,10 @@ mod rules {
         );
         let pages = paginate(&doc, &l, &g);
         let placed = pages.iter().flat_map(|p| p.images.iter()).next().unwrap();
-        assert!(placed.height <= g.content_height() + SLACK, "scaled to fit");
+        assert!(
+            DocY::from(placed.height) <= DocY::from(g.content_height()) + SLACK,
+            "scaled to fit"
+        );
         let before = source.width / source.height;
         let after = placed.width / placed.height;
         assert!((before - after).abs() < 0.01, "aspect kept");
@@ -1326,7 +1361,7 @@ mod rules {
                 .find(|rect| rect.stroke == 0.0)
                 .expect("the panel is on every page the block reaches");
             for run in &l.runs[page.runs.clone()] {
-                let bottom = run.y + metrics::LINE_HEIGHT * run.size;
+                let bottom = run.y + DocY::from(metrics::LINE_HEIGHT * run.size);
                 assert!(
                     run.y >= panel.y - SLACK,
                     "a line sits above the panel that holds it"
@@ -1370,7 +1405,7 @@ mod rules {
         for page in &pages[1..] {
             let first = l.runs[page.runs.start].y;
             assert!(
-                (first - page.top - metrics::CODE_PAD).abs() < SLACK,
+                (first - page.top - DocY::from(metrics::CODE_PAD)).abs() < SLACK,
                 "a continued panel starts one padding above its first line"
             );
         }
@@ -1431,7 +1466,7 @@ mod rules {
                 }
                 for rect in &page.rects {
                     assert!(
-                        rect.y + rect.height - page.top <= g.content_height() + SLACK,
+                        rect.y + rect.height - page.top <= DocY::from(g.content_height()) + SLACK,
                         "the placeholder reaches into the bottom margin with {filler} fillers"
                     );
                 }
@@ -1459,7 +1494,7 @@ mod rules {
             for (index, page) in pages.iter().enumerate() {
                 for rect in &page.rects {
                     let holds_a_line = l.runs[page.runs.clone()].iter().any(|run| {
-                        let bottom = run.y + metrics::LINE_HEIGHT * run.size;
+                        let bottom = run.y + DocY::from(metrics::LINE_HEIGHT * run.size);
                         run.y < rect.y + rect.height + SLACK && bottom > rect.y - SLACK
                     });
                     assert!(
@@ -1490,7 +1525,7 @@ mod rules {
             let pages = paginate(&doc, &l, &g);
             for page in &pages {
                 for row in &l.table_rows {
-                    if row.bottom - row.top > g.content_height() {
+                    if row.bottom - row.top > DocY::from(g.content_height()) {
                         continue;
                     }
                     assert!(
@@ -1516,7 +1551,7 @@ mod rules {
         let l = laid_out(&doc);
         let band = &l.table_rows[l.table_rows.len() - 1];
         assert!(
-            band.bottom - band.top > g.content_height(),
+            band.bottom - band.top > DocY::from(g.content_height()),
             "the fixture row really is taller than a page"
         );
         let pages = paginate(&doc, &l, &g);
@@ -1535,14 +1570,14 @@ mod rules {
         for (index, page) in pages.iter().enumerate() {
             for rect in &page.rects {
                 assert!(
-                    rect.y + rect.height - page.top <= g.content_height() + SLACK,
+                    rect.y + rect.height - page.top <= DocY::from(g.content_height()) + SLACK,
                     "page {index} draws grid into the bottom margin"
                 );
             }
             for run in &l.runs[page.runs.clone()] {
-                let bottom = run.y + metrics::LINE_HEIGHT * run.size;
+                let bottom = run.y + DocY::from(metrics::LINE_HEIGHT * run.size);
                 assert!(
-                    bottom - page.top <= g.content_height() + SLACK,
+                    bottom - page.top <= DocY::from(g.content_height()) + SLACK,
                     "page {index} puts a line into the bottom margin"
                 );
             }
