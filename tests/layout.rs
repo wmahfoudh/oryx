@@ -1936,12 +1936,23 @@ fn rows_holding(l: &LayoutDoc, from: u32, to: u32) -> usize {
 
 /// A cluster of 70 KB, emoji joined by ZWJ, fills the first chunk from
 /// its first byte, and no line after the first starts on a byte of its
-/// own: the chunk keeps its lines, the next chunk starts at the cut, and
-/// the layout ends (Task 428, finding 1 of its read).
+/// own: the chunk keeps its lines, the next chunk starts at the cut, the
+/// layout ends, and each emoji is drawn once (Task 428, finding 1 of its
+/// read, and finding 3 of the read of its correction).
 #[test]
 fn a_joined_emoji_chain_longer_than_a_chunk_is_laid_out_once() {
     let source = format!("{}😀", "😀\u{200d}".repeat(10_000));
     let (_, l) = lay2(&source, 1000.0);
+    // Each row of the cluster draws its own emoji: a row dropped or
+    // drawn twice changes the sum of the widths.
+    let (_, one) = lay2("😀", 1000.0);
+    let emoji = one.runs[0].width;
+    let drawn: f32 = l.runs.iter().map(|r| r.width).sum();
+    assert!(
+        (drawn - 10_001.0 * emoji).abs() < emoji / 2.0,
+        "the rows draw {drawn} px of emoji, not {}",
+        10_001.0 * emoji
+    );
     // The rows of one cluster all point at its bytes: the ranges, each
     // taken once and in order, cover the paragraph.
     let mut ranges: Vec<(u32, u32)> = l
@@ -1980,6 +1991,28 @@ fn a_joined_emoji_chain_across_a_cut_is_drawn_once() {
         rows_holding(&alone, 0, len),
         "the rows of the chain, against the chain alone"
     );
+}
+
+/// One unbroken word over 64 KB wraps letter by letter, each row
+/// starting on the byte where the row before it ends: a chunk stops at
+/// such a row, and no row is short at the cut (Task 428, finding 3 of
+/// the read of its correction).
+#[test]
+fn an_unbroken_word_across_a_cut_has_no_short_row() {
+    let source = "a".repeat(100_000);
+    let (doc, l) = lay2(&source, 1000.0);
+    let lines = line_texts(&l, &doc);
+    let full = lines[0].1.len();
+    for (n, (_, text)) in lines[..lines.len() - 1].iter().enumerate() {
+        assert_eq!(
+            text.len(),
+            full,
+            "row {n} holds {} letters, not {full}",
+            text.len()
+        );
+    }
+    let letters: usize = lines.iter().map(|(_, text)| text.len()).sum();
+    assert_eq!(letters, source.len());
 }
 
 #[test]
