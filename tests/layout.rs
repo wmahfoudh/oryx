@@ -14,6 +14,7 @@ use oryx::layout::{
 use oryx::style::fonts::{FontStore, ARABIC_FAMILY, BODY_FAMILY, CODE_FAMILY, HEBREW_FAMILY};
 use oryx::style::highlight::{self, Arrival};
 use oryx::style::theme::Theme;
+use oryx::ui::settings;
 
 fn fonts() -> FontStore {
     FontStore::new()
@@ -1729,6 +1730,68 @@ fn align_left_and_center_hold_under_a_forced_rtl_direction() {
     );
     let mid = middle.x + middle.width / 2.0;
     assert!((mid - 400.0).abs() < 2.0, "centered, mid {mid}");
+}
+
+/// The left and right ends of each visual line of `l`, top to bottom.
+fn line_spans(l: &LayoutDoc) -> Vec<(f32, f32)> {
+    let mut lines: Vec<(DocY, f32, f32)> = Vec::new();
+    for r in &l.runs {
+        match lines.iter_mut().find(|line| line.0 == r.y) {
+            Some(line) => {
+                line.1 = line.1.min(r.x);
+                line.2 = line.2.max(r.x + r.width);
+            }
+            None => lines.push((r.y, r.x, r.x + r.width)),
+        }
+    }
+    lines.sort_by(|a, b| a.0.total_cmp(&b.0));
+    lines
+        .into_iter()
+        .map(|(_, left, right)| (left, right))
+        .collect()
+}
+
+/// At a zoom step the row's height is not exact in binary, and
+/// cosmic-text adds up the line tops of a paragraph in f32: a line can
+/// start a rounding above the bottom of the line before it. Each line
+/// of a centered or right-aligned paragraph is still placed on its own
+/// (the third read of Task 418, finding 1).
+#[test]
+fn each_line_of_an_aligned_paragraph_is_placed_on_its_own_at_a_zoom_step() {
+    let words: Vec<String> = (0..160)
+        .map(|i| format!("{}{i}", "x".repeat([3, 2, 12, 25, 1, 18, 1, 3][i % 8])))
+        .collect();
+    let text = words.join(" ");
+    let mut zoom = 1.0;
+    for _ in 0..5 {
+        zoom = settings::step_zoom(zoom, settings::ZOOM_STEP);
+        let c = ViewConfig { zoom, ..cfg() };
+        for (align, at) in [("center", 0.5_f32), ("right", 1.0)] {
+            let lay_at = |source: &str| {
+                let doc = markdown::parse(source);
+                let mut media = MediaCache::offline(PathBuf::from("."));
+                layout(
+                    &doc,
+                    &Theme::default_dark(),
+                    &mut fonts(),
+                    &mut media,
+                    &c,
+                    1000.0,
+                )
+            };
+            let one = lay_at(&format!("<p align=\"{align}\">x</p>"));
+            let mark = one.runs[0].x + one.runs[0].width * at;
+            let lines = line_spans(&lay_at(&format!("<p align=\"{align}\">\n{text}\n</p>\n")));
+            assert!(lines.len() > 10, "zoom {zoom}: {} lines", lines.len());
+            for (n, (left, right)) in lines.iter().enumerate() {
+                let place = left + (right - left) * at;
+                assert!(
+                    (place - mark).abs() < 1.0,
+                    "zoom {zoom}, {align}, line {n}: at {place}, not {mark}"
+                );
+            }
+        }
+    }
 }
 
 #[test]

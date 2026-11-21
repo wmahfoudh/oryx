@@ -7109,7 +7109,7 @@ fn fit_side_text(
 /// the left edge, 0.5 centers it, 1.0 puts it against the right edge.
 /// A line may move either way, since right-to-left text starts on the
 /// right; a line wider than the content stays where it is. Lines are
-/// clustered by vertical overlap.
+/// clustered by a vertical overlap of half a pixel or more.
 #[allow(clippy::too_many_arguments)]
 fn align_lines(
     out: &mut LayoutDoc,
@@ -7136,12 +7136,15 @@ fn align_lines(
     for (i, g) in out.math_glyphs.iter().enumerate().skip(math_mark) {
         items.push((g.top, g.bottom, 3, i));
     }
+    // cosmic-text adds up the line tops of a paragraph in f32, so a line
+    // can start a rounding above the exact bottom of the line before it.
+    const OVERLAP: DocY = 0.5;
     items.sort_by(|a, b| a.0.total_cmp(&b.0));
     let mut start = 0;
     while start < items.len() {
         let mut end = start + 1;
         let mut bottom = items[start].1;
-        while end < items.len() && items[end].0 < bottom {
+        while end < items.len() && items[end].0 < bottom - OVERLAP {
             bottom = bottom.max(items[end].1);
             end += 1;
         }
@@ -8132,6 +8135,8 @@ mod tests {
             assert_eq!(gap.to_bits(), DocY::from(25.5_f32).to_bits(), "line {line}");
             let exact = first + unit as DocY * 25.5;
             assert_eq!(top.to_bits(), exact.to_bits(), "line {line}");
+            let by_line = table.code_line_top(0, unit);
+            assert_eq!(by_line.to_bits(), exact.to_bits(), "line {line}");
         }
     }
 
@@ -8143,7 +8148,7 @@ mod tests {
         let table = table_of_plain_lines(row);
         for unit in [6_900_000, 6_900_001, 6_912_602] {
             let gap = table.unit_top(0, unit) - table.unit_top(0, unit - 1);
-            assert!((gap - DocY::from(row)).abs() < 0.001, "{unit}: {gap}");
+            assert_eq!(gap.to_bits(), DocY::from(row).to_bits(), "{unit}: {gap}");
         }
     }
 

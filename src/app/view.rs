@@ -166,8 +166,6 @@ impl Page<'_> {
         if pending && !scroll::reached(waits, lay.height, view_h) {
             return Some(waits);
         }
-        // The same sum as the layout's own row, taken before the seat:
-        // far down a big file a float is 2 px apart from the next.
         Some(caret::seated(top + self.piece_depth(offset), below))
     }
 
