@@ -6468,19 +6468,28 @@ fn shift_line_down(out: &mut LayoutDoc, marks: &LineMarks, dy: DocY) {
 }
 
 /// A shaped chunk's last visual line: its top, its right edge, and its
-/// baseline, read off the chunk's runs.
+/// baseline, read off the chunk's runs by their line box, so that a
+/// subscript, a superscript or a footnote mark counts with its line.
 fn chunk_metrics(runs: &[TextRun], x0: f32, y: DocY) -> (DocY, f32, DocY) {
-    let last_top = runs.iter().map(|r| r.y).fold(y, DocY::max);
+    let line_top = |r: &TextRun| r.y + DocY::from(r.rise);
+    let last_top = runs.iter().map(line_top).fold(y, DocY::max);
+    let on_last = |r: &&TextRun| (line_top(r) - last_top).abs() < 1.0;
     let end_x = runs
         .iter()
-        .filter(|r| (r.y - last_top).abs() < 1.0)
+        .filter(on_last)
         .map(|r| r.x + r.width)
         .fold(x0, f32::max);
     let last_base = runs
         .iter()
-        .filter(|r| (r.y - last_top).abs() < 1.0)
-        .map(|r| r.baseline)
+        .filter(on_last)
+        .map(|r| r.baseline + DocY::from(r.rise))
         .fold(0.0, DocY::max);
+    debug_assert!(
+        runs.iter()
+            .filter(on_last)
+            .all(|r| (r.baseline + DocY::from(r.rise) - last_base).abs() < 0.5),
+        "the runs of a line share its baseline once their rise is counted"
+    );
     (last_top, end_x, last_base)
 }
 
@@ -6549,9 +6558,19 @@ fn split_after_equation(
                 }
             })
             .max();
+        // The shaper leaves out the blank that opens the chunk when the
+        // first word fits the room only without it, and lays that word
+        // out at the start of the line: the word goes to the next line.
+        let opening = (start..end).find(|&s| !masked[s].text(source).is_empty());
+        let blank_left_out = opening.is_some_and(|s| {
+            masked[s].text(source).starts_with(char::is_whitespace)
+                && !runs
+                    .iter()
+                    .any(|r| r.span == s && matches!(r.text, TextRef::Model { start: 0, .. }))
+        });
         if let Some(c) = last {
             let fits = left >= x0 - 0.5 && right - left <= room + 0.5;
-            if fits && cut_at_a_break(masked, source, c, end) {
+            if fits && !blank_left_out && cut_at_a_break(masked, source, c, end) {
                 cut = Some(c);
             }
         }

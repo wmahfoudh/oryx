@@ -6469,6 +6469,292 @@ fn a_raised_pill_on_the_line_below_the_kept_one_is_not_kept() {
     }
 }
 
+/// The first run whose text holds `part`.
+fn run_with<'a>(l: &'a LayoutDoc, doc: &'a Document, part: &str) -> &'a TextRun {
+    l.runs
+        .iter()
+        .find(|r| l.run_text(doc, r).contains(part))
+        .unwrap_or_else(|| panic!("no run holds {part:?}"))
+}
+
+/// The right edge of the runs of `block` on the line of `line`, the
+/// runs listed in `skip` left out.
+fn line_right(l: &LayoutDoc, doc: &Document, line: &TextRun, skip: &[&str]) -> f32 {
+    l.runs
+        .iter()
+        .filter(|r| {
+            r.block == line.block && (r.baseline - line.baseline).abs() < DocY::from(1.0 + r.size)
+        })
+        .filter(|r| !skip.contains(&l.run_text(doc, r)))
+        .map(|r| r.x + r.width)
+        .fold(f32::MIN, f32::max)
+}
+
+/// The left and right edges of the formula boxes of `block`.
+fn formula_box(l: &LayoutDoc, block: usize) -> (f32, f32) {
+    let glyphs: Vec<&MathGlyph> = l.math_glyphs.iter().filter(|g| g.block == block).collect();
+    assert!(!glyphs.is_empty(), "no formula in block {block}");
+    let left = glyphs.iter().map(|g| g.left).fold(f32::MAX, f32::min);
+    let right = glyphs.iter().map(|g| g.right).fold(f32::MIN, f32::max);
+    (left, right)
+}
+
+#[test]
+fn a_formula_after_a_raised_or_lowered_run_sits_after_the_words_of_its_line() {
+    // The open line's right end and baseline are the line's own, not
+    // those of a subscript, a superscript or a footnote mark on it: the
+    // formula goes after the last word, on the line's baseline, and the
+    // words after it follow the formula. The plain line was right.
+    let cases = [
+        "Text a<sub>2</sub> then more words here $x^2+y^2$ and after.\n",
+        "Text a<sup>2</sup> then more words here $x^2+y^2$ and after.\n",
+        "Text a2 then more words here $x^2+y^2$ and after.\n",
+        "Text then more words here a<sub>2</sub> $x^2+y^2$ and after.\n",
+        "Text then more words here a<sup>2</sup> $x^2+y^2$ and after.\n",
+        "Text then more words here a[^1] $x^2+y^2$ and after.\n\n[^1]: A note.\n",
+        "- Text a<sub>2</sub> then more words here $x^2+y^2$ and after.\n",
+        "| Head |\n|---|\n| Text a<sub>2</sub> then more words here $x^2+y^2$ and after. |\n",
+        "Note.[^1]\n\n[^1]: Text a<sub>2</sub> then more words here $x^2+y^2$ and after.\n",
+    ];
+    let mut faults = Vec::new();
+    for src in cases {
+        let (doc, l) = lay2(src, 1000.0);
+        let text = run_with(&l, &doc, "Text");
+        let after = run_with(&l, &doc, "and after");
+        let words = line_right(&l, &doc, text, &[" and after.", "and after."]);
+        let (left, right) = formula_box(&l, text.block);
+        let x = l
+            .math_glyphs
+            .iter()
+            .find(|g| g.block == text.block && g.ch == Some('\u{1D465}'))
+            .unwrap_or_else(|| panic!("{src:?}: no glyph for x"));
+        if left < words - 0.5 {
+            faults.push(format!(
+                "{src:?}: the formula starts at {left}, over the words that end at {words}"
+            ));
+        }
+        if after.x < right - 0.5 {
+            faults.push(format!(
+                "{src:?}: \"and after.\" starts at {}, inside the formula that ends at {right}",
+                after.x
+            ));
+        }
+        if (after.baseline - text.baseline).abs() >= 0.5 {
+            faults.push(format!(
+                "{src:?}: \"and after.\" sits at baseline {}, the line at {}",
+                after.baseline, text.baseline
+            ));
+        }
+        if (x.y - text.baseline).abs() >= 0.5 {
+            faults.push(format!(
+                "{src:?}: the formula sits at baseline {}, the line at {}",
+                x.y, text.baseline
+            ));
+        }
+    }
+    assert!(faults.is_empty(), "{}", faults.join("\n"));
+}
+
+#[test]
+fn a_small_image_after_a_subscript_sits_after_the_words_of_its_line() {
+    // An inline image joins the open line as a formula does, at the
+    // line's right end: in a page and in a book.
+    let img = "<img src=\"small.png\" width=\"14\" height=\"14\">";
+    let (doc, page) = lay_lone(
+        &format!("Text a<sub>2</sub> then more words here {img} and after.\n"),
+        1000.0,
+        DirectionMode::Auto,
+    );
+    let book = lay_book(
+        "",
+        &format!("<html><body><p>Text a<sub>2</sub> then more words here {img} and after.</p></body></html>"),
+        1000.0,
+    );
+    let book_doc = Document::default();
+    let mut faults = Vec::new();
+    for (name, doc, l) in [("page", &doc, &page), ("book", &book_doc, &book)] {
+        let text = &l.runs[0];
+        let after = l.runs.last().expect("runs");
+        let words = l.runs[..l.runs.len() - 1]
+            .iter()
+            .map(|r| r.x + r.width)
+            .fold(f32::MIN, f32::max);
+        let image = l.images.first().expect("the image");
+        if image.x < words - 0.5 {
+            faults.push(format!(
+                "{name}: the image starts at {}, over the words that end at {words}",
+                image.x
+            ));
+        }
+        if after.x < image.x + image.width - 0.5 {
+            faults.push(format!(
+                "{name}: the last run starts at {}, inside the image",
+                after.x
+            ));
+        }
+        if (after.baseline - text.baseline).abs() >= 0.5 {
+            faults.push(format!(
+                "{name}: the last run sits at baseline {}, the line at {}",
+                after.baseline, text.baseline
+            ));
+        }
+        if name == "page" {
+            assert_eq!(l.run_text(doc, after), " and after.");
+        }
+    }
+    assert!(faults.is_empty(), "{}", faults.join("\n"));
+}
+
+#[test]
+fn words_with_a_subscript_that_join_an_image_s_line_keep_its_baseline() {
+    // The words after an image are shaped alone, then moved onto the
+    // open line by their baseline: the line's, not the subscript's.
+    let img = "<img src=\"small.png\" width=\"14\" height=\"14\">";
+    let (doc, l) = lay_lone(
+        &format!("Text words {img} a<sub>2</sub> bee $x^2$ and after.\n"),
+        1000.0,
+        DirectionMode::Auto,
+    );
+    let text = run_with(&l, &doc, "Text");
+    let bee = find_word(&l, &doc, "bee");
+    assert!(
+        (bee.baseline - text.baseline).abs() < 0.5,
+        "\"bee\" sits at baseline {}, the line at {}",
+        bee.baseline,
+        text.baseline
+    );
+    let (left, _) = formula_box(&l, text.block);
+    assert!(
+        left >= bee.x + bee.width - 0.5,
+        "the formula starts at {left}, over \"bee\" that ends at {}",
+        bee.x + bee.width
+    );
+}
+
+/// The junctions of a formula and the word after it that sit on one
+/// line, and those of them with no space: the word's letter starts at
+/// the formula's right edge. A justified line cuts the space into a run
+/// of its own, so the gap is measured, not the run's text.
+fn junctions_without_a_space(l: &LayoutDoc, doc: &Document) -> (usize, usize) {
+    let margin = l.runs.iter().map(|r| r.x).fold(f32::MAX, f32::min);
+    let mut on_one_line = 0;
+    let mut glued = 0;
+    for r in &l.runs {
+        let t = l.run_text(doc, r);
+        if r.x <= margin + 1.0 || !t.trim_start().starts_with('z') {
+            continue;
+        }
+        on_one_line += 1;
+        let formula = l
+            .math_glyphs
+            .iter()
+            .filter(|g| (g.y - r.baseline).abs() < DocY::from(r.size) && g.right <= r.x + 0.5)
+            .map(|g| g.right)
+            .fold(f32::MIN, f32::max);
+        if t.starts_with('z') && r.x - formula < 1.0 {
+            glued += 1;
+        }
+    }
+    (on_one_line, glued)
+}
+
+#[test]
+fn a_word_after_an_inline_formula_keeps_its_space_at_each_width() {
+    // The word after a formula that fits the line only without its
+    // space goes to the next line, as any word that does not fit.
+    // Before, the shaper dropped the space and the word stayed, glued
+    // to the formula: 2% of the junctions over these widths.
+    // The word in italics is a span of its own, the space before it in
+    // the span of the text.
+    let mut fonts = fonts();
+    let mut faults = Vec::new();
+    for word in ["z{k}", "*z{k}*"] {
+        let words: Vec<String> = (0..50)
+            .map(|k| format!("w{k} $a^2_i$ {}", word.replace("{k}", &k.to_string())))
+            .collect();
+        let src = format!("{}\n", words.join(" "));
+        let doc = markdown::parse(src.as_str());
+        let mut junctions = 0;
+        for w in (300..=1000).step_by(10) {
+            let l = lay_doc(&doc, w as f32, &mut fonts);
+            let (on_one_line, glued) = junctions_without_a_space(&l, &doc);
+            junctions += on_one_line;
+            if glued > 0 {
+                faults.push((word, w, glued));
+            }
+        }
+        assert!(
+            junctions > 1000,
+            "{word}: {junctions} junctions on one line"
+        );
+    }
+    assert!(
+        faults.is_empty(),
+        "words glued to a formula, by width: {faults:?}"
+    );
+}
+
+#[test]
+fn a_word_after_an_inline_formula_keeps_its_space_in_a_justified_paragraph() {
+    let words: Vec<String> = (0..50).map(|k| format!("w{k} $a^2_i$ z{k}")).collect();
+    let src = format!("{}\n", words.join(" "));
+    let mut faults = Vec::new();
+    for w in (300..=1000).step_by(20) {
+        let (doc, l) = lay_justified(&src, w as f32);
+        let (_, glued) = junctions_without_a_space(&l, &doc);
+        if glued > 0 {
+            faults.push((w, glued));
+        }
+    }
+    assert!(
+        faults.is_empty(),
+        "words glued to a formula, by width: {faults:?}"
+    );
+}
+
+#[test]
+fn a_word_that_fits_only_without_its_space_after_a_formula_starts_the_next_line() {
+    // At 340 wide, "z2" fits after the third formula of the line only
+    // without its space: it starts the next line, at the margin.
+    let words: Vec<String> = (0..4).map(|k| format!("w{k} $a^2_i$ z{k}")).collect();
+    let src = format!("{}\n", words.join(" "));
+    let (doc, l) = lay2(&src, 340.0);
+    let margin = l.runs.iter().map(|r| r.x).fold(f32::MAX, f32::min);
+    let z2 = l
+        .runs
+        .iter()
+        .find(|r| l.run_text(&doc, r).trim_start().starts_with("z2"))
+        .expect("the run of z2");
+    assert!(
+        (z2.x - margin).abs() < 0.5,
+        "\"z2\" starts at {}, not at the margin {margin}",
+        z2.x
+    );
+    let w2 = run_with(&l, &doc, "w2");
+    assert!(z2.y > w2.y + 1.0, "\"z2\" is on the line of \"w2\"");
+}
+
+#[test]
+fn a_word_too_wide_for_the_room_after_a_formula_starts_the_next_line() {
+    // The word does not fit after the formula even without its space:
+    // it starts the next line whole, at the margin.
+    // At 400 wide, "the walk is n" ends near x 169 and the word needs
+    // more than the 199 pixels left.
+    let (doc, l) = lay2(
+        "The number of the steps in the walk is $n$ thousandfoldnesses keeps going on and on for quite a while.\n",
+        400.0,
+    );
+    let margin = l.runs.iter().map(|r| r.x).fold(f32::MAX, f32::min);
+    let word = run_with(&l, &doc, "thousandfoldnesses");
+    let line = run_with(&l, &doc, "the walk is");
+    assert!(word.y > line.y + 1.0, "the word is on the formula's line");
+    assert!(
+        (word.x - margin).abs() < 0.5,
+        "the word starts at {}",
+        word.x
+    );
+}
+
 /// A document with a small picture beside it, laid out under a
 /// direction: the picture is 100 by 50, in a folder of its own.
 fn lay_lone(source: &str, width: f32, direction: DirectionMode) -> (Document, LayoutDoc) {
