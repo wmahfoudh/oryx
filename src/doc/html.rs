@@ -247,7 +247,7 @@ impl EmphasisTable {
             };
             let property = property.trim().to_ascii_lowercase();
             let value = value.trim().to_ascii_lowercase();
-            let value = value.trim_end_matches("!important").trim().to_string();
+            let value = without_important(&value).to_string();
             match property.as_str() {
                 "font-style" => {
                     if value.contains("italic") || value.contains("oblique") {
@@ -386,6 +386,50 @@ fn collect_text(node: &Handle, out: &mut String) {
     for child in node.children.borrow().iter() {
         collect_text(child, out);
     }
+}
+
+/// A declaration's value without its `!important`, which CSS allows
+/// with blanks between the two words. The value is in lower case.
+fn without_important(value: &str) -> &str {
+    let value = value.trim();
+    match value.strip_suffix("important") {
+        Some(rest) => match rest.trim_end().strip_suffix('!') {
+            Some(rest) => rest.trim_end(),
+            None => value,
+        },
+        None => value,
+    }
+}
+
+/// A chapter is XHTML, where `<br></br>` is one break. The HTML parser
+/// takes an end tag `</br>` for a second `<br>`, so the end tags are
+/// left out before the parse: `</br>` in any case, blanks before `>`.
+fn without_br_end_tags(xhtml: &str) -> std::borrow::Cow<'_, str> {
+    let bytes = xhtml.as_bytes();
+    let mut out = String::new();
+    let mut copied = 0;
+    let mut from = 0;
+    while let Some(at) = xhtml[from..].find("</") {
+        let start = from + at;
+        from = start + 2;
+        if bytes.len() < start + 4 || !bytes[start + 2..start + 4].eq_ignore_ascii_case(b"br") {
+            continue;
+        }
+        let mut end = start + 4;
+        while end < bytes.len() && bytes[end].is_ascii_whitespace() {
+            end += 1;
+        }
+        if bytes.get(end) == Some(&b'>') {
+            out.push_str(&xhtml[copied..start]);
+            copied = end + 1;
+            from = copied;
+        }
+    }
+    if copied == 0 {
+        return std::borrow::Cow::Borrowed(xhtml);
+    }
+    out.push_str(&xhtml[copied..]);
+    std::borrow::Cow::Owned(out)
 }
 
 /// `element`, `.class`, or `element.class`; anything else is None.
@@ -712,6 +756,7 @@ impl Walker {
     /// Parses one chapter and walks it. html5ever never fails; malformed
     /// markup yields whatever text it holds.
     pub fn walk_chapter(&mut self, xhtml: &str) {
+        let xhtml = without_br_end_tags(xhtml);
         let dom = html5ever::parse_document(RcDom::default(), Default::default())
             .from_utf8()
             .one(xhtml.as_bytes());
@@ -1849,6 +1894,101 @@ mod tests {
             ["A", "\n", "\n", "B"],
             "two breaks leave a blank line"
         );
+    }
+
+    /// A chapter is XHTML, where `<br></br>` is one break: the end tag is
+    /// no second break, in text and in a `<pre>`.
+    #[test]
+    fn an_end_tag_of_br_is_no_second_break() {
+        for (xhtml, expected) in [
+            (
+                "<p>verse one,<br></br>verse two</p>",
+                vec!["verse one,", "\n", "verse two"],
+            ),
+            ("<p>a<BR></BR>b</p>", vec!["a", "\n", "b"]),
+            ("<p>a<br></br ><br></br>b</p>", vec!["a", "\n", "\n", "b"]),
+            (
+                "<p>a<code>x<br></br>y</code></p>",
+                vec!["a", "x", "\n", "y"],
+            ),
+        ] {
+            let (blocks, source, _) = walk(&format!("<html><body>{xhtml}</body></html>"));
+            let texts: Vec<&str> = spans_of(&blocks[0])
+                .iter()
+                .map(|s| s.text(&source))
+                .collect();
+            assert_eq!(texts, expected, "{xhtml}");
+        }
+        let (blocks, source, _) = walk("<html><body><pre>a<br></br>b</pre></body></html>");
+        let BlockKind::CodeBlock { lines, .. } = &blocks[0].kind else {
+            panic!("expected a code block, got {:?}", blocks[0].kind);
+        };
+        assert_eq!(lines.len(), 2, "one break in the pre");
+        assert_eq!(lines.line(&source, 1), "b");
+    }
+
+    #[test]
+    fn the_end_tags_of_br_are_left_out_and_nothing_else() {
+        assert_eq!(without_br_end_tags("a</br>b</BR >c</br\n>d"), "abcd");
+        for kept in ["</b>", "</brx>", "</ br>", "<br/>", "&lt;/br&gt;", "a</br"] {
+            assert_eq!(without_br_end_tags(kept), kept);
+        }
+        assert!(matches!(
+            without_br_end_tags("no break here"),
+            std::borrow::Cow::Borrowed(_)
+        ));
+    }
+
+    /// The gaps the read of `030b3de` named: a break before alt text, in
+    /// a heading and in a table cell.
+    #[test]
+    fn a_line_break_before_alt_text_in_a_heading_and_in_a_cell() {
+        let (blocks, source, _) =
+            walk("<html><body><p>See<br/><img alt=\"Fig. 1\"/></p></body></html>");
+        let texts: Vec<&str> = spans_of(&blocks[0])
+            .iter()
+            .map(|s| s.text(&source))
+            .collect();
+        assert_eq!(texts, ["See", "\n", "Fig. 1"]);
+        let (blocks, source, _) = walk("<html><body><h2>One<br/>Two</h2></body></html>");
+        let BlockKind::Heading { spans, .. } = &blocks[0].kind else {
+            panic!("expected a heading, got {:?}", blocks[0].kind);
+        };
+        let texts: Vec<&str> = spans.iter().map(|s| s.text(&source)).collect();
+        assert_eq!(texts, ["One", "\n", "Two"]);
+        let (blocks, source, _) =
+            walk("<html><body><table><tr><td>One<br/>Two</td></tr></table></body></html>");
+        let BlockKind::Table { header, rows, .. } = &blocks[0].kind else {
+            panic!("expected a table, got {:?}", blocks[0].kind);
+        };
+        let cell = rows
+            .first()
+            .and_then(|r| r.first())
+            .or(header.first())
+            .expect("a cell");
+        let texts: Vec<&str> = cell.iter().map(|s| s.text(&source)).collect();
+        assert_eq!(texts, ["One", "\n", "Two"]);
+    }
+
+    /// `! important` with blanks after the `!`, which CSS allows, and a
+    /// clear with `!IMPORTANT`: a rule that turns off the italic of `<i>`.
+    #[test]
+    fn important_with_blanks_and_a_clear_are_read() {
+        let e = EmphasisTable::declarations("text-align: right ! important");
+        assert_eq!(e.place(), Some(Place::Right));
+        let e = EmphasisTable::declarations("text-align: center !\timportant");
+        assert_eq!(e.place(), Some(Place::Center));
+        let e = EmphasisTable::declarations("font-style: normal !IMPORTANT");
+        assert!(e.clear.italic && !e.set.italic);
+        let (blocks, source, _) = walk_styled(
+            ".n { font-style: normal !IMPORTANT }",
+            "<html><body><p><i class=\"n\">upright</i></p></body></html>",
+        );
+        let span = spans_of(&blocks[0])
+            .iter()
+            .find(|s| s.text(&source) == "upright")
+            .expect("the span");
+        assert!(!span.italic, "the rule turns the italic off");
     }
 
     /// `!important` is read in any case, as CSS reads its keywords.
