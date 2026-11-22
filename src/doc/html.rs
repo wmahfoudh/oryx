@@ -7,7 +7,13 @@
 //! `slug` and `trim_cell` it shares so books and READMEs agree. Anything
 //! unmapped strips to its inner text.
 
-use html5ever::tendril::TendrilSink;
+use std::cell::Cell;
+
+use html5ever::buffer_queue::BufferQueue;
+use html5ever::tendril::StrTendril;
+use html5ever::tokenizer::{TagKind, Token, TokenSink, TokenSinkResult, Tokenizer};
+use html5ever::tree_builder::{TreeBuilder, TreeSink};
+use html5ever::TokenizerResult;
 use markup5ever_rcdom::{Handle, NodeData, RcDom};
 
 use crate::doc::markdown::{slug, trim_cell};
@@ -401,35 +407,66 @@ fn without_important(value: &str) -> &str {
     }
 }
 
-/// A chapter is XHTML, where `<br></br>` is one break. The HTML parser
-/// takes an end tag `</br>` for a second `<br>`, so the end tags are
-/// left out before the parse: `</br>` in any case, blanks before `>`.
-fn without_br_end_tags(xhtml: &str) -> std::borrow::Cow<'_, str> {
-    let bytes = xhtml.as_bytes();
-    let mut out = String::new();
-    let mut copied = 0;
-    let mut from = 0;
-    while let Some(at) = xhtml[from..].find("</") {
-        let start = from + at;
-        from = start + 2;
-        if bytes.len() < start + 4 || !bytes[start + 2..start + 4].eq_ignore_ascii_case(b"br") {
-            continue;
+/// The tokens of a chapter on their way to the tree builder. A chapter
+/// is XHTML, where `<br></br>` is one break, and HTML reads the end tag
+/// `</br>` as a second `<br>`. The end tag that closes an open `<br>` is
+/// dropped here. Any other `</br>` is a break, as HTML reads it.
+struct ChapterTokens {
+    tree: TreeBuilder<Handle, RcDom>,
+    /// The `<br>` start tags not self-closed and not closed yet. Text
+    /// sets it back to zero: hand-written HTML writes `<br>` with no end
+    /// tag, and a later `</br>` there is a break.
+    open_breaks: Cell<usize>,
+}
+
+impl TokenSink for ChapterTokens {
+    type Handle = Handle;
+
+    fn process_token(&self, token: Token, line_number: u64) -> TokenSinkResult<Handle> {
+        match &token {
+            Token::TagToken(tag) if tag.name == html5ever::local_name!("br") => {
+                let open = self.open_breaks.get();
+                match tag.kind {
+                    TagKind::StartTag if !tag.self_closing => self.open_breaks.set(open + 1),
+                    TagKind::EndTag if open > 0 => {
+                        self.open_breaks.set(open - 1);
+                        return TokenSinkResult::Continue;
+                    }
+                    _ => {}
+                }
+            }
+            Token::CharacterTokens(text) if !text.bytes().all(|b| b.is_ascii_whitespace()) => {
+                self.open_breaks.set(0)
+            }
+            Token::NullCharacterToken => self.open_breaks.set(0),
+            _ => {}
         }
-        let mut end = start + 4;
-        while end < bytes.len() && bytes[end].is_ascii_whitespace() {
-            end += 1;
-        }
-        if bytes.get(end) == Some(&b'>') {
-            out.push_str(&xhtml[copied..start]);
-            copied = end + 1;
-            from = copied;
-        }
+        self.tree.process_token(token, line_number)
     }
-    if copied == 0 {
-        return std::borrow::Cow::Borrowed(xhtml);
+
+    fn end(&self) {
+        self.tree.end();
     }
-    out.push_str(&xhtml[copied..]);
-    std::borrow::Cow::Owned(out)
+
+    fn adjusted_current_node_present_but_not_in_html_namespace(&self) -> bool {
+        self.tree
+            .adjusted_current_node_present_but_not_in_html_namespace()
+    }
+}
+
+/// `html5ever::parse_document` with `ChapterTokens` between the
+/// tokenizer and the tree builder; the loop is the driver's.
+fn parse_chapter(xhtml: &str) -> RcDom {
+    let tokens = ChapterTokens {
+        tree: TreeBuilder::new(RcDom::default(), Default::default()),
+        open_breaks: Cell::new(0),
+    };
+    let tokenizer = Tokenizer::new(tokens, Default::default());
+    let input = BufferQueue::default();
+    input.push_back(StrTendril::from_slice(xhtml));
+    while !matches!(tokenizer.feed(&input), TokenizerResult::Done) {}
+    tokenizer.end();
+    tokenizer.sink.tree.sink.finish()
 }
 
 /// `element`, `.class`, or `element.class`; anything else is None.
@@ -756,10 +793,7 @@ impl Walker {
     /// Parses one chapter and walks it. html5ever never fails; malformed
     /// markup yields whatever text it holds.
     pub fn walk_chapter(&mut self, xhtml: &str) {
-        let xhtml = without_br_end_tags(xhtml);
-        let dom = html5ever::parse_document(RcDom::default(), Default::default())
-            .from_utf8()
-            .one(xhtml.as_bytes());
+        let dom = parse_chapter(xhtml);
         self.walk(&dom.document);
         self.flush();
     }
@@ -1927,16 +1961,181 @@ mod tests {
         assert_eq!(lines.line(&source, 1), "b");
     }
 
+    /// The text of a chapter's first paragraph, the blanks around each
+    /// break taken off: a break is a `\n`.
+    fn lines_of(body: &str) -> String {
+        let (blocks, source, _) = walk(&format!("<html><body>{body}</body></html>"));
+        let text: String = spans_of(&blocks[0])
+            .iter()
+            .map(|s| s.text(&source))
+            .collect();
+        text.split('\n')
+            .map(str::trim)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// A lone `</br>` is a break, as HTML reads it. Other end tags, a
+    /// comment, an escaped tag and a tag cut by the chapter's end are
+    /// read as html5ever reads them.
     #[test]
-    fn the_end_tags_of_br_are_left_out_and_nothing_else() {
-        assert_eq!(without_br_end_tags("a</br>b</BR >c</br\n>d"), "abcd");
-        for kept in ["</b>", "</brx>", "</ br>", "<br/>", "&lt;/br&gt;", "a</br"] {
-            assert_eq!(without_br_end_tags(kept), kept);
+    fn a_lone_end_tag_of_br_is_a_break() {
+        for (body, expected) in [
+            ("<p>one</br>two</p>", "one\ntwo"),
+            ("<p>one</BR >two</p>", "one\ntwo"),
+            ("<p>one</br\n>two</p>", "one\ntwo"),
+            ("<p>one</br>two</br>three</p>", "one\ntwo\nthree"),
+            ("<p>one</b>two</p>", "onetwo"),
+            ("<p>one</brx>two</p>", "onetwo"),
+            ("<p>one</ br>two</p>", "onetwo"),
+            ("<p>one&lt;/br&gt;two</p>", "one</br>two"),
+        ] {
+            assert_eq!(lines_of(body), expected, "{body}");
         }
-        assert!(matches!(
-            without_br_end_tags("no break here"),
-            std::borrow::Cow::Borrowed(_)
-        ));
+        let (blocks, source, _) = walk("<p>one</br");
+        assert_eq!(spans_of(&blocks[0])[0].text(&source), "one");
+        let (blocks, source, _) =
+            walk("<html><body><pre>pre three</br>pre four</pre></body></html>");
+        let BlockKind::CodeBlock { lines, .. } = &blocks[0].kind else {
+            panic!("expected a code block, got {:?}", blocks[0].kind);
+        };
+        assert_eq!(lines.len(), 2, "a break in the pre");
+        assert_eq!(lines.line(&source, 1), "pre four");
+    }
+
+    /// `</br>` and `<br>` inside an alt text or the text of a `<textarea>`
+    /// are text, not tags.
+    #[test]
+    fn an_end_tag_of_br_in_an_alt_text_or_raw_text_is_text() {
+        for (body, expected) in [
+            ("<p><img alt=\"first</br>second\"/></p>", "first</br>second"),
+            ("<p><textarea>ta</br>tb</textarea></p>", "ta</br>tb"),
+            ("<p><img alt=\"<br>\"/>one</br>two</p>", "<br>one\ntwo"),
+        ] {
+            assert_eq!(lines_of(body), expected, "{body}");
+        }
+    }
+
+    /// html5ever reads `</br class="x">` and `</br/>` as end tags `br`:
+    /// after a `<br>` they close it.
+    #[test]
+    fn an_end_tag_of_br_with_attributes_or_a_slash_closes_its_br() {
+        for body in [
+            "<p>one<br></br class=\"x\">two</p>",
+            "<p>one<br></br/>two</p>",
+            "<p>one<br></br title=\">\">two</p>",
+        ] {
+            assert_eq!(lines_of(body), "one\ntwo", "{body}");
+        }
+    }
+
+    /// Blanks, a comment and a tag between a `<br>` and its end tag leave
+    /// it open; text closes it, as HTML reads a `<br>`. A self-closed
+    /// `<br/>` opens nothing.
+    #[test]
+    fn what_stands_between_a_br_and_its_end_tag() {
+        for (body, expected) in [
+            ("<p>one<br> </br>two</p>", "one\ntwo"),
+            ("<p>one<br>\n</br>two</p>", "one\ntwo"),
+            ("<p>one<br>\r\n</br>two</p>", "one\ntwo"),
+            ("<p>one<br>\r</br>two</p>", "one\ntwo"),
+            ("<p>one<br><!-- c --></br>two</p>", "one\ntwo"),
+            ("<p>one<br><a id=\"fp12\"></a></br>two</p>", "one\ntwo"),
+            ("<p>é<br></br>漢</p>", "é\n漢"),
+            ("<p>one<br><br></br></br>two</p>", "one\n\ntwo"),
+            ("<p>a<br>b</br>c</p>", "a\nb\nc"),
+            ("<p>a<br>&nbsp;</br>b</p>", "a\n\nb"),
+            ("<p>one<br/></br>two</p>", "one\n\ntwo"),
+            ("<p>one<br />\n</br>two</p>", "one\n\ntwo"),
+        ] {
+            assert_eq!(lines_of(body), expected, "{body}");
+        }
+    }
+
+    /// The breaks of a paragraph against a plain model of the rule, on
+    /// random runs of the tags of `br`, blanks, comments, anchors and
+    /// words between two words. HTML reads each tag of `br` as a break.
+    /// The end tag that closes an open `<br>` is no break, and a word
+    /// closes the open ones. The words come out whole.
+    #[test]
+    #[ignore]
+    fn fuzz_chapter_breaks() {
+        use proptest::prelude::*;
+        #[derive(Clone, Copy)]
+        enum Kind {
+            Open,
+            SelfClosed,
+            End,
+            Blank,
+            Tag,
+            Word(&'static str),
+        }
+        const PIECES: &[(&str, Kind)] = &[
+            ("<br>", Kind::Open),
+            ("<BR clear=\"all\">", Kind::Open),
+            ("<br/>", Kind::SelfClosed),
+            ("<br />", Kind::SelfClosed),
+            ("</br>", Kind::End),
+            ("</BR >", Kind::End),
+            ("</br class=\"x\">", Kind::End),
+            ("</br/>", Kind::End),
+            (" ", Kind::Blank),
+            ("\r\n", Kind::Blank),
+            ("<!-- c -->", Kind::Tag),
+            ("<a id=\"fp1\"></a>", Kind::Tag),
+            ("w", Kind::Word("w")),
+            ("é", Kind::Word("é")),
+            ("&nbsp;", Kind::Word("")),
+        ];
+        let config = ProptestConfig {
+            failure_persistence: None,
+            ..ProptestConfig::default()
+        };
+        proptest!(config, |(picks in prop::collection::vec(0..PIECES.len(), 0..40))| {
+            let mut body = String::from("<html><body><p>x");
+            let mut words = String::from("x");
+            let (mut open, mut breaks) = (0usize, 0usize);
+            for &i in &picks {
+                let (markup, kind) = PIECES[i];
+                body.push_str(markup);
+                match kind {
+                    Kind::Open => {
+                        open += 1;
+                        breaks += 1;
+                    }
+                    Kind::SelfClosed => breaks += 1,
+                    Kind::End if open > 0 => open -= 1,
+                    Kind::End => breaks += 1,
+                    Kind::Word(shown) => {
+                        open = 0;
+                        words.push_str(shown);
+                    }
+                    Kind::Blank | Kind::Tag => {}
+                }
+            }
+            body.push_str("y</p></body></html>");
+            words.push('y');
+            let (blocks, source, _) = walk(&body);
+            let text: String = spans_of(&blocks[0])
+                .iter()
+                .map(|s| s.text(&source))
+                .collect();
+            prop_assert_eq!(text.matches('\n').count(), breaks, "{:?}", body);
+            let shown: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+            prop_assert_eq!(shown, words, "{:?}", body);
+        });
+    }
+
+    /// A value that ends in "important" with no `!` is read whole.
+    #[test]
+    fn important_with_no_bang_is_part_of_the_value() {
+        assert_eq!(without_important("right important"), "right important");
+        assert_eq!(without_important("unimportant"), "unimportant");
+        assert_eq!(without_important("right ! important"), "right");
+        let e = EmphasisTable::declarations("text-align: right important");
+        assert_eq!(e.place(), None);
+        let e = EmphasisTable::declarations("font-family: monospace important");
+        assert!(!e.set.mono && e.clear.mono);
     }
 
     /// The gaps the read of `030b3de` named: a break before alt text, in
