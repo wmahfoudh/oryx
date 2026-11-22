@@ -6500,9 +6500,10 @@ fn chunk_metrics(runs: &[TextRun], x0: f32, y: DocY) -> (DocY, f32, DocY) {
 /// the first word after the cut, the model offsets of the cut span
 /// shifted by the bytes skipped, so selection and copy stay exact. The
 /// chunk starts a new line whole, from its first word, when no word
-/// fits, when the first line would end inside a word, or when the chunk
-/// reads right to left: shaped alone, such a line is laid out right to
-/// left and lands over the text before the equation. Answers the
+/// fits, when the first word fits only without the blank before it,
+/// when the first line would end inside a word, or when the chunk reads
+/// right to left: shaped alone, such a line is laid out right to left
+/// and lands over the text before the equation. Answers the
 /// remainder's marks and height; marks at the end of the runs mean the
 /// whole chunk joined the line.
 #[allow(clippy::too_many_arguments)]
@@ -6539,7 +6540,8 @@ fn split_after_equation(
     // The cut: where the first visual line of the chunk, shaped in the
     // room left, ends. No cut when nothing fits (a first line of a blank
     // alone, which shaping trims, or wider than the room, a word that
-    // cannot break) or when the line would end inside a word.
+    // cannot break), when the first word fits only without its blank,
+    // or when the line would end inside a word.
     let mut cut: Option<(usize, usize)> = None;
     if room > 0.0 && !rtl {
         shape_block_lines(

@@ -6631,6 +6631,132 @@ fn words_with_a_subscript_that_join_an_image_s_line_keep_its_baseline() {
     );
 }
 
+#[test]
+fn a_superscript_alone_after_an_inline_image_keeps_its_raise() {
+    // The chunk between two images is the raised or lowered run alone:
+    // it joins the open line by the line's baseline and keeps its
+    // raise, and the next image follows it. Before Task 430 the
+    // superscript fell onto the next line and the image covered it.
+    let img = "<img src=\"small.png\" width=\"14\" height=\"14\">";
+    let (doc, l) = lay_lone(
+        &format!("Text {img}<sup>2</sup> {img} end, and low {img}<sub>3</sub> {img} end.\n"),
+        1000.0,
+        DirectionMode::Auto,
+    );
+    let text = run_with(&l, &doc, "Text");
+    let mut faults = Vec::new();
+    for (mark, raised, image) in [("2", true, 1), ("3", false, 3)] {
+        let r = find_text(&l, &doc, mark);
+        let before = &l.images[image - 1];
+        let after = &l.images[image];
+        if raised && r.baseline > text.baseline - DocY::from(3.0) {
+            faults.push(format!(
+                "\"2\" sits at baseline {}, the line at {}",
+                r.baseline, text.baseline
+            ));
+        }
+        if !raised && r.baseline < text.baseline + DocY::from(1.0) {
+            faults.push(format!(
+                "\"3\" sits at baseline {}, the line at {}",
+                r.baseline, text.baseline
+            ));
+        }
+        if r.x < before.x + before.width - 0.5 {
+            faults.push(format!(
+                "{mark:?} starts at {}, inside the image before it",
+                r.x
+            ));
+        }
+        if after.x < r.x + r.width - 0.5 {
+            faults.push(format!(
+                "the image after {mark:?} starts at {}, over it",
+                after.x
+            ));
+        }
+        if (after.y - before.y).abs() > DocY::from(0.5) {
+            faults.push(format!(
+                "the image after {mark:?} is at {}, the one before at {}",
+                after.y, before.y
+            ));
+        }
+    }
+    assert!(faults.is_empty(), "{}", faults.join("\n"));
+}
+
+#[test]
+fn a_raised_mark_that_opens_a_line_before_a_formula_keeps_its_raise() {
+    // A superscript or a footnote mark alone before a formula, at the
+    // start of a paragraph or after a hard break: the mark is raised on
+    // the line and the formula follows it. Before Task 430 the mark was
+    // drawn under the line, the formula at the margin over it; after a
+    // break the line sat a third of a size high.
+    let cases = [
+        (
+            "<sup>2</sup>$x^2$ starts a paragraph with a raised mark.\n",
+            "2",
+            " starts",
+        ),
+        (
+            "[^1]$y^2$ starts with a footnote mark.\n\n[^1]: A note.\n",
+            "1",
+            " starts",
+        ),
+        (
+            "A line then a break.<br><sup>3</sup>$z^2$ after the break.\n",
+            "3",
+            " after",
+        ),
+    ];
+    let mut faults = Vec::new();
+    for (src, mark, words) in cases {
+        let (doc, l) = lay2(src, 1000.0);
+        let after = run_with(&l, &doc, words);
+        let r = l
+            .runs
+            .iter()
+            .find(|r| r.block == after.block && l.run_text(&doc, r) == mark)
+            .unwrap_or_else(|| panic!("{src:?}: no run of the mark"));
+        let (left, right) = formula_box(&l, after.block);
+        if r.baseline > after.baseline - DocY::from(3.0) {
+            faults.push(format!(
+                "{src:?}: the mark sits at baseline {}, the line at {}",
+                r.baseline, after.baseline
+            ));
+        }
+        if left < r.x + r.width - 0.5 {
+            faults.push(format!(
+                "{src:?}: the formula starts at {left}, over the mark that ends at {}",
+                r.x + r.width
+            ));
+        }
+        if after.x < right - 0.5 {
+            faults.push(format!(
+                "{src:?}: the words start at {}, inside the formula",
+                after.x
+            ));
+        }
+        let first = l
+            .runs
+            .iter()
+            .find(|r| l.run_text(&doc, r).contains("A line then"))
+            .map(|r| r.baseline);
+        // A line that holds the small mark alone when it is shaped takes
+        // its baseline from the mark's font, 2.3 px higher than a line of
+        // body text at the default size, formula or not: the bound leaves
+        // that out, and catches the 8.9 px of before.
+        if let Some(first) = first {
+            let gap = after.baseline - first;
+            let size = cfg().body_size;
+            if gap < DocY::from(metrics::LINE_HEIGHT * size - 0.15 * size) {
+                faults.push(format!(
+                    "{src:?}: the line after the break is {gap} under the first"
+                ));
+            }
+        }
+    }
+    assert!(faults.is_empty(), "{}", faults.join("\n"));
+}
+
 /// The junctions of a formula and the word after it that sit on one
 /// line, and those of them with no space: the word's letter starts at
 /// the formula's right edge. A justified line cuts the space into a run
@@ -6699,13 +6825,16 @@ fn a_word_after_an_inline_formula_keeps_its_space_in_a_justified_paragraph() {
     let words: Vec<String> = (0..50).map(|k| format!("w{k} $a^2_i$ z{k}")).collect();
     let src = format!("{}\n", words.join(" "));
     let mut faults = Vec::new();
+    let mut junctions = 0;
     for w in (300..=1000).step_by(20) {
         let (doc, l) = lay_justified(&src, w as f32);
-        let (_, glued) = junctions_without_a_space(&l, &doc);
+        let (on_one_line, glued) = junctions_without_a_space(&l, &doc);
+        junctions += on_one_line;
         if glued > 0 {
             faults.push((w, glued));
         }
     }
+    assert!(junctions > 500, "{junctions} junctions on one line");
     assert!(
         faults.is_empty(),
         "words glued to a formula, by width: {faults:?}"
