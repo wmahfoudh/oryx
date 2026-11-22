@@ -42,6 +42,12 @@
 - A line of spaces or tabs after a link definition is now read as a blank line. Before, it was read as text, and the paragraph after it started with an empty line.
 - At a zoom step, each line of a centered or right-aligned paragraph is now in its place. Before, some lines moved sideways with the line above them.
 - A centered or right-aligned paragraph, on a page or in a book, now has each line in its place when it holds superscripts, subscripts, footnote marks or inline code larger than the text. Before, its short lines stayed at the left.
+- A formula or a small picture after a subscript, a superscript or a footnote mark now comes after the last word of its line. Before, it was drawn over the words or over the mark.
+- A word after a formula now keeps its space at the end of a line. If the word only fits without its space, it goes to the next line. Before, it was glued to the formula.
+- In a book, text aligned to the right, such as a date or a signature, is now at the right. Before, it was at the left.
+- In a book, each line break now starts a new line. Before, the lines of a poem or an address ran together.
+- In some books, the lines of a code listing are now one under the other. Before, a blank line followed each line.
+- A book's styles marked `!important` in capitals, or with a space after the `!`, are now read. Before, they were ignored.
 - `Alt+Escape` in the Go to line field, or in the field that asks for a file's path, now closes the field as `Escape` does. Before, it quit Oryx or left the editor.
 - On Linux without a desktop portal and without zenity, the Save of the unsaved-changes question on a note or on piped text is now followed by what the question announced, once you have given the path: Oryx quits, opens the file, or starts the new file or note. Before, the text was saved and nothing followed.
 - The case key (`Ctrl+U`) now changes the first word of a footnote's text. Before, that word was left as typed.
