@@ -1794,6 +1794,205 @@ fn each_line_of_an_aligned_paragraph_is_placed_on_its_own_at_a_zoom_step() {
     }
 }
 
+/// The left and right ends of each visual line of block `block` in `l`,
+/// top to bottom, its runs and the pills behind its inline code. A
+/// raised or lowered run has a top of its own, so the runs are grouped
+/// by baseline: a run sits at most 0.3 of the body size above its line's
+/// baseline and 0.12 below it, and the next line's baseline is 1.5 body
+/// sizes down. A pill is 0.8 of the line high, its middle about 0.35 of
+/// the body size above the baseline, and reaches 3 px past its text.
+fn line_spans_by_baseline(l: &LayoutDoc, block: usize, body: f32) -> Vec<(f32, f32)> {
+    let mut runs: Vec<&TextRun> = l.runs.iter().filter(|r| r.block == block).collect();
+    runs.sort_by(|a, b| a.baseline.total_cmp(&b.baseline));
+    let mut lines: Vec<(DocY, f32, f32)> = Vec::new();
+    for r in runs {
+        match lines.last_mut() {
+            Some(line) if r.baseline - line.0 < DocY::from(0.6 * body) => {
+                line.1 = line.1.min(r.x);
+                line.2 = line.2.max(r.x + r.width);
+            }
+            _ => lines.push((r.baseline, r.x, r.x + r.width)),
+        }
+    }
+    for rect in l.rects.iter().filter(|r| r.height < DocY::from(1.5 * body)) {
+        let middle = rect.y + rect.height / 2.0;
+        // The line's baseline here is its first run's, the highest of
+        // the line: a superscript's when one leads.
+        if let Some(line) = lines.iter_mut().find(|line| {
+            let lowest = line.0 + DocY::from(0.42 * body);
+            middle > line.0 - DocY::from(0.9 * body) && middle < lowest
+        }) {
+            line.1 = line.1.min(rect.x);
+            line.2 = line.2.max(rect.x + rect.width);
+        }
+    }
+    lines
+        .into_iter()
+        .map(|(_, left, right)| (left, right))
+        .collect()
+}
+
+/// Each line of block `block` of the layout of `body` in a centered and
+/// a right-aligned division, against the place of one word aligned the
+/// same way. The zooms are 1.0 and five steps up. A line wider than the
+/// content stays where it is, as `align_lines` leaves it: a pill reaches
+/// 3 px past the text, so a full line that starts or ends with inline
+/// code is one.
+fn assert_each_aligned_line_in_place(body: &str, notes: &str, base: ViewConfig) {
+    let mut zoom = 1.0;
+    for step in 0..6 {
+        if step > 0 {
+            zoom = settings::step_zoom(zoom, settings::ZOOM_STEP);
+        }
+        let c = ViewConfig {
+            zoom,
+            ..base.clone()
+        };
+        for (align, at) in [("center", 0.5_f32), ("right", 1.0)] {
+            let lay_at = |source: &str| {
+                let doc = markdown::parse(source);
+                let mut media = MediaCache::offline(PathBuf::from("."));
+                let l = layout(
+                    &doc,
+                    &Theme::default_dark(),
+                    &mut fonts(),
+                    &mut media,
+                    &c,
+                    1000.0,
+                );
+                (doc, l)
+            };
+            let (_, one) = lay_at(&format!("<div align=\"{align}\">\n\nx\n\n</div>\n"));
+            let mark = one.runs[0].x + one.runs[0].width * at;
+            let (_, left_one) = lay_at("x\n");
+            let (_, right_one) = lay_at("<div align=\"right\">\n\nx\n\n</div>\n");
+            let content = right_one.runs[0].x + right_one.runs[0].width - left_one.runs[0].x;
+            let (doc, l) = lay_at(&format!(
+                "<div align=\"{align}\">\n\n{body}\n\n</div>\n\n{notes}"
+            ));
+            let block = doc
+                .blocks
+                .iter()
+                .position(|b| matches!(b.kind, BlockKind::Paragraph { .. }))
+                .expect("the aligned paragraph");
+            let lines = line_spans_by_baseline(&l, block, c.body_size * zoom);
+            assert!(
+                lines.len() > 4,
+                "zoom {zoom}, {align}: {} lines",
+                lines.len()
+            );
+            let placed = lines
+                .iter()
+                .enumerate()
+                .filter(|(_, (left, right))| right - left <= content + 0.5);
+            let mut checked = 0;
+            for (n, (left, right)) in placed {
+                let place = left + (right - left) * at;
+                assert!(
+                    (place - mark).abs() < 1.0,
+                    "zoom {zoom}, {align}, line {n} of {}: at {place}, not {mark}",
+                    lines.len()
+                );
+                checked += 1;
+            }
+            assert!(checked > 4, "zoom {zoom}, {align}: {checked} lines placed");
+        }
+    }
+}
+
+/// A raised or lowered run starts above or below its line's top, and its
+/// box reached the line before or after it: the paragraph became one
+/// group and its short last line was not aligned (the fourth read of
+/// Task 418, finding 3).
+#[test]
+fn superscripts_subscripts_and_footnote_marks_keep_each_aligned_line_in_place() {
+    let words: Vec<String> = (0..200)
+        .map(|i| match i % 6 {
+            0 => format!("x<sup>{i}</sup>"),
+            2 => format!("y<sub>{i}</sub>"),
+            4 => format!("z[^n{i}]"),
+            _ => format!("w{i}"),
+        })
+        .collect();
+    let notes: String = (0..200)
+        .filter(|i| i % 6 == 4)
+        .map(|i| format!("[^n{i}]: Note {i}.\n"))
+        .collect();
+    assert_each_aligned_line_in_place(&words.join(" "), &notes, cfg());
+}
+
+/// Inline code larger than the body text had a box of 1.5 times its own
+/// size, taller than the body's line, which reached the next line (the
+/// fourth read of Task 418, finding 4).
+#[test]
+fn larger_inline_code_keeps_each_aligned_line_in_place() {
+    let words: Vec<String> = (0..150)
+        .map(|i| match i % 3 {
+            0 => format!("`code {i}`"),
+            1 => format!("text{i} more"),
+            _ => format!("plain{i}"),
+        })
+        .collect();
+    let base = ViewConfig {
+        body_size: 14.0,
+        code_size: 20.0,
+        ..cfg()
+    };
+    assert_each_aligned_line_in_place(&words.join(" "), "", base);
+}
+
+/// The runs whose box was right keep it, to the bit: a plain run of the
+/// text, a list's marker and a code line have no rise and a line height
+/// of 1.5 times their size, the box `align_lines` read before Task 429.
+#[test]
+fn plain_runs_markers_and_code_lines_keep_their_box_for_alignment() {
+    let doc = markdown::parse(
+        "A plain line with **bold** and *italic* words.\n\n- an item\n- another\n\n1. first\n\n```rust\nfn main() {}\n```\n",
+    );
+    let l = lay_doc(&doc, 800.0, &mut fonts());
+    assert!(l.runs.len() > 8, "{} runs", l.runs.len());
+    for r in &l.runs {
+        assert_eq!(r.rise, 0.0, "{:?}", l.run_text(&doc, r));
+        assert_eq!(
+            r.line_height.to_bits(),
+            (metrics::LINE_HEIGHT * r.size).to_bits(),
+            "{:?}",
+            l.run_text(&doc, r)
+        );
+    }
+}
+
+/// A book's centered paragraph with superscripts, the common shape of a
+/// book's footnote marks, goes through the same alignment.
+#[test]
+fn a_book_s_centered_paragraph_with_superscripts_keeps_each_line_in_place() {
+    let words: Vec<String> = (0..200)
+        .map(|i| match i % 5 {
+            0 => format!("x<sup>{i}</sup>"),
+            2 => format!("y<sub>{i}</sub>"),
+            _ => format!("w{i}"),
+        })
+        .collect();
+    let css = "p { text-align: center }";
+    let one = lay_book(css, "<html><body><p>x</p></body></html>", 1000.0);
+    let mark = one.runs[0].x + one.runs[0].width * 0.5;
+    let l = lay_book(
+        css,
+        &format!("<html><body><p>{}</p></body></html>", words.join(" ")),
+        1000.0,
+    );
+    let lines = line_spans_by_baseline(&l, l.runs[0].block, cfg().body_size);
+    assert!(lines.len() > 4, "{} lines", lines.len());
+    for (n, (left, right)) in lines.iter().enumerate() {
+        let place = (left + right) / 2.0;
+        assert!(
+            (place - mark).abs() < 1.0,
+            "line {n} of {}: at {place}, not {mark}",
+            lines.len()
+        );
+    }
+}
+
 /// The text of each visual line of `l`, its runs joined in order, top
 /// to bottom, with the line's top.
 fn line_texts(l: &LayoutDoc, doc: &Document) -> Vec<(DocY, String)> {

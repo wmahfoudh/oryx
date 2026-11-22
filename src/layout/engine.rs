@@ -120,12 +120,20 @@ pub enum TextRef {
 pub struct TextRun {
     pub text: TextRef,
     pub x: f32,
-    /// Top of the line box.
+    /// Top of the run's box: its line box's top, less the run's rise.
     pub y: DocY,
     /// Baseline y, used by glyph rasterization at paint.
     pub baseline: DocY,
     pub width: f32,
     pub size: f32,
+    /// How far the run sits above its line: positive for a superscript
+    /// or a footnote mark, negative for a subscript. Its line box starts
+    /// at `y + rise`.
+    pub rise: f32,
+    /// The height of the run's line box, by which an aligned block tells
+    /// one visual line from the next. A marker's and a code line's is
+    /// 1.5 times the run's size.
+    pub line_height: f32,
     /// Id into `LayoutDoc::families`.
     pub family: u16,
     pub weight: u16,
@@ -5108,6 +5116,11 @@ fn shape_segment_chunk(
                 out.side_ref(&line_text[start_byte..end_byte])
             };
             let family = out.family_id(&st.family);
+            debug_assert!(
+                line_height > 0.0 && st.rise.abs() < line_height,
+                "a run sits inside one line: rise {}, line height {line_height}",
+                st.rise
+            );
             out.runs.push(TextRun {
                 text,
                 x,
@@ -5115,6 +5128,8 @@ fn shape_segment_chunk(
                 baseline,
                 width,
                 size: st.size,
+                rise: st.rise,
+                line_height,
                 family,
                 weight: st.weight.0,
                 italic: st.italic,
@@ -7195,7 +7210,9 @@ fn fit_side_text(
 /// the left edge, 0.5 centers it, 1.0 puts it against the right edge.
 /// A line may move either way, since right-to-left text starts on the
 /// right; a line wider than the content stays where it is. Lines are
-/// clustered by a vertical overlap of more than half a pixel.
+/// clustered by a vertical overlap of more than half a pixel. A text run
+/// counts with its line box, not its own: a raised run and inline code
+/// larger than the body would reach the line before or after.
 #[allow(clippy::too_many_arguments)]
 fn align_lines(
     out: &mut LayoutDoc,
@@ -7211,7 +7228,8 @@ fn align_lines(
     // 2 images, 3 math glyphs.
     let mut items: Vec<(DocY, DocY, u8, usize)> = Vec::new();
     for (i, r) in out.runs.iter().enumerate().skip(runs_mark) {
-        items.push((r.y, r.y + DocY::from(metrics::LINE_HEIGHT * r.size), 0, i));
+        let top = r.y + DocY::from(r.rise);
+        items.push((top, top + DocY::from(r.line_height), 0, i));
     }
     for (i, r) in out.rects.iter().enumerate().skip(rects_mark) {
         items.push((r.y, r.y + r.height, 1, i));
@@ -7347,6 +7365,8 @@ fn shape_side_text(
             baseline: DocY::from(run.line_y),
             width: run_width,
             size,
+            rise: 0.0,
+            line_height: metrics::LINE_HEIGHT * size,
             family,
             weight: Weight::NORMAL.0,
             italic: false,
@@ -7926,6 +7946,8 @@ fn shape_code_chunk(
                 baseline: y0 + DocY::from(run.line_y),
                 width: group.width,
                 size,
+                rise: 0.0,
+                line_height: metrics::LINE_HEIGHT * size,
                 family,
                 weight: if bold {
                     bold_weight.0
