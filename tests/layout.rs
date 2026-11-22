@@ -7145,6 +7145,36 @@ fn lay_book(css: &str, xhtml: &str, width: f32) -> LayoutDoc {
 }
 
 #[test]
+fn a_line_break_in_a_book_starts_a_new_line() {
+    // Verse and addresses: each `<br>` starts a line at the margin,
+    // whatever follows it. Before, plain text after a break stayed on
+    // the line of the text before it.
+    let l = lay_book(
+        "",
+        "<html><body><p>Roses are red,<br/>Violets are blue.<br/><i>Sugar is sweet,</i></p></body></html>",
+        1000.0,
+    );
+    let margin = l.runs.iter().map(|r| r.x).fold(f32::MAX, f32::min);
+    let mut starts: Vec<(DocY, f32)> = Vec::new();
+    for r in &l.runs {
+        match starts
+            .iter_mut()
+            .find(|(y, _)| (*y - r.baseline).abs() < DocY::from(0.5))
+        {
+            Some((_, x)) => *x = x.min(r.x),
+            None => starts.push((r.baseline, r.x)),
+        }
+    }
+    assert_eq!(starts.len(), 3, "three lines: {starts:?}");
+    for (y, x) in &starts {
+        assert!(
+            (x - margin).abs() < 0.5,
+            "the line at {y} starts at {x}, not at the margin {margin}"
+        );
+    }
+}
+
+#[test]
 fn a_book_s_right_aligned_paragraph_ends_each_line_at_the_right() {
     // A dateline, a signature, the source under a quotation: each line
     // ends at the content's right edge, as under markdown's

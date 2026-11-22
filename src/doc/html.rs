@@ -246,11 +246,8 @@ impl EmphasisTable {
                 continue;
             };
             let property = property.trim().to_ascii_lowercase();
-            let value = value
-                .trim()
-                .trim_end_matches("!important")
-                .trim()
-                .to_ascii_lowercase();
+            let value = value.trim().to_ascii_lowercase();
+            let value = value.trim_end_matches("!important").trim().to_string();
             match property.as_str() {
                 "font-style" => {
                     if value.contains("italic") || value.contains("oblique") {
@@ -1156,14 +1153,17 @@ impl Walker {
     }
 
     /// Appends text in the current style, merging into the last span
-    /// when the styles match.
+    /// when the styles match. A `<br>` stays a span of its own: the
+    /// layout breaks a line only at a span that is `"\n"` alone.
     fn push_str(&mut self, text: &str) {
         if text.is_empty() {
             return;
         }
         let style = self.style();
         match self.spans.last_mut() {
-            Some(last) if Self::same_style(last, &style) => last.raw_text_mut().push_str(text),
+            Some(last) if last.raw_text() != "\n" && Self::same_style(last, &style) => {
+                last.raw_text_mut().push_str(text)
+            }
             _ => {
                 let mut span = style;
                 span.set_text(text);
@@ -1803,6 +1803,83 @@ mod tests {
             !b.right && !b.centered && !b.left,
             "the attribute says left"
         );
+    }
+
+    /// `<br>` is a span of its own, `"\n"` alone, whatever follows it, so
+    /// the layout breaks the line there. Text in the same style after it
+    /// was merged into it, and the lines ran together.
+    #[test]
+    fn a_line_break_stays_a_span_of_its_own() {
+        let cases = [
+            (
+                "<p>Roses are red,<br/>Violets are blue.</p>",
+                "Violets are blue.",
+            ),
+            (
+                "<p>Roses are red,<br/>\nViolets are blue.</p>",
+                "Violets are blue.",
+            ),
+            ("<p>One<br/><i>Two</i></p>", "Two"),
+            ("<p>She said<br/><q>yes</q></p>", "\u{201C}yes\u{201D}"),
+            ("<p>A<br/>B<br/>C</p>", "B\nC"),
+        ];
+        for (xhtml, after) in cases {
+            let (blocks, source, _) = walk(&format!("<html><body>{xhtml}</body></html>"));
+            let texts: Vec<&str> = spans_of(&blocks[0])
+                .iter()
+                .map(|s| s.text(&source))
+                .collect();
+            let at = texts
+                .iter()
+                .position(|t| *t == "\n")
+                .unwrap_or_else(|| panic!("{xhtml}: no break alone in {texts:?}"));
+            assert_eq!(texts[at + 1..].concat(), after, "{xhtml}: {texts:?}");
+            assert!(
+                texts.iter().all(|t| *t == "\n" || !t.contains('\n')),
+                "{xhtml}: a break inside a span of text: {texts:?}"
+            );
+        }
+        let (blocks, source, _) = walk("<html><body><p>A<br/><br/>B</p></body></html>");
+        let texts: Vec<&str> = spans_of(&blocks[0])
+            .iter()
+            .map(|s| s.text(&source))
+            .collect();
+        assert_eq!(
+            texts,
+            ["A", "\n", "\n", "B"],
+            "two breaks leave a blank line"
+        );
+    }
+
+    /// `!important` is read in any case, as CSS reads its keywords.
+    #[test]
+    fn important_in_any_case_leaves_the_value_read() {
+        for (declaration, place) in [
+            ("text-align: right !IMPORTANT", Place::Right),
+            ("text-align: center !Important", Place::Center),
+            ("text-align: right!important", Place::Right),
+        ] {
+            let e = EmphasisTable::declarations(declaration);
+            assert_eq!(e.place(), Some(place), "{declaration}");
+        }
+        assert!(
+            EmphasisTable::declarations("font-weight: bold !IMPORTANT")
+                .set
+                .bold
+        );
+    }
+
+    /// A `style` attribute places the block, and wins over the class.
+    #[test]
+    fn a_style_attribute_places_the_block_at_the_right() {
+        let (blocks, _, _) =
+            walk("<html><body><p style=\"text-align: right\">Yours.</p></body></html>");
+        assert!(blocks[0].right && !blocks[0].centered);
+        let (blocks, _, _) = walk_styled(
+            ".c { text-align: center }",
+            "<html><body><p class=\"c\" style=\"text-align:right\">Yours.</p></body></html>",
+        );
+        assert!(blocks[0].right && !blocks[0].centered, "the style wins");
     }
 
     /// A value the walker does not read, `inherit` among them, leaves
