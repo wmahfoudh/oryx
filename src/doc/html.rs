@@ -66,6 +66,8 @@ pub struct EmphasisFlags {
     pub sup: bool,
     pub mono: bool,
     pub centered: bool,
+    /// Text placed at the right: each line ends at the right edge.
+    pub right: bool,
     /// Justified text: not centered, and no word on where a single
     /// line goes, so a lone image under it is not placed.
     pub justified: bool,
@@ -79,6 +81,15 @@ pub struct Emphasis {
     pub clear: EmphasisFlags,
 }
 
+/// Where a block's lines go, by the word of a paragraph or a division.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Place {
+    Center,
+    Right,
+    /// Left, start or end: where the lines' direction puts them.
+    Natural,
+}
+
 macro_rules! each_trait {
     ($macro:ident) => {
         $macro!(italic);
@@ -89,6 +100,7 @@ macro_rules! each_trait {
         $macro!(sup);
         $macro!(mono);
         $macro!(centered);
+        $macro!(right);
         $macro!(justified);
     };
 }
@@ -107,8 +119,8 @@ impl Emphasis {
         each_trait!(merge);
     }
 
-    /// Whether any span trait is mentioned; centered is a block trait
-    /// and rides its own path.
+    /// Whether any span trait is mentioned; the place of the lines is a
+    /// block trait and goes its own path.
     fn mentions_inline(&self) -> bool {
         let (s, c) = (&self.set, &self.clear);
         s.italic
@@ -127,13 +139,14 @@ impl Emphasis {
             || c.mono
     }
 
-    /// The block trait: Some(true) centered, Some(false) explicitly not,
-    /// None unmentioned.
-    fn centered(&self) -> Option<bool> {
+    /// The block trait: where the lines go, None unmentioned.
+    fn place(&self) -> Option<Place> {
         if self.set.centered {
-            Some(true)
+            Some(Place::Center)
+        } else if self.set.right {
+            Some(Place::Right)
         } else if self.clear.centered {
-            Some(false)
+            Some(Place::Natural)
         } else {
             None
         }
@@ -305,27 +318,24 @@ impl EmphasisTable {
                     }
                     _ => {}
                 },
-                "text-align" => match value.as_str() {
-                    "center" => {
-                        out.set.centered = true;
-                        out.clear.centered = false;
-                        out.set.justified = false;
-                        out.clear.justified = true;
-                    }
-                    "left" | "right" | "start" | "end" => {
-                        out.set.centered = false;
-                        out.clear.centered = true;
-                        out.set.justified = false;
-                        out.clear.justified = true;
-                    }
-                    "justify" => {
-                        out.set.centered = false;
-                        out.clear.centered = true;
-                        out.set.justified = true;
-                        out.clear.justified = false;
-                    }
-                    _ => {}
-                },
+                // `left`, `start` and `end` leave the lines where their
+                // direction puts them: the walker does not know the
+                // direction, which `start` and `end` follow.
+                "text-align" => {
+                    let (centered, right, justified) = match value.as_str() {
+                        "center" => (true, false, false),
+                        "right" => (false, true, false),
+                        "left" | "start" | "end" => (false, false, false),
+                        "justify" => (false, false, true),
+                        _ => continue,
+                    };
+                    out.set.centered = centered;
+                    out.clear.centered = !centered;
+                    out.set.right = right;
+                    out.clear.right = !right;
+                    out.set.justified = justified;
+                    out.clear.justified = !justified;
+                }
                 "font-family" => {
                     let mut families = value
                         .split(',')
@@ -574,10 +584,9 @@ pub struct Walker {
     /// A whitespace run is pending; the next visible character spends it.
     space: bool,
     quote_depth: u8,
-    /// The word of each open paragraph or division on its alignment:
-    /// Some(true) centered, Some(false) placed left or right, None when
-    /// it says nothing.
-    center: Vec<Option<bool>>,
+    /// The word of each open paragraph or division on where its lines
+    /// go, None when it says nothing.
+    place: Vec<Option<Place>>,
     bold: u16,
     italic: u16,
     strike: u16,
@@ -631,7 +640,7 @@ impl Walker {
             spans: Vec::new(),
             space: false,
             quote_depth: 0,
-            center: Vec::new(),
+            place: Vec::new(),
             bold: 0,
             italic: 0,
             strike: 0,
@@ -920,22 +929,23 @@ impl Walker {
                 // stylesheet says nothing: the attribute is a presentational
                 // hint, which any stylesheet rule overrides. Justify places
                 // nothing: a justified single line stays where it starts.
-                let word = match emphasis.centered() {
-                    Some(true) => Some(true),
-                    Some(false) => (!emphasis.justified()).then_some(false),
-                    None => match attr("align").map(|a| a.to_ascii_lowercase()) {
-                        Some(a) if a == "center" => Some(true),
-                        Some(a) if a == "left" || a == "right" => Some(false),
+                let word = match emphasis.place() {
+                    Some(Place::Natural) => (!emphasis.justified()).then_some(Place::Natural),
+                    Some(place) => Some(place),
+                    None => match attr("align").map(|a| a.to_ascii_lowercase()).as_deref() {
+                        Some("center") => Some(Place::Center),
+                        Some("right") => Some(Place::Right),
+                        Some("left") => Some(Place::Natural),
                         _ => None,
                     },
                 };
                 // The content pending before this block belongs to the
                 // enclosing blocks and takes their words, not this one's.
                 self.flush();
-                self.center.push(word);
+                self.place.push(word);
                 self.children(node);
                 self.flush();
-                self.center.pop();
+                self.place.pop();
             }
             "blockquote" if !in_table => {
                 self.flush();
@@ -1322,9 +1332,9 @@ impl Walker {
             return;
         };
         if let Some(caption) = t.caption.take() {
-            self.center.push(Some(true));
+            self.place.push(Some(Place::Center));
             self.emit(BlockKind::Paragraph { spans: caption });
-            self.center.pop();
+            self.place.pop();
         }
         if t.header.is_empty() && t.rows.is_empty() {
             return;
@@ -1451,14 +1461,17 @@ impl Walker {
         // The word of the innermost block that carries one places the
         // block, as the model says; with no word said, a lone image is
         // centered.
-        let word = self.center.iter().rev().find_map(|word| *word);
-        let centered = word.unwrap_or_else(|| self.lone_image(&kind));
+        let word = self.place.iter().rev().find_map(|word| *word);
+        let centered = match word {
+            Some(place) => place == Place::Center,
+            None => self.lone_image(&kind),
+        };
         self.blocks.push(Block {
             quote_depth: self.quote_depth,
             alert: None,
             range,
             centered,
-            right: false,
+            right: word == Some(Place::Right),
             left: false,
             details,
             kind,
@@ -1712,6 +1725,93 @@ mod tests {
             blocks[0].centered,
             "a centered paragraph inside a left division"
         );
+    }
+
+    /// A dateline, a signature: `text-align: right` and `align="right"`
+    /// place the block at the right, as markdown's `align="right"` does.
+    #[test]
+    fn text_align_right_places_the_block_at_the_right() {
+        let (blocks, _, _) = walk_styled(
+            ".r { text-align: right }",
+            "<html><body><p class=\"r\">London, May 1889.</p></body></html>",
+        );
+        let b = &blocks[0];
+        assert!(
+            b.right && !b.centered && !b.left,
+            "the stylesheet says right"
+        );
+        let (blocks, _, _) = walk("<html><body><p align=\"RIGHT\">Yours, S. H.</p></body></html>");
+        let b = &blocks[0];
+        assert!(
+            b.right && !b.centered && !b.left,
+            "the attribute says right"
+        );
+        let (blocks, _, _) = walk_styled(
+            "div { text-align: right }",
+            "<html><body><div><p>One.</p><p>Two.</p></div></body></html>",
+        );
+        assert!(
+            blocks.iter().all(|b| b.right && !b.centered),
+            "the paragraphs take the division's word"
+        );
+        let (blocks, _, _) = walk_styled(
+            ".r { text-align: right }",
+            "<html><body><p class=\"r\"><img src=\"a.png\"/></p></body></html>",
+        );
+        let b = &blocks[0];
+        assert!(b.right && !b.centered, "a lone image the book puts right");
+    }
+
+    /// The innermost word places the block: right inside a centered
+    /// division, centered inside a right one, and left inside a right
+    /// one; justify says nothing, so the division's word holds.
+    #[test]
+    fn the_innermost_word_places_a_block_between_center_and_right() {
+        let css = ".c { text-align: center } .r { text-align: right } \
+                   .l { text-align: left } .j { text-align: justify }";
+        let (blocks, _, _) = walk_styled(
+            css,
+            "<html><body><div class=\"c\"><p class=\"r\">A</p><p>B</p></div></body></html>",
+        );
+        assert!(blocks[0].right && !blocks[0].centered, "A says right");
+        assert!(blocks[1].centered && !blocks[1].right, "B takes center");
+        let (blocks, _, _) = walk_styled(
+            css,
+            "<html><body><div class=\"r\"><p class=\"c\">A</p><p>B</p><p class=\"l\">C</p><p class=\"j\">D</p></div></body></html>",
+        );
+        assert!(blocks[0].centered && !blocks[0].right, "A says center");
+        assert!(blocks[1].right && !blocks[1].centered, "B takes right");
+        assert!(!blocks[2].right && !blocks[2].centered, "C says left");
+        assert!(blocks[3].right && !blocks[3].centered, "D takes right");
+    }
+
+    /// `left`, `start`, `end` and `justify` place nothing at the right:
+    /// the lines start where their direction puts them, as before.
+    #[test]
+    fn left_start_end_and_justify_place_no_block_at_the_right() {
+        for value in ["left", "start", "end", "justify"] {
+            let (blocks, _, _) = walk_styled(
+                &format!("p {{ text-align: {value} }}"),
+                "<html><body><p>Words.</p></body></html>",
+            );
+            let b = &blocks[0];
+            assert!(!b.right && !b.centered && !b.left, "{value}");
+        }
+        let (blocks, _, _) = walk("<html><body><p align=\"left\">Words.</p></body></html>");
+        let b = &blocks[0];
+        assert!(
+            !b.right && !b.centered && !b.left,
+            "the attribute says left"
+        );
+    }
+
+    /// A value the walker does not read, `inherit` among them, leaves
+    /// the place unsaid and the rest of the rule read.
+    #[test]
+    fn an_unknown_text_align_value_leaves_the_rest_of_the_rule_read() {
+        let e = EmphasisTable::declarations("text-align: inherit; font-style: italic");
+        assert!(e.set.italic);
+        assert_eq!(e.place(), None);
     }
 
     #[test]

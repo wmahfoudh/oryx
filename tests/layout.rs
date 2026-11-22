@@ -7144,6 +7144,47 @@ fn lay_book(css: &str, xhtml: &str, width: f32) -> LayoutDoc {
     )
 }
 
+#[test]
+fn a_book_s_right_aligned_paragraph_ends_each_line_at_the_right() {
+    // A dateline, a signature, the source under a quotation: each line
+    // ends at the content's right edge, as under markdown's
+    // `align="right"`. Before, the book read `right` as left.
+    let reference = &lay("<p align=\"right\">x</p>", 1000.0).runs[0];
+    let edge = reference.x + reference.width;
+    let words: Vec<String> = (0..120).map(|i| format!("w{i}")).collect();
+    let words = words.join(" ");
+    let cases = [
+        (
+            "p.r { text-align: right }",
+            format!("<p class=\"r\">{words}</p>"),
+        ),
+        ("", format!("<p align=\"right\">{words}</p>")),
+        (
+            "div.r { text-align: right }",
+            format!("<div class=\"r\"><p>London, May 1889.</p><p>{words}</p></div>"),
+        ),
+    ];
+    for (css, body) in cases {
+        let l = lay_book(css, &format!("<html><body>{body}</body></html>"), 1000.0);
+        let mut blocks: Vec<usize> = l.runs.iter().map(|r| r.block).collect();
+        blocks.dedup();
+        let mut checked = 0;
+        for block in blocks {
+            for (n, (_, right)) in line_spans_by_baseline(&l, block, cfg().body_size)
+                .iter()
+                .enumerate()
+            {
+                assert!(
+                    (right - edge).abs() < 1.0,
+                    "{css:?}, block {block}, line {n}: ends at {right}, not {edge}"
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked > 3, "{css:?}: {checked} lines");
+    }
+}
+
 /// The read of Task 358: a book that places its lone image keeps the
 /// image where the book put it; only a book that says nothing gets the
 /// middle.

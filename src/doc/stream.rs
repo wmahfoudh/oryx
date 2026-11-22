@@ -102,6 +102,8 @@ fn block_matches(kept: &Block, incoming: &Block) -> bool {
         || kept.alert != incoming.alert
         || kept.range != incoming.range
         || kept.centered != incoming.centered
+        || kept.right != incoming.right
+        || kept.left != incoming.left
         || kept.details != incoming.details
     {
         return false;
@@ -401,6 +403,22 @@ mod tests {
             panic!("an unresolved reference cannot splice")
         };
         assert_eq!(blocks, crate::doc::markdown::parse(source).blocks);
+    }
+
+    #[test]
+    fn a_block_placed_elsewhere_in_the_full_parse_replaces() {
+        // A prefix block that the full parse places at the right, or at
+        // the left, is not kept with the prefix's place.
+        let prefix = crate::doc::markdown::parse("para one\n\npara two\n").blocks;
+        for side in ["right", "left"] {
+            let mut full = prefix.clone();
+            if side == "right" {
+                full[1].right = true;
+            } else {
+                full[1].left = true;
+            }
+            assert!(matches!(swap(&prefix, full), Swap::Replace(_)), "{side}");
+        }
     }
 
     #[test]
