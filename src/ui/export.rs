@@ -167,15 +167,15 @@ const ROWS: [Row; 9] = [
 impl Row {
     fn label(self) -> &'static str {
         match self {
-            Row::Theme => "theme",
-            Row::BodyFamily => "body font",
-            Row::BodySize => "body size",
-            Row::CodeFamily => "code font",
-            Row::CodeSize => "code size",
-            Row::Page => "page",
-            Row::Orientation => "orientation",
-            Row::PageNumbers => "page numbers",
-            Row::Justify => "justify",
+            Row::Theme => "Theme",
+            Row::BodyFamily => "Body font",
+            Row::BodySize => "Body size",
+            Row::CodeFamily => "Code font",
+            Row::CodeSize => "Code size",
+            Row::Page => "Page",
+            Row::Orientation => "Orientation",
+            Row::PageNumbers => "Page numbers",
+            Row::Justify => "Justify",
             Row::Export => "Export",
         }
     }
@@ -595,6 +595,16 @@ impl Overlay for ExportDialog {
 mod tests {
     use super::*;
     use crate::export::resolve_theme;
+
+    #[test]
+    fn each_row_starts_with_a_capital_letter_and_has_no_other() {
+        for row in ROWS.into_iter().chain([Row::Justify]) {
+            let label = row.label();
+            let mut letters = label.chars();
+            assert!(letters.next().is_some_and(char::is_uppercase), "{label}");
+            assert!(letters.all(|c| !c.is_uppercase()), "{label}");
+        }
+    }
 
     fn settings() -> ExportSettings {
         ExportSettings {

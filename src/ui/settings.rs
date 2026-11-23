@@ -23,21 +23,21 @@ const FOOTER_H: f32 = 30.0;
 const _: () = assert!(HEADER_H + PAD / 2.0 >= LIST_ROW_H && FOOTER_H + PAD / 2.0 >= LIST_ROW_H);
 const PANEL_W: f32 = 420.0;
 /// Where the values start, as a share of the panel's width: past the
-/// longest label in bold, "save on focus loss", with air between.
+/// longest label in bold, "Save on focus loss", with air between.
 const VALUE_COLUMN: f32 = 0.46;
 const RADIUS: f32 = 8.0;
 
 const ROWS: [&str; 10] = [
-    "body font",
-    "code font",
-    "body size",
-    "code size",
-    "interface scale",
-    "line numbers",
-    "word count",
-    "input method",
-    "save on focus loss",
-    "save after a pause",
+    "Body font",
+    "Code font",
+    "Body size",
+    "Code size",
+    "Interface scale",
+    "Line numbers",
+    "Word count",
+    "Input method",
+    "Save on focus loss",
+    "Save after a pause",
 ];
 
 /// The on/off rows' places in `ROWS`.
@@ -794,7 +794,7 @@ mod tests {
         for _ in 0..INPUT_METHOD_ROW {
             press(&mut s, NamedKey::ArrowDown);
         }
-        assert_eq!(ROWS[s.row], "input method");
+        assert_eq!(ROWS[s.row], "Input method");
         let mut seen = Vec::new();
         for key in [
             NamedKey::ArrowRight,
@@ -854,10 +854,19 @@ mod tests {
     }
 
     #[test]
+    fn each_row_starts_with_a_capital_letter_and_has_no_other() {
+        for label in ROWS {
+            let mut letters = label.chars();
+            assert!(letters.next().is_some_and(char::is_uppercase), "{label}");
+            assert!(letters.all(|c| !c.is_uppercase()), "{label}");
+        }
+    }
+
+    #[test]
     fn the_autosave_rows_stand_last() {
         assert_eq!(ROWS.len(), SAVE_PAUSE_ROW + 1);
-        assert_eq!(ROWS.get(SAVE_FOCUS_ROW), Some(&"save on focus loss"));
-        assert_eq!(ROWS.get(SAVE_PAUSE_ROW), Some(&"save after a pause"));
+        assert_eq!(ROWS.get(SAVE_FOCUS_ROW), Some(&"Save on focus loss"));
+        assert_eq!(ROWS.get(SAVE_PAUSE_ROW), Some(&"Save after a pause"));
     }
 
     #[test]

@@ -141,7 +141,7 @@ While Oryx is busy with the open file, a small dot shows in the bottom right cor
 
 `Ctrl+Plus` and `Ctrl+Minus` zoom in and out, and so does the mouse wheel with `Ctrl` held.
 
-Oryx follows the scale of your display, so text and controls have the intended size on a scaled screen, like a laptop at 200%. The `interface scale` setting adjusts this size from -50% to +100%, and Oryx remembers it.
+Oryx follows the scale of your display, so text and controls have the intended size on a scaled screen, like a laptop at 200%. The `Interface scale` setting adjusts this size from -50% to +100%, and Oryx remembers it.
 
 On a touch screen, a swipe scrolls the document, the sidebar and the dialogs, and keeps scrolling for a moment when released while moving. A tap clicks, and pinching with two fingers zooms the document.
 
@@ -211,7 +211,7 @@ The replace field only exists in the editor. Search works everywhere.
 
 `Ctrl+S` saves. Lines you did not touch are written back unchanged, and each line keeps its own line ending, so a Windows file or an old Mac file stays as it was. A dot next to the file name in the title means there are unsaved changes. `Ctrl+Shift+S` saves under a new name, also while reading.
 
-Autosave is off by default and has two settings (`Ctrl+,`). `save on focus loss` saves the file when you switch to another window, and `save after a pause` saves it once you stop typing for the time you choose, from 5 seconds to 15 minutes. Autosave does not write over a change another program made to the file. Oryx tells you and waits for your `Ctrl+S`.
+Autosave is off by default and has two settings (`Ctrl+,`). `Save on focus loss` saves the file when you switch to another window, and `Save after a pause` saves it once you stop typing for the time you choose, from 5 seconds to 15 minutes. Autosave does not write over a change another program made to the file. Oryx tells you and waits for your `Ctrl+S`.
 
 Closing, quitting or reloading with unsaved changes asks first: `S` saves, `D` discards, `Escape` goes back to editing. If another program changes the file while you have unsaved edits, Oryx shows a notice and leaves your edits alone. If the file is deleted or moved, `Ctrl+S` writes it back.
 
