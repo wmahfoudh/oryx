@@ -12271,22 +12271,49 @@ mod tests {
         }
     }
 
-    /// The input log has the keys typed. It is in a build only when the
-    /// build asks for it, and a release asks for nothing.
-    #[test]
-    fn the_input_log_is_a_build_option_that_is_off_by_default() {
-        let manifest: toml::Table = include_str!("../Cargo.toml")
-            .parse()
-            .expect("the manifest is TOML");
+    /// The features a build with no flag turns on, by a manifest's
+    /// table: the default ones, and those they name.
+    fn default_features(manifest: &str) -> Vec<String> {
+        let manifest: toml::Table = manifest.parse().expect("the manifest is TOML");
         let features = manifest
             .get("features")
             .and_then(|features| features.as_table())
             .expect("the manifest has a table of features");
-        assert!(features.contains_key("input-log"), "the option exists");
-        let default = features.get("default").and_then(|list| list.as_array());
+        let mut on = vec!["default".to_string()];
+        let mut at = 0;
+        while at < on.len() {
+            let named = features.get(&on[at]).and_then(|list| list.as_array());
+            for name in named.into_iter().flatten().filter_map(|name| name.as_str()) {
+                if !on.iter().any(|seen| seen == name) {
+                    on.push(name.to_string());
+                }
+            }
+            at += 1;
+        }
+        on
+    }
+
+    /// The input log has the keys typed. It is in a build only when the
+    /// build asks for it, and a release asks for nothing.
+    #[test]
+    fn the_input_log_is_a_build_option_that_is_off_by_default() {
+        let manifest = include_str!("../Cargo.toml");
         assert!(
-            default.is_none_or(|list| list.iter().all(|name| name.as_str() != Some("input-log"))),
-            "a release is built with the default features"
+            manifest.contains("\ninput-log = []\n"),
+            "the option exists and turns nothing else on"
+        );
+        let on = default_features(manifest);
+        assert!(
+            !on.iter().any(|name| name == "input-log"),
+            "a release is built with the default features: {on:?}"
+        );
+        let through_another =
+            "[features]\ndefault = [\"probe\"]\nprobe = [\"input-log\"]\ninput-log = []\n";
+        assert!(
+            default_features(through_another)
+                .iter()
+                .any(|name| name == "input-log"),
+            "a default feature that names the option turns it on"
         );
     }
 
