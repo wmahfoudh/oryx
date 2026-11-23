@@ -52,6 +52,7 @@
 - On Linux without a desktop portal and without zenity, the Save of the unsaved-changes question on a note or on piped text is now followed by what the question announced, once you have given the path: Oryx quits, opens the file, or starts the new file or note. Before, the text was saved and nothing followed.
 - The case key (`Ctrl+U`) now changes the first word of a footnote's text. Before, that word was left as typed.
 - Enter held in the Go to line field no longer adds empty lines after it goes to the line. A held key now stops repeating once its first press has closed a field or a dialog, or changed the mode.
+- The rows of the settings dialog and of the export dialog now start with a capital letter. Before, they were in small letters.
 
 ## v1.3.0
 
