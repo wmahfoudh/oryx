@@ -854,6 +854,7 @@ mod tests {
         assert!(!editor.field_has_keys(), "the list of roles");
         editor.key(&Key::Named(NamedKey::Enter), false, false);
         assert!(editor.field_has_keys(), "the color field open");
+        assert!(!editor.field_takes_text(), "a hex color is no text");
         editor.key(&Key::Named(NamedKey::Escape), false, false);
         assert!(!editor.field_has_keys(), "the color field closed");
     }

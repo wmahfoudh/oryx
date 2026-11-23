@@ -44,6 +44,9 @@ pub enum Action {
     /// Save the open file after a pause of this many seconds since the
     /// last edit, 0 for never, and persist the choice.
     SetSaveAfterPause(u32),
+    /// Turn the system's input method on or off in the editor and in
+    /// the text fields, and persist the choice.
+    SetInputMethod(bool),
 }
 
 /// What the app should do after an overlay handled an event.
@@ -255,6 +258,12 @@ pub trait Overlay {
     /// Whether one of the overlay's text fields is open and has the
     /// keys, so the app runs the blink for its caret.
     fn field_has_keys(&self) -> bool {
+        false
+    }
+    /// Whether the open field takes any text, a name for one, so that
+    /// the system's input method may be on in it. A field of digits
+    /// or of a hex color says no.
+    fn field_takes_text(&self) -> bool {
         false
     }
 }

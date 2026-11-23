@@ -21,7 +21,7 @@ use oryx::export::{self, ExportPass, ExportSettings};
 use oryx::input::{
     self,
     keymap::{self, Command, KeyOwner},
-    touch,
+    log as input_log, touch,
 };
 use oryx::layout::{
     self, layout_begin, layout_extend, layout_more, metrics, recolor_batch, window_to, ComicFit,
@@ -64,7 +64,7 @@ use oryx::ui::wordcount;
 use winit::application::ApplicationHandler;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::{
-    ElementState, KeyEvent, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent,
+    ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent,
 };
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, ModifiersState, NamedKey, PhysicalKey};
@@ -430,6 +430,8 @@ pub fn run(
         caret_was: None,
         drawn_once: false,
         focused: true,
+        input_method_on: false,
+        input_log: open_input_log(),
         pause_save: autosave::Pause::default(),
         note_seat: None,
         note_copy: autosave::Pause::default(),
@@ -1078,6 +1080,69 @@ fn live_caret(owner: KeyOwner, editing: bool, focused: bool) -> Option<CaretAt> 
     }
 }
 
+/// Whether the system's input method is on. It is on where a live
+/// caret takes text: in the editor, in the search bar, in the path
+/// field and in a dialog's field that takes a name. It is off
+/// wherever a bare letter is a shortcut or an answer, and in a field
+/// of digits or of a hex color. With the setting off it is off
+/// everywhere, and the window is never asked for it.
+fn input_method_wanted(
+    setting: bool,
+    owner: KeyOwner,
+    editing: bool,
+    focused: bool,
+    has_caret: bool,
+    dialog_text: bool,
+) -> bool {
+    if !setting {
+        return false;
+    }
+    match live_caret(owner, editing, focused) {
+        None => false,
+        Some(CaretAt::Text) => has_caret,
+        Some(CaretAt::Field) => match owner {
+            KeyOwner::Search | KeyOwner::Path => true,
+            KeyOwner::Dialog { .. } => dialog_text,
+            KeyOwner::GoTo | KeyOwner::Question | KeyOwner::Text | KeyOwner::Code => false,
+        },
+    }
+}
+
+/// Opens the input log when `ORYX_INPUT_LOG` names a file. Its first
+/// line says the version and the system, and which of Wayland and X11
+/// the session offers.
+fn open_input_log() -> Option<input_log::InputLog> {
+    let path = std::env::var_os("ORYX_INPUT_LOG").filter(|path| !path.is_empty())?;
+    let session = if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        " wayland"
+    } else if std::env::var_os("DISPLAY").is_some() {
+        " x11"
+    } else {
+        ""
+    };
+    let header = format!(
+        "oryx {} {}{session}",
+        env!("CARGO_PKG_VERSION"),
+        std::env::consts::OS
+    );
+    match input_log::InputLog::open(Path::new(&path), &header) {
+        Ok(log) => Some(log),
+        Err(err) => {
+            eprintln!("oryx: no input log: {err}");
+            None
+        }
+    }
+}
+
+fn log_mods(state: ModifiersState) -> input_log::Mods {
+    input_log::Mods {
+        ctrl: state.control_key(),
+        shift: state.shift_key(),
+        alt: state.alt_key(),
+        logo: state.super_key(),
+    }
+}
+
 /// The loop's next wake, rebuilt at every pass: each timer still
 /// running asks for its deadline and the soonest wins. A timer that
 /// stopped asks for nothing, so no lapsed deadline stays behind to spin
@@ -1612,6 +1677,11 @@ struct App {
     /// Whether the window has the keyboard focus. In the background the
     /// caret is not painted and its blink timer does not run.
     focused: bool,
+    /// What Oryx told the window last about the system's input method.
+    /// A window starts with it off. Set in `sync_input_method` alone.
+    input_method_on: bool,
+    /// The input log, open when `ORYX_INPUT_LOG` names a file.
+    input_log: Option<input_log::InputLog>,
     /// The pause save's deadline, armed by every edit.
     pause_save: autosave::Pause,
     /// This Oryx's note folder, claimed at the first note and held to
@@ -2395,6 +2465,75 @@ impl App {
             self.wake_caret();
         }
         live
+    }
+
+    /// Turns the system's input method on or off for the window when
+    /// the rule's answer changes. It runs once per pass of the loop, so
+    /// the answer follows what the last events left: a field opened,
+    /// the editor entered, the focus lost. With the setting off the
+    /// answer is always off, and the window is never asked.
+    fn sync_input_method(&mut self) {
+        let dialog_text = self
+            .overlay
+            .as_ref()
+            .is_some_and(|overlay| overlay.field_takes_text());
+        let wanted = input_method_wanted(
+            self.config.input_method,
+            self.key_owner(),
+            self.mode == edit::Mode::Edit,
+            self.focused,
+            self.caret.is_some(),
+            dialog_text,
+        );
+        if wanted == self.input_method_on {
+            return;
+        }
+        let Some(gfx) = self.gfx.as_ref() else {
+            return;
+        };
+        gfx.window.set_ime_allowed(wanted);
+        self.input_method_on = wanted;
+        if let Some(log) = self.input_log.as_mut() {
+            log.write(&input_log::Record::Allowed(wanted));
+        }
+    }
+
+    /// Writes an event of the keyboard or of the input method to the
+    /// input log, as it arrives and before the window acts on it.
+    fn log_input(&mut self, event: &WindowEvent) {
+        let record = match event {
+            WindowEvent::KeyboardInput {
+                event,
+                is_synthetic,
+                ..
+            } => input_log::Record::Key(input_log::KeyRecord {
+                pressed: event.state == ElementState::Pressed,
+                logical: input_log::key_name(&event.logical_key),
+                keycap: input_log::key_name(&event.key_without_modifiers()),
+                code: input_log::code_name(event.physical_key),
+                text: event.text.as_ref().map(|text| text.to_string()),
+                repeat: event.repeat,
+                synthetic: *is_synthetic,
+                mods: log_mods(self.modifiers),
+                owner: self.key_owner(),
+                editing: self.mode == edit::Mode::Edit,
+            }),
+            WindowEvent::Ime(Ime::Enabled) => input_log::Record::Enabled,
+            WindowEvent::Ime(Ime::Disabled) => input_log::Record::Disabled,
+            WindowEvent::Ime(Ime::Preedit(text, cursor)) => input_log::Record::Preedit {
+                text: text.clone(),
+                cursor: *cursor,
+            },
+            WindowEvent::Ime(Ime::Commit(text)) => input_log::Record::Commit(text.clone()),
+            WindowEvent::Focused(on) => input_log::Record::Focus(*on),
+            WindowEvent::ModifiersChanged(modifiers) => {
+                input_log::Record::Mods(log_mods(modifiers.state()))
+            }
+            _ => return,
+        };
+        if let Some(log) = self.input_log.as_mut() {
+            log.write(&record);
+        }
     }
 
     /// A key or a press while a field has the keys shows its caret at
@@ -6888,6 +7027,7 @@ impl App {
                     ui_scale: self.config.ui_scale,
                     line_numbers: self.config.line_numbers,
                     word_count: self.config.word_count,
+                    input_method: self.config.input_method,
                     save_on_focus_loss: self.config.save_on_focus_loss,
                     save_after_pause: self.config.save_after_pause,
                 },
@@ -8476,6 +8616,10 @@ impl App {
                 self.config.save_on_focus_loss = on;
                 self.view_dirty = true;
             }
+            OverlayResult::Apply(Action::SetInputMethod(on)) => {
+                self.config.input_method = on;
+                self.view_dirty = true;
+            }
             OverlayResult::Apply(Action::SetSaveAfterPause(seconds)) => {
                 self.config.save_after_pause = seconds;
                 self.view_dirty = true;
@@ -9753,6 +9897,7 @@ impl ApplicationHandler for App {
                 wake.by(at);
             }
         }
+        self.sync_input_method();
         let blinking = match self.caret_now() {
             Some(CaretAt::Text) => self.caret.is_some(),
             Some(CaretAt::Field) => true,
@@ -9921,6 +10066,7 @@ impl ApplicationHandler for App {
             self.drops = wayland_drops(&window, self.waker.clone());
         }
         self.gfx = Some(Gfx { window, surface });
+        self.input_method_on = false;
         self.rescale(scale);
         // The panel comes back the way it was left, at its saved width.
         if self.config.sidebar_open {
@@ -9952,6 +10098,9 @@ impl ApplicationHandler for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        if self.input_log.is_some() {
+            self.log_input(&event);
+        }
         match event {
             WindowEvent::CloseRequested => {
                 if self.guard_unsaved(confirm::Pending::Quit) {
@@ -12093,6 +12242,99 @@ mod tests {
     /// that has the keys, or in the editor's text, and nowhere while the
     /// window is in the background or the keys go to a list or a
     /// question.
+    #[test]
+    fn the_input_method_is_on_where_a_caret_takes_text() {
+        use super::{input_method_wanted, KeyOwner};
+        let on = |owner, editing, has_caret, dialog_text| {
+            input_method_wanted(true, owner, editing, true, has_caret, dialog_text)
+        };
+        assert!(!on(KeyOwner::Text, false, false, false), "reading mode");
+        assert!(!on(KeyOwner::Code, false, false, false), "reading mode");
+        assert!(on(KeyOwner::Text, true, true, false), "the editor");
+        assert!(on(KeyOwner::Code, true, true, false), "the editor");
+        assert!(
+            !on(KeyOwner::Text, true, false, false),
+            "the editor with no caret"
+        );
+        for editing in [true, false] {
+            assert!(
+                on(KeyOwner::Search, editing, editing, false),
+                "the search bar"
+            );
+            assert!(
+                on(KeyOwner::Path, editing, editing, false),
+                "the path field"
+            );
+            assert!(
+                on(KeyOwner::Dialog { field: true }, editing, editing, true),
+                "a name in a dialog"
+            );
+            assert!(
+                !on(KeyOwner::Dialog { field: true }, editing, editing, false),
+                "a hex color in a dialog"
+            );
+            assert!(!on(KeyOwner::GoTo, editing, editing, false), "digits");
+            assert!(
+                !on(KeyOwner::Question, editing, editing, true),
+                "a question"
+            );
+            assert!(
+                !on(KeyOwner::Dialog { field: false }, editing, editing, true),
+                "a list"
+            );
+        }
+    }
+
+    /// With the setting off the answer is off in each state, so the
+    /// window is never asked for the input method. With it on, the
+    /// answer is off wherever no caret is live.
+    #[test]
+    fn the_input_method_is_off_with_the_setting_off_and_where_no_caret_is_live() {
+        use super::{input_method_wanted, live_caret, KeyOwner};
+        let owners = [
+            KeyOwner::Question,
+            KeyOwner::Dialog { field: false },
+            KeyOwner::Dialog { field: true },
+            KeyOwner::Path,
+            KeyOwner::GoTo,
+            KeyOwner::Search,
+            KeyOwner::Text,
+            KeyOwner::Code,
+        ];
+        let both = [true, false];
+        let mut on = 0;
+        for owner in owners {
+            for editing in both {
+                for focused in both {
+                    for has_caret in both {
+                        for dialog_text in both {
+                            let state = format!(
+                                "{owner:?}, editing {editing}, focused {focused}, \
+                                 caret {has_caret}, text {dialog_text}"
+                            );
+                            let wanted = |setting| {
+                                input_method_wanted(
+                                    setting,
+                                    owner,
+                                    editing,
+                                    focused,
+                                    has_caret,
+                                    dialog_text,
+                                )
+                            };
+                            assert!(!wanted(false), "the setting off: {state}");
+                            if live_caret(owner, editing, focused).is_none() {
+                                assert!(!wanted(true), "no live caret: {state}");
+                            }
+                            on += usize::from(wanted(true));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(on > 0, "the walk reaches a state where it is on");
+    }
+
     #[test]
     fn the_live_caret_is_where_the_keys_go() {
         use super::{live_caret, CaretAt, KeyOwner};

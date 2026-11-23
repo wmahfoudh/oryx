@@ -373,6 +373,10 @@ impl Overlay for ThemeBrowser {
         self.renaming.is_some()
     }
 
+    fn field_takes_text(&self) -> bool {
+        self.renaming.is_some()
+    }
+
     fn draw(&mut self, painter: &mut Painter, theme: &Theme, caret_lit: bool) {
         let mut rename_box: Option<RenameBox> = None;
         let (w, h) = (painter.width(), painter.height());
@@ -868,10 +872,13 @@ mod tests {
         let mut browser = ThemeBrowser::new(vec![dir.clone()], None, "mine");
         std::fs::remove_dir_all(&dir).unwrap();
         assert!(!browser.field_has_keys(), "the list alone");
+        assert!(!browser.field_takes_text(), "the list alone");
         browser.start_rename(0, "mine".to_string());
         assert!(browser.field_has_keys(), "the rename field open");
+        assert!(browser.field_takes_text(), "a name is text");
         browser.key(&Key::Named(NamedKey::Escape), false, false);
         assert!(!browser.field_has_keys(), "the rename field closed");
+        assert!(!browser.field_takes_text(), "the rename field closed");
     }
 
     /// Forty themes in a folder, the browser open on one of them.

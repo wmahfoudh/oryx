@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 pub mod keymap;
+pub mod log;
 pub mod touch;
 
 /// Two clicks closer together than this count as one double click, wherever

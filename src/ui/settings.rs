@@ -27,7 +27,7 @@ const PANEL_W: f32 = 420.0;
 const VALUE_COLUMN: f32 = 0.46;
 const RADIUS: f32 = 8.0;
 
-const ROWS: [&str; 9] = [
+const ROWS: [&str; 10] = [
     "body font",
     "code font",
     "body size",
@@ -35,6 +35,7 @@ const ROWS: [&str; 9] = [
     "interface scale",
     "line numbers",
     "word count",
+    "input method",
     "save on focus loss",
     "save after a pause",
 ];
@@ -42,9 +43,20 @@ const ROWS: [&str; 9] = [
 /// The on/off rows' places in `ROWS`.
 const LINE_NUMBERS_ROW: usize = 5;
 const WORD_COUNT_ROW: usize = 6;
-const SAVE_FOCUS_ROW: usize = 7;
+const INPUT_METHOD_ROW: usize = 7;
+const SAVE_FOCUS_ROW: usize = 8;
 /// The pause row steps through `autosave::PAUSES`.
-const SAVE_PAUSE_ROW: usize = 8;
+const SAVE_PAUSE_ROW: usize = 9;
+
+/// The line under the rows: the keys, or what the selected row is for.
+fn hint(row: usize) -> &'static str {
+    match row {
+        INPUT_METHOD_ROW => {
+            "to type Chinese, Japanese or Korean \u{00B7} \u{2190}/\u{2192}: adjust \u{00B7} esc: close"
+        }
+        _ => "enter: change font \u{00B7} \u{2190}/\u{2192}: adjust \u{00B7} esc: close",
+    }
+}
 
 /// Font size bounds for both families.
 pub const SIZE_MIN: f32 = 8.0;
@@ -110,6 +122,7 @@ pub struct Settings {
     ui_scale: f32,
     line_numbers: bool,
     word_count: bool,
+    input_method: bool,
     save_on_focus_loss: bool,
     save_after_pause: u32,
     row: usize,
@@ -127,6 +140,7 @@ pub struct Values {
     pub ui_scale: f32,
     pub line_numbers: bool,
     pub word_count: bool,
+    pub input_method: bool,
     pub save_on_focus_loss: bool,
     pub save_after_pause: u32,
 }
@@ -141,6 +155,7 @@ impl Settings {
             ui_scale,
             line_numbers,
             word_count,
+            input_method,
             save_on_focus_loss,
             save_after_pause,
         } = values;
@@ -153,6 +168,7 @@ impl Settings {
             ui_scale,
             line_numbers,
             word_count,
+            input_method,
             save_on_focus_loss,
             save_after_pause,
             row: 0,
@@ -215,6 +231,12 @@ impl Settings {
             WORD_COUNT_ROW => {
                 self.word_count = !self.word_count;
                 Some(OverlayResult::Apply(Action::SetWordCount(self.word_count)))
+            }
+            INPUT_METHOD_ROW => {
+                self.input_method = !self.input_method;
+                Some(OverlayResult::Apply(Action::SetInputMethod(
+                    self.input_method,
+                )))
             }
             SAVE_FOCUS_ROW => {
                 self.save_on_focus_loss = !self.save_on_focus_loss;
@@ -431,10 +453,12 @@ impl Overlay for Settings {
                             let value = match index {
                                 2 => format!("{}", self.body_size as i32),
                                 3 => format!("{}", self.code_size as i32),
-                                LINE_NUMBERS_ROW | WORD_COUNT_ROW | SAVE_FOCUS_ROW => {
+                                LINE_NUMBERS_ROW | WORD_COUNT_ROW | INPUT_METHOD_ROW
+                                | SAVE_FOCUS_ROW => {
                                     let on = match index {
                                         LINE_NUMBERS_ROW => self.line_numbers,
                                         WORD_COUNT_ROW => self.word_count,
+                                        INPUT_METHOD_ROW => self.input_method,
                                         _ => self.save_on_focus_loss,
                                     };
                                     if on { "on" } else { "off" }.to_string()
@@ -458,7 +482,7 @@ impl Overlay for Settings {
                 painter.text(
                     px + PAD,
                     py + panel_h - FOOTER_H + 6.0,
-                    "enter: change font \u{00B7} \u{2190}/\u{2192}: adjust \u{00B7} esc: close",
+                    hint(self.row),
                     BODY_FAMILY,
                     12.0,
                     400,
@@ -608,6 +632,7 @@ mod tests {
                 ui_scale: 1.0,
                 line_numbers: false,
                 word_count: false,
+                input_method: false,
                 save_on_focus_loss: false,
                 save_after_pause: 0,
             },
@@ -631,6 +656,7 @@ mod tests {
                 ui_scale: 1.0,
                 line_numbers: false,
                 word_count: false,
+                input_method: false,
                 save_on_focus_loss: false,
                 save_after_pause: 0,
             },
@@ -762,6 +788,45 @@ mod tests {
             seen.push(on);
         }
         assert_eq!(seen, [true, false, true, false]);
+    }
+
+    #[test]
+    fn the_input_method_row_flips_with_the_arrows_space_and_enter() {
+        let mut s = settings();
+        for _ in 0..INPUT_METHOD_ROW {
+            press(&mut s, NamedKey::ArrowDown);
+        }
+        assert_eq!(ROWS[s.row], "input method");
+        let mut seen = Vec::new();
+        for key in [
+            NamedKey::ArrowRight,
+            NamedKey::ArrowLeft,
+            NamedKey::Space,
+            NamedKey::Enter,
+        ] {
+            let OverlayResult::Apply(Action::SetInputMethod(on)) = press(&mut s, key) else {
+                panic!("{key:?} flips the row");
+            };
+            seen.push(on);
+        }
+        assert_eq!(seen, [true, false, true, false]);
+    }
+
+    #[test]
+    fn the_hint_under_the_rows_says_what_the_input_method_row_is_for() {
+        let keys = hint(0);
+        for (row, label) in ROWS.iter().enumerate() {
+            if row == INPUT_METHOD_ROW {
+                assert!(
+                    hint(row).contains("Chinese, Japanese or Korean"),
+                    "{}",
+                    hint(row)
+                );
+                assert!(hint(row).contains("esc: close"), "{}", hint(row));
+            } else {
+                assert_eq!(hint(row), keys, "{label}");
+            }
+        }
     }
 
     #[test]

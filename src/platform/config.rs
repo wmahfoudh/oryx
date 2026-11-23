@@ -67,6 +67,10 @@ pub struct Config {
     /// dialog offers a few choices up to a quarter of an hour; a value
     /// written by hand is honored as it stands, up to the same limit.
     pub save_after_pause: u32,
+    /// Whether the system's input method is on in the editor and in
+    /// the text fields, to type Chinese, Japanese or Korean; off by
+    /// default. An on/off row in the settings dialog.
+    pub input_method: bool,
     /// Where the welcome page's tips stand in their rotation: the index
     /// of the next tip to show. Advances each time the page shows one,
     /// at a launch with no file or on the link under the tip.
@@ -136,6 +140,7 @@ impl Default for Config {
             word_count: false,
             save_on_focus_loss: false,
             save_after_pause: 0,
+            input_method: false,
             tip: 0,
             export: None,
             window: None,
@@ -740,6 +745,7 @@ mod tests {
             word_count: true,
             save_on_focus_loss: true,
             save_after_pause: 5,
+            input_method: true,
             tip: 7,
             export: None,
             window: None,
@@ -1050,6 +1056,21 @@ mod tests {
         let loaded = load_from(&path);
         std::fs::remove_file(&path).unwrap();
         assert!(!loaded.line_numbers);
+    }
+
+    #[test]
+    fn the_input_method_starts_off_and_a_save_keeps_it_on() {
+        assert!(!Config::default().input_method);
+        let path = temp_path("no-input-method-key.toml");
+        std::fs::write(&path, "theme = \"nord\"\n").unwrap();
+        let (mut config, seen) = load_with_baseline(&path);
+        assert!(!config.input_method, "an older config reads off");
+        config.input_method = true;
+        let _ = save_changes(&path, &config, &seen);
+        let on_disk = load_from(&path);
+        std::fs::remove_file(&path).unwrap();
+        assert!(on_disk.input_method, "the choice is kept");
+        assert_eq!(on_disk.theme, "nord");
     }
 
     #[test]
