@@ -1108,13 +1108,20 @@ fn input_method_wanted(
     }
 }
 
-/// Opens the input log when `ORYX_INPUT_LOG` names a file. Its first
-/// line says the version, the system, and on Linux which of Wayland and
-/// X11 the variables name (`log_session`). The log is opened after the
-/// event loop is built. By then the Wayland client has taken
-/// `WAYLAND_SOCKET` out of the environment, so a launch on a socket
-/// that a launcher passed is named by `DISPLAY`, or not at all.
+/// Opens the input log, in a build made with the `input-log` feature,
+/// when `ORYX_INPUT_LOG` names a file. The log has the keys typed: a
+/// release is built without the feature, and does not read the
+/// variable.
+///
+/// The first line says the version, the system, and on Linux which of
+/// Wayland and X11 the variables name (`log_session`). The log is
+/// opened after the event loop is built. By then the Wayland client
+/// has taken `WAYLAND_SOCKET` out of the environment, so a launch on a
+/// socket that a launcher passed is named by `DISPLAY`, or not at all.
 fn open_input_log() -> Option<input_log::InputLog> {
+    if !cfg!(feature = "input-log") {
+        return None;
+    }
     let path = std::env::var_os("ORYX_INPUT_LOG").filter(|path| !path.is_empty())?;
     let session = log_session(
         cfg!(target_os = "linux"),
@@ -12262,6 +12269,25 @@ mod tests {
             }
             assert_eq!(wake.control_flow(), ControlFlow::WaitUntil(near));
         }
+    }
+
+    /// The input log has the keys typed. It is in a build only when the
+    /// build asks for it, and a release asks for nothing.
+    #[test]
+    fn the_input_log_is_a_build_option_that_is_off_by_default() {
+        let manifest: toml::Table = include_str!("../Cargo.toml")
+            .parse()
+            .expect("the manifest is TOML");
+        let features = manifest
+            .get("features")
+            .and_then(|features| features.as_table())
+            .expect("the manifest has a table of features");
+        assert!(features.contains_key("input-log"), "the option exists");
+        let default = features.get("default").and_then(|list| list.as_array());
+        assert!(
+            default.is_none_or(|list| list.iter().all(|name| name.as_str() != Some("input-log"))),
+            "a release is built with the default features"
+        );
     }
 
     #[test]

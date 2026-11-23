@@ -1,6 +1,7 @@
 //! The input log: a line per key event and per event of the system's
 //! input method, as winit hands them to the window. `ORYX_INPUT_LOG`
-//! names the file. The log exists to see what each system and each
+//! names the file, in a build made with the `input-log` feature. The
+//! log exists to see what each system and each
 //! input method sends, and its lines are read back by the tests that
 //! replay them.
 //!

@@ -75,6 +75,12 @@ rustix = { version = "1.1", features = ["event"] }
 wayland-backend = { version = "0.3", features = ["client_system"] }
 wayland-client = "0.31"
 
+# The input log (`ORYX_INPUT_LOG`), for a probe of a system's input
+# method. It writes the keys typed to a file, so a release is built
+# without it.
+[features]
+input-log = []
+
 [profile.release]
 lto = true
 codegen-units = 1
