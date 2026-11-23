@@ -51,9 +51,7 @@ const SAVE_PAUSE_ROW: usize = 9;
 /// The line under the rows: the keys, or what the selected row is for.
 fn hint(row: usize) -> &'static str {
     match row {
-        INPUT_METHOD_ROW => {
-            "to type Chinese, Japanese or Korean \u{00B7} \u{2190}/\u{2192}: adjust \u{00B7} esc: close"
-        }
+        INPUT_METHOD_ROW => "to type Chinese, Japanese or Korean",
         _ => "enter: change font \u{00B7} \u{2190}/\u{2192}: adjust \u{00B7} esc: close",
     }
 }
@@ -817,12 +815,11 @@ mod tests {
         let keys = hint(0);
         for (row, label) in ROWS.iter().enumerate() {
             if row == INPUT_METHOD_ROW {
+                assert_eq!(hint(row), "to type Chinese, Japanese or Korean");
                 assert!(
-                    hint(row).contains("Chinese, Japanese or Korean"),
-                    "{}",
-                    hint(row)
+                    hint(row).chars().count() <= keys.chars().count(),
+                    "no longer than the keys' line, which fits a narrow dialog"
                 );
-                assert!(hint(row).contains("esc: close"), "{}", hint(row));
             } else {
                 assert_eq!(hint(row), keys, "{label}");
             }

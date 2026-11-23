@@ -381,8 +381,16 @@ impl InputLog {
     /// Opens the file to append, so a second launch on the same path
     /// keeps the first one's lines, and writes the header as a comment.
     pub fn open(path: &Path, header: &str) -> std::io::Result<InputLog> {
-        let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-        writeln!(file, "# {header}")?;
+        let mut options = OpenOptions::new();
+        options.create(true).append(true);
+        // The log has the keys typed: a new file is its owner's alone.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(path)?;
+        file.write_all(format!("# {header}\n").as_bytes())?;
         Ok(InputLog {
             file,
             start: Instant::now(),
@@ -393,7 +401,11 @@ impl InputLog {
     /// stop the window.
     pub fn write(&mut self, record: &Record) {
         let ms = u64::try_from(self.start.elapsed().as_millis()).unwrap_or(u64::MAX);
-        let _ = writeln!(self.file, "{}", line(ms, record));
+        // The line and its break go in one write: a second window
+        // of Oryx appends to the same file.
+        let mut text = line(ms, record);
+        text.push('\n');
+        let _ = self.file.write_all(text.as_bytes());
     }
 }
 
@@ -611,6 +623,18 @@ mod tests {
             .map(|(_, record)| record)
             .collect();
         assert_eq!(read, records);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_file_is_made_for_its_owner_alone() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = std::env::temp_dir().join(format!("oryx-input-log-mode-{}", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        drop(InputLog::open(&path, "oryx test").unwrap());
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(mode, 0o600, "{mode:o}");
     }
 
     /// The log's lines against the records they came from: any record,

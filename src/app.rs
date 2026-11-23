@@ -1109,17 +1109,19 @@ fn input_method_wanted(
 }
 
 /// Opens the input log when `ORYX_INPUT_LOG` names a file. Its first
-/// line says the version and the system, and which of Wayland and X11
-/// the session offers.
+/// line says the version, the system, and on Linux which of Wayland and
+/// X11 the variables name (`log_session`). The log is opened after the
+/// event loop is built. By then the Wayland client has taken
+/// `WAYLAND_SOCKET` out of the environment, so a launch on a socket
+/// that a launcher passed is named by `DISPLAY`, or not at all.
 fn open_input_log() -> Option<input_log::InputLog> {
     let path = std::env::var_os("ORYX_INPUT_LOG").filter(|path| !path.is_empty())?;
-    let session = if std::env::var_os("WAYLAND_DISPLAY").is_some() {
-        " wayland"
-    } else if std::env::var_os("DISPLAY").is_some() {
-        " x11"
-    } else {
-        ""
-    };
+    let session = log_session(
+        cfg!(target_os = "linux"),
+        std::env::var_os("WAYLAND_DISPLAY").as_deref(),
+        std::env::var_os("WAYLAND_SOCKET").as_deref(),
+        std::env::var_os("DISPLAY").as_deref(),
+    );
     let header = format!(
         "oryx {} {}{session}",
         env!("CARGO_PKG_VERSION"),
@@ -1131,6 +1133,29 @@ fn open_input_log() -> Option<input_log::InputLog> {
             eprintln!("oryx: no input log: {err}");
             None
         }
+    }
+}
+
+/// Which of Wayland and X11 winit opens the window on, for the first
+/// line of the input log. winit picks Wayland on `WAYLAND_DISPLAY`,
+/// else on `WAYLAND_SOCKET`, and X11 on `DISPLAY` after both. A
+/// variable that is set and empty names nothing. On Windows and on a
+/// Mac the answer is empty, whatever the variables say.
+fn log_session(
+    linux: bool,
+    wayland: Option<&std::ffi::OsStr>,
+    socket: Option<&std::ffi::OsStr>,
+    display: Option<&std::ffi::OsStr>,
+) -> &'static str {
+    let named = |name: Option<&std::ffi::OsStr>| name.is_some_and(|name| !name.is_empty());
+    if !linux {
+        ""
+    } else if named(wayland) || named(socket) {
+        " wayland"
+    } else if named(display) {
+        " x11"
+    } else {
+        ""
     }
 }
 
@@ -1678,7 +1703,8 @@ struct App {
     /// caret is not painted and its blink timer does not run.
     focused: bool,
     /// What Oryx told the window last about the system's input method.
-    /// A window starts with it off. Set in `sync_input_method` alone.
+    /// A window starts with it off, and the mark goes back to off when
+    /// the window is made. `sync_input_method` alone sets it after.
     input_method_on: bool,
     /// The input log, open when `ORYX_INPUT_LOG` names a file.
     input_log: Option<input_log::InputLog>,
@@ -12238,10 +12264,33 @@ mod tests {
         }
     }
 
-    /// The live caret is where the next key lands: in the text field
-    /// that has the keys, or in the editor's text, and nowhere while the
-    /// window is in the background or the keys go to a list or a
-    /// question.
+    #[test]
+    fn the_input_log_names_the_session_winit_opens() {
+        use super::log_session;
+        use std::ffi::OsStr;
+        let s = |text: &'static str| Some(OsStr::new(text));
+        assert_eq!(log_session(true, s("wayland-1"), None, s(":0")), " wayland");
+        assert_eq!(
+            log_session(true, s(""), None, s(":99")),
+            " x11",
+            "an empty name is no display"
+        );
+        assert_eq!(
+            log_session(true, None, s("5"), s(":0")),
+            " wayland",
+            "a launcher's socket"
+        );
+        assert_eq!(log_session(true, None, s(""), s(":0")), " x11");
+        assert_eq!(log_session(true, None, None, s(":0")), " x11");
+        assert_eq!(log_session(true, None, None, s("")), "");
+        assert_eq!(log_session(true, None, None, None), "");
+        assert_eq!(
+            log_session(false, None, None, s(":0")),
+            "",
+            "a Mac with an X server"
+        );
+    }
+
     #[test]
     fn the_input_method_is_on_where_a_caret_takes_text() {
         use super::{input_method_wanted, KeyOwner};
@@ -12335,6 +12384,10 @@ mod tests {
         assert!(on > 0, "the walk reaches a state where it is on");
     }
 
+    /// The live caret is where the next key lands: in the text field
+    /// that has the keys, or in the editor's text, and nowhere while the
+    /// window is in the background or the keys go to a list or a
+    /// question.
     #[test]
     fn the_live_caret_is_where_the_keys_go() {
         use super::{live_caret, CaretAt, KeyOwner};
