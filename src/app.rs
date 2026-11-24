@@ -1725,8 +1725,8 @@ struct App {
     /// The composing text of the system's input method, at the caret
     /// of what has the keys.
     composition: method::Composition,
-    /// The text caret's bar on the last frame that placed it, for the
-    /// system's input method. None when that frame had no text caret.
+    /// The text caret's bar in the last frame drawn, for the system's
+    /// input method. None when that frame placed no text caret.
     text_caret: Option<method::Area>,
     /// The caret's area the system was last given.
     caret_sent: method::Sent,
@@ -2588,7 +2588,8 @@ impl App {
         let event = match event {
             Ime::Enabled => {
                 // On Wayland the protocol resets the caret's place at
-                // each enable.
+                // each enable. The other platforms get the same area
+                // once more.
                 self.caret_sent.forget();
                 method::Event::Enabled
             }
@@ -2620,7 +2621,7 @@ impl App {
     /// with no modifier, so the reader's own guards apply and the text
     /// does there what the key does. The search bar searches again, a
     /// selection in the editor is replaced or wrapped, the go to line
-    /// field refuses what is not a digit.
+    /// field refuses what is neither a digit nor a colon.
     fn type_commit(&mut self, to: CommitTo, text: &str, event_loop: &ActiveEventLoop) {
         self.fling = None;
         let key = Key::Character(SmolStr::new(text));
@@ -12546,11 +12547,11 @@ mod tests {
         );
     }
 
-    /// The input method is wanted only where a caret is live in a
-    /// focused window: in the editor with a caret, and in a field that
-    /// takes text. The rule itself is `method::takes_text`, with its
-    /// tests. The focus is not in it: a window in the background keeps
-    /// the answer of what has the keys.
+    /// The input method is wanted only where a focused window would
+    /// have a live caret: in the editor with a caret, and in a field
+    /// that takes text. The rule is `method::takes_text`, with its
+    /// tests, and it does not read the focus: a window in the
+    /// background keeps the answer of what has the keys.
     #[test]
     fn the_input_method_is_wanted_only_where_a_caret_is_live() {
         use super::{live_caret, KeyOwner};

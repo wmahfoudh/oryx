@@ -95,9 +95,10 @@ pub struct FieldView {
     /// The bytes drawn, which the next frame keeps while the caret
     /// stays inside them.
     pub window: Range<usize>,
-    /// The caret's bar as this paint places it, lit or not: x, y,
-    /// width and height in the window's logical pixels. The system's
-    /// input method opens its candidates beside it.
+    /// The caret's bar as this paint places it, lit or not, in the
+    /// window's logical pixels: the x of the middle of its stroke, its
+    /// top, its width and its height. The system's input method opens
+    /// its candidates beside it.
     pub caret: [f32; 4],
 }
 

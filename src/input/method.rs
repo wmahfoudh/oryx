@@ -286,8 +286,10 @@ impl Sent {
         Some(caret)
     }
 
-    /// The system forgot the area: at each turn on, and on Wayland at
-    /// each `Enabled`. The next one is given again.
+    /// Forgets the area, so the next one is given even when it is the
+    /// same. The system has none in a new window and after a turn on,
+    /// Wayland resets it at each `Enabled`, and under X11 a point is
+    /// given again when a composition opens.
     pub fn forget(&mut self) {
         self.0 = None;
     }
