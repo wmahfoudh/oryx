@@ -95,6 +95,10 @@ pub struct FieldView {
     /// The bytes drawn, which the next frame keeps while the caret
     /// stays inside them.
     pub window: Range<usize>,
+    /// The caret's bar as this paint places it, lit or not: x, y,
+    /// width and height in the window's logical pixels. The system's
+    /// input method opens its candidates beside it.
+    pub caret: [f32; 4],
 }
 
 /// The second row of the bar: the replacement text and whether its
@@ -373,8 +377,8 @@ pub(crate) fn draw_field(
             ui.overlay_fg,
         );
     }
+    let caret_x = left + x_of(field.caret()) + 1.0;
     if focused && caret_lit {
-        let caret_x = left + x_of(field.caret()) + 1.0;
         painter.line(caret_x, top + 1.0, caret_x, top + 19.0, 1.0, ui.overlay_fg);
     }
     // Every boundary from the drawn window's start, the hidden ones
@@ -441,6 +445,7 @@ pub(crate) fn draw_field(
         left,
         offsets,
         window,
+        caret: [caret_x, top + 1.0, 1.0, 18.0],
     }
 }
 

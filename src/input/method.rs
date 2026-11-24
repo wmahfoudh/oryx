@@ -217,9 +217,9 @@ impl Composition {
     /// Forgets a composing text that no longer shows: what has the
     /// keys or the mode changed, the keys take no text there, or the
     /// setting went off. True when a text was forgotten, and a frame
-    /// is to be asked. It is meant to run after each event of the
-    /// window, so that a text never outlives the event that moved the
-    /// keys away from it.
+    /// is to be asked. The window runs it before each of its events
+    /// and before it reads the rule, so that a text never outlives the
+    /// event that moved the keys away from it.
     pub fn settle(&mut self, at: At) -> bool {
         if self.is_empty() || self.shown(at).is_some() {
             return false;
@@ -244,6 +244,58 @@ impl Composition {
         let showed = self.shown(at).is_some();
         self.clear();
         showed
+    }
+}
+
+/// The caret's bar, in the window's physical pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Area {
+    pub x: i32,
+    pub y: i32,
+    pub w: u32,
+    pub h: u32,
+}
+
+/// The position and the size the system gets for the caret, so that
+/// it opens its candidates beside it. X11 takes a point and no size
+/// (`point`): the foot of the bar, under which the candidates open.
+pub fn caret_spot(caret: Area, point: bool) -> ((i32, i32), (u32, u32)) {
+    let y = if point {
+        caret.y.saturating_add_unsigned(caret.h)
+    } else {
+        caret.y
+    };
+    ((caret.x, y), (caret.w, caret.h))
+}
+
+/// The caret's area the system was last given.
+#[derive(Debug, Default)]
+pub struct Sent(Option<Area>);
+
+impl Sent {
+    /// The area to give the system now, if any: the caret's, when the
+    /// input method is on and the area is not the one last given. An
+    /// area given while the input method is off is dropped by the
+    /// system, so none is.
+    pub fn due(&mut self, on: bool, caret: Option<Area>) -> Option<Area> {
+        let caret = caret.filter(|_| on)?;
+        if self.0 == Some(caret) {
+            return None;
+        }
+        self.0 = Some(caret);
+        Some(caret)
+    }
+
+    /// The system forgot the area: at each turn on, and on Wayland at
+    /// each `Enabled`. The next one is given again.
+    pub fn forget(&mut self) {
+        self.0 = None;
+    }
+
+    /// Whether the system has no area: none was given since the last
+    /// `forget`.
+    pub fn is_forgotten(&self) -> bool {
+        self.0.is_none()
     }
 }
 
@@ -755,6 +807,70 @@ mod tests {
                 assert!(!drops_press(setting, key), "{key:?}");
             }
         }
+    }
+
+    // The caret's rectangle given to the system.
+
+    const BAR: Area = Area {
+        x: 120,
+        y: 48,
+        w: 2,
+        h: 22,
+    };
+
+    #[test]
+    fn the_carets_area_is_sent_once_and_again_when_it_moves() {
+        let mut sent = Sent::default();
+        assert_eq!(sent.due(true, Some(BAR)), Some(BAR));
+        assert_eq!(sent.due(true, Some(BAR)), None, "the same place");
+        let moved = Area { x: 131, ..BAR };
+        assert_eq!(sent.due(true, Some(moved)), Some(moved));
+        assert_eq!(sent.due(true, Some(moved)), None);
+        assert_eq!(sent.due(true, Some(BAR)), Some(BAR), "back where it was");
+    }
+
+    #[test]
+    fn nothing_is_sent_while_the_input_method_is_off_or_the_caret_has_no_place() {
+        let mut sent = Sent::default();
+        assert_eq!(
+            sent.due(false, Some(BAR)),
+            None,
+            "off: the system would drop it"
+        );
+        assert_eq!(
+            sent.due(true, None),
+            None,
+            "a caret the layout does not hold"
+        );
+        assert_eq!(
+            sent.due(true, Some(BAR)),
+            Some(BAR),
+            "due at the first chance"
+        );
+        assert_eq!(sent.due(true, None), None);
+        assert_eq!(sent.due(true, Some(BAR)), None, "the system still has it");
+    }
+
+    #[test]
+    fn a_forgotten_area_is_sent_again() {
+        // The system forgets the place at each turn on, and on Wayland
+        // at each `Enabled`.
+        let mut sent = Sent::default();
+        assert!(sent.is_forgotten(), "nothing was given yet");
+        assert_eq!(sent.due(true, Some(BAR)), Some(BAR));
+        assert!(!sent.is_forgotten());
+        sent.forget();
+        assert!(sent.is_forgotten());
+        assert_eq!(sent.due(false, Some(BAR)), None);
+        assert!(sent.is_forgotten(), "nothing is given while off");
+        assert_eq!(sent.due(true, Some(BAR)), Some(BAR));
+        assert_eq!(sent.due(true, Some(BAR)), None);
+    }
+
+    #[test]
+    fn the_system_gets_the_bar_and_under_x11_the_point_at_its_foot() {
+        assert_eq!(caret_spot(BAR, false), ((120, 48), (2, 22)));
+        assert_eq!(caret_spot(BAR, true), ((120, 70), (2, 22)));
     }
 
     // Where a commit goes, a test per row of its table.

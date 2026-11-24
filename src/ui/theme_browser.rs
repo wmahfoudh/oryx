@@ -377,6 +377,17 @@ impl Overlay for ThemeBrowser {
         self.renaming.is_some()
     }
 
+    fn caret_area(&self) -> Option<[f32; 4]> {
+        let (_, field) = self.renaming.as_ref()?;
+        if self.rename_offsets.is_empty() {
+            return None;
+        }
+        // The bar `draw` fills, from the box and the offsets it kept.
+        let (x, y, _, _) = self.rename_rect;
+        let caret = field.caret_offset(&self.rename_offsets);
+        Some([x + 5.0 + caret + 1.5, y + 5.0, 1.5, 17.0])
+    }
+
     fn draw(&mut self, painter: &mut Painter, theme: &Theme, caret_lit: bool) {
         let mut rename_box: Option<RenameBox> = None;
         let (w, h) = (painter.width(), painter.height());

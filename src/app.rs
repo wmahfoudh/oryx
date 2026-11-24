@@ -22,6 +22,7 @@ use oryx::input::{
     self,
     keymap::{self, Command, KeyOwner},
     log as input_log,
+    method::{self, CommitTo},
     route::{self, After, Field, First},
     touch,
 };
@@ -69,7 +70,7 @@ use winit::event::{
     ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent,
 };
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::keyboard::{Key, ModifiersState, NamedKey};
+use winit::keyboard::{Key, ModifiersState, NamedKey, SmolStr};
 use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 use winit::window::{CursorIcon, Window, WindowId};
 
@@ -433,6 +434,10 @@ pub fn run(
         drawn_once: false,
         focused: true,
         input_method_on: false,
+        composition: method::Composition::default(),
+        text_caret: None,
+        caret_sent: method::Sent::default(),
+        caret_point: false,
         input_log: open_input_log(),
         pause_save: autosave::Pause::default(),
         note_seat: None,
@@ -636,9 +641,34 @@ fn file_link_target(target: &str, base: Option<&Path>) -> Option<(PathBuf, Optio
     path.is_file().then_some((path, fragment))
 }
 
-/// Fills the caret bar into a 0RGB frame, clipped to the viewport. The
-/// box arrives in document space; the frame starts at the sidebar inset
-/// and scrolls by `scroll_y`.
+/// The caret's bar on the frame, clipped to it. The box arrives in
+/// document space; the frame starts at the sidebar inset and scrolls
+/// by `scroll_y`. The caret paints it, and the system's input method
+/// opens its candidates beside it.
+fn caret_bar(
+    width: u32,
+    height: u32,
+    inset: u32,
+    scroll_y: DocY,
+    scale: f32,
+    caret: CaretBox,
+) -> method::Area {
+    let bar = ((1.5 * scale).round() as u32).max(1);
+    let x0 = (caret.x.max(0.0) as u32).saturating_add(inset).min(width);
+    let x1 = x0.saturating_add(bar).min(width);
+    let top = layout::relative_y(caret.y, scroll_y);
+    let y0 = (top.max(0.0) as u32).min(height);
+    let y1 = ((top + caret.h).max(0.0) as u32).min(height);
+    method::Area {
+        x: x0 as i32,
+        y: y0 as i32,
+        w: x1 - x0,
+        h: y1 - y0,
+    }
+}
+
+/// Fills the caret bar into a 0RGB frame, clipped to the viewport
+/// (`caret_bar`).
 #[allow(clippy::too_many_arguments)]
 fn draw_caret(
     frame: &mut [u32],
@@ -651,15 +681,11 @@ fn draw_caret(
     color: Rgba,
 ) {
     let value = oryx::paint::pixel(color.r, color.g, color.b);
-    let bar = ((1.5 * scale).round() as u32).max(1);
-    let x0 = (caret.x.max(0.0) as u32).saturating_add(inset).min(width);
-    let x1 = x0.saturating_add(bar).min(width);
-    let top = layout::relative_y(caret.y, scroll_y);
-    let y0 = (top.max(0.0) as u32).min(height);
-    let y1 = ((top + caret.h).max(0.0) as u32).min(height);
-    for y in y0..y1 {
+    let bar = caret_bar(width, height, inset, scroll_y, scale, caret);
+    let (x0, y0) = (bar.x as u32, bar.y as u32);
+    for y in y0..y0 + bar.h {
         let row = (y * width) as usize;
-        for x in x0..x1 {
+        for x in x0..x0 + bar.w {
             frame[row + x as usize] = value;
         }
     }
@@ -1082,32 +1108,14 @@ fn live_caret(owner: KeyOwner, editing: bool, focused: bool) -> Option<CaretAt> 
     }
 }
 
-/// Whether the system's input method is on. It is on where a live
-/// caret takes text: in the editor, in the search bar, in the path
-/// field and in a dialog's field that takes a name. It is off
-/// wherever a bare letter is a shortcut or an answer, and in a field
-/// of digits or of a hex color. With the setting off it is off
-/// everywhere, and the window is never asked for it.
-fn input_method_wanted(
-    setting: bool,
-    owner: KeyOwner,
-    editing: bool,
-    focused: bool,
-    has_caret: bool,
-    dialog_text: bool,
-) -> bool {
-    if !setting {
-        return false;
-    }
-    match live_caret(owner, editing, focused) {
-        None => false,
-        Some(CaretAt::Text) => has_caret,
-        Some(CaretAt::Field) => match owner {
-            KeyOwner::Search | KeyOwner::Path => true,
-            KeyOwner::Dialog { .. } => dialog_text,
-            KeyOwner::GoTo | KeyOwner::Question | KeyOwner::Text | KeyOwner::Code => false,
-        },
-    }
+/// Whether the window's display takes a point for the caret of the
+/// input method, and no area: X11 (winit, `x11/window.rs`).
+fn takes_a_point(window: &Window) -> bool {
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    matches!(
+        window.window_handle().map(|handle| handle.as_raw()),
+        Ok(RawWindowHandle::Xlib(_) | RawWindowHandle::Xcb(_))
+    )
 }
 
 /// Opens the input log, in a build made with the `input-log` feature,
@@ -1714,6 +1722,17 @@ struct App {
     /// A window starts with it off, and the mark goes back to off when
     /// the window is made. `sync_input_method` alone sets it after.
     input_method_on: bool,
+    /// The composing text of the system's input method, at the caret
+    /// of what has the keys.
+    composition: method::Composition,
+    /// The text caret's bar on the last frame that placed it, for the
+    /// system's input method. None when that frame had no text caret.
+    text_caret: Option<method::Area>,
+    /// The caret's area the system was last given.
+    caret_sent: method::Sent,
+    /// The window's display takes a point for the caret and no area:
+    /// X11.
+    caret_point: bool,
     /// The input log, open when `ORYX_INPUT_LOG` names a file.
     input_log: Option<input_log::InputLog>,
     /// The pause save's deadline, armed by every edit.
@@ -2497,24 +2516,34 @@ impl App {
         live
     }
 
-    /// Turns the system's input method on or off for the window when
-    /// the rule's answer changes. It runs once per pass of the loop, so
-    /// the answer follows what the last events left: a field opened,
-    /// the editor entered, the focus lost. With the setting off the
-    /// answer is always off, and the window is never asked.
-    fn sync_input_method(&mut self) {
+    /// What an event of the input method is read in: the setting, what
+    /// has the keys, the mode, and whether the keys take text there.
+    fn method_at(&self) -> method::At {
         let dialog_text = self
             .overlay
             .as_ref()
             .is_some_and(|overlay| overlay.field_takes_text());
-        let wanted = input_method_wanted(
+        method::At::new(
             self.config.input_method,
             self.key_owner(),
             self.mode == edit::Mode::Edit,
-            self.focused,
             self.caret.is_some(),
             dialog_text,
-        );
+        )
+    }
+
+    /// Turns the system's input method on or off for the window when
+    /// the rule's answer changes. It runs once per pass of the loop, so
+    /// the answer follows what the last events left: a field opened,
+    /// the editor entered. With the setting off the answer is always
+    /// off, and the window is never asked.
+    ///
+    /// The focus is not in the rule. The system takes the input method
+    /// from a window that loses the focus by itself, and under X11 an
+    /// off and an on make a new input context, which starts on the
+    /// first keyboard of the input method.
+    fn sync_input_method(&mut self) {
+        let wanted = self.method_at().wanted();
         if wanted == self.input_method_on {
             return;
         }
@@ -2523,9 +2552,155 @@ impl App {
         };
         gfx.window.set_ime_allowed(wanted);
         self.input_method_on = wanted;
+        // The system forgets the caret's place at each turn on.
+        self.caret_sent.forget();
         if let Some(log) = self.input_log.as_mut() {
             log.write(&input_log::Record::Allowed(wanted));
         }
+    }
+
+    /// Forgets a composing text that no longer shows: what has the
+    /// keys or the mode changed, or the rule's answer went off. It
+    /// runs before each event of the window and before the rule is
+    /// read, so each reader of the composition finds it settled, and
+    /// the code that moves the keys has no call to make.
+    fn settle_composition(&mut self) {
+        if self.composition.is_empty() {
+            return;
+        }
+        if self.composition.settle(self.method_at()) {
+            self.request_redraw();
+        }
+    }
+
+    /// Forgets the composing text whatever has the keys: the window
+    /// lost the focus, or another document took the open one's place.
+    fn drop_composition(&mut self) {
+        if self.composition.clear() {
+            self.request_redraw();
+        }
+    }
+
+    /// An event of the system's input method. With the setting off it
+    /// does nothing.
+    fn method_event(&mut self, event: &Ime, event_loop: &ActiveEventLoop) {
+        let at = self.method_at();
+        let event = match event {
+            Ime::Enabled => {
+                // On Wayland the protocol resets the caret's place at
+                // each enable.
+                self.caret_sent.forget();
+                method::Event::Enabled
+            }
+            Ime::Disabled => method::Event::Disabled,
+            Ime::Preedit(text, cursor) => method::Event::Composing {
+                text,
+                cursor: *cursor,
+            },
+            Ime::Commit(text) => method::Event::Commit(text),
+        };
+        let showed = self.composition.shown(at).is_some();
+        let outcome = self.composition.event(at, event);
+        if outcome.redraw {
+            self.request_redraw();
+        }
+        // Under X11 ibus takes the caret's point only from an input
+        // context that a key has reached, so the point given at the
+        // turn on is lost when the caret has not moved since: it is
+        // given again when a composition opens.
+        if self.caret_point && !showed && self.composition.shown(at).is_some() {
+            self.caret_sent.forget();
+        }
+        if let Some((to, text)) = outcome.commit {
+            self.type_commit(to, text, event_loop);
+        }
+    }
+
+    /// Types committed text: its reader gets it as a character key
+    /// with no modifier, so the reader's own guards apply and the text
+    /// does there what the key does. The search bar searches again, a
+    /// selection in the editor is replaced or wrapped, the go to line
+    /// field refuses what is not a digit.
+    fn type_commit(&mut self, to: CommitTo, text: &str, event_loop: &ActiveEventLoop) {
+        self.fling = None;
+        let key = Key::Character(SmolStr::new(text));
+        match to {
+            CommitTo::Editor => {
+                self.edit_key(&key, false, false, false);
+            }
+            CommitTo::Field(Field::Search) => {
+                self.search_key(&key, false, false, false);
+            }
+            CommitTo::Field(Field::Path) => {
+                self.path_key(&key, false, false, false, false, event_loop);
+            }
+            CommitTo::Field(Field::GoTo) => {
+                self.goto_key(&key, false, false, false);
+            }
+            CommitTo::Dialog => {
+                if let Some(overlay) = self.overlay.as_mut() {
+                    let result = overlay.key(&key, false, false);
+                    self.overlay_result(result);
+                }
+            }
+        }
+        self.wake_field_caret();
+    }
+
+    /// The caret's bar of what has the keys, in the window's physical
+    /// pixels: the text caret of the last frame, or the caret of the
+    /// field's last paint.
+    fn caret_area(&self) -> Option<method::Area> {
+        let field = match self.key_owner() {
+            KeyOwner::Text | KeyOwner::Code => return self.text_caret,
+            KeyOwner::Search => {
+                let state = self.search.as_ref()?;
+                if state.replace_focused() {
+                    state.replace_view.caret
+                } else {
+                    state.query_view.caret
+                }
+            }
+            KeyOwner::Path => self.path_ask.as_ref()?.view.caret,
+            KeyOwner::Dialog { field: true } => self.overlay.as_ref()?.caret_area()?,
+            KeyOwner::GoTo | KeyOwner::Question | KeyOwner::Dialog { field: false } => {
+                return None;
+            }
+        };
+        let [x, y, w, h] = field.map(|side| (side * self.scale).round());
+        Some(method::Area {
+            x: x as i32,
+            y: y as i32,
+            w: (w as u32).max(1),
+            h: h as u32,
+        })
+    }
+
+    /// Gives the system the caret's area while the input method is on,
+    /// when it is not the one it has. It runs after `sync_input_method`:
+    /// an area given while the input method is off is dropped.
+    fn sync_caret_area(&mut self) {
+        if !self.input_method_on {
+            return;
+        }
+        let area = self.caret_area();
+        let renewed = self.caret_sent.is_forgotten();
+        let Some(area) = self.caret_sent.due(true, area) else {
+            return;
+        };
+        let Some(gfx) = self.gfx.as_ref() else {
+            return;
+        };
+        let ((x, y), (w, h)) = method::caret_spot(area, self.caret_point);
+        let size = PhysicalSize::new(w, h);
+        // winit keeps the point of an X11 input context and drops one
+        // equal to it: a point given again goes one pixel off first.
+        if renewed && self.caret_point {
+            gfx.window
+                .set_ime_cursor_area(PhysicalPosition::new(x, y + 1), size);
+        }
+        gfx.window
+            .set_ime_cursor_area(PhysicalPosition::new(x, y), size);
     }
 
     /// Writes an event of the keyboard or of the input method to the
@@ -2818,6 +2993,7 @@ impl App {
             return;
         };
         let page = edit::rendered_document(kind, text);
+        self.drop_composition();
         self.outline = OutlineTree::build(&page);
         match (self.edit_park.as_mut(), edit::source_document(kind, text)) {
             (Some(parked), Some(source)) => {
@@ -7695,6 +7871,7 @@ impl App {
         self.open_failed = !opened;
         // A refused file is a page that says why, in the file's place.
         let o = loaded.unwrap_or_else(|err| load::refused(&err));
+        self.drop_composition();
         self.document = o.document;
         self.lossy = o.lossy;
         self.crlf = o.crlf;
@@ -8095,6 +8272,7 @@ impl App {
         if self.path.is_some() || self.help_stash.is_some() {
             return;
         }
+        self.drop_composition();
         self.document = oryx::doc::markdown::parse(help::welcome(self.config.tip as usize));
         self.config.tip = self.config.tip.wrapping_add(1);
         config::save(&self.config);
@@ -8172,6 +8350,7 @@ impl App {
     /// are colored by the guess of the band in view alone, and two of
     /// them near the view keep the guess running without end (issue #9).
     fn show_help_document(&mut self, document: Document, title: &str) {
+        self.drop_composition();
         self.document = document;
         self.start_highlight(load::pending(&self.document));
         self.outline = OutlineTree::build(&self.document);
@@ -8238,6 +8417,7 @@ impl App {
         }
         self.history = stash.history;
         self.view.steps_held = stash.steps_held;
+        self.drop_composition();
         self.document = stash.document;
         self.path = stash.path;
         self.ledger = stash.ledger;
@@ -9608,19 +9788,27 @@ impl App {
                 }
             }
         }
-        if live == Some(CaretAt::Text) && self.blink_visible {
+        // The caret is placed on the lit half of its blink, and on
+        // the other half too while the input method is on: the system
+        // opens its candidates beside the caret.
+        self.text_caret = None;
+        if live == Some(CaretAt::Text) && (self.blink_visible || self.input_method_on) {
             if let Some(c) = self.caret {
                 if let Some(b) = c.geometry(lay, &self.document, &mut self.fonts) {
-                    draw_caret(
-                        &mut buffer,
-                        size.width,
-                        size.height,
-                        inset,
-                        frame_y,
-                        self.scale,
-                        b,
-                        self.theme.text.body,
-                    );
+                    let (w, h) = (size.width, size.height);
+                    self.text_caret = Some(caret_bar(w, h, inset, frame_y, self.scale, b));
+                    if self.blink_visible {
+                        draw_caret(
+                            &mut buffer,
+                            size.width,
+                            size.height,
+                            inset,
+                            frame_y,
+                            self.scale,
+                            b,
+                            self.theme.text.body,
+                        );
+                    }
                 }
             }
         }
@@ -9927,7 +10115,9 @@ impl ApplicationHandler for App {
                 wake.by(at);
             }
         }
+        self.settle_composition();
         self.sync_input_method();
+        self.sync_caret_area();
         let blinking = match self.caret_now() {
             Some(CaretAt::Text) => self.caret.is_some(),
             Some(CaretAt::Field) => true,
@@ -10095,8 +10285,10 @@ impl ApplicationHandler for App {
         {
             self.drops = wayland_drops(&window, self.waker.clone());
         }
+        self.caret_point = takes_a_point(&window);
         self.gfx = Some(Gfx { window, surface });
         self.input_method_on = false;
+        self.caret_sent.forget();
         self.rescale(scale);
         // The panel comes back the way it was left, at its saved width.
         if self.config.sidebar_open {
@@ -10131,6 +10323,7 @@ impl ApplicationHandler for App {
         if self.input_log.is_some() {
             self.log_input(&event);
         }
+        self.settle_composition();
         match event {
             WindowEvent::CloseRequested => {
                 if self.guard_unsaved(confirm::Pending::Quit) {
@@ -10152,6 +10345,7 @@ impl ApplicationHandler for App {
                 // the releases of the keys that are down.
                 self.focused = false;
                 self.held.clear();
+                self.drop_composition();
                 self.left_held = false;
                 self.drop_grab();
                 self.request_redraw();
@@ -10161,6 +10355,7 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::ModifiersChanged(m) => self.modifiers = m.state(),
+            WindowEvent::Ime(event) => self.method_event(&event, event_loop),
             WindowEvent::KeyboardInput {
                 event,
                 is_synthetic,
@@ -10175,6 +10370,12 @@ impl ApplicationHandler for App {
                     repeat,
                     ..
                 } = event;
+                // With the setting on, a key the system's input method
+                // uses arrives as `Process` on Windows, a shortcut
+                // included: it is the input method's.
+                if method::drops_press(self.config.input_method, &logical_key) {
+                    return;
+                }
                 self.fling = None;
                 // What is not a keystroke stops here: a synthetic
                 // press, and a repeat of a key that was pressed under
@@ -11804,6 +12005,73 @@ mod tests {
         assert_eq!(painted >> 24, 0xFF);
     }
 
+    /// The bar given to the system's input method is the one the
+    /// caret paints: with the sidebar's inset, a scrolled page, a
+    /// scale of two, and a caret cut by the frame's edges.
+    #[test]
+    fn the_carets_bar_is_what_the_caret_paints() {
+        use oryx::edit::caret::CaretBox;
+        use oryx::input::method::Area;
+        let (width, height) = (60u32, 40u32);
+        let color = oryx::style::theme::Rgba {
+            r: 255,
+            g: 255,
+            b: 255,
+            a: 255,
+        };
+        let cases = [
+            (0u32, 0.0, 1.0f32, 5.0f32, 5.0, 10.0f32),
+            (12, 0.0, 1.0, 5.0, 5.0, 10.0),
+            (12, 30.6, 1.0, 5.0, 40.0, 10.0),
+            (0, 0.0, 2.0, 7.4, 3.0, 20.0),
+            (0, 0.0, 1.0, 59.0, 35.0, 10.0),
+            (0, 20.0, 1.0, 5.0, 15.0, 10.0),
+            (50, 0.0, 2.0, 9.5, 0.0, 12.0),
+        ];
+        for (inset, scroll, scale, x, y, h) in cases {
+            let caret = CaretBox { x, y: y as DocY, h };
+            let mut frame = vec![0u32; (width * height) as usize];
+            super::draw_caret(
+                &mut frame, width, height, inset, scroll, scale, caret, color,
+            );
+            let lit: Vec<(u32, u32)> = (0..height)
+                .flat_map(|py| (0..width).map(move |px| (px, py)))
+                .filter(|&(px, py)| frame[(py * width + px) as usize] != 0)
+                .collect();
+            assert!(!lit.is_empty(), "the case paints: {x} {y} {inset}");
+            let (x0, x1) = (
+                lit.iter().map(|p| p.0).min().unwrap(),
+                lit.iter().map(|p| p.0).max().unwrap(),
+            );
+            let (y0, y1) = (
+                lit.iter().map(|p| p.1).min().unwrap(),
+                lit.iter().map(|p| p.1).max().unwrap(),
+            );
+            assert_eq!(
+                lit.len() as u32,
+                (x1 - x0 + 1) * (y1 - y0 + 1),
+                "a full bar"
+            );
+            assert_eq!(
+                super::caret_bar(width, height, inset, scroll, scale, caret),
+                Area {
+                    x: x0 as i32,
+                    y: y0 as i32,
+                    w: x1 - x0 + 1,
+                    h: y1 - y0 + 1,
+                },
+                "inset {inset}, scroll {scroll}, scale {scale}, caret {x} {y} {h}"
+            );
+        }
+        // A caret below the frame paints nothing, and its bar is empty.
+        let below = CaretBox {
+            x: 5.0,
+            y: 500.0,
+            h: 10.0,
+        };
+        assert_eq!(super::caret_bar(width, height, 0, 0.0, 1.0, below).h, 0);
+    }
+
     #[test]
     fn the_command_key_is_a_chord_key_on_macos_only() {
         assert!(super::chord_pressed(true, false, false));
@@ -12278,55 +12546,15 @@ mod tests {
         );
     }
 
+    /// The input method is wanted only where a caret is live in a
+    /// focused window: in the editor with a caret, and in a field that
+    /// takes text. The rule itself is `method::takes_text`, with its
+    /// tests. The focus is not in it: a window in the background keeps
+    /// the answer of what has the keys.
     #[test]
-    fn the_input_method_is_on_where_a_caret_takes_text() {
-        use super::{input_method_wanted, KeyOwner};
-        let on = |owner, editing, has_caret, dialog_text| {
-            input_method_wanted(true, owner, editing, true, has_caret, dialog_text)
-        };
-        assert!(!on(KeyOwner::Text, false, false, false), "reading mode");
-        assert!(!on(KeyOwner::Code, false, false, false), "reading mode");
-        assert!(on(KeyOwner::Text, true, true, false), "the editor");
-        assert!(on(KeyOwner::Code, true, true, false), "the editor");
-        assert!(
-            !on(KeyOwner::Text, true, false, false),
-            "the editor with no caret"
-        );
-        for editing in [true, false] {
-            assert!(
-                on(KeyOwner::Search, editing, editing, false),
-                "the search bar"
-            );
-            assert!(
-                on(KeyOwner::Path, editing, editing, false),
-                "the path field"
-            );
-            assert!(
-                on(KeyOwner::Dialog { field: true }, editing, editing, true),
-                "a name in a dialog"
-            );
-            assert!(
-                !on(KeyOwner::Dialog { field: true }, editing, editing, false),
-                "a hex color in a dialog"
-            );
-            assert!(!on(KeyOwner::GoTo, editing, editing, false), "digits");
-            assert!(
-                !on(KeyOwner::Question, editing, editing, true),
-                "a question"
-            );
-            assert!(
-                !on(KeyOwner::Dialog { field: false }, editing, editing, true),
-                "a list"
-            );
-        }
-    }
-
-    /// With the setting off the answer is off in each state, so the
-    /// window is never asked for the input method. With it on, the
-    /// answer is off wherever no caret is live.
-    #[test]
-    fn the_input_method_is_off_with_the_setting_off_and_where_no_caret_is_live() {
-        use super::{input_method_wanted, live_caret, KeyOwner};
+    fn the_input_method_is_wanted_only_where_a_caret_is_live() {
+        use super::{live_caret, KeyOwner};
+        use oryx::input::method::At;
         let owners = [
             KeyOwner::Question,
             KeyOwner::Dialog { field: false },
@@ -12341,79 +12569,28 @@ mod tests {
         let mut on = 0;
         for owner in owners {
             for editing in both {
-                for focused in both {
-                    for has_caret in both {
-                        for dialog_text in both {
-                            let state = format!(
-                                "{owner:?}, editing {editing}, focused {focused}, \
-                                 caret {has_caret}, text {dialog_text}"
-                            );
-                            let wanted = |setting| {
-                                input_method_wanted(
-                                    setting,
-                                    owner,
-                                    editing,
-                                    focused,
-                                    has_caret,
-                                    dialog_text,
-                                )
-                            };
-                            assert!(!wanted(false), "the setting off: {state}");
-                            if live_caret(owner, editing, focused).is_none() {
-                                assert!(!wanted(true), "no live caret: {state}");
-                            }
-                            on += usize::from(wanted(true));
+                for has_caret in both {
+                    for dialog_text in both {
+                        let wanted = |setting| {
+                            At::new(setting, owner, editing, has_caret, dialog_text).wanted()
+                        };
+                        let state = format!(
+                            "{owner:?}, editing {editing}, caret {has_caret}, text {dialog_text}"
+                        );
+                        assert!(!wanted(false), "the setting off: {state}");
+                        if live_caret(owner, editing, true).is_none() {
+                            assert!(!wanted(true), "no live caret: {state}");
                         }
+                        assert!(
+                            live_caret(owner, editing, false).is_none(),
+                            "no caret is live in the background: {state}"
+                        );
+                        on += usize::from(wanted(true));
                     }
                 }
             }
         }
         assert!(on > 0, "the walk reaches a state where it is on");
-    }
-
-    /// The library has the rule too, for the code of the input method
-    /// that the window does not call yet (`method::takes_text`). The
-    /// two answer the same in each state of a focused window.
-    #[test]
-    fn the_rule_of_the_library_is_the_windows_rule_with_the_focus() {
-        use super::{input_method_wanted, KeyOwner};
-        use oryx::input::method;
-        let owners = [
-            KeyOwner::Question,
-            KeyOwner::Dialog { field: false },
-            KeyOwner::Dialog { field: true },
-            KeyOwner::Path,
-            KeyOwner::GoTo,
-            KeyOwner::Search,
-            KeyOwner::Text,
-            KeyOwner::Code,
-        ];
-        let both = [true, false];
-        for owner in owners {
-            for editing in both {
-                for has_caret in both {
-                    for dialog_text in both {
-                        for setting in both {
-                            let at =
-                                method::At::new(setting, owner, editing, has_caret, dialog_text);
-                            assert_eq!(
-                                at.wanted(),
-                                input_method_wanted(
-                                    setting,
-                                    owner,
-                                    editing,
-                                    true,
-                                    has_caret,
-                                    dialog_text
-                                ),
-                                "{owner:?}, editing {editing}, caret {has_caret}, \
-                                 text {dialog_text}, setting {setting}"
-                            );
-                        }
-                    }
-                }
-            }
-        }
     }
 
     /// The live caret is where the next key lands: in the text field

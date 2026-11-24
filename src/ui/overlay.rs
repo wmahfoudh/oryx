@@ -266,6 +266,13 @@ pub trait Overlay {
     fn field_takes_text(&self) -> bool {
         false
     }
+    /// The caret's bar of the open text field as it was last painted,
+    /// lit or not: x, y, width and height in the window's logical
+    /// pixels. The system's input method opens its candidates beside
+    /// it. None when no field is open or none was painted yet.
+    fn caret_area(&self) -> Option<[f32; 4]> {
+        None
+    }
 }
 
 #[cfg(test)]
