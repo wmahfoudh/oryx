@@ -21,7 +21,9 @@ use oryx::export::{self, ExportPass, ExportSettings};
 use oryx::input::{
     self,
     keymap::{self, Command, KeyOwner},
-    log as input_log, touch,
+    log as input_log,
+    route::{self, After, Field, First},
+    touch,
 };
 use oryx::layout::{
     self, layout_begin, layout_extend, layout_more, metrics, recolor_batch, window_to, ComicFit,
@@ -67,7 +69,7 @@ use winit::event::{
     ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent,
 };
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::keyboard::{Key, ModifiersState, NamedKey, PhysicalKey};
+use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 use winit::window::{CursorIcon, Window, WindowId};
 
@@ -334,7 +336,7 @@ pub fn run(
         preview: None,
         history: History::default(),
         pending_step: None,
-        held: Vec::new(),
+        held: route::Held::default(),
         search_origin: None,
         book_toc,
         positions: config::Positions::load(),
@@ -1441,9 +1443,8 @@ struct App {
     /// the history moves only once that file really opens.
     pending_step: Option<bool>,
     /// The keys that are down, each with what had the keys at its
-    /// first press: the owner, the mode, and whether the help page was
-    /// open. A repeat that arrives under another is dropped.
-    held: Vec<(PhysicalKey, (KeyOwner, edit::Mode, bool))>,
+    /// first press. A repeat that arrives under another is dropped.
+    held: route::Held,
     /// Where the reader stood when the search bar opened, filed as a
     /// place at the first hit taken with Enter.
     search_origin: Option<history::Entry>,
@@ -2457,26 +2458,22 @@ impl App {
         self.blink_flip = Instant::now() + CARET_BLINK;
     }
 
-    /// What has the keys: the four that take them before the editor in
-    /// the routing of `window_event`, in its order, then the text.
+    /// What has the keys: the first that is open in the order of the
+    /// route of a press (`route::Open::owner`), then the text.
     fn key_owner(&self) -> KeyOwner {
-        if self.confirm.is_some() {
-            KeyOwner::Question
-        } else if let Some(overlay) = self.overlay.as_ref() {
-            KeyOwner::Dialog {
-                field: overlay.field_has_keys(),
-            }
-        } else if self.path_ask.is_some() {
-            KeyOwner::Path
-        } else if self.goto.is_some() {
-            KeyOwner::GoTo
-        } else if self.search.is_some() {
-            KeyOwner::Search
-        } else if self.mode == edit::Mode::Edit && !self.markdown_source() {
-            KeyOwner::Code
-        } else {
-            KeyOwner::Text
+        route::Open {
+            question: self.confirm.is_some(),
+            dialog: self
+                .overlay
+                .as_ref()
+                .map(|overlay| overlay.field_has_keys()),
+            path: self.path_ask.is_some(),
+            goto: self.goto.is_some(),
+            search: self.search.is_some(),
+            editing: self.mode == edit::Mode::Edit,
+            markdown_source: self.markdown_source(),
         }
+        .owner()
     }
 
     fn caret_now(&self) -> Option<CaretAt> {
@@ -10179,30 +10176,16 @@ impl ApplicationHandler for App {
                     ..
                 } = event;
                 self.fling = None;
-                // A synthetic press reports a key that was already held
-                // when focus arrived, not a keystroke. On Windows the
-                // Escape that cancels a native file dialog comes back
-                // exactly so when the window regains focus, and acting
-                // on it quit the app.
-                if is_synthetic {
-                    return;
-                }
-                // The repeats of a held key go to what had the keys at
-                // its first press. Once that press closed a field or a
-                // dialog, or changed the mode, they are dropped until
-                // the key is pressed again: the Enter that closed the
-                // go to line field went on as line breaks in the text.
-                // Each key keeps its own record, so a Shift pressed
-                // while Enter is held does not renew Enter's.
-                let owner = (self.key_owner(), self.mode, self.help_stash.is_some());
-                if !repeat {
-                    self.held.retain(|(key, _)| *key != physical_key);
-                    self.held.push((physical_key, owner));
-                } else if self
-                    .held
-                    .iter()
-                    .any(|(key, at_press)| *key == physical_key && *at_press != owner)
-                {
+                // What is not a keystroke stops here: a synthetic
+                // press, and a repeat of a key that was pressed under
+                // another owner of the keys.
+                let owner = self.key_owner();
+                let at = route::HeldAt {
+                    owner,
+                    mode: self.mode,
+                    help: self.help_stash.is_some(),
+                };
+                if !self.held.admits(physical_key, at, repeat, is_synthetic) {
                     return;
                 }
                 // On a layout that types another script, a chord is
@@ -10212,17 +10195,6 @@ impl ApplicationHandler for App {
                 // with Ctrl and Alt both held, an AltGr character on
                 // Windows.
                 let latin = keymap::latin_key(&logical_key, physical_key);
-                // The confirm modal owns the keyboard outright until a
-                // decision lands.
-                if self.confirm.is_some() {
-                    // A held key repeating into the modal answers nothing:
-                    // the Enter that opened it from the sidebar must not
-                    // answer it too.
-                    if !repeat {
-                        self.confirm_key(&latin, event_loop);
-                    }
-                    return;
-                }
                 let ctrl = chord_key(self.modifiers);
                 let shift = self.modifiers.shift_key();
                 let alt = self.modifiers.alt_key();
@@ -10235,120 +10207,82 @@ impl ApplicationHandler for App {
                         shift,
                         alt,
                     },
-                    self.key_owner(),
+                    owner,
                 );
-                // A character typed with Alt held (Option on a Mac) is
-                // typing when no chord of the keymap claims the key. A
-                // command with no receiver in what has the keys claims
-                // nothing (`Command::live`).
-                let claimed = resolved.is_some();
-                let alt = alt
-                    && !keymap::alt_typing(
-                        &logical_key,
-                        ctrl,
-                        alt,
-                        claimed,
-                        cfg!(target_os = "macos"),
-                    );
-                let key = if keymap::chord_held(ctrl, alt) {
-                    &latin
-                } else {
-                    &logical_key
-                };
-                // The text fields of the panels insert a character with
-                // Alt held (Option types one on a Mac), so the panels take
-                // the Latin key with Ctrl alone.
-                let panel_key = if ctrl && !alt { &latin } else { &logical_key };
-                // A held Escape repeats, and the ladder must not climb by
-                // itself: each rung, the quit included, takes its own
-                // press. The same held key kept repeating into the window
-                // after a dialog closed on it.
-                if repeat && resolved == Some(Command::Quit) {
-                    return;
-                }
-                // The overlay toggles stay global so their chord closes the
-                // overlay it opened; everything else feeds an open overlay.
-                match resolved {
-                    Some(
-                        cmd @ (Command::ThemeBrowser
-                        | Command::Settings
-                        | Command::Sidebar
-                        | Command::OpenFile),
-                    ) => {
-                        self.run_command(cmd, event_loop);
+                // A command with no receiver in what has the keys
+                // claims nothing (`Command::live`).
+                let route::Keys {
+                    alt,
+                    key,
+                    panel_key,
+                } = route::keys(
+                    &logical_key,
+                    &latin,
+                    ctrl,
+                    alt,
+                    resolved.is_some(),
+                    cfg!(target_os = "macos"),
+                );
+                let editing = self.mode == edit::Mode::Edit;
+                let reader = route::first(owner, editing, repeat, resolved);
+                let taken = match reader {
+                    First::Nobody => return,
+                    First::Question => {
+                        self.confirm_key(&latin, event_loop);
+                        return;
                     }
-                    _ if self.overlay.is_some() => {
+                    First::Toggle(cmd) => {
+                        self.run_command(cmd, event_loop);
+                        true
+                    }
+                    First::Dialog => {
                         let overlay = self.overlay.as_mut().expect("overlay open");
                         let result = overlay.key(panel_key, ctrl, shift);
                         self.overlay_result(result);
+                        true
                     }
-                    _ if self.path_key(key, ctrl, shift, alt, repeat, event_loop) => {}
-                    // The path field has the keyboard, under the go to
-                    // line field's rule below.
-                    _ if self.path_ask.is_some() => {
-                        if let Some(cmd) = resolved {
-                            self.run_command(cmd, event_loop);
-                        }
+                    First::Field(Field::Path) => {
+                        self.path_key(key, ctrl, shift, alt, repeat, event_loop)
                     }
-                    _ if self.goto_key(key, ctrl, shift, alt) => {}
-                    // The go to line field has the keyboard, under the
-                    // search field's own rule: what it did not claim
-                    // acts only when it is app-wide, which `resolved`
-                    // already holds to (`Command::live`).
-                    _ if self.goto.is_some() => {
-                        if let Some(cmd) = resolved {
-                            self.run_command(cmd, event_loop);
-                        }
-                    }
-                    _ if self.search_key(key, ctrl, shift, alt) => {}
-                    // A search field has the keyboard: what the bar did
-                    // not claim acts only when it is app-wide, which
-                    // `resolved` already holds to. Nothing reaches the
-                    // editor's own keys or the document's editing chords
-                    // while a field is open.
-                    _ if self.search.is_some() => {
-                        if let Some(cmd) = resolved {
-                            self.run_command(cmd, event_loop);
-                        }
-                    }
-                    _ if self.mode == edit::Mode::Edit && self.edit_key(key, ctrl, shift, alt) => {}
-                    Some(Command::LineUp) if self.sidebar_owns_keys() => {
-                        self.sidebar_move(-1);
-                    }
-                    Some(Command::LineDown) if self.sidebar_owns_keys() => {
-                        self.sidebar_move(1);
-                    }
-                    None if self.sidebar_owns_keys()
-                        && ctrl
-                        && matches!(logical_key, Key::Named(NamedKey::Enter)) =>
-                    {
-                        self.open_selected_beside();
-                    }
-                    None if self.sidebar_owns_keys()
-                        && matches!(logical_key, Key::Named(NamedKey::Enter)) =>
-                    {
-                        let outline_tab = self
-                            .sidebar
-                            .as_ref()
-                            .is_some_and(|s| s.tab() == sidebar::Tab::Outline);
-                        if outline_tab {
-                            if let Some(block) = self.outline.selected_block() {
-                                self.jump_to_heading(block);
+                    First::Field(Field::GoTo) => self.goto_key(key, ctrl, shift, alt),
+                    First::Field(Field::Search) => self.search_key(key, ctrl, shift, alt),
+                    First::Editor => self.edit_key(key, ctrl, shift, alt),
+                    First::Page => false,
+                };
+                if !taken {
+                    // A key function that leaves a press has changed
+                    // nothing, so the rest goes by the owner read
+                    // before it.
+                    debug_assert_eq!(self.key_owner(), owner);
+                    let enter = matches!(logical_key, Key::Named(NamedKey::Enter));
+                    match route::after(reader, resolved, self.sidebar_owns_keys(), ctrl, enter) {
+                        After::Nothing => {}
+                        After::Command(cmd) => self.run_command(cmd, event_loop),
+                        After::SidebarMove(by) => self.sidebar_move(by),
+                        After::OpenBeside => self.open_selected_beside(),
+                        After::SidebarEnter => {
+                            let outline_tab = self
+                                .sidebar
+                                .as_ref()
+                                .is_some_and(|s| s.tab() == sidebar::Tab::Outline);
+                            if outline_tab {
+                                if let Some(block) = self.outline.selected_block() {
+                                    self.jump_to_heading(block);
+                                }
+                            } else {
+                                self.sidebar_action(|side| side.enter());
                             }
-                        } else {
-                            self.sidebar_action(|side| side.enter());
+                            // Activation keeps the keys: the table says
+                            // Enter holds, so arrow-and-enter stepping
+                            // stays a flow.
+                            self.move_ownership(PaneAct::Enter);
                         }
-                        // Activation keeps the keys: the table says Enter
-                        // holds, so arrow-and-enter stepping stays a flow.
-                        self.move_ownership(PaneAct::Enter);
                     }
-                    Some(cmd) => self.run_command(cmd, event_loop),
-                    None => {}
                 }
                 self.wake_field_caret();
             }
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Released => {
-                self.held.retain(|(key, _)| *key != event.physical_key);
+                self.held.release(event.physical_key);
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 self.fling = None;
