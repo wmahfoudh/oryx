@@ -2,6 +2,7 @@ use std::time::Duration;
 
 pub mod keymap;
 pub mod log;
+pub mod method;
 pub mod route;
 pub mod touch;
 

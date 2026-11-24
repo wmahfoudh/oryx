@@ -1,0 +1,106 @@
+# oryx 1.4.0 linux wayland
+48	focus	on=1
+48	mods	mods=----
+48	mods	mods=----
+97	release	key=named:Enter	cap=named:Enter	code=Enter	text=\r	repeat=0	synthetic=0	mods=----	owner=text	mode=read
+6241	mods	mods=----
+6241	focus	on=0
+6241	ime-disabled
+8840	focus	on=1
+8840	mods	mods=----
+8840	mods	mods=----
+15484	press	key=named:Control	cap=named:Control	code=ControlLeft	repeat=0	synthetic=0	mods=----	owner=text	mode=read
+15485	mods	mods=c---
+15840	press	key=char:f	cap=char:f	code=KeyF	text=f	repeat=0	synthetic=0	mods=c---	owner=text	mode=read
+15849	allowed	on=1
+15849	ime-enabled
+15849	preedit	text=
+16032	release	key=char:f	cap=char:f	code=KeyF	text=f	repeat=0	synthetic=0	mods=c---	owner=search	mode=read
+16242	release	key=named:Control	cap=named:Control	code=ControlLeft	repeat=0	synthetic=0	mods=c---	owner=search	mode=read
+16243	mods	mods=----
+17590	press	key=named:Control	cap=named:Control	code=ControlLeft	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+17590	mods	mods=c---
+18334	release	key=named:Control	cap=named:Control	code=ControlLeft	repeat=0	synthetic=0	mods=c---	owner=search	mode=read
+18334	mods	mods=----
+21960	preedit	text=n	cursor=0,1
+22293	preedit	text=ni	cursor=0,2
+22592	preedit	text=ni h	cursor=0,4
+22822	preedit	text=ni ha	cursor=0,5
+23145	preedit	text=ni hao	cursor=0,6
+24404	preedit	text=
+24404	commit	text=你好
+24404	preedit	text=	cursor=0,0
+26894	preedit	text=n	cursor=0,1
+27301	preedit	text=ni	cursor=0,2
+27577	preedit	text=ni h	cursor=0,4
+27804	preedit	text=ni ha	cursor=0,5
+28060	preedit	text=ni hao	cursor=0,6
+29558	preedit	text=
+29558	commit	text=nihao
+29558	preedit	text=	cursor=0,0
+31282	preedit	text=n	cursor=0,1
+31612	preedit	text=ni	cursor=0,2
+31926	preedit	text=ni h	cursor=0,4
+32125	preedit	text=ni ha	cursor=0,5
+32417	preedit	text=ni hao	cursor=0,6
+33598	preedit	text=	cursor=0,0
+40449	preedit	text=n	cursor=0,1
+40807	preedit	text=ni	cursor=0,2
+41077	preedit	text=ni h	cursor=0,4
+41269	preedit	text=ni ha	cursor=0,5
+41487	preedit	text=ni hao	cursor=0,6
+42897	preedit	text=
+42897	commit	text=你好
+42897	preedit	text=	cursor=0,0
+45217	press	key=named:F9	cap=named:F9	code=F9	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+45449	release	key=named:F9	cap=named:F9	code=F9	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+46525	preedit	text=n	cursor=0,1
+46878	preedit	text=ni	cursor=0,2
+47200	preedit	text=ni h	cursor=0,4
+47445	preedit	text=ni ha	cursor=0,5
+48073	preedit	text=ni hao	cursor=0,6
+49362	preedit	text=
+49362	commit	text=nihao
+49362	preedit	text=	cursor=0,0
+51306	press	key=named:F9	cap=named:F9	code=F9	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+51492	release	key=named:F9	cap=named:F9	code=F9	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+52943	preedit	text=n	cursor=0,1
+53305	preedit	text=ni	cursor=0,2
+53560	preedit	text=ni h	cursor=0,4
+53774	preedit	text=ni ha	cursor=0,5
+54033	preedit	text=ni hao	cursor=0,6
+55211	preedit	text=	cursor=0,0
+56754	press	key=named:F9	cap=named:F9	code=F9	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+56950	release	key=named:F9	cap=named:F9	code=F9	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+58507	preedit	text=n	cursor=0,1
+58820	preedit	text=ni	cursor=0,2
+59096	preedit	text=ni h	cursor=0,4
+59272	preedit	text=ni ha	cursor=0,5
+59553	preedit	text=ni hao	cursor=0,6
+61324	preedit	text=ni ha	cursor=0,5
+62403	preedit	text=ni h	cursor=0,4
+64583	preedit	text=ni h	cursor=0,2
+65644	preedit	text=ni h	cursor=0,4
+66893	preedit	text=
+66893	commit	text=你好
+66893	preedit	text=	cursor=0,0
+69050	press	key=named:F9	cap=named:F9	code=F9	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+69230	release	key=named:F9	cap=named:F9	code=F9	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+71178	preedit	text=n	cursor=0,1
+71504	preedit	text=ni	cursor=0,2
+71746	preedit	text=ni h	cursor=0,4
+71928	preedit	text=ni ha	cursor=0,5
+72163	preedit	text=ni hao	cursor=0,6
+74568	preedit	text=
+74568	commit	text=👋
+74569	preedit	text=	cursor=0,0
+76475	press	key=named:F9	cap=named:F9	code=F9	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+76673	release	key=named:F9	cap=named:F9	code=F9	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+80621	press	key=named:Escape	cap=named:Escape	code=Escape	text=\u{1b}	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+80627	allowed	on=0
+80627	ime-disabled
+80642	preedit	text=
+80822	release	key=named:Escape	cap=named:Escape	code=Escape	text=\u{1b}	repeat=0	synthetic=0	mods=----	owner=text	mode=read
+82956	press	key=named:F9	cap=named:F9	code=F9	repeat=0	synthetic=0	mods=----	owner=text	mode=read
+83163	release	key=named:F9	cap=named:F9	code=F9	repeat=0	synthetic=0	mods=----	owner=text	mode=read
+87900	press	key=named:Escape	cap=named:Escape	code=Escape	text=\u{1b}	repeat=0	synthetic=0	mods=----	owner=text	mode=read

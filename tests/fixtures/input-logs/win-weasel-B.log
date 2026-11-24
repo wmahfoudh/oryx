@@ -1,0 +1,115 @@
+# oryx 1.4.0 windows
+52	focus	on=1
+53	release	key=named:Enter	cap=named:Enter	code=Enter	repeat=0	synthetic=0	mods=----	owner=text	mode=read
+17298	mods	mods=----
+17299	focus	on=0
+39037	focus	on=1
+70155	mods	mods=c---
+70156	press	key=named:Control	cap=named:Control	code=ControlLeft	repeat=0	synthetic=0	mods=c---	owner=text	mode=read
+71255	mods	mods=----
+71255	release	key=named:Control	cap=named:Control	code=ControlLeft	repeat=0	synthetic=0	mods=----	owner=text	mode=read
+73372	mods	mods=c---
+73373	press	key=named:Control	cap=named:Control	code=ControlLeft	repeat=0	synthetic=0	mods=c---	owner=text	mode=read
+74525	press	key=char:f	cap=char:f	code=KeyF	text=f	repeat=0	synthetic=0	mods=c---	owner=text	mode=read
+74556	allowed	on=1
+74749	release	key=char:f	cap=char:f	code=KeyF	repeat=0	synthetic=0	mods=c---	owner=search	mode=read
+74880	mods	mods=----
+74880	release	key=named:Control	cap=named:Control	code=ControlLeft	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+78824	ime-enabled
+78831	preedit	text=\u{20}	cursor=0,0
+78832	press	key=named:Process	cap=named:Process	code=KeyN	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+78919	release	key=char:n	cap=char:n	code=KeyN	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+79147	press	key=named:Process	cap=named:Process	code=KeyI	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+79206	release	key=char:i	cap=char:i	code=KeyI	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+79817	press	key=named:Process	cap=named:Process	code=KeyH	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+79905	release	key=char:h	cap=char:h	code=KeyH	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+80019	press	key=named:Process	cap=named:Process	code=KeyA	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+80121	release	key=char:a	cap=char:a	code=KeyA	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+80256	press	key=named:Process	cap=named:Process	code=KeyO	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+80368	release	key=char:o	cap=char:o	code=KeyO	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+81277	preedit	text=
+81277	commit	text=你好
+81277	ime-disabled
+81291	press	key=named:Process	cap=named:Process	code=Space	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+81481	release	key=named:Space	cap=named:Space	code=Space	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+83033	ime-enabled
+83039	preedit	text=\u{20}	cursor=0,0
+83041	press	key=named:Process	cap=named:Process	code=KeyN	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+83099	release	key=char:n	cap=char:n	code=KeyN	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+83271	press	key=named:Process	cap=named:Process	code=KeyI	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+83331	release	key=char:i	cap=char:i	code=KeyI	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+83497	press	key=named:Process	cap=named:Process	code=KeyH	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+83551	release	key=char:h	cap=char:h	code=KeyH	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+83623	press	key=named:Process	cap=named:Process	code=KeyA	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+83722	release	key=char:a	cap=char:a	code=KeyA	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+83801	press	key=named:Process	cap=named:Process	code=KeyO	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+83895	release	key=char:o	cap=char:o	code=KeyO	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+85144	preedit	text=
+85144	commit	text=nihao
+85144	ime-disabled
+85160	press	key=named:Process	cap=named:Process	code=Enter	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+85284	release	key=named:Enter	cap=named:Enter	code=Enter	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+86104	ime-enabled
+86115	preedit	text=\u{20}	cursor=0,0
+86118	press	key=named:Process	cap=named:Process	code=KeyN	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+86176	release	key=char:n	cap=char:n	code=KeyN	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+86349	press	key=named:Process	cap=named:Process	code=KeyI	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+86402	release	key=char:i	cap=char:i	code=KeyI	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+86529	press	key=named:Process	cap=named:Process	code=KeyH	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+86602	release	key=char:h	cap=char:h	code=KeyH	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+86679	press	key=named:Process	cap=named:Process	code=KeyA	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+86770	release	key=char:a	cap=char:a	code=KeyA	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+86806	press	key=named:Process	cap=named:Process	code=KeyO	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+86882	release	key=char:o	cap=char:o	code=KeyO	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+88724	preedit	text=	cursor=0,0
+88724	preedit	text=
+88724	commit	text=
+88725	ime-disabled
+88739	press	key=named:Process	cap=named:Process	code=Escape	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+88869	release	key=named:Escape	cap=named:Escape	code=Escape	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+90645	ime-enabled
+90661	preedit	text=\u{20}	cursor=0,0
+90664	press	key=named:Process	cap=named:Process	code=KeyN	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+90694	release	key=char:n	cap=char:n	code=KeyN	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+90878	press	key=named:Process	cap=named:Process	code=KeyI	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+90923	release	key=char:i	cap=char:i	code=KeyI	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+91076	press	key=named:Process	cap=named:Process	code=KeyH	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+91142	release	key=char:h	cap=char:h	code=KeyH	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+91213	press	key=named:Process	cap=named:Process	code=KeyA	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+91330	release	key=char:a	cap=char:a	code=KeyA	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+91399	press	key=named:Process	cap=named:Process	code=KeyO	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+91476	release	key=char:o	cap=char:o	code=KeyO	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+92350	press	key=named:Process	cap=named:Process	code=Backspace	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+92498	release	key=named:Backspace	cap=named:Backspace	code=Backspace	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+94477	press	key=named:Process	cap=named:Process	code=Backspace	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+94626	release	key=named:Backspace	cap=named:Backspace	code=Backspace	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+95976	press	key=named:Process	cap=named:Process	code=ArrowLeft	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+96181	release	key=named:ArrowLeft	cap=named:ArrowLeft	code=ArrowLeft	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+98249	press	key=named:Process	cap=named:Process	code=ArrowRight	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+98514	release	key=named:ArrowRight	cap=named:ArrowRight	code=ArrowRight	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+99029	preedit	text=
+99029	commit	text=你好
+99029	ime-disabled
+99046	press	key=named:Process	cap=named:Process	code=Space	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+99222	release	key=named:Space	cap=named:Space	code=Space	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+102256	ime-enabled
+102263	preedit	text=\u{20}	cursor=0,0
+102266	press	key=named:Process	cap=named:Process	code=KeyN	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+102363	release	key=char:n	cap=char:n	code=KeyN	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+102487	press	key=named:Process	cap=named:Process	code=KeyI	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+102547	release	key=char:i	cap=char:i	code=KeyI	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+102778	press	key=named:Process	cap=named:Process	code=KeyH	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+102841	release	key=char:h	cap=char:h	code=KeyH	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+102863	press	key=named:Process	cap=named:Process	code=KeyA	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+102972	release	key=char:a	cap=char:a	code=KeyA	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+103043	press	key=named:Process	cap=named:Process	code=KeyO	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+103126	release	key=char:o	cap=char:o	code=KeyO	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+103818	preedit	text=
+103818	commit	text=妳好
+103818	ime-disabled
+103837	press	key=named:Process	cap=named:Process	code=Digit2	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+103988	release	key=char:2	cap=char:2	code=Digit2	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+106720	press	key=named:Escape	cap=named:Escape	code=Escape	text=\u{1b}	repeat=0	synthetic=0	mods=----	owner=search	mode=read
+106731	allowed	on=0
+106897	release	key=named:Escape	cap=named:Escape	code=Escape	repeat=0	synthetic=0	mods=----	owner=text	mode=read
+107628	press	key=named:Escape	cap=named:Escape	code=Escape	text=\u{1b}	repeat=0	synthetic=0	mods=----	owner=text	mode=read

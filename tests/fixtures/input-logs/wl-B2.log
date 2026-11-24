@@ -1,0 +1,90 @@
+# oryx 1.4.0 linux wayland
+24	focus	on=1
+24	mods	mods=----
+24	mods	mods=----
+50	release	key=named:Enter	cap=named:Enter	code=Enter	text=\r	repeat=0	synthetic=0	mods=----	owner=text	mode=read
+6536	mods	mods=----
+6536	focus	on=0
+6536	ime-disabled
+8717	focus	on=1
+8717	mods	mods=----
+8717	mods	mods=----
+11765	press	key=named:Control	cap=named:Control	code=ControlLeft	repeat=0	synthetic=0	mods=----	owner=text	mode=read
+11765	mods	mods=c---
+12146	press	key=char:e	cap=char:e	code=KeyE	text=e	repeat=0	synthetic=0	mods=c---	owner=text	mode=read
+12160	allowed	on=1
+12160	ime-enabled
+12174	preedit	text=
+12174	preedit	text=	cursor=0,0
+12295	release	key=char:e	cap=char:e	code=KeyE	text=e	repeat=0	synthetic=0	mods=c---	owner=text	mode=edit
+12389	release	key=named:Control	cap=named:Control	code=ControlLeft	repeat=0	synthetic=0	mods=c---	owner=text	mode=edit
+12389	mods	mods=----
+13503	press	key=named:Control	cap=named:Control	code=ControlLeft	repeat=0	synthetic=0	mods=----	owner=text	mode=edit
+13503	mods	mods=c---
+14039	press	key=named:End	cap=named:End	code=End	repeat=0	synthetic=0	mods=c---	owner=text	mode=edit
+14185	release	key=named:End	cap=named:End	code=End	repeat=0	synthetic=0	mods=c---	owner=text	mode=edit
+14504	release	key=named:Control	cap=named:Control	code=ControlLeft	repeat=0	synthetic=0	mods=c---	owner=text	mode=edit
+14504	mods	mods=----
+16674	preedit	text=年	cursor=3,3
+17200	preedit	text=你	cursor=3,3
+17965	preedit	text=你和	cursor=6,6
+18193	preedit	text=你哈	cursor=6,6
+18578	preedit	text=你好	cursor=6,6
+22795	preedit	text=
+22795	commit	text=你好
+22795	preedit	text=	cursor=0,0
+25675	preedit	text=年	cursor=3,3
+25954	preedit	text=你	cursor=3,3
+26259	preedit	text=你和	cursor=6,6
+26442	preedit	text=你哈	cursor=6,6
+26654	preedit	text=你好	cursor=6,6
+27979	preedit	text=
+27979	commit	text=nihao
+27979	preedit	text=	cursor=0,0
+30760	press	key=named:F9	cap=named:F9	code=F9	repeat=0	synthetic=0	mods=----	owner=text	mode=edit
+30928	release	key=named:F9	cap=named:F9	code=F9	repeat=0	synthetic=0	mods=----	owner=text	mode=edit
+31821	preedit	text=年	cursor=3,3
+32092	preedit	text=你	cursor=3,3
+32396	preedit	text=你和	cursor=6,6
+32575	preedit	text=你哈	cursor=6,6
+32797	preedit	text=你好	cursor=6,6
+34221	preedit	text=	cursor=0,0
+35831	press	key=named:F9	cap=named:F9	code=F9	repeat=0	synthetic=0	mods=----	owner=text	mode=edit
+36003	release	key=named:F9	cap=named:F9	code=F9	repeat=0	synthetic=0	mods=----	owner=text	mode=edit
+37289	preedit	text=年	cursor=3,3
+37512	preedit	text=你	cursor=3,3
+37753	preedit	text=你和	cursor=6,6
+37960	preedit	text=你哈	cursor=6,6
+38316	preedit	text=你好	cursor=6,6
+39876	preedit	text=你哈	cursor=6,6
+41454	preedit	text=你和	cursor=6,6
+43167	preedit	text=你和	cursor=3,3
+44030	preedit	text=你和	cursor=6,6
+45396	preedit	text=
+45397	commit	text=你和
+45397	preedit	text=	cursor=0,0
+47255	press	key=named:F9	cap=named:F9	code=F9	repeat=0	synthetic=0	mods=----	owner=text	mode=edit
+47403	release	key=named:F9	cap=named:F9	code=F9	repeat=0	synthetic=0	mods=----	owner=text	mode=edit
+48592	preedit	text=年	cursor=3,3
+48822	preedit	text=你	cursor=3,3
+49044	preedit	text=你和	cursor=6,6
+49211	preedit	text=你哈	cursor=6,6
+49450	preedit	text=你好	cursor=6,6
+51142	preedit	text=
+51142	commit	text=你好吗
+51142	preedit	text=	cursor=0,0
+56640	preedit	text=年	cursor=3,3
+56910	preedit	text=你	cursor=3,3
+57981	preedit	text=
+57981	commit	text=你
+57981	preedit	text=	cursor=0,0
+61162	press	key=named:F9	cap=named:F9	code=F9	repeat=0	synthetic=0	mods=----	owner=text	mode=edit
+61314	release	key=named:F9	cap=named:F9	code=F9	repeat=0	synthetic=0	mods=----	owner=text	mode=edit
+62361	press	key=named:Escape	cap=named:Escape	code=Escape	text=\u{1b}	repeat=0	synthetic=0	mods=----	owner=text	mode=edit
+62504	release	key=named:Escape	cap=named:Escape	code=Escape	text=\u{1b}	repeat=0	synthetic=0	mods=----	owner=text	mode=edit
+62880	press	key=named:Escape	cap=named:Escape	code=Escape	text=\u{1b}	repeat=0	synthetic=0	mods=----	owner=text	mode=edit
+62891	allowed	on=0
+62891	ime-disabled
+62902	preedit	text=
+63009	release	key=named:Escape	cap=named:Escape	code=Escape	text=\u{1b}	repeat=0	synthetic=0	mods=----	owner=text	mode=read
+63421	press	key=named:Escape	cap=named:Escape	code=Escape	text=\u{1b}	repeat=0	synthetic=0	mods=----	owner=text	mode=read

@@ -1,0 +1,85 @@
+# oryx 1.4.0 linux x11
+1	ime-disabled
+1	focus	on=0
+2075	focus	on=1
+2075	mods	mods=----
+2377	mods	mods=----
+2377	press	key=named:Control	cap=named:Control	code=ControlLeft	repeat=0	synthetic=0	mods=----	owner=text	mode=read
+2377	mods	mods=c---
+2377	press	key=char:e	cap=char:e	code=KeyE	text=e	repeat=0	synthetic=0	mods=c---	owner=text	mode=read
+2378	release	key=char:e	cap=char:e	code=KeyE	text=e	repeat=0	synthetic=0	mods=c---	owner=text	mode=edit
+2378	release	key=named:Control	cap=named:Control	code=ControlLeft	repeat=0	synthetic=0	mods=c---	owner=text	mode=edit
+2378	mods	mods=----
+2396	allowed	on=1
+2529	ime-enabled
+2529	press	key=named:Control	cap=named:Control	code=ControlLeft	repeat=0	synthetic=0	mods=----	owner=text	mode=edit
+2529	mods	mods=c---
+2529	press	key=named:End	cap=named:End	code=End	repeat=0	synthetic=0	mods=c---	owner=text	mode=edit
+2529	release	key=named:End	cap=named:End	code=End	repeat=0	synthetic=0	mods=c---	owner=text	mode=edit
+2529	release	key=named:Control	cap=named:Control	code=ControlLeft	repeat=0	synthetic=0	mods=c---	owner=text	mode=edit
+2529	mods	mods=----
+2685	press	key=named:F9	cap=named:F9	code=F9	repeat=0	synthetic=0	mods=----	owner=text	mode=edit
+2688	release	key=named:F9	cap=named:F9	code=F9	repeat=0	synthetic=0	mods=----	owner=text	mode=edit
+2878	preedit	text=
+2879	preedit	text=年	cursor=3,3
+3010	preedit	text=你	cursor=3,3
+3157	preedit	text=你和	cursor=6,6
+3307	preedit	text=你哈	cursor=6,6
+3459	preedit	text=你好	cursor=6,6
+3599	preedit	text=
+3599	commit	text=你好
+3599	preedit	text=
+3599	release	key=named:Space	cap=named:Space	code=Space	text=\u{20}	repeat=0	synthetic=0	mods=----	owner=text	mode=edit
+3748	press	key=named:F9	cap=named:F9	code=F9	repeat=0	synthetic=0	mods=----	owner=text	mode=edit
+3753	release	key=named:F9	cap=named:F9	code=F9	repeat=0	synthetic=0	mods=----	owner=text	mode=edit
+3945	preedit	text=
+3945	preedit	text=年	cursor=3,3
+4075	preedit	text=你	cursor=3,3
+4221	preedit	text=你和	cursor=6,6
+4372	preedit	text=你哈	cursor=6,6
+4523	preedit	text=你好	cursor=6,6
+4674	preedit	text=
+4674	commit	text=nihao
+4674	preedit	text=
+4674	release	key=named:Enter	cap=named:Enter	code=Enter	text=\r	repeat=0	synthetic=0	mods=----	owner=text	mode=edit
+4812	press	key=named:F9	cap=named:F9	code=F9	repeat=0	synthetic=0	mods=----	owner=text	mode=edit
+4817	release	key=named:F9	cap=named:F9	code=F9	repeat=0	synthetic=0	mods=----	owner=text	mode=edit
+4997	preedit	text=
+4997	preedit	text=年	cursor=3,3
+5139	preedit	text=你	cursor=3,3
+5285	preedit	text=你和	cursor=6,6
+5433	preedit	text=你哈	cursor=6,6
+5586	preedit	text=你好	cursor=6,6
+5733	preedit	text=	cursor=0,0
+5733	preedit	text=
+5733	release	key=named:Escape	cap=named:Escape	code=Escape	text=\u{1b}	repeat=0	synthetic=0	mods=----	owner=text	mode=edit
+5874	press	key=named:F9	cap=named:F9	code=F9	repeat=0	synthetic=0	mods=----	owner=text	mode=edit
+5879	release	key=named:F9	cap=named:F9	code=F9	repeat=0	synthetic=0	mods=----	owner=text	mode=edit
+6077	preedit	text=
+6077	preedit	text=年	cursor=3,3
+6199	preedit	text=你	cursor=3,3
+6343	preedit	text=你和	cursor=6,6
+6487	preedit	text=你哈	cursor=6,6
+6649	preedit	text=你好	cursor=6,6
+6802	preedit	text=你哈	cursor=6,6
+6951	preedit	text=你和	cursor=6,6
+7152	preedit	text=你和	cursor=6,6
+7262	preedit	text=你和	cursor=6,6
+7401	preedit	text=
+7402	commit	text=你和
+7402	preedit	text=
+7402	release	key=named:Space	cap=named:Space	code=Space	text=\u{20}	repeat=0	synthetic=0	mods=----	owner=text	mode=edit
+7545	press	key=named:F9	cap=named:F9	code=F9	repeat=0	synthetic=0	mods=----	owner=text	mode=edit
+7550	release	key=named:F9	cap=named:F9	code=F9	repeat=0	synthetic=0	mods=----	owner=text	mode=edit
+7759	preedit	text=
+7759	preedit	text=年	cursor=3,3
+7871	preedit	text=你	cursor=3,3
+8020	preedit	text=你和	cursor=6,6
+8170	preedit	text=你哈	cursor=6,6
+8322	preedit	text=你好	cursor=6,6
+8464	preedit	text=
+8464	commit	text=你好吗
+8464	preedit	text=
+8464	release	key=char:2	cap=char:2	code=Digit2	text=2	repeat=0	synthetic=0	mods=----	owner=text	mode=edit
+8610	press	key=named:F9	cap=named:F9	code=F9	repeat=0	synthetic=0	mods=----	owner=text	mode=edit
+8615	release	key=named:F9	cap=named:F9	code=F9	repeat=0	synthetic=0	mods=----	owner=text	mode=edit

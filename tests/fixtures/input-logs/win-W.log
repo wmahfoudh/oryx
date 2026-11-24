@@ -1,0 +1,36 @@
+# oryx 1.4.0 windows
+47	focus	on=1
+3150	mods	mods=----
+3150	focus	on=0
+18628	focus	on=1
+19113	mods	mods=c---
+19113	press	key=named:Control	cap=named:Control	code=ControlLeft	repeat=0	synthetic=0	mods=c---	owner=text	mode=read
+19697	press	key=char:e	cap=char:e	code=KeyE	text=e	repeat=0	synthetic=0	mods=c---	owner=text	mode=read
+19719	allowed	on=1
+19917	release	key=char:e	cap=char:e	code=KeyE	repeat=0	synthetic=0	mods=c---	owner=text	mode=edit
+20072	mods	mods=----
+20073	release	key=named:Control	cap=named:Control	code=ControlLeft	repeat=0	synthetic=0	mods=----	owner=text	mode=edit
+23235	mods	mods=c---
+23236	press	key=named:Control	cap=named:Control	code=ControlLeft	repeat=0	synthetic=0	mods=c---	owner=text	mode=edit
+23798	press	key=named:End	cap=named:End	code=End	repeat=0	synthetic=0	mods=c---	owner=text	mode=edit
+23962	release	key=named:End	cap=named:End	code=End	repeat=0	synthetic=0	mods=c---	owner=text	mode=edit
+24444	mods	mods=----
+24444	release	key=named:Control	cap=named:Control	code=ControlLeft	repeat=0	synthetic=0	mods=----	owner=text	mode=edit
+27563	mods	mods=---l
+27564	press	key=named:Super	cap=named:Super	code=SuperLeft	repeat=0	synthetic=0	mods=---l	owner=text	mode=edit
+28044	release	key=char:.	cap=char:.	code=Period	repeat=1	synthetic=0	mods=---l	owner=text	mode=edit
+28267	mods	mods=----
+28267	release	key=named:Super	cap=named:Super	code=SuperLeft	repeat=0	synthetic=0	mods=----	owner=text	mode=edit
+32055	ime-enabled
+32084	preedit	text=😍	cursor=4,4
+39133	preedit	text=😍❤	cursor=7,7
+39593	preedit	text=😍❤❤	cursor=10,10
+40569	preedit	text=😍❤❤🤣	cursor=14,14
+43355	preedit	text=
+43355	commit	text=😍❤❤🤣
+43355	ime-disabled
+43654	release	key=named:Escape	cap=named:Escape	code=Escape	repeat=0	synthetic=0	mods=----	owner=text	mode=edit
+44420	press	key=named:Escape	cap=named:Escape	code=Escape	text=\u{1b}	repeat=0	synthetic=0	mods=----	owner=text	mode=edit
+44451	allowed	on=0
+44620	release	key=named:Escape	cap=named:Escape	code=Escape	repeat=0	synthetic=0	mods=----	owner=text	mode=read
+45169	press	key=named:Escape	cap=named:Escape	code=Escape	text=\u{1b}	repeat=0	synthetic=0	mods=----	owner=text	mode=read

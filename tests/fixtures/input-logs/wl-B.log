@@ -1,0 +1,259 @@
+# oryx 1.4.0 linux wayland
+60	focus	on=1
+60	mods	mods=----
+60	mods	mods=----
+3096	mods	mods=----
+3096	focus	on=0
+3096	ime-disabled
+8527	focus	on=1
+8527	mods	mods=----
+9407	press	key=named:Control	cap=named:Control	code=ControlLeft	repeat=0	synthetic=0	mods=----	owner=text	mode=read
+9408	mods	mods=c---
+9761	press	key=char:e	cap=char:e	code=KeyE	text=e	repeat=0	synthetic=0	mods=c---	owner=text	mode=read
+9777	allowed	on=1
+9777	ime-enabled
+9803	preedit	text=
+9940	release	key=char:e	cap=char:e	code=KeyE	text=e	repeat=0	synthetic=0	mods=c---	owner=text	mode=edit
+10019	release	key=named:Control	cap=named:Control	code=ControlLeft	repeat=0	synthetic=0	mods=c---	owner=text	mode=edit
+10019	mods	mods=----
+11053	press	key=named:Control	cap=named:Control	code=ControlLeft	repeat=0	synthetic=0	mods=----	owner=text	mode=edit
+11053	mods	mods=c---
+11737	press	key=named:End	cap=named:End	code=End	repeat=0	synthetic=0	mods=c---	owner=text	mode=edit
+11907	release	key=named:End	cap=named:End	code=End	repeat=0	synthetic=0	mods=c---	owner=text	mode=edit
+12115	release	key=named:Control	cap=named:Control	code=ControlLeft	repeat=0	synthetic=0	mods=c---	owner=text	mode=edit
+12115	mods	mods=----
+13020	press	key=named:Control	cap=named:Control	code=ControlLeft	repeat=0	synthetic=0	mods=----	owner=text	mode=edit
+13020	mods	mods=c---
+13807	release	key=named:Control	cap=named:Control	code=ControlLeft	repeat=0	synthetic=0	mods=c---	owner=text	mode=edit
+13807	mods	mods=----
+14928	press	key=named:Alt	cap=named:Alt	code=AltLeft	repeat=0	synthetic=0	mods=----	owner=text	mode=edit
+14929	mods	mods=--a-
+15080	mods	mods=----
+15080	focus	on=0
+15080	ime-disabled
+15094	allowed	on=0
+15288	focus	on=1
+15289	mods	mods=--a-
+15289	mods	mods=----
+15289	focus	on=0
+15289	ime-disabled
+20208	focus	on=1
+20208	mods	mods=--a-
+20208	mods	mods=----
+20214	allowed	on=1
+20214	ime-enabled
+20215	preedit	text=
+21839	preedit	text=n	cursor=0,1
+22139	preedit	text=ni	cursor=0,2
+22409	preedit	text=ni a	cursor=0,4
+23829	preedit	text=niao	cursor=0,4
+25109	preedit	text=
+25109	commit	text=鸟
+25109	preedit	text=	cursor=0,0
+30504	press	key=named:Alt	cap=named:Alt	code=AltLeft	repeat=0	synthetic=0	mods=----	owner=text	mode=edit
+30504	mods	mods=--a-
+30898	mods	mods=----
+30898	focus	on=0
+30898	ime-disabled
+30906	allowed	on=0
+31138	focus	on=1
+31138	mods	mods=--a-
+31138	mods	mods=----
+31138	focus	on=0
+31138	ime-disabled
+35797	focus	on=1
+35798	mods	mods=--a-
+35798	mods	mods=----
+35805	allowed	on=1
+35805	ime-enabled
+35805	preedit	text=
+36827	preedit	text=n	cursor=0,1
+37183	preedit	text=ni	cursor=0,2
+37851	preedit	text=ni h	cursor=0,4
+38101	preedit	text=ni ha	cursor=0,5
+38572	preedit	text=ni hao	cursor=0,6
+39935	preedit	text=
+39935	commit	text=你好
+39935	preedit	text=	cursor=0,0
+41948	press	key=named:Alt	cap=named:Alt	code=AltLeft	repeat=0	synthetic=0	mods=----	owner=text	mode=edit
+41948	mods	mods=--a-
+42281	mods	mods=----
+42281	focus	on=0
+42281	ime-disabled
+42294	allowed	on=0
+42507	focus	on=1
+42507	mods	mods=--a-
+42507	mods	mods=----
+42507	focus	on=0
+42507	ime-disabled
+45865	focus	on=1
+45865	mods	mods=--a-
+45865	mods	mods=----
+45874	allowed	on=1
+45874	ime-enabled
+45874	preedit	text=
+47106	preedit	text=n	cursor=0,1
+47399	preedit	text=ni	cursor=0,2
+47733	preedit	text=ni h	cursor=0,4
+47951	preedit	text=ni ha	cursor=0,5
+48244	preedit	text=ni hao	cursor=0,6
+49377	preedit	text=
+49377	commit	text=nihao
+49377	preedit	text=	cursor=0,0
+52230	press	key=named:Alt	cap=named:Alt	code=AltLeft	repeat=0	synthetic=0	mods=----	owner=text	mode=edit
+52230	mods	mods=--a-
+52375	mods	mods=----
+52376	focus	on=0
+52376	ime-disabled
+52387	allowed	on=0
+52611	focus	on=1
+52611	mods	mods=--a-
+52611	mods	mods=----
+52611	focus	on=0
+52611	ime-disabled
+57735	focus	on=1
+57735	mods	mods=--a-
+57735	mods	mods=----
+57747	allowed	on=1
+57747	ime-enabled
+57748	preedit	text=
+58500	preedit	text=n	cursor=0,1
+58806	preedit	text=ni	cursor=0,2
+59062	preedit	text=ni h	cursor=0,4
+59237	preedit	text=ni ha	cursor=0,5
+59711	preedit	text=ni hao	cursor=0,6
+62343	preedit	text=	cursor=0,0
+64221	press	key=named:Alt	cap=named:Alt	code=AltLeft	repeat=0	synthetic=0	mods=----	owner=text	mode=edit
+64221	mods	mods=--a-
+64575	mods	mods=----
+64575	focus	on=0
+64575	ime-disabled
+64583	allowed	on=0
+64798	focus	on=1
+64798	mods	mods=--a-
+64798	mods	mods=----
+64798	focus	on=0
+64798	ime-disabled
+68468	focus	on=1
+68468	mods	mods=--a-
+68468	mods	mods=----
+68489	allowed	on=1
+68489	ime-enabled
+68489	preedit	text=
+69262	preedit	text=n	cursor=0,1
+69749	preedit	text=ni	cursor=0,2
+70070	preedit	text=ni h	cursor=0,4
+70279	preedit	text=ni ha	cursor=0,5
+70540	preedit	text=ni hao	cursor=0,6
+71891	preedit	text=ni ha	cursor=0,5
+77518	press	key=named:Alt	cap=named:Alt	code=AltLeft	repeat=0	synthetic=0	mods=----	owner=text	mode=edit
+77518	mods	mods=--a-
+77782	preedit	text=
+77782	commit	text=ni ha
+77782	mods	mods=----
+77782	focus	on=0
+77782	ime-disabled
+77796	allowed	on=0
+78021	focus	on=1
+78021	mods	mods=--a-
+78021	mods	mods=----
+78021	focus	on=0
+78021	ime-disabled
+81889	focus	on=1
+81889	mods	mods=--a-
+81889	mods	mods=----
+81898	allowed	on=1
+81898	ime-enabled
+81898	preedit	text=
+83124	press	key=named:Backspace	cap=named:Backspace	code=Backspace	text=\u{8}	repeat=0	synthetic=0	mods=----	owner=text	mode=edit
+83390	release	key=named:Backspace	cap=named:Backspace	code=Backspace	text=\u{8}	repeat=0	synthetic=0	mods=----	owner=text	mode=edit
+84758	preedit	text=d	cursor=0,1
+86762	preedit	text=	cursor=0,0
+89167	preedit	text=d	cursor=0,1
+92640	preedit	text=
+92640	commit	text=d
+92640	preedit	text=	cursor=0,0
+97550	press	key=named:Space	cap=named:Space	code=Space	text=\u{20}	repeat=0	synthetic=0	mods=----	owner=text	mode=edit
+97802	release	key=named:Space	cap=named:Space	code=Space	text=\u{20}	repeat=0	synthetic=0	mods=----	owner=text	mode=edit
+99027	press	key=named:Backspace	cap=named:Backspace	code=Backspace	text=\u{8}	repeat=0	synthetic=0	mods=----	owner=text	mode=edit
+99193	release	key=named:Backspace	cap=named:Backspace	code=Backspace	text=\u{8}	repeat=0	synthetic=0	mods=----	owner=text	mode=edit
+100020	preedit	text=n	cursor=0,1
+102461	preedit	text=n	cursor=0,1
+103747	preedit	text=ni	cursor=0,2
+104088	preedit	text=ni h	cursor=0,4
+104260	preedit	text=ni ha	cursor=0,5
+106660	preedit	text=ni ha p	cursor=0,7
+108499	preedit	text=ni ha	cursor=0,5
+108836	preedit	text=ni hao	cursor=0,6
+112787	preedit	text=
+112787	commit	text=👋
+112787	preedit	text=	cursor=0,0
+116662	press	key=named:Alt	cap=named:Alt	code=AltLeft	repeat=0	synthetic=0	mods=----	owner=text	mode=edit
+116662	mods	mods=--a-
+116868	mods	mods=----
+116868	focus	on=0
+116868	ime-disabled
+116877	allowed	on=0
+117090	focus	on=1
+117090	mods	mods=--a-
+117090	mods	mods=----
+117090	focus	on=0
+117090	ime-disabled
+121175	focus	on=1
+121175	mods	mods=--a-
+121175	mods	mods=----
+121182	allowed	on=1
+121182	ime-enabled
+121183	preedit	text=
+123230	preedit	text=n	cursor=0,1
+123524	preedit	text=ni	cursor=0,2
+123818	preedit	text=ni h	cursor=0,4
+123973	preedit	text=ni ha	cursor=0,5
+124187	preedit	text=ni hao	cursor=0,6
+125218	preedit	text=
+125218	commit	text=👋
+125218	preedit	text=	cursor=0,0
+127713	press	key=named:Enter	cap=named:Enter	code=Enter	text=\r	repeat=0	synthetic=0	mods=----	owner=text	mode=edit
+127947	release	key=named:Enter	cap=named:Enter	code=Enter	text=\r	repeat=0	synthetic=0	mods=----	owner=text	mode=edit
+128681	press	key=named:Control	cap=named:Control	code=ControlLeft	repeat=0	synthetic=0	mods=----	owner=text	mode=edit
+128681	mods	mods=c---
+129377	release	key=named:Control	cap=named:Control	code=ControlLeft	repeat=0	synthetic=0	mods=c---	owner=text	mode=edit
+129377	mods	mods=----
+129709	press	key=named:Alt	cap=named:Alt	code=AltLeft	repeat=0	synthetic=0	mods=----	owner=text	mode=edit
+129709	mods	mods=--a-
+129794	mods	mods=----
+129795	focus	on=0
+129795	ime-disabled
+129803	allowed	on=0
+129997	focus	on=1
+129997	mods	mods=--a-
+129997	mods	mods=----
+129997	focus	on=0
+129997	ime-disabled
+139202	focus	on=1
+139203	mods	mods=--a-
+139203	mods	mods=----
+139213	allowed	on=1
+139213	ime-enabled
+139214	preedit	text=
+142813	preedit	text=n	cursor=0,1
+143501	preedit	text=n o	cursor=0,3
+145154	preedit	text=
+145154	commit	text=你哦
+145154	preedit	text=	cursor=0,0
+152675	mods	mods=----
+152676	focus	on=0
+152676	ime-disabled
+152685	allowed	on=0
+218586	focus	on=1
+218586	mods	mods=----
+218597	allowed	on=1
+218597	ime-enabled
+218598	preedit	text=
+221318	press	key=named:Escape	cap=named:Escape	code=Escape	text=\u{1b}	repeat=0	synthetic=0	mods=----	owner=text	mode=edit
+221331	allowed	on=0
+221331	ime-disabled
+221352	preedit	text=
+221492	release	key=named:Escape	cap=named:Escape	code=Escape	text=\u{1b}	repeat=0	synthetic=0	mods=----	owner=text	mode=read
+222336	press	key=named:Escape	cap=named:Escape	code=Escape	text=\u{1b}	repeat=0	synthetic=0	mods=----	owner=text	mode=read
+222499	release	key=named:Escape	cap=named:Escape	code=Escape	text=\u{1b}	repeat=0	synthetic=0	mods=----	owner=question	mode=read

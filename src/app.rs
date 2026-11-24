@@ -12371,6 +12371,51 @@ mod tests {
         assert!(on > 0, "the walk reaches a state where it is on");
     }
 
+    /// The library has the rule too, for the code of the input method
+    /// that the window does not call yet (`method::takes_text`). The
+    /// two answer the same in each state of a focused window.
+    #[test]
+    fn the_rule_of_the_library_is_the_windows_rule_with_the_focus() {
+        use super::{input_method_wanted, KeyOwner};
+        use oryx::input::method;
+        let owners = [
+            KeyOwner::Question,
+            KeyOwner::Dialog { field: false },
+            KeyOwner::Dialog { field: true },
+            KeyOwner::Path,
+            KeyOwner::GoTo,
+            KeyOwner::Search,
+            KeyOwner::Text,
+            KeyOwner::Code,
+        ];
+        let both = [true, false];
+        for owner in owners {
+            for editing in both {
+                for has_caret in both {
+                    for dialog_text in both {
+                        for setting in both {
+                            let at =
+                                method::At::new(setting, owner, editing, has_caret, dialog_text);
+                            assert_eq!(
+                                at.wanted(),
+                                input_method_wanted(
+                                    setting,
+                                    owner,
+                                    editing,
+                                    true,
+                                    has_caret,
+                                    dialog_text
+                                ),
+                                "{owner:?}, editing {editing}, caret {has_caret}, \
+                                 text {dialog_text}, setting {setting}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// The live caret is where the next key lands: in the text field
     /// that has the keys, or in the editor's text, and nowhere while the
     /// window is in the background or the keys go to a list or a

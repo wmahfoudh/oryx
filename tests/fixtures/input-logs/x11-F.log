@@ -1,0 +1,102 @@
+# oryx 1.4.0 linux x11
+1	ime-disabled
+15	focus	on=0
+17	focus	on=1
+17	press	key=named:Enter	cap=named:Enter	code=Enter	text=\r	repeat=0	synthetic=1	mods=----	owner=text	mode=read
+17	mods	mods=----
+17	release	key=named:Enter	cap=named:Enter	code=Enter	text=\r	repeat=0	synthetic=0	mods=----	owner=text	mode=read
+50	release	key=named:Enter	cap=named:Enter	code=Enter	text=\r	repeat=0	synthetic=0	mods=----	owner=text	mode=read
+2409	mods	mods=----
+2410	focus	on=0
+6029	focus	on=1
+6030	mods	mods=----
+7455	press	key=named:Control	cap=named:Control	code=ControlLeft	repeat=0	synthetic=0	mods=----	owner=text	mode=read
+7456	mods	mods=c---
+8503	press	key=char:e	cap=char:e	code=KeyE	text=e	repeat=0	synthetic=0	mods=c---	owner=text	mode=read
+8518	allowed	on=1
+8734	ime-enabled
+8735	release	key=char:e	cap=char:e	code=KeyE	text=e	repeat=0	synthetic=0	mods=c---	owner=text	mode=edit
+8896	mods	mods=----
+8898	mods	mods=c---
+8898	release	key=named:Control	cap=named:Control	code=ControlLeft	repeat=0	synthetic=0	mods=c---	owner=text	mode=edit
+8898	mods	mods=----
+9400	mods	mods=c---
+9401	mods	mods=----
+9401	press	key=named:Control	cap=named:Control	code=ControlLeft	repeat=0	synthetic=0	mods=----	owner=text	mode=edit
+9401	mods	mods=c---
+10511	press	key=named:End	cap=named:End	code=End	repeat=0	synthetic=0	mods=c---	owner=text	mode=edit
+10698	release	key=named:End	cap=named:End	code=End	repeat=0	synthetic=0	mods=c---	owner=text	mode=edit
+11101	mods	mods=----
+11103	mods	mods=c---
+11103	release	key=named:Control	cap=named:Control	code=ControlLeft	repeat=0	synthetic=0	mods=c---	owner=text	mode=edit
+11103	mods	mods=----
+17223	mods	mods=c---
+17225	mods	mods=----
+17225	press	key=named:Control	cap=named:Control	code=ControlLeft	repeat=0	synthetic=0	mods=----	owner=text	mode=edit
+17225	mods	mods=c---
+17869	release	key=named:Space	cap=named:Space	code=Space	text=\u{20}	repeat=0	synthetic=0	mods=c---	owner=text	mode=edit
+18646	release	key=named:Space	cap=named:Space	code=Space	text=\u{20}	repeat=0	synthetic=0	mods=c---	owner=text	mode=edit
+19559	release	key=named:Space	cap=named:Space	code=Space	text=\u{20}	repeat=0	synthetic=0	mods=c---	owner=text	mode=edit
+20086	release	key=named:Space	cap=named:Space	code=Space	text=\u{20}	repeat=0	synthetic=0	mods=c---	owner=text	mode=edit
+20921	release	key=named:Space	cap=named:Space	code=Space	text=\u{20}	repeat=0	synthetic=0	mods=c---	owner=text	mode=edit
+21304	mods	mods=----
+21306	mods	mods=c---
+21306	release	key=named:Control	cap=named:Control	code=ControlLeft	repeat=0	synthetic=0	mods=c---	owner=text	mode=edit
+21306	mods	mods=----
+27150	release	key=char:[	cap=char:[	code=BracketLeft	text=[	repeat=0	synthetic=0	mods=----	owner=text	mode=edit
+32871	preedit	text=
+32871	commit	text=ê
+33070	release	key=char:e	cap=char:e	code=KeyE	text=e	repeat=0	synthetic=0	mods=----	owner=text	mode=edit
+40170	press	key=named:F9	cap=named:F9	code=F9	repeat=0	synthetic=0	mods=----	owner=text	mode=edit
+40350	release	key=named:F9	cap=named:F9	code=F9	repeat=0	synthetic=0	mods=----	owner=text	mode=edit
+47930	mods	mods=--a-
+47931	mods	mods=----
+47931	press	key=named:Alt	cap=named:Alt	code=AltRight	repeat=0	synthetic=0	mods=----	owner=text	mode=edit
+47931	mods	mods=--a-
+48584	mods	mods=----
+48584	preedit	text=
+48584	commit	text=€
+48810	mods	mods=--a-
+48810	release	key=char:e	cap=char:e	code=KeyE	text=e	repeat=0	synthetic=0	mods=--a-	owner=text	mode=edit
+48951	mods	mods=----
+48953	mods	mods=--a-
+48953	release	key=named:Alt	cap=named:Alt	code=AltRight	repeat=0	synthetic=0	mods=--a-	owner=text	mode=edit
+48953	mods	mods=----
+52600	press	key=named:F9	cap=named:F9	code=F9	repeat=0	synthetic=0	mods=----	owner=text	mode=edit
+52796	release	key=named:F9	cap=named:F9	code=F9	repeat=0	synthetic=0	mods=----	owner=text	mode=edit
+54984	mods	mods=c---
+54986	mods	mods=----
+54986	press	key=named:Control	cap=named:Control	code=ControlLeft	repeat=0	synthetic=0	mods=----	owner=text	mode=edit
+54986	mods	mods=c---
+55539	press	key=char:f	cap=char:f	code=KeyF	text=f	repeat=0	synthetic=0	mods=c---	owner=text	mode=edit
+55707	release	key=char:f	cap=char:f	code=KeyF	text=f	repeat=0	synthetic=0	mods=c---	owner=search	mode=edit
+55924	mods	mods=----
+55926	mods	mods=c---
+55926	release	key=named:Control	cap=named:Control	code=ControlLeft	repeat=0	synthetic=0	mods=c---	owner=search	mode=edit
+55926	mods	mods=----
+57642	release	key=char:[	cap=char:[	code=BracketLeft	text=[	repeat=0	synthetic=0	mods=----	owner=search	mode=edit
+59427	preedit	text=
+59427	commit	text=ê
+59652	release	key=char:e	cap=char:e	code=KeyE	text=e	repeat=0	synthetic=0	mods=----	owner=search	mode=edit
+64572	mods	mods=--a-
+64573	mods	mods=----
+64573	press	key=named:Alt	cap=named:Alt	code=AltRight	repeat=0	synthetic=0	mods=----	owner=search	mode=edit
+64573	mods	mods=--a-
+65292	mods	mods=----
+65292	preedit	text=
+65292	commit	text=€
+65524	mods	mods=--a-
+65524	release	key=char:e	cap=char:e	code=KeyE	text=e	repeat=0	synthetic=0	mods=--a-	owner=search	mode=edit
+65607	mods	mods=----
+65609	mods	mods=--a-
+65609	release	key=named:Alt	cap=named:Alt	code=AltRight	repeat=0	synthetic=0	mods=--a-	owner=search	mode=edit
+65609	mods	mods=----
+68429	press	key=named:Escape	cap=named:Escape	code=Escape	text=\u{1b}	repeat=0	synthetic=0	mods=----	owner=search	mode=edit
+68615	release	key=named:Escape	cap=named:Escape	code=Escape	text=\u{1b}	repeat=0	synthetic=0	mods=----	owner=text	mode=edit
+71308	press	key=named:F9	cap=named:F9	code=F9	repeat=0	synthetic=0	mods=----	owner=text	mode=edit
+71498	release	key=named:F9	cap=named:F9	code=F9	repeat=0	synthetic=0	mods=----	owner=text	mode=edit
+72375	press	key=named:Escape	cap=named:Escape	code=Escape	text=\u{1b}	repeat=0	synthetic=0	mods=----	owner=text	mode=edit
+72390	allowed	on=0
+72544	ime-disabled
+72544	release	key=named:Escape	cap=named:Escape	code=Escape	text=\u{1b}	repeat=0	synthetic=0	mods=----	owner=text	mode=read
+72956	press	key=named:Escape	cap=named:Escape	code=Escape	text=\u{1b}	repeat=0	synthetic=0	mods=----	owner=text	mode=read
