@@ -196,6 +196,7 @@ pub fn draw_bar(
         true,
         caret_lit,
         state.view.window.start,
+        None,
     );
 }
 

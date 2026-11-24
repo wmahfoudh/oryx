@@ -2,7 +2,9 @@
 //! and other scripts: the composing text the window holds, the press
 //! that is the input method's, and where committed text goes. These
 //! rules need no window, so they are under tests, a fuzzer and the
-//! replays of recorded logs (`tests/input_method.rs`).
+//! replays of recorded logs (`tests/input_method.rs`). The tests by
+//! hand, on a real session, are listed in
+//! `tests/field/input-method.md`.
 //!
 //! With the setting off, nothing here acts.
 

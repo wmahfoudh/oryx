@@ -12,6 +12,7 @@ use crate::layout::DocY;
 use crate::paint::painter::Painter;
 use crate::style::fonts::BODY_FAMILY;
 use crate::style::theme::{self, Rgba, Theme};
+use crate::ui::compose;
 use crate::ui::overlay::{self, inside, Action, Overlay, OverlayResult, PanelDrag};
 use crate::ui::scrollbar;
 use crate::ui::textfield::TextField;
@@ -386,6 +387,24 @@ impl Overlay for ThemeBrowser {
         let (x, y, _, _) = self.rename_rect;
         let caret = field.caret_offset(&self.rename_offsets);
         Some([x + 5.0 + caret + 1.5, y + 5.0, 1.5, 17.0])
+    }
+
+    fn compose_spot(&self, theme: &Theme) -> Option<compose::Spot<'static>> {
+        let [x, _, _, _] = self.caret_area()?;
+        // The rename field as `draw` fills it, and its text's top.
+        let (left, top, width, _) = self.rename_rect;
+        Some(compose::Spot {
+            x,
+            top: top + 3.0,
+            height: 21.0,
+            text_top: top + 4.0,
+            room: (left + 2.0, left + width - 2.0),
+            family: BODY_FAMILY,
+            size: 15.0,
+            weight: 400,
+            bg: theme.ui.selection_bg,
+            fg: theme.ui.overlay_fg,
+        })
     }
 
     fn draw(&mut self, painter: &mut Painter, theme: &Theme, caret_lit: bool) {
@@ -890,6 +909,46 @@ mod tests {
         browser.key(&Key::Named(NamedKey::Escape), false, false);
         assert!(!browser.field_has_keys(), "the rename field closed");
         assert!(!browser.field_takes_text(), "the rename field closed");
+    }
+
+    /// The box of an input method's composing text goes at the rename
+    /// field's caret, inside the field as it was last painted. The list
+    /// alone, and a field not painted yet, have no place for it.
+    #[test]
+    fn the_composing_box_of_the_rename_field_is_at_its_caret_inside_the_field() {
+        let dir = temp_dir("rename-compose");
+        std::fs::write(
+            dir.join("mine.toml"),
+            "[surface]\nbackground = \"#282a36\"\n",
+        )
+        .unwrap();
+        let mut browser = ThemeBrowser::new(vec![dir.clone()], None, "mine");
+        std::fs::remove_dir_all(&dir).unwrap();
+        let theme = Theme::default_dark();
+        let mut fonts = FontStore::new();
+        drawn(&mut browser, &mut fonts, 600, 400);
+        assert!(browser.compose_spot(&theme).is_none(), "the list alone");
+        browser.start_rename(0, "mine".to_string());
+        assert!(browser.compose_spot(&theme).is_none(), "not painted yet");
+        drawn(&mut browser, &mut fonts, 600, 400);
+        let spot = browser.compose_spot(&theme).expect("the field is painted");
+        let caret = browser.caret_area().unwrap();
+        let (x, y, w, h) = browser.rename_rect;
+        assert_eq!(spot.x, caret[0], "at the caret");
+        assert!(
+            spot.top >= y && spot.top + spot.height <= y + h,
+            "inside the field"
+        );
+        assert!(spot.top <= caret[1] && spot.top + spot.height >= caret[1] + caret[3]);
+        assert!(
+            spot.room.0 >= x && spot.room.1 <= x + w,
+            "its room is the field"
+        );
+        assert_eq!(
+            (spot.family, spot.size),
+            (BODY_FAMILY, 15.0),
+            "the field's face"
+        );
     }
 
     /// Forty themes in a folder, the browser open on one of them.

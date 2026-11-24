@@ -13,7 +13,7 @@ use oryx::doc::stream::{self, ParseWorker};
 use oryx::edit::{
     self,
     autosave::{self, Verdict},
-    caret::{self, Caret, CaretBox, Motion},
+    caret::{self, Caret, CaretBox, Face, Motion},
     splice::{self, Ledger, Placed, Replay},
     undo::{Kind, Undo},
 };
@@ -44,6 +44,7 @@ use oryx::style::highlight::{self, Highlighter, PendingBlock};
 use oryx::style::seams::Table;
 use oryx::style::theme::{self, Rgba, Theme};
 use oryx::ui::busy::{self, Busy};
+use oryx::ui::compose;
 use oryx::ui::confirm;
 use oryx::ui::export::{ExportDialog, ExportProgress};
 use oryx::ui::goto::{self, GotoState};
@@ -664,6 +665,38 @@ fn caret_bar(
         y: y0 as i32,
         w: x1 - x0,
         h: y1 - y0,
+    }
+}
+
+/// Where the box of an input method's composing text is drawn in the
+/// editor, in logical pixels: at the caret's bar (`caret_bar`), over
+/// the caret's row, in the face of the text there, inside the pane
+/// right of the sidebar. The text is centered on the row, as the row's
+/// own text is.
+fn compose_spot<'a>(
+    width: u32,
+    inset: u32,
+    scroll_y: DocY,
+    scale: f32,
+    caret: CaretBox,
+    face: Face<'a>,
+    theme: &Theme,
+) -> compose::Spot<'a> {
+    let top = layout::relative_y(caret.y, scroll_y) / scale;
+    let height = caret.h / scale;
+    let size = face.size / scale;
+    compose::Spot {
+        x: (caret.x.max(0.0) + inset as f32) / scale,
+        top,
+        height,
+        // The painter sets a line 1.25 times the size high.
+        text_top: top + (height - 1.25 * size) / 2.0,
+        room: (inset as f32 / scale, width as f32 / scale),
+        family: face.family,
+        size,
+        weight: face.weight,
+        bg: theme.ui.overlay_bg,
+        fg: theme.ui.overlay_fg,
     }
 }
 
@@ -2605,12 +2638,19 @@ impl App {
         if outcome.redraw {
             self.request_redraw();
         }
-        // Under X11 ibus takes the caret's point only from an input
-        // context that a key has reached, so the point given at the
-        // turn on is lost when the caret has not moved since: it is
-        // given again when a composition opens.
-        if self.caret_point && !showed && self.composition.shown(at).is_some() {
-            self.caret_sent.forget();
+        if !showed && self.composition.shown(at).is_some() {
+            // Under X11 ibus takes the caret's point only from an
+            // input context that a key has reached, so the point given
+            // at the turn on is lost when the caret has not moved
+            // since: it is given again when a composition opens.
+            if self.caret_point {
+                self.caret_sent.forget();
+            }
+            // A composition that opens in the editor with the caret
+            // out of view brings the view to it, as a typed key does.
+            if matches!(self.key_owner(), KeyOwner::Text | KeyOwner::Code) {
+                self.view.owe_caret();
+            }
         }
         if let Some((to, text)) = outcome.commit {
             self.type_commit(to, text, event_loop);
@@ -9452,7 +9492,17 @@ impl App {
         let live = self.follow_caret(owner);
         // A field paints its caret on the blink's lit half while it has
         // the keys; the owner says which of the bars and the dialog it is.
-        let field_lit = live == Some(CaretAt::Field) && self.blink_visible;
+        // An input method's composing text shows where a caret is live,
+        // so a window in the background draws no box. Its box has the
+        // input method's own cursor: Oryx's caret is not drawn with it.
+        let composing = live
+            .and_then(|_| self.composition.shown(self.method_at()))
+            .map(|shown| (shown.text.to_string(), shown.cursor));
+        let composing = composing.as_ref().map(|(text, cursor)| method::Shown {
+            text,
+            cursor: *cursor,
+        });
+        let field_lit = live == Some(CaretAt::Field) && self.blink_visible && composing.is_none();
         let inset = self.inset() as u32;
         let Some(size) = self.gfx.as_ref().map(|g| g.window.inner_size()) else {
             return;
@@ -9793,12 +9843,16 @@ impl App {
         // the other half too while the input method is on: the system
         // opens its candidates beside the caret.
         self.text_caret = None;
-        if live == Some(CaretAt::Text) && (self.blink_visible || self.input_method_on) {
+        let mut composing_at = None;
+        let placed = self.blink_visible || self.input_method_on || composing.is_some();
+        if live == Some(CaretAt::Text) && placed {
             if let Some(c) = self.caret {
                 if let Some(b) = c.geometry(lay, &self.document, &mut self.fonts) {
                     let (w, h) = (size.width, size.height);
                     self.text_caret = Some(caret_bar(w, h, inset, frame_y, self.scale, b));
-                    if self.blink_visible {
+                    if composing.is_some() {
+                        composing_at = Some((c, b));
+                    } else if self.blink_visible {
                         draw_caret(
                             &mut buffer,
                             size.width,
@@ -9811,6 +9865,27 @@ impl App {
                         );
                     }
                 }
+            }
+        }
+        // The composing text in the editor, over the page and under
+        // the panels. It borrows the notices' canvas.
+        if let (Some(shown), Some((c, b))) = (composing, composing_at) {
+            let fits = self
+                .notice_canvas
+                .as_ref()
+                .is_some_and(|(p, _)| p.width() == size.width && p.height() == size.height);
+            if !fits {
+                self.notice_canvas =
+                    tiny_skia::Pixmap::new(size.width, size.height).map(|pixmap| (pixmap, None));
+            }
+            if let Some((canvas, stale)) = self.notice_canvas.as_mut() {
+                let face = c.face(lay, &self.document);
+                let spot =
+                    compose_spot(size.width, inset, frame_y, self.scale, b, face, &self.theme);
+                let mut painter = Painter::new(canvas, &mut self.fonts, stale.take(), self.scale);
+                compose::draw(&mut painter, shown, spot);
+                painter.composite(&mut buffer, size.width);
+                *stale = painter.dirty();
             }
         }
         // While editing the caret owns every bare key, so the panel's
@@ -9871,6 +9946,7 @@ impl App {
                     state,
                     size.width as f32 / self.scale,
                     field_lit && owner == KeyOwner::Search,
+                    composing.filter(|_| owner == KeyOwner::Search),
                 );
                 painter.composite(&mut buffer, size.width);
                 *stale = painter.dirty();
@@ -9918,6 +9994,7 @@ impl App {
                     state,
                     size.width as f32 / self.scale,
                     field_lit && owner == KeyOwner::Path,
+                    composing.filter(|_| owner == KeyOwner::Path),
                 );
                 painter.composite(&mut buffer, size.width);
                 *stale = painter.dirty();
@@ -10052,6 +10129,14 @@ impl App {
                     &self.theme,
                     field_lit && matches!(owner, KeyOwner::Dialog { .. }),
                 );
+                // The dialog's text field, painted just above, says
+                // where its box goes.
+                let in_field = owner == (KeyOwner::Dialog { field: true });
+                if let Some(shown) = composing.filter(|_| in_field) {
+                    if let Some(spot) = overlay.compose_spot(&self.theme) {
+                        compose::draw(&mut painter, shown, spot);
+                    }
+                }
                 painter.composite(&mut buffer, size.width);
                 *stale = painter.dirty();
             }
@@ -12004,6 +12089,57 @@ mod tests {
         super::draw_caret(&mut frame, width, height, 0, 0.0, 1.0, caret, color);
         let painted = frame.iter().find(|p| **p != 0).expect("the caret painted");
         assert_eq!(painted >> 24, 0xFF);
+    }
+
+    /// The box of a composing text stands on the caret's bar: its text
+    /// starts at the bar's x, the box covers the caret's row, and its
+    /// room is the pane right of the sidebar. The text has the size of
+    /// the face and is centered on the row. With the sidebar's inset,
+    /// a scrolled page and a scale of one and a half and of two.
+    #[test]
+    fn the_composing_box_stands_on_the_carets_bar() {
+        use oryx::edit::caret::{CaretBox, Face};
+        let (width, height) = (600u32, 400u32);
+        let theme = oryx::style::theme::Theme::default_dark();
+        let cases = [
+            (0u32, 0.0, 1.0f32, 50.0f32, 90.0, 30.0f32, 20.0f32),
+            (120, 0.0, 1.0, 50.0, 90.0, 30.0, 20.0),
+            (120, 60.0, 1.5, 50.4, 90.0, 45.0, 30.0),
+            (0, 30.0, 2.0, 7.0, 150.0, 60.0, 40.0),
+        ];
+        for (inset, scroll, scale, x, y, h, size) in cases {
+            let caret = CaretBox { x, y: y as DocY, h };
+            let face = Face {
+                family: "Hack",
+                size,
+                weight: 700,
+            };
+            let bar = super::caret_bar(width, height, inset, scroll, scale, caret);
+            let spot = super::compose_spot(width, inset, scroll, scale, caret, face, &theme);
+            let state = format!("inset {inset}, scroll {scroll}, scale {scale}: {spot:?}");
+            assert!((spot.x * scale - bar.x as f32).abs() < 1.0, "{state}");
+            assert!((spot.top * scale - bar.y as f32).abs() < 1.0, "{state}");
+            assert!((spot.height * scale - bar.h as f32).abs() < 1.0, "{state}");
+            assert_eq!(
+                spot.room,
+                (inset as f32 / scale, width as f32 / scale),
+                "{state}"
+            );
+            assert_eq!((spot.family, spot.weight), ("Hack", 700), "{state}");
+            assert!((spot.size * scale - size).abs() < 0.01, "{state}");
+            let (row, line) = (
+                spot.top + spot.height / 2.0,
+                spot.text_top + spot.size * 0.625,
+            );
+            assert!(
+                (row - line).abs() < 0.01,
+                "the text centered on the row: {state}"
+            );
+            assert_eq!(
+                (spot.bg, spot.fg),
+                (theme.ui.overlay_bg, theme.ui.overlay_fg)
+            );
+        }
     }
 
     /// The bar given to the system's input method is the one the

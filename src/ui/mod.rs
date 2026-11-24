@@ -1,4 +1,5 @@
 pub mod busy;
+pub mod compose;
 pub mod confirm;
 pub mod export;
 pub mod goto;

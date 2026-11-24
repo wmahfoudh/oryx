@@ -7,10 +7,12 @@ use std::ops::Range;
 
 use crate::doc::model::{BlockKind, CodeBody, Document};
 use crate::edit::caret::word_char;
+use crate::input::method::Shown;
 use crate::layout::DocY;
 use crate::paint::painter::Painter;
 use crate::style::fonts::CODE_FAMILY;
 use crate::style::theme::{Rgba, Theme};
+use crate::ui::compose;
 use crate::ui::selection::{block_pieces, ModelPos, Piece, Selection};
 use crate::ui::textfield::TextField;
 
@@ -141,13 +143,16 @@ impl SearchState {
 /// The floating pill over the document's top-right corner: query on the
 /// left, match counter on the right, in the theme's overlay colors. The
 /// fields' views are refreshed for the mouse. `caret_lit` is the blink's
-/// lit half while the bar has the keys.
+/// lit half while the bar has the keys. `composing` is the composing
+/// text of an input method while the bar has the keys: the field the
+/// keyboard feeds draws it.
 pub fn draw_bar(
     painter: &mut Painter,
     theme: &Theme,
     state: &mut SearchState,
     width: f32,
     caret_lit: bool,
+    composing: Option<Shown>,
 ) {
     let ui = &theme.ui;
     let x = (width - BAR_WIDTH - MARGIN).max(MARGIN);
@@ -241,6 +246,7 @@ pub fn draw_bar(
         !state.replace_focused(),
         caret_lit,
         state.query_view.window.start,
+        composing,
     );
 
     if let Some(row) = state.replace.as_ref() {
@@ -276,6 +282,7 @@ pub fn draw_bar(
             row.focused,
             caret_lit,
             state.replace_view.window.start,
+            composing,
         );
     }
 }
@@ -312,6 +319,11 @@ pub fn bar_hit(width: f32, replace_row: bool, px: f32, py: f32) -> Option<BarHit
 /// placeholder when empty, the selection drawn only on the field the
 /// keyboard feeds, and its caret only on the blink's lit half
 /// (`caret_lit`). Answers where the text stands, for the mouse.
+///
+/// With a composing text of an input method (`composing`), the field
+/// the keyboard feeds draws it in a box at its caret, inside the
+/// field's room, and draws no placeholder. The box covers the caret's
+/// place, and the caller asks for no caret then.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_field(
     painter: &mut Painter,
@@ -324,8 +336,10 @@ pub(crate) fn draw_field(
     focused: bool,
     caret_lit: bool,
     previous_start: usize,
+    composing: Option<Shown>,
 ) -> FieldView {
     let ui = &theme.ui;
+    let composing = composing.filter(|_| focused);
     let text = field.text();
     let (window, cut) = window_fit(painter, text, field.caret(), avail, previous_start);
     let shown = if cut {
@@ -357,7 +371,9 @@ pub(crate) fn draw_field(
             );
         }
     }
-    if text.is_empty() {
+    if text.is_empty() && composing.is_some() {
+        // The box is drawn where the placeholder would be.
+    } else if text.is_empty() {
         painter.text(
             left + 6.0,
             top + TEXT_DROP,
@@ -381,6 +397,24 @@ pub(crate) fn draw_field(
     let caret_x = left + x_of(field.caret()) + 1.0;
     if focused && caret_lit {
         painter.line(caret_x, top + 1.0, caret_x, top + 19.0, 1.0, ui.overlay_fg);
+    }
+    if let Some(shown) = composing {
+        compose::draw(
+            painter,
+            shown,
+            compose::Spot {
+                x: caret_x,
+                top: top - 1.0,
+                height: 22.0,
+                text_top: top + TEXT_DROP,
+                room: (left, left + avail),
+                family: CODE_FAMILY,
+                size: QUERY_SIZE,
+                weight: 400,
+                bg: ui.selection_bg,
+                fg: ui.overlay_fg,
+            },
+        );
     }
     // Every boundary from the drawn window's start, the hidden ones
     // placed beyond the drawn text on the side where the text goes on:
@@ -1243,6 +1277,7 @@ mod tests {
                 focused,
                 caret_lit,
                 0,
+                None,
             );
             drop(painter);
             pixmap
@@ -1260,6 +1295,71 @@ mod tests {
         assert!(
             dark.data() == unfocused.data(),
             "a field without the keys paints no caret"
+        );
+    }
+
+    /// With an input method's composing text, the field the keyboard
+    /// feeds draws its box at the caret, over the caret's place, and no
+    /// placeholder. A field without the keys draws as it does with no
+    /// composing text.
+    #[test]
+    fn a_field_draws_the_composing_text_in_place_of_its_caret_and_its_placeholder() {
+        let mut fonts = FontStore::new();
+        let theme = Theme::default_dark();
+        let shown = Shown {
+            text: "ni",
+            cursor: None,
+        };
+        let mut drawn = |text: &str, focused: bool, lit: bool, composing: Option<Shown>| {
+            let field = TextField::new(text.to_string());
+            let mut pixmap = Pixmap::new(200, 40).unwrap();
+            let mut painter = Painter::new(&mut pixmap, &mut fonts, None, 1.0);
+            draw_field(
+                &mut painter,
+                &theme,
+                &field,
+                10.0,
+                10.0,
+                160.0,
+                "a long placeholder",
+                focused,
+                lit,
+                0,
+                composing,
+            );
+            drop(painter);
+            pixmap
+        };
+        let painted = |pixmap: &Pixmap, columns: std::ops::Range<u32>| {
+            columns
+                .flat_map(|x| (0..40).map(move |y| (x, y)))
+                .any(|(x, y)| pixmap.pixel(x, y).is_some_and(|p| p.alpha() > 0))
+        };
+        let empty = drawn("", true, true, Some(shown));
+        assert!(
+            empty.data() == drawn("", true, false, Some(shown)).data(),
+            "the box covers the caret: the lit half paints what the dark half does"
+        );
+        assert!(painted(&empty, 9..30), "the box at the caret");
+        assert!(!painted(&empty, 60..200), "no placeholder beside the box");
+        assert!(
+            painted(&drawn("", true, false, None), 60..200),
+            "the placeholder is there with no composing text"
+        );
+        assert!(
+            drawn("abc", false, true, Some(shown)).data() == drawn("abc", false, true, None).data(),
+            "a field without the keys draws no box"
+        );
+        // The caret is after "abc": the box starts there and goes on.
+        let after = drawn("abc", true, false, Some(shown));
+        let plain = drawn("abc", true, false, None);
+        let differ: Vec<u32> = (0..200)
+            .filter(|&x| (0..40).any(|y| after.pixel(x, y) != plain.pixel(x, y)))
+            .collect();
+        let (first, last) = (differ[0], differ[differ.len() - 1]);
+        assert!(
+            first >= 30 && last <= 70,
+            "the box after the text: {first} to {last}"
         );
     }
 
@@ -1286,6 +1386,7 @@ mod tests {
             true,
             true,
             0,
+            None,
         );
         assert_eq!(view.offsets.len(), 61);
         assert!(
@@ -1319,6 +1420,7 @@ mod tests {
             true,
             true,
             0,
+            None,
         );
         let (window, cut) = window_fit(&mut painter, query, 0, 120.0, 0);
         assert!(!cut && window.start == 0 && window.end < query.len());
@@ -1372,6 +1474,7 @@ mod tests {
             true,
             true,
             0,
+            None,
         );
         let took = started.elapsed();
         assert!(view.offsets.windows(2).all(|w| w[0] < w[1]));
@@ -1402,6 +1505,7 @@ mod tests {
                 true,
                 true,
                 previous,
+                None,
             )
             .window
         };
@@ -1464,6 +1568,7 @@ mod tests {
                 true,
                 true,
                 previous,
+                None,
             )
             .window
         };
@@ -1556,6 +1661,7 @@ mod tests {
             true,
             true,
             0,
+            None,
         );
         let (window, cut) = window_fit(&mut painter, &query, 0, 120.0, 0);
         assert!(!cut && window.start == 0 && window.end < query.len());
@@ -1604,6 +1710,7 @@ mod tests {
             true,
             true,
             0,
+            None,
         );
         let (window, _) = window_fit(&mut painter, &query, 0, 120.0, 0);
         assert!(
@@ -1631,6 +1738,7 @@ mod tests {
             true,
             true,
             0,
+            None,
         );
         let (window, _) = window_fit(&mut painter, &query, query.len(), 120.0, 0);
         assert!(

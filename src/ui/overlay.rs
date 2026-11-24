@@ -8,6 +8,7 @@ use winit::keyboard::Key;
 
 use crate::paint::painter::Painter;
 use crate::style::theme::{Rgba, Theme};
+use crate::ui::compose;
 
 /// App-level effect requested by an overlay.
 pub enum Action {
@@ -271,6 +272,14 @@ pub trait Overlay {
     /// pixels. The system's input method opens its candidates beside
     /// it. None when no field is open or none was painted yet.
     fn caret_area(&self) -> Option<[f32; 4]> {
+        None
+    }
+    /// Where the box of an input method's composing text is drawn in
+    /// the open text field: at its caret, inside the field, in its
+    /// face. None when no field that takes text is open or none was
+    /// painted yet. The window draws the box after `draw`, and asks
+    /// `draw` for no caret then.
+    fn compose_spot(&self, _theme: &Theme) -> Option<compose::Spot<'static>> {
         None
     }
 }

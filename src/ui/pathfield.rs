@@ -9,6 +9,7 @@
 
 use std::path::{Path, PathBuf, MAIN_SEPARATOR};
 
+use crate::input::method::Shown;
 use crate::paint::painter::Painter;
 use crate::style::fonts::CODE_FAMILY;
 use crate::style::theme::{Rgba, Theme};
@@ -151,13 +152,15 @@ pub fn bar_hit(width: f32, px: f32, py: f32) -> bool {
 
 /// The floating pill over the document's top-right corner, where the
 /// search bar stands: the ask's word on the left, the field after it.
-/// `caret_lit` is the blink's lit half while the field has the keys.
+/// `caret_lit` is the blink's lit half while the field has the keys,
+/// and `composing` the composing text of an input method then.
 pub fn draw_bar(
     painter: &mut Painter,
     theme: &Theme,
     state: &mut PathState,
     width: f32,
     caret_lit: bool,
+    composing: Option<Shown>,
 ) {
     let ui = &theme.ui;
     let (x, y, w, h) = bar_rect(width);
@@ -203,6 +206,7 @@ pub fn draw_bar(
         true,
         caret_lit,
         state.view.window.start,
+        composing,
     );
 }
 

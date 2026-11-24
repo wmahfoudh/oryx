@@ -293,6 +293,15 @@ pub struct CaretBox {
     pub h: f32,
 }
 
+/// The face of the text at the caret: what a text drawn beside the
+/// caret is set in.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Face<'a> {
+    pub family: &'a str,
+    pub size: f32,
+    pub weight: u16,
+}
+
 /// One mappable run on a visual line: laid-out text whose display
 /// bytes slice the source directly.
 struct MappedRun {
@@ -1109,6 +1118,34 @@ impl Caret {
         }
     }
 
+    /// The face of the text the caret is in: its run's, on the line
+    /// `geometry` finds, and on a blank line the first run's of the
+    /// text line before it. The code face where no row answers: an
+    /// empty page, or a line the layout does not hold.
+    pub fn face<'a>(self, lay: &'a LayoutDoc, doc: &Document) -> Face<'a> {
+        let offset = self.offset;
+        let lines = lines_of(lay, doc);
+        let line = locate(&lines, offset)
+            .or_else(|| lines.iter().rposition(|l| l.end < offset))
+            .map(|li| &lines[li]);
+        let run = line.and_then(|line| run_at(line, offset).or(line.runs.first()));
+        match run {
+            Some(run) => {
+                let text_run = &lay.runs[run.index];
+                Face {
+                    family: lay.run_family(text_run),
+                    size: text_run.size,
+                    weight: text_run.weight,
+                }
+            }
+            None => Face {
+                family: &lay.code_family,
+                size: lay.code_size,
+                weight: 400,
+            },
+        }
+    }
+
     /// Where the caret stands, when its offset is on a placed line.
     /// The offset after the file's final newline, where Enter at the
     /// end of the file leaves the caret, stands on a row of its own
@@ -1895,6 +1932,41 @@ mod tests {
             third.y,
             abc.y + DocY::from(2.0 * h)
         );
+    }
+
+    /// The composing text of an input method is drawn in the face of
+    /// the text at the caret: the run's own, a heading's larger size
+    /// included.
+    #[test]
+    fn the_face_at_the_caret_is_its_runs() {
+        let doc = md_doc("# Title\n\nbody text\n");
+        let (l, _) = lay_of(&doc);
+        let (title, body) = (run(&l, &doc, "Title"), run(&l, &doc, "body text"));
+        assert!(title.size > body.size, "a heading is larger");
+        for (needle, run) in [("itle", title), ("ody", body)] {
+            let face = Caret::at(at(&doc, needle)).face(&l, &doc);
+            assert_eq!(face.family, l.run_family(run), "{needle}");
+            assert_eq!((face.size, face.weight), (run.size, run.weight), "{needle}");
+        }
+    }
+
+    /// On a blank line the face is the one of the text line before it,
+    /// as the caret's own advance there. With no row at all it is the
+    /// code face.
+    #[test]
+    fn the_face_on_a_blank_line_and_on_an_empty_page() {
+        let doc = code_doc("alpha\n\nbeta\n");
+        let (l, _) = lay_of(&doc);
+        let alpha = run(&l, &doc, "alpha");
+        let face = Caret::at(6).face(&l, &doc);
+        assert_eq!(face.family, l.run_family(alpha));
+        assert_eq!((face.size, face.weight), (alpha.size, alpha.weight));
+
+        let empty = code_doc("");
+        let (le, _) = lay_of(&empty);
+        let face = Caret::at(0).face(&le, &empty);
+        assert_eq!(face.family, le.code_family.as_str());
+        assert_eq!((face.size, face.weight), (le.code_size, 400));
     }
 
     /// A page with no text at all, the untitled note as it opens or a
