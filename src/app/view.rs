@@ -494,8 +494,11 @@ pub(super) enum Reload {
     Scroll(DocY),
     /// A view kept through a new pass, with the scroll of the moment.
     Kept(Kept, DocY),
-    /// The row of a code or text file, or of the editor.
-    Row(LinePlace),
+    /// The row of a code or text file, or of the editor, and whether
+    /// the snap to the caret is owed with it: the row is then the seat
+    /// of the caret's line, which shows the line's first row, and the
+    /// snap shows the caret's own.
+    Row(LinePlace, bool),
     /// A landing on the page: a link, a step of the history, a go to
     /// line, a drop of the thumb.
     Offset(LinePlace),
@@ -1405,7 +1408,7 @@ impl View {
     /// before the file is opened again.
     pub(super) fn before_reload(&self, source: &str) -> Reload {
         if let Some(place) = self.pending_row {
-            Reload::Row(LinePlace::of(source, place))
+            Reload::Row(LinePlace::of(source, place), self.caret_snap)
         } else if let Some(place) = self.pending_offset {
             Reload::Offset(LinePlace::of(source, place))
         } else if self.end_waits() {
@@ -1435,9 +1438,10 @@ impl View {
                 self.scroll_y = scroll;
                 self.kept_view = Some(kept);
             }
-            Reload::Row(line) => {
+            Reload::Row(line, snap) => {
                 let place = line.place(&page.doc.source);
                 self.seat_editor_on(page, place);
+                self.caret_snap = snap;
             }
             Reload::Offset(line) => self.pending_offset = Some(line.place(&page.doc.source)),
             Reload::End => self.hold_end(),
@@ -3106,6 +3110,46 @@ mod tests {
         bench.reload(grown());
         bench.settle(REST);
         assert_eq!(bench.caret_row_shown(true), Ok(()));
+    }
+
+    /// A case the fuzzer found. A letter is typed at a caret whose
+    /// line the measure has not reached, on a lower row of a line that
+    /// wraps, the view elsewhere. The seat of the caret's line waits,
+    /// and the snap is owed with it: the seat shows the line's first
+    /// row, the snap the caret's own. A reload keeps both, and the
+    /// view ends where it ends without the reload.
+    #[test]
+    fn a_reload_keeps_the_snap_owed_with_the_seat_of_the_carets_line() {
+        let mut ends = Vec::new();
+        for reloaded in [false, true] {
+            let mut bench = Bench::new(numbered(LINES), true, 3);
+            bench.frame();
+            bench.go_to(92);
+            bench.frame();
+            // A click on the picture of the place the jump waits for,
+            // on a lower row of line 91.
+            assert!(bench.click(0.0, 0.0));
+            bench.frame();
+            bench.wheel(1.0);
+            bench.frame();
+            assert!(bench.letter());
+            bench.frame();
+            assert!(
+                bench.view.pending_row.is_some() && bench.view.caret_snap,
+                "the seat waits and the snap is owed"
+            );
+            if reloaded {
+                bench.reload(bench.text.clone());
+                assert!(
+                    bench.view.pending_row.is_some() && bench.view.caret_snap,
+                    "the reload keeps both"
+                );
+            }
+            bench.settle(REST);
+            assert_eq!(bench.caret_row_shown(true), Ok(()), "reloaded {reloaded}");
+            ends.push(bench.view.scroll_y);
+        }
+        assert_eq!(ends[0], ends[1], "the reload changes nothing");
     }
 
     #[test]
