@@ -1300,6 +1300,16 @@ impl View {
         self.kept_view = self.kept_view.filter(|kept| kept.shows_caret());
     }
 
+    /// The editor of a code or text file is left. The view owed to
+    /// the caret ends with the caret: left set, the seat would make a
+    /// reload while reading ask for the caret, with the view at the
+    /// top of the file. What waits for a place of the file stays, and
+    /// lands while reading.
+    pub(super) fn caret_left(&mut self) {
+        self.caret_snap = false;
+        self.caret_seat = None;
+    }
+
     /// A click placed the caret, and the view stays where the click
     /// found it.
     pub(super) fn caret_clicked(&mut self) {
@@ -2406,6 +2416,14 @@ mod tests {
             self.typed('x')
         }
 
+        /// The editor of a code or text file is left:
+        /// `App::leave_edit`.
+        fn leave(&mut self) {
+            self.editing = false;
+            self.caret = None;
+            self.view.caret_left();
+        }
+
         /// A character typed at the caret, a line break among them.
         fn typed(&mut self, ch: char) -> bool {
             let Some(caret) = self.caret else {
@@ -3232,6 +3250,32 @@ mod tests {
         assert!(bench.view.caret_snap, "the reload keeps the snap");
         bench.settle(REST);
         assert_eq!(bench.caret_row_shown(true), Ok(()));
+    }
+
+    /// The editor of a text file is left while the snap waits beside
+    /// the seat it made. The view owed to the caret ends with the
+    /// caret, and a reload while reading keeps the view.
+    #[test]
+    fn a_reload_after_the_editor_is_left_keeps_the_view() {
+        let mut bench = Bench::new(numbered(LINES), true, 3);
+        bench.frame();
+        bench.go_to(300);
+        bench.frame();
+        assert!(bench.letter());
+        let mut frames = 0;
+        while bench.view.pending_row.is_some() || bench.view.caret_seat.is_none() {
+            bench.frame();
+            frames += 1;
+            assert!(frames < 1000, "the seat does not land");
+        }
+        assert!(bench.pass_active(), "the file is still measured");
+        bench.leave();
+        bench.settle(REST);
+        let view = bench.view.scroll_y;
+        assert!(view > 0.0, "the view is on the line of the letter");
+        bench.reload(bench.text.clone());
+        bench.settle(REST);
+        assert_eq!(bench.view.scroll_y, view, "the view the reader had");
     }
 
     #[test]

@@ -2507,6 +2507,10 @@ impl App {
                     }
                 }
             }
+        } else {
+            // A code or text file keeps its document, and what waits
+            // for a place of it still lands while reading.
+            self.view.caret_left();
         }
         self.request_redraw();
     }
