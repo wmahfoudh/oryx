@@ -117,6 +117,10 @@ pub struct Outcome<'a> {
     pub redraw: bool,
     /// Text to type, and the reader that types it.
     pub commit: Option<(CommitTo, &'a str)>,
+    /// A composing text came that is not the one that showed: the user
+    /// typed a letter of a composition. In the editor the view goes to
+    /// the caret, as after a typed key.
+    pub composed: bool,
 }
 
 /// The composing text that shows.
@@ -199,11 +203,13 @@ impl Composition {
                 Outcome {
                     redraw: !same,
                     commit: None,
+                    composed: !same,
                 }
             }
             Event::Composing { .. } | Event::Disabled => Outcome {
                 redraw: self.close(at),
                 commit: None,
+                composed: false,
             },
             Event::Commit(text) => {
                 let redraw = self.close(at);
@@ -211,6 +217,7 @@ impl Composition {
                 Outcome {
                     redraw,
                     commit: to.map(|to| (to, text)),
+                    composed: false,
                 }
             }
         }
@@ -409,13 +416,72 @@ mod tests {
             outcome,
             Outcome {
                 redraw: true,
-                commit: None
+                commit: None,
+                composed: true,
             }
         );
         assert_eq!(composition.shown(editor()), shown("ni", Some((2, 2))));
         let outcome = composition.event(editor(), composing("ni h", Some((0, 4))));
         assert!(outcome.redraw, "the next text takes its place");
         assert_eq!(composition.shown(editor()), shown("ni h", Some((0, 4))));
+    }
+
+    /// Each letter of a composition is typing: a composing text that
+    /// is not the one shown says so, the first as the next ones. The
+    /// same text again, the end of a composition and a text that is
+    /// not held say nothing.
+    #[test]
+    fn a_composing_text_that_changes_is_a_typed_letter() {
+        let mut composition = Composition::default();
+        let typed =
+            |composition: &mut Composition, at, event| composition.event(at, event).composed;
+        assert!(
+            typed(&mut composition, editor(), composing("n", None)),
+            "the first"
+        );
+        assert!(
+            typed(&mut composition, editor(), composing("ni", None)),
+            "the next"
+        );
+        assert!(
+            !typed(&mut composition, editor(), composing("ni", None)),
+            "the same again"
+        );
+        assert!(
+            typed(&mut composition, editor(), composing("ni", Some((0, 2)))),
+            "its cursor moved"
+        );
+        assert!(
+            !typed(&mut composition, editor(), composing("", None)),
+            "an empty one"
+        );
+        assert!(typed(&mut composition, editor(), composing("n", None)));
+        assert!(
+            !typed(&mut composition, editor(), Event::Commit("你")),
+            "a commit"
+        );
+        assert!(typed(&mut composition, editor(), composing("n", None)));
+        assert!(
+            !typed(&mut composition, editor(), Event::Disabled),
+            "the end"
+        );
+        assert!(!typed(&mut composition, editor(), Event::Enabled));
+        assert!(
+            !typed(
+                &mut composition,
+                at(KeyOwner::GoTo, true),
+                composing("n", None)
+            ),
+            "where the keys take no text"
+        );
+        assert!(
+            !typed(
+                &mut composition,
+                off(KeyOwner::Text, true),
+                composing("n", None)
+            ),
+            "the setting off"
+        );
     }
 
     #[test]
@@ -435,7 +501,8 @@ mod tests {
             outcome,
             Outcome {
                 redraw: true,
-                commit: None
+                commit: None,
+                composed: false,
             }
         );
         assert!(composition.is_empty());
@@ -451,7 +518,8 @@ mod tests {
             outcome,
             Outcome {
                 redraw: true,
-                commit: Some((CommitTo::Editor, "\u{4f60}"))
+                commit: Some((CommitTo::Editor, "\u{4f60}")),
+                composed: false,
             }
         );
         assert!(composition.is_empty());
@@ -462,7 +530,8 @@ mod tests {
             outcome,
             Outcome {
                 redraw: false,
-                commit: Some((CommitTo::Editor, "\u{43f}"))
+                commit: Some((CommitTo::Editor, "\u{43f}")),
+                composed: false,
             }
         );
     }
@@ -475,7 +544,8 @@ mod tests {
             outcome,
             Outcome {
                 redraw: true,
-                commit: None
+                commit: None,
+                composed: false,
             }
         );
         assert!(composition.is_empty());
@@ -492,7 +562,8 @@ mod tests {
             outcome,
             Outcome {
                 redraw: true,
-                commit: None
+                commit: None,
+                composed: false,
             }
         );
         assert!(composition.is_empty());

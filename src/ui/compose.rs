@@ -12,6 +12,11 @@ use crate::style::theme::Rgba;
 const PAD_LEFT: f32 = 2.0;
 const PAD_RIGHT: f32 = 3.0;
 
+/// The edge of a box has the text's color at a quarter of its
+/// strength: it shows on the box's color in a light theme and in a
+/// dark one.
+const EDGE_STRENGTH: u8 = 4;
+
 /// Where a composing box is drawn, in the painter's logical pixels.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Spot<'a> {
@@ -33,6 +38,10 @@ pub struct Spot<'a> {
     /// The color of the box, and of its text, its lines and its bar.
     pub bg: Rgba,
     pub fg: Rgba,
+    /// A thin line around the box, for a box of the color of what is
+    /// under it: without the line, the text the box covers looks
+    /// deleted.
+    pub edged: bool,
 }
 
 /// A box placed in its room.
@@ -113,7 +122,8 @@ pub fn marks(text: &str, cursor: Option<(usize, usize)>) -> Marks {
 
 /// Draws the composing text in its box at `spot`: the text underlined,
 /// the input method's cursor as a bar, a stronger line under its
-/// range. The box covers what is under it, the text after the caret
+/// range, and a thin line around the box where the spot asks for one.
+/// The box covers what is under it, the text after the caret
 /// included. The painter's clip is lifted at the end.
 pub fn draw(painter: &mut Painter, shown: Shown, spot: Spot) {
     let width = painter.measure(shown.text, spot.family, spot.size, spot.weight);
@@ -164,6 +174,22 @@ pub fn draw(painter: &mut Painter, shown: Shown, spot: Spot) {
         0.0,
         spot.fg,
     );
+    if spot.edged && placed.width > 1.0 && spot.height > 1.0 {
+        // The line is inside the rectangle, so the box is no larger.
+        let edge = Rgba {
+            a: spot.fg.a / EDGE_STRENGTH,
+            ..spot.fg
+        };
+        painter.stroke(
+            placed.left + 0.5,
+            spot.top + 0.5,
+            placed.width - 1.0,
+            spot.height - 1.0,
+            0.0,
+            1.0,
+            edge,
+        );
+    }
     painter.clip(None);
 }
 
@@ -344,6 +370,7 @@ mod tests {
                 b: 227,
                 a: 255,
             },
+            edged: false,
         }
     }
 
@@ -394,6 +421,47 @@ mod tests {
         };
         let (x0, _, x1, _) = extent(&painted(shown, spot(100.0, (60.0, 200.0)))).unwrap();
         assert_eq!((x0, x1), (60, 199), "the room and nothing beside it");
+    }
+
+    /// The edge is one pixel inside the box's rectangle, in the text's
+    /// color made faint: the box is no larger with it, and its inside
+    /// has the box's color.
+    #[test]
+    fn an_edged_box_has_a_faint_line_around_it_inside_its_rectangle() {
+        let shown = Shown {
+            text: "ni",
+            cursor: None,
+        };
+        let plain = painted(shown, spot(100.0, (10.0, 290.0)));
+        let edged = painted(
+            shown,
+            Spot {
+                edged: true,
+                ..spot(100.0, (10.0, 290.0))
+            },
+        );
+        let (x0, y0, x1, y1) = extent(&plain).unwrap();
+        assert_eq!(extent(&edged), Some((x0, y0, x1, y1)), "no larger");
+        let color = |pixmap: &Pixmap, x: u32, y: u32| {
+            let p = pixmap.pixel(x, y).unwrap();
+            (p.red(), p.green(), p.blue())
+        };
+        let (bg, fg) = ((26, 32, 48), (201, 209, 227));
+        let middle = (y0 + y1) / 2;
+        for (x, y, side) in [
+            (x0, middle, "left"),
+            (x1, middle, "right"),
+            (x0 + 1, y0, "top"),
+            (x0 + 1, y1, "bottom"),
+        ] {
+            assert_eq!(color(&plain, x, y), bg, "{side}, no edge");
+            let (r, g, b) = color(&edged, x, y);
+            assert!(
+                r > bg.0 + 20 && r < fg.0 - 60 && g > bg.1 + 20 && b > bg.2 + 20,
+                "{side}: a faint line, ({r}, {g}, {b})"
+            );
+        }
+        assert_eq!(color(&edged, x0 + 1, y0 + 1), bg, "the inside");
     }
 
     /// The bar is a column of the text's color over the box's height,

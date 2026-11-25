@@ -392,7 +392,13 @@ impl Overlay for ThemeBrowser {
     fn compose_spot(&self, theme: &Theme) -> Option<compose::Spot<'static>> {
         let [x, _, _, _] = self.caret_area()?;
         // The rename field as `draw` fills it, and its text's top.
-        let (left, top, width, _) = self.rename_rect;
+        let (left, top, width, height) = self.rename_rect;
+        // A field cut by the list's edge is clipped there, and the box
+        // is drawn after the list, with no clip.
+        let list = self.geometry.list_top..=self.geometry.list_top + self.geometry.list_h;
+        if !list.contains(&top) || !list.contains(&(top + height)) {
+            return None;
+        }
         Some(compose::Spot {
             x,
             top: top + 3.0,
@@ -402,8 +408,10 @@ impl Overlay for ThemeBrowser {
             family: BODY_FAMILY,
             size: 15.0,
             weight: 400,
-            bg: theme.ui.selection_bg,
+            // The field's own background, so the box has an edge.
+            bg: theme.ui.overlay_bg,
             fg: theme.ui.overlay_fg,
+            edged: true,
         })
     }
 
@@ -948,6 +956,35 @@ mod tests {
             (spot.family, spot.size),
             (BODY_FAMILY, 15.0),
             "the field's face"
+        );
+        assert!(spot.edged, "the field's own color, with an edge");
+    }
+
+    /// A rename field cut by the list's edge is clipped there, and a
+    /// box drawn after the list would stand over the header: such a
+    /// field has no place for the composing box.
+    #[test]
+    fn a_rename_field_cut_by_the_lists_edge_has_no_composing_box() {
+        let mut browser = long_browser("rename-cut", "theme-00");
+        let theme = Theme::default_dark();
+        let mut fonts = FontStore::new();
+        drawn(&mut browser, &mut fonts, 600, 400);
+        browser.start_rename(0, "theme-00".to_string());
+        browser.scroll = 0.0;
+        drawn(&mut browser, &mut fonts, 600, 400);
+        assert!(
+            browser.compose_spot(&theme).is_some(),
+            "the row whole in the list"
+        );
+        browser.scroll = ROW_H / 2.0;
+        drawn(&mut browser, &mut fonts, 600, 400);
+        assert!(
+            browser.rename_rect.1 < browser.geometry.list_top,
+            "the field is cut"
+        );
+        assert!(
+            browser.compose_spot(&theme).is_none(),
+            "no box over the header"
         );
     }
 

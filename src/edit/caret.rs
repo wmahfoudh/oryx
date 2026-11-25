@@ -1119,16 +1119,21 @@ impl Caret {
     }
 
     /// The face of the text the caret is in: its run's, on the line
-    /// `geometry` finds, and on a blank line the first run's of the
-    /// text line before it. The code face where no row answers: an
-    /// empty page, or a line the layout does not hold.
+    /// `geometry` finds. On a blank line after text it is the first
+    /// run's of the text line before it, the face the caret's advance
+    /// there is measured in (`line_prefix_advance`). On a page with no
+    /// row, and on a blank row above the first text line, it is the
+    /// code face. It is asked where `geometry` placed the caret.
     pub fn face<'a>(self, lay: &'a LayoutDoc, doc: &Document) -> Face<'a> {
         let offset = self.offset;
         let lines = lines_of(lay, doc);
-        let line = locate(&lines, offset)
-            .or_else(|| lines.iter().rposition(|l| l.end < offset))
-            .map(|li| &lines[li]);
-        let run = line.and_then(|line| run_at(line, offset).or(line.runs.first()));
+        let run = match locate(&lines, offset) {
+            Some(li) => run_at(&lines[li], offset),
+            None => lines
+                .iter()
+                .rfind(|l| l.end < offset)
+                .and_then(|line| line.runs.first()),
+        };
         match run {
             Some(run) => {
                 let text_run = &lay.runs[run.index];
@@ -1948,6 +1953,20 @@ mod tests {
             assert_eq!(face.family, l.run_family(run), "{needle}");
             assert_eq!((face.size, face.weight), (run.size, run.weight), "{needle}");
         }
+    }
+
+    /// The blank line after a line that ends in bold: the face is the
+    /// one of that line's first run, which the caret's own advance on
+    /// the blank line is measured in, not the bold of its end.
+    #[test]
+    fn the_face_on_a_blank_line_is_the_first_runs_of_the_line_before() {
+        let doc = md_doc("plain **bold**\n\nnext\n");
+        let (l, _) = lay_of(&doc);
+        let bold = run(&l, &doc, "bold");
+        assert_eq!(bold.weight, 700, "the line ends in bold");
+        let blank = at(&doc, "\n\nnext") + 1;
+        let face = Caret::at(blank).face(&l, &doc);
+        assert_eq!(face.weight, 400, "the first run of the line before");
     }
 
     /// On a blank line the face is the one of the text line before it,

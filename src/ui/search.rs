@@ -411,8 +411,12 @@ pub(crate) fn draw_field(
                 family: CODE_FAMILY,
                 size: QUERY_SIZE,
                 weight: 400,
-                bg: ui.selection_bg,
+                // The bar's own background: a selection beside the
+                // box keeps its color. The edge shows where the box
+                // covers the text after the caret.
+                bg: ui.overlay_bg,
                 fg: ui.overlay_fg,
+                edged: true,
             },
         );
     }
@@ -1361,6 +1365,52 @@ mod tests {
             first >= 30 && last <= 70,
             "the box after the text: {first} to {last}"
         );
+    }
+
+    /// The bar opens again with its last query selected. The box of
+    /// a composing text then has the bar's own background, not the
+    /// selection's: the two do not read as one highlight.
+    #[test]
+    fn the_composing_box_of_a_field_does_not_have_the_selections_color() {
+        let mut fonts = FontStore::new();
+        let theme = Theme::default_dark();
+        let mut field = TextField::new("abc".to_string());
+        field.select_all();
+        let mut pixmap = Pixmap::new(200, 40).unwrap();
+        let mut painter = Painter::new(&mut pixmap, &mut fonts, None, 1.0);
+        let shown = Shown {
+            text: "ni",
+            cursor: None,
+        };
+        let view = draw_field(
+            &mut painter,
+            &theme,
+            &field,
+            10.0,
+            10.0,
+            160.0,
+            "",
+            true,
+            false,
+            0,
+            Some(shown),
+        );
+        drop(painter);
+        let color = |x: u32, y: u32| {
+            let p = pixmap.pixel(x, y).unwrap();
+            (p.red(), p.green(), p.blue())
+        };
+        let rgb = |c: Rgba| (c.r, c.g, c.b);
+        assert_ne!(rgb(theme.ui.overlay_bg), rgb(theme.ui.selection_bg));
+        // Left of the first letter, in the middle of the row: the
+        // selection. Above the composing text, right of the caret:
+        // the box.
+        assert_eq!(color(9, 20), rgb(theme.ui.selection_bg), "the selection");
+        let caret = view.caret[0] as u32;
+        assert_eq!(color(caret + 4, 10), rgb(theme.ui.overlay_bg), "the box");
+        // The box has the bar's color, so a line around it shows where
+        // it is: its top row is not the bar's color.
+        assert_ne!(color(caret + 4, 9), rgb(theme.ui.overlay_bg), "its edge");
     }
 
     /// A query longer than the pill, the caret at its start: the drawn

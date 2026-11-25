@@ -491,6 +491,7 @@ fn replay(name: &str, setting: bool) -> Replayed {
             Record::Focus(false) => Outcome {
                 redraw: composition.clear(),
                 commit: None,
+                composed: false,
             },
             Record::Focus(true) | Record::Mods(_) | Record::Allowed(_) => Outcome::default(),
         };

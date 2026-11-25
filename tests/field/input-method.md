@@ -5,22 +5,14 @@ are run again after each change of `src/input/method.rs` or of the
 `Ime` events in `src/app.rs`. The tests that need no hand are in
 `tests/input_method.rs`.
 
-Work on a copy of this file, since the steps type in it:
+Work on a copy of this file, since the steps type in it. Open the copy
+with Oryx and turn the setting on: `Ctrl+,`, the row "Input method",
+`Space`, `Escape`.
 
-    cp tests/field/input-method.md /tmp/input-method.md
-    oryx /tmp/input-method.md
-
-Turn the setting on first: `Ctrl+,`, the row "Input method", `Space`,
-`Escape`.
-
-While you compose, the letters show in a box at the caret, underlined,
-and the candidates open beside the box.
-
-alpha beta gamma delta
-
-one two three four
-
-end
+While you compose, the composing text shows in a box at the caret,
+underlined, and the candidates open beside the box. The text the steps
+type in is the last three lines of text of this file, so `Ctrl+End`
+goes to it.
 
 ## H1. fcitx5 on Wayland
 
@@ -39,18 +31,20 @@ Pinyin. `Ctrl+Space` switches.
 7. `ni`, then `Ctrl+F`: the search bar opens. The next letter shows in
    a box in the bar. `Escape` until the bar is closed.
 8. `ni`, then `Ctrl+G`: the box goes, and nothing is typed. `5`,
-   `Enter`: the caret is on line 5.
+   `Enter`: the caret is on line 5. `Ctrl+End`.
 9. `ni`, then `Alt+Tab` to another window and back: `ni` is typed.
    Then `nihao`, `Space`: 你好.
-10. `Escape` to reading mode, `Ctrl+F`, `nihao`, `Space`: 你好 is in
+10. `ni`, then scroll to the top of the file with the wheel, then `h`:
+    the view comes back to the box. `Escape`.
+11. `Escape` to reading mode, `Ctrl+F`, `nihao`, `Space`: 你好 is in
     the bar and its matches are lit. `Escape`.
-11. In reading mode, `Space` and the arrows move the page, and no
+12. In reading mode, `Space` and the arrows move the page, and no
     candidate opens.
-12. A keyboard chosen in fcitx5 (Russian): in the editor the letters
+13. A keyboard chosen in fcitx5 (Russian): in the editor the letters
     are typed, and `Ctrl+S` saves with the key at the place of `S`.
-13. The candidates: beside the box in the editor, and under the box in
+14. The candidates: beside the box in the editor, and under the box in
     the search bar. They are not at a corner of the window.
-14. The setting off, then steps 1 and 10 again: the letters are typed
+15. The setting off, then steps 1 and 11 again: the letters are typed
     as letters.
 
 ## H2. fcitx5 under X11
@@ -72,8 +66,9 @@ Oryx shows no box, and its caret stays.
 About 25 minutes. "Pinyin on" means that the taskbar shows 中. `Shift`
 switches.
 
-1. Microsoft Pinyin: steps 1 to 5, 9 and 10 of H1. At step 9 the text
-   is typed as it shows in the box.
+1. Microsoft Pinyin: steps 1 to 5 and 9 to 11 of H1. At step 4 the bar
+   moves and there is no stronger line. At step 9 the text is typed as
+   it shows in the box.
 2. Microsoft Pinyin: `ni`, then a click on another line, then `Space`:
    你 is typed on the line clicked.
 3. Microsoft Pinyin: `ni`, then `Ctrl+,`, `Ctrl+F` or `Ctrl+G`: nothing
@@ -82,7 +77,8 @@ switches.
    `，` and `。`.
 5. Microsoft Pinyin: `Ctrl+,`, `Escape`, then `ni`: the candidates are
    beside the caret.
-6. Weasel: steps 1 to 4 of H1.
+6. Weasel: steps 1 to 3 of H1. Weasel shows the letters in its own
+   window, and Oryx's box is one space wide.
 7. Japanese, in hiragana: `kyouhaiitenkidesu`, `Space`: the clause
    being converted has the stronger line. `Enter`: the sentence is
    typed.
@@ -98,3 +94,11 @@ switches.
 ## The Mac
 
 Not tried. The code follows the source of winit.
+
+## The text
+
+alpha beta gamma delta
+
+one two three four
+
+end

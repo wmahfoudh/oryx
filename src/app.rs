@@ -670,14 +670,17 @@ fn caret_bar(
 
 /// Where the box of an input method's composing text is drawn in the
 /// editor, in logical pixels: at the caret's bar (`caret_bar`), over
-/// the caret's row, in the face of the text there, inside the pane
-/// right of the sidebar. The text is centered on the row, as the row's
-/// own text is.
+/// the caret's row, in the face of the text there. Its room is the
+/// pane's text: from the end of the line numbers' room (`gutter`, zero
+/// when they are off) to the scrollbar's strip. The text is centered
+/// on the row, as the row's own text is.
+#[allow(clippy::too_many_arguments)]
 fn compose_spot<'a>(
     width: u32,
     inset: u32,
     scroll_y: DocY,
     scale: f32,
+    gutter: f32,
     caret: CaretBox,
     face: Face<'a>,
     theme: &Theme,
@@ -691,12 +694,17 @@ fn compose_spot<'a>(
         height,
         // The painter sets a line 1.25 times the size high.
         text_top: top + (height - 1.25 * size) / 2.0,
-        room: (inset as f32 / scale, width as f32 / scale),
+        room: (
+            (inset as f32 + gutter) / scale,
+            width as f32 / scale - scrollbar::STRIP_WIDTH,
+        ),
         family: face.family,
         size,
         weight: face.weight,
         bg: theme.ui.overlay_bg,
         fg: theme.ui.overlay_fg,
+        // On the page the box's color differs from what is around it.
+        edged: false,
     }
 }
 
@@ -2638,19 +2646,20 @@ impl App {
         if outcome.redraw {
             self.request_redraw();
         }
-        if !showed && self.composition.shown(at).is_some() {
-            // Under X11 ibus takes the caret's point only from an
-            // input context that a key has reached, so the point given
-            // at the turn on is lost when the caret has not moved
-            // since: it is given again when a composition opens.
-            if self.caret_point {
-                self.caret_sent.forget();
-            }
-            // A composition that opens in the editor with the caret
-            // out of view brings the view to it, as a typed key does.
-            if matches!(self.key_owner(), KeyOwner::Text | KeyOwner::Code) {
-                self.view.owe_caret();
-            }
+        // Under X11 ibus takes the caret's point only from an input
+        // context that a key has reached, so the point given at the
+        // turn on is lost when the caret has not moved since: it is
+        // given again when a composition opens.
+        if self.caret_point && !showed && self.composition.shown(at).is_some() {
+            self.caret_sent.forget();
+        }
+        // A letter of a composition is typing. In the editor it does
+        // what a typed key does to the view: a fling stops, the view
+        // goes to the caret, and what waited for another place is
+        // dropped.
+        if outcome.composed && matches!(self.key_owner(), KeyOwner::Text | KeyOwner::Code) {
+            self.fling = None;
+            self.view.owe_caret();
         }
         if let Some((to, text)) = outcome.commit {
             self.type_commit(to, text, event_loop);
@@ -9840,8 +9849,9 @@ impl App {
             }
         }
         // The caret is placed on the lit half of its blink, and on
-        // the other half too while the input method is on: the system
-        // opens its candidates beside the caret.
+        // the other half too while the input method is on or a
+        // composing text shows: the system opens its candidates beside
+        // the caret, and the box is drawn at it.
         self.text_caret = None;
         let mut composing_at = None;
         let placed = self.blink_visible || self.input_method_on || composing.is_some();
@@ -9880,8 +9890,17 @@ impl App {
             }
             if let Some((canvas, stale)) = self.notice_canvas.as_mut() {
                 let face = c.face(lay, &self.document);
-                let spot =
-                    compose_spot(size.width, inset, frame_y, self.scale, b, face, &self.theme);
+                let gutter = self.cfg.gutter;
+                let spot = compose_spot(
+                    size.width,
+                    inset,
+                    frame_y,
+                    self.scale,
+                    gutter,
+                    b,
+                    face,
+                    &self.theme,
+                );
                 let mut painter = Painter::new(canvas, &mut self.fonts, stale.take(), self.scale);
                 compose::draw(&mut painter, shown, spot);
                 painter.composite(&mut buffer, size.width);
@@ -12115,14 +12134,21 @@ mod tests {
                 weight: 700,
             };
             let bar = super::caret_bar(width, height, inset, scroll, scale, caret);
-            let spot = super::compose_spot(width, inset, scroll, scale, caret, face, &theme);
+            let gutter = inset as f32 / 3.0;
+            let spot =
+                super::compose_spot(width, inset, scroll, scale, gutter, caret, face, &theme);
             let state = format!("inset {inset}, scroll {scroll}, scale {scale}: {spot:?}");
             assert!((spot.x * scale - bar.x as f32).abs() < 1.0, "{state}");
             assert!((spot.top * scale - bar.y as f32).abs() < 1.0, "{state}");
             assert!((spot.height * scale - bar.h as f32).abs() < 1.0, "{state}");
+            // From the end of the line numbers' room to the scrollbar's
+            // strip.
             assert_eq!(
                 spot.room,
-                (inset as f32 / scale, width as f32 / scale),
+                (
+                    (inset as f32 + gutter) / scale,
+                    width as f32 / scale - oryx::ui::scrollbar::STRIP_WIDTH
+                ),
                 "{state}"
             );
             assert_eq!((spot.family, spot.weight), ("Hack", 700), "{state}");
@@ -12139,6 +12165,7 @@ mod tests {
                 (spot.bg, spot.fg),
                 (theme.ui.overlay_bg, theme.ui.overlay_fg)
             );
+            assert!(!spot.edged, "on the page the box's color is its edge");
         }
     }
 
