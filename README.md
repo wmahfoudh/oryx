@@ -115,7 +115,7 @@ A few consistent rules apply across the app: `Escape` closes the active overlay 
 | `Ctrl+G` | Go to a line:column |
 | `Alt+Left` / `Alt+Right` | Back and forward |
 | `Ctrl+T` | Choose a theme |
-| `Ctrl+,` | Settings: fonts, sizes, line numbers, word count, autosave |
+| `Ctrl+,` | Settings: fonts, sizes, line numbers, word count, autosave, input method |
 | `Ctrl+P` | Export to PDF |
 | `Ctrl+Shift+P` | PDF export settings |
 | `F1` | All shortcuts and the markdown syntax |
@@ -189,7 +189,7 @@ Oryx requires no account and collects zero telemetry. It never reports what you 
 - Oryx opens text files in UTF-8 only. A file in an older encoding, like Windows-1252 or Shift JIS, is refused rather than shown wrong. Binary files are refused too.
 - Books protected by DRM and fixed-layout EPUB books are not supported. CBR comics open when their pages are stored in the RAR archive without compression, which is the usual case.
 - Oryx renders the HTML that GitHub allows in a README, plus page breaks and aligned blocks. It does not apply CSS and does not render whole HTML pages.
-- Typing works with any keyboard layout, but the input methods for Chinese, Japanese and Korean are not supported.
+- The input methods for Chinese, Japanese and Korean are off by default. You turn them on with `Input method` in the settings (`Ctrl+,`). They are not tested on the Mac (for the moment).
 - On a file of several megabytes, the rest of the file is laid out and colored in the background, so a few lines can change color a moment after you reach them. A PDF export waits for this coloring to finish.
 - On Linux, Oryx needs glibc 2.35 and OpenSSL 3, which recent distributions have ([the list](INSTALL.md#requirements)).
 - The Mac build is made on GitHub's Mac machines and tested by some nice Mac users (thank you!).

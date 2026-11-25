@@ -102,7 +102,7 @@ With text selected, typing a bracket, a quote, `*`, `_` or a backtick wraps the 
 | Key | What it does |
 |---|---|
 | `Ctrl+T` | Choose a theme: arrows to preview, `Enter` to keep, `Escape` to go back |
-| `Ctrl+,` | Settings: fonts, sizes, interface scale, line numbers, word count and autosave |
+| `Ctrl+,` | Settings: fonts, sizes, interface scale, line numbers, word count, autosave and input method |
 | `Ctrl+Plus` / `Ctrl+Minus` | Zoom in / out; in a comic, switch between page width, whole page and two pages |
 | `Ctrl+0` | Reset the zoom; in a comic, show the whole page |
 | `Ctrl+J` | Justify the text on or off (markdown and books) |

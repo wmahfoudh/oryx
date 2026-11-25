@@ -8,6 +8,10 @@
 
 - A small dot now shows in the bottom right corner while Oryx is busy with the open file: reading it, measuring it, coloring it, counting its words or exporting it to PDF. You can read and type meanwhile. The dot goes out when the work is done.
 
+#### Editing
+
+- You can now type Chinese, Japanese and Korean with an input method, in the editor and in the text fields. To use it, turn on `Input method` in the settings (`Ctrl+,`). Before, input methods were not supported. It was tested on Linux and on Windows (not on the Mac, for the moment).
+
 ### Fixes
 
 - A big code file with long lines is now as fast far down as at its top. Before, in a 194 MB playlist whose lines wrap, a page key at the end of the file took 0.4 s, and the editor used more than half a processor core there while you typed nothing.

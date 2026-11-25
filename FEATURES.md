@@ -185,6 +185,16 @@ With text selected, typing a bracket or a quote wraps the selection instead of r
 
 `Alt+Left` and `Alt+Right` go back and forward between the places you jumped from, in the editor too.
 
+### Input methods
+
+To type Chinese, Japanese or Korean, turn on `Input method` in the settings (`Ctrl+,`). It is off by default.
+
+With the setting on, the input method of the system works in the editor and in the text fields, such as the search bar. The letters you type show at the caret, underlined, and the candidates open beside them. `Escape` cancels them, and the editor stays open.
+
+The input method is on only where you type text. While you read, `Space` and the arrows still move the page.
+
+It was tested on Linux and on Windows, not on the Mac (for the moment).
+
 ### Markdown helpers
 
 `Ctrl+B`, `Ctrl+I` and `` Ctrl+` `` make the selection, or the word under the cursor, bold, italic or code. The same key removes the formatting. With nothing selected, press the key, type, and press it again to continue in plain text.

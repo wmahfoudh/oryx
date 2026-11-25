@@ -631,7 +631,7 @@ pub const SHORTCUTS: &[Shortcut] = &[
     },
     Shortcut {
         keys: "Ctrl+,",
-        action: "Settings: fonts, sizes, interface scale, line numbers, word count and autosave",
+        action: "Settings: fonts, sizes, interface scale, line numbers, word count, autosave and input method",
         section: "View",
         bindings: &[
             (Binding::Ctrl(","), Command::Settings),

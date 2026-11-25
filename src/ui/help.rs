@@ -20,7 +20,7 @@ pub fn welcome(tip: usize) -> String {
          `{}` shows or hides the folder sidebar, where you browse and open files.\n\n\
          `{}` opens the settings: fonts, sizes and the interface scale, \
          if the page looks too small or too large on this screen, and the \
-         line numbers, the word count and autosave.\n\n\
+         line numbers, the word count, autosave and the input method.\n\n\
          `{}` lists the shortcuts, the markdown syntax and the math commands.\n\n\
          {}\n\
          You can also drag and drop a file here.\n\n\
@@ -563,6 +563,11 @@ pub const TIPS: &[Tip] = &[
         text: r#"To turn on autosave, open the settings with `Ctrl+,`. Oryx can save your file when you switch to another window, or after you stop typing, from 5 seconds to 15 minutes."#,
     },
     Tip {
+        kind: TipKind::Tip,
+        area: Area::Editing,
+        text: r#"To type Chinese, Japanese or Korean, open the settings with `Ctrl+,` and turn on "Input method". The letters you type show at the caret, underlined, and the candidates open beside them."#,
+    },
+    Tip {
         kind: TipKind::Note,
         area: Area::Editing,
         text: r#"Autosave does not write over someone else's change. If another program changed your file while you were editing it, Oryx keeps your text, tells you, and waits for your `Ctrl+S`."#,
@@ -600,7 +605,7 @@ pub const TIPS: &[Tip] = &[
     Tip {
         kind: TipKind::Tip,
         area: Area::Looks,
-        text: r#"`Ctrl+,` opens the settings: the body font and the code font, their sizes, the interface scale, the line numbers, the word count and autosave."#,
+        text: r#"`Ctrl+,` opens the settings: the body font and the code font, their sizes, the interface scale, the line numbers, the word count, autosave and the input method."#,
     },
     Tip {
         kind: TipKind::Tip,
