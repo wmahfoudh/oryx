@@ -1300,11 +1300,12 @@ impl View {
         self.kept_view = self.kept_view.filter(|kept| kept.shows_caret());
     }
 
-    /// The editor of a code or text file is left. The view owed to
-    /// the caret ends with the caret: left set, the seat would make a
-    /// reload while reading ask for the caret, with the view at the
-    /// top of the file. What waits for a place of the file stays, and
-    /// lands while reading.
+    /// The editor is left with no page to return to: Escape or
+    /// `Ctrl+E` in a code or text file, and another file or a reload
+    /// from any editor. The view owed to the caret ends with the
+    /// caret: left set, the seat would make a reload while reading ask
+    /// for the caret, with the view at the top of the file. A row that
+    /// waits for a place of the file stays, and lands while reading.
     pub(super) fn caret_left(&mut self) {
         self.caret_snap = false;
         self.caret_seat = None;
@@ -4455,6 +4456,23 @@ mod tests {
         );
     }
 
+    /// A case the fuzzer found: a click on the row the bottom edge
+    /// cuts, then a zoom step. The view is kept by its top
+    /// (`Kept::of`), and the row, which grew, is under the view: the
+    /// rule, not a fault, and a limit of what the fuzzer checks.
+    #[test]
+    fn a_zoom_step_on_a_row_the_edge_cuts_is_a_limit_of_the_fuzzer() {
+        let acts = [Act::Click(0, 176), Act::Zoom(true)];
+        for pace in [3, usize::MAX] {
+            let ended = check(&acts, true, pace).expect("the rules hold");
+            assert_eq!(ended.2, Some("caret's row cut by an edge"), "pace {pace}");
+        }
+        // A row whole in the view keeps its height, and no limit is
+        // met.
+        let whole = check(&[Act::Click(0, 150), Act::Zoom(true)], true, 3).expect("the rules hold");
+        assert_eq!(whole.2, None);
+    }
+
     /// The smallest input `fuzz_view_wait` fails on when a
     /// click on a picture is read on the layout, as before the task: a
     /// drop of the thumb, then a click. The caret's row was left out
@@ -4628,8 +4646,15 @@ mod tests {
         /// changes no behavior. A sequence that meets one is not
         /// compared with the file measured whole. Each line goes when
         /// its fault is corrected.
-        fn gap(&self, act: Act) -> Option<&'static str> {
+        fn gap(&mut self, act: Act) -> Option<&'static str> {
             match act {
+                // Not a fault, the rule of `Kept::of`: a caret whose
+                // row an edge cuts is left where it is, and a zoom step
+                // or a new width keeps the view by its top. The row,
+                // which grows or moves, can end under the view.
+                Act::Zoom(_) | Act::Width(_) if self.editing && self.caret_row_cut() => {
+                    Some("caret's row cut by an edge")
+                }
                 // Not a fault, a limit of the comparison. While
                 // reading, a zoom step or a new width keeps the top of
                 // the view, and a jump that still waits keeps its line
@@ -4652,6 +4677,24 @@ mod tests {
                 }
                 _ => None,
             }
+        }
+
+        /// Whether an edge of the view cuts the caret's row: part of
+        /// it in the view, not the whole. False for a row the layout
+        /// does not hold.
+        fn caret_row_cut(&mut self) -> bool {
+            let (view_h, scroll) = (DocY::from(self.view_h), self.view.scroll_y);
+            let Some(lay) = self.lay.as_ref() else {
+                return false;
+            };
+            self.caret
+                .and_then(|caret| caret.geometry(lay, &self.doc, &mut self.fonts))
+                .is_some_and(|b| {
+                    let (top, bottom) = (b.y, b.y + DocY::from(b.h));
+                    let part = bottom > scroll && top < scroll + view_h;
+                    let whole = top >= scroll && bottom <= scroll + view_h;
+                    part && !whole
+                })
         }
 
         /// Whether the caret is on one of the long lines of `numbered`.
