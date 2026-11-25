@@ -492,12 +492,16 @@ impl LinePlace {
 pub(super) enum Reload {
     /// Nothing waited: the scroll.
     Scroll(DocY),
-    /// A view kept through a new pass, with the scroll of the moment.
-    Kept(Kept, DocY),
+    /// A view kept through a new pass, with the scroll of the moment,
+    /// and whether the snap to the caret is owed beside it: the view
+    /// of an edit does not show the caret's row after a line break on
+    /// its last row, and the snap brings the row in.
+    Kept(Kept, DocY, bool),
     /// The row of a code or text file, or of the editor, and whether
-    /// the snap to the caret is owed with it: the row is then the seat
-    /// of the caret's line, which shows the line's first row, and the
-    /// snap shows the caret's own.
+    /// the snap to the caret is owed beside it. A letter keeps the row
+    /// that waits, whatever asked it: the seat of the caret's line, a
+    /// go to line, a click, a step of the history. A seat shows the
+    /// first row of its line, and the snap the caret's own.
     Row(LinePlace, bool),
     /// A landing on the page: a link, a step of the history, a go to
     /// line, a drop of the thumb.
@@ -1414,7 +1418,7 @@ impl View {
         } else if self.end_waits() {
             Reload::End
         } else if let Some(kept) = self.kept_view {
-            Reload::Kept(kept, self.scroll_y)
+            Reload::Kept(kept, self.scroll_y, self.caret_snap)
         } else if self.caret_snap || self.caret_seat.is_some() {
             Reload::Caret
         } else {
@@ -1434,9 +1438,10 @@ impl View {
             // The reload keeps its exact scroll; the place the file
             // remembers would land it on the block's top.
             Reload::Scroll(scroll) => self.scroll_y = scroll,
-            Reload::Kept(kept, scroll) => {
+            Reload::Kept(kept, scroll, snap) => {
                 self.scroll_y = scroll;
                 self.kept_view = Some(kept);
+                self.caret_snap = snap;
             }
             Reload::Row(line, snap) => {
                 let place = line.place(&page.doc.source);
@@ -2398,6 +2403,11 @@ mod tests {
         /// A letter typed at the caret, by the path of `App::apply_edit`
         /// that drops the layout, then `App::seat_caret_after_edit`.
         fn letter(&mut self) -> bool {
+            self.typed('x')
+        }
+
+        /// A character typed at the caret, a line break among them.
+        fn typed(&mut self, ch: char) -> bool {
             let Some(caret) = self.caret else {
                 return false;
             };
@@ -2406,11 +2416,11 @@ mod tests {
                 let (view, page) = self.page();
                 view.edit_view(&page, at)
             };
-            self.text.insert(at, 'x');
+            self.text.insert(at, ch);
             self.doc = edit::rendered_document(FileKind::Text, &self.text);
             self.lay = None;
             self.view.keep_edit_view(edit_view);
-            self.caret = Some(Caret::at(at + 1));
+            self.caret = Some(Caret::at(at + ch.len_utf8()));
             self.view.owe_caret();
             true
         }
@@ -3150,6 +3160,78 @@ mod tests {
             ends.push(bench.view.scroll_y);
         }
         assert_eq!(ends[0], ends[1], "the reload changes nothing");
+    }
+
+    /// A character typed in the measured part of a file still
+    /// measured: the view of the edit is kept, and the snap is owed
+    /// beside it. After a letter the kept view shows the caret's row.
+    /// After a line break on the last row of the view it does not, and
+    /// the snap brings the row in. A reload keeps both, and the view
+    /// ends where it ends without the reload.
+    #[test]
+    fn a_reload_keeps_the_snap_owed_beside_the_view_of_an_edit() {
+        // Each click is at the end of a short line: the letter in the
+        // middle of the view, the line break on its last whole row.
+        for (ch, y) in [('x', 100.0), ('\n', 175.0)] {
+            let mut ends = Vec::new();
+            for reloaded in [false, true] {
+                let mut bench = Bench::new(numbered(LINES), true, 3);
+                for _ in 0..60 {
+                    bench.frame();
+                }
+                bench.wheel(4.0);
+                bench.frame();
+                assert!(bench.click(300.0, y));
+                bench.frame();
+                assert!(bench.typed(ch));
+                assert!(
+                    matches!(bench.view.kept_view, Some(Kept::Edit(_))) && bench.view.caret_snap,
+                    "the view of the edit is kept and the snap is owed"
+                );
+                if reloaded {
+                    bench.reload(bench.text.clone());
+                    assert!(
+                        matches!(bench.view.kept_view, Some(Kept::Edit(_)))
+                            && bench.view.caret_snap,
+                        "{ch:?}: the reload keeps both"
+                    );
+                }
+                bench.settle(REST);
+                assert_eq!(
+                    bench.caret_row_shown(true),
+                    Ok(()),
+                    "{ch:?}, reloaded {reloaded}"
+                );
+                ends.push(bench.view.scroll_y);
+            }
+            assert_eq!(ends[0], ends[1], "{ch:?}: the reload changes nothing");
+        }
+    }
+
+    /// The seat of the caret's line has landed and the snap waits for
+    /// the end of the measure, nothing beside it: after a reload the
+    /// snap is still owed, and the caret's row is in the view at rest.
+    #[test]
+    fn a_reload_keeps_the_snap_owed_alone() {
+        let mut bench = Bench::new(numbered(LINES), true, 3);
+        bench.frame();
+        bench.go_to(300);
+        bench.frame();
+        assert!(bench.letter());
+        let mut frames = 0;
+        while bench.view.pending_row.is_some() || bench.view.caret_seat.is_none() {
+            bench.frame();
+            frames += 1;
+            assert!(frames < 1000, "the seat does not land");
+        }
+        assert!(
+            bench.pass_active() && bench.view.caret_snap && bench.view.kept_view.is_none(),
+            "the snap alone is owed, while the file is measured"
+        );
+        bench.reload(bench.text.clone());
+        assert!(bench.view.caret_snap, "the reload keeps the snap");
+        bench.settle(REST);
+        assert_eq!(bench.caret_row_shown(true), Ok(()));
     }
 
     #[test]
