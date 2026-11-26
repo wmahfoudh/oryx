@@ -159,3 +159,5 @@ oryx --clear-cache      # remove the downloaded remote images
 oryx --version          # print the version
 oryx --help             # list these options
 ```
+
+On Windows, you can make a shortcut to `oryx.exe` and add a folder after it in the shortcut's Target, for example `"C:\Program Files\Oryx\oryx.exe" D:\work`. Oryx then opens with the sidebar on that folder, whatever file you opened last.

@@ -59,7 +59,7 @@ chmod +x Oryx-*-x86_64.AppImage
 
 You can update it in place with AppImageUpdate, AppImageLauncher or Gear Lever.
 
-You can make the AppImage portable. Create a folder next to it with the same name and `.home` at the end, such as `Oryx-<version>-x86_64.AppImage.home`. The AppImage then uses it as your home folder, and Oryx keeps its files there. If you rename the AppImage, rename the folder too.
+You can make the AppImage portable. Create a folder next to it with the same name and `.home` at the end, such as `Oryx-<version>-x86_64.AppImage.home`. The AppImage then uses it as your home folder, and Oryx keeps its files there. If you rename the AppImage, rename the folder too. If your system sets `XDG_CONFIG_HOME` or one of the other `XDG` folder variables, Oryx uses those folders, not the `.home` folder.
 
 ### Tarball
 

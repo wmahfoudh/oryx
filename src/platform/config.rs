@@ -1281,6 +1281,30 @@ mod tests {
     }
 
     #[test]
+    fn a_portable_copy_finds_a_book_whichever_form_its_folder_and_the_path_have() {
+        let plain = r"E:\Stick\Oryx";
+        let book = r"\\?\E:\Stick\Books\a.cbz";
+        let mut positions = Positions::default();
+        positions.remember_from(Some(plain), book, 12, Default::default());
+        assert_eq!(positions.book[0].key, r"..\Books\a.cbz");
+        assert_eq!(
+            positions.entry(Some(STICK), book).map(|b| b.offset),
+            Some(12)
+        );
+        assert_eq!(
+            positions
+                .entry(Some(STICK), r"E:\Stick\Books\a.cbz")
+                .map(|b| b.offset),
+            Some(12)
+        );
+        let old = Config {
+            last_dir: r"\\?\E:\Stick\Books".to_string(),
+            ..Config::default()
+        };
+        assert_eq!(old.as_stored(Some(plain)).last_dir, r"..\Books");
+    }
+
+    #[test]
     fn a_portable_copy_keeps_a_book_on_another_drive_and_an_identifier_as_they_are() {
         let mut positions = Positions::default();
         for key in [

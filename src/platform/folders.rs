@@ -243,7 +243,8 @@ struct Parsed {
 /// The pieces of `E:\Books\a.cbz` or of its canonical form,
 /// `\\?\E:\Books\a.cbz`. None for anything else: a network share,
 /// a path with no drive or no root, a path that still holds a `.` or a
-/// `..`, which a canonical path never does. The rule is written on the
+/// `..`, which a canonical path never does, a name with a colon, which
+/// `read` takes for a value that is no relative path. The rule is written on the
 /// text and not on `std::path`, which knows a drive letter on Windows
 /// alone: the tests run on each platform.
 fn parse(text: &str) -> Option<Parsed> {
@@ -259,7 +260,10 @@ fn parse(text: &str) -> Option<Parsed> {
         .filter(|name| !name.is_empty())
         .map(str::to_string)
         .collect();
-    if names.iter().any(|name| name == "." || name == "..") {
+    if names
+        .iter()
+        .any(|name| name == "." || name == ".." || name.contains(':'))
+    {
         return None;
     }
     Some(Parsed {
@@ -449,6 +453,32 @@ mod tests {
     }
 
     #[test]
+    fn a_path_with_a_colon_in_a_name_is_stored_in_full() {
+        for path in [r"\\?\E:\Tools\a:b", r"E:\Books\notes.md:stream"] {
+            assert_eq!(stored(path, Some(BASE)), path);
+            assert_eq!(read(path, Some(BASE)), path);
+        }
+        assert_eq!(
+            stored(r"\\?\E:\Books\a.cbz", Some(r"\\?\E:\To:ols\Oryx")),
+            r"\\?\E:\Books\a.cbz"
+        );
+    }
+
+    #[test]
+    fn the_prefix_counts_on_neither_side() {
+        let plain = r"E:\Tools\Oryx";
+        let book = r"\\?\E:\Books\a.cbz";
+        assert_eq!(stored(book, Some(plain)), r"..\..\Books\a.cbz");
+        assert_eq!(stored(book, Some(BASE)), stored(book, Some(plain)));
+        assert_eq!(
+            stored(r"E:\Books\a.cbz", Some(plain)),
+            stored(book, Some(plain))
+        );
+        assert_eq!(read(r"..\..\Books\a.cbz", Some(plain)), r"E:\Books\a.cbz");
+        assert_eq!(read(r"..\..\Books\a.cbz", Some(BASE)), book);
+    }
+
+    #[test]
     fn a_relative_value_is_read_from_the_base() {
         let cases = [
             (r"books\a.cbz", r"\\?\E:\Tools\Oryx\books\a.cbz"),
@@ -501,24 +531,30 @@ mod tests {
     }
 
     /// The round trip, for any base and any path of plain names on its
-    /// drive: what is stored reads back as the path.
+    /// drive: what is stored reads back as the path. A colon in a name
+    /// of either one leaves the path in full.
     #[test]
     #[ignore = "fuzzer, run by make fuzz"]
     fn fuzz_stored_paths() {
         use proptest::prelude::*;
-        let name = "[A-Za-z0-9 _.-]{1,8}"
+        let name = "[A-Za-z0-9 _.:-]{1,8}"
             .prop_filter("a plain name", |n| n != "." && n != ".." && n.trim() == n);
         let names = || prop::collection::vec(name.clone(), 0..5);
         let config = ProptestConfig {
             failure_persistence: None,
             ..ProptestConfig::default()
         };
-        proptest!(config, |(base in names(), path in names(), verbatim in any::<bool>())| {
+        proptest!(config, |(base_names in names(), path_names in names(), verbatim in any::<bool>())| {
             let prefix = if verbatim { r"\\?\E:\" } else { r"E:\" };
-            let base = format!("{prefix}{}", base.join(r"\"));
-            let full = format!("{prefix}{}", path.join(r"\"));
+            let base = format!("{prefix}{}", base_names.join(r"\"));
+            let full = format!("{prefix}{}", path_names.join(r"\"));
             let value = stored(&full, Some(&base));
-            prop_assert!(parse(&value).is_none(), "{value} is still a full path");
+            let colon = |names: &[String]| names.iter().any(|n| n.contains(':'));
+            if colon(&base_names) || colon(&path_names) {
+                prop_assert_eq!(&value, &full);
+            } else {
+                prop_assert!(parse(&value).is_none(), "{value} is still a full path");
+            }
             prop_assert_eq!(read(&value, Some(&base)), full);
         });
     }
