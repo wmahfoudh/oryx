@@ -1657,6 +1657,13 @@ pub struct LayoutPass {
 /// as before: reading a face's table costs more than it saves there.
 const COUNT_FROM: usize = 2048;
 
+/// How far ahead of the assembler the seed may run in a block that is
+/// counted. A unit the seed passes costs about 0.1 µs, so a seed put
+/// back by a wave of coloring costs under 2 ms; the assembler places
+/// about 90,000 counted units a slice, which leaves a worker about 3 ms
+/// for a unit the count does not answer.
+const SEED_AHEAD: usize = 16_384;
+
 /// Whether a code line's styled ranges all draw in the regular face.
 /// A markdown source asks for bold and italic, which the count's table
 /// does not hold.
@@ -2617,6 +2624,17 @@ fn pool_sync(doc: &Document, theme: &Theme, cfg: &ViewConfig, pass: &mut LayoutP
 
 /// Keeps the claim queue ahead of the assembler by a bounded window.
 fn pool_top_up(doc: &Document, out: &mut LayoutDoc, pass: &mut LayoutPass) {
+    // This runs before each step, and under the count a step costs less
+    // than a read of the backlog behind its locks. A seed still half its
+    // bound ahead of the assembler waits.
+    if let (Some(counted), Some(open)) = (pass.counting, pass.open.as_ref()) {
+        if open.position == counted
+            && pass.seed_position == counted
+            && pass.seed_line >= open.unit + SEED_AHEAD / 2
+        {
+            return;
+        }
+    }
     let Some(pool) = pass.pool.clone() else {
         return;
     };
@@ -2624,6 +2642,19 @@ fn pool_top_up(doc: &Document, out: &mut LayoutDoc, pass: &mut LayoutPass) {
         return;
     };
     let window = 4 * pool.width();
+    // Under the count the assembler passes a unit without taking its
+    // result, so the pool stays full and the seed stops while the
+    // assembler goes on. A job for a unit already placed serves nothing:
+    // the seed starts at the assembler's place, as `pool_sync` puts it.
+    let assembler = pass.counting.map(|_| match &pass.open {
+        Some(open) => (open.position, open.unit),
+        None => (pass.position, 0),
+    });
+    if let Some(at) = assembler {
+        if (pass.seed_position, pass.seed_line) < at {
+            (pass.seed_position, pass.seed_line) = at;
+        }
+    }
     // The backlog is read behind two locks: once here and once after
     // each job, not at each line the loop passes without a job.
     let mut backlog = pool.backlog();
@@ -2639,6 +2670,16 @@ fn pool_top_up(doc: &Document, out: &mut LayoutDoc, pass: &mut LayoutPass) {
                 pass.seed_position += 1;
                 pass.seed_line = 0;
                 continue;
+            }
+            // In the block being counted no unit left may need a job,
+            // and only a job fills the backlog: the distance to the
+            // assembler bounds the seed there, not the end of the block.
+            if pass.counting == Some(pass.seed_position)
+                && assembler.is_some_and(|(position, unit)| {
+                    position == pass.seed_position && pass.seed_line >= unit + SEED_AHEAD
+                })
+            {
+                break;
             }
             let unit_index = pass.seed_line;
             pass.seed_line += 1;
@@ -7454,6 +7495,24 @@ pub fn recolor_batch(
     let last = *affected.last().expect("affected is not empty");
     let run_lo = lay.code_lines[first].runs.start;
     let run_hi = lay.code_lines[last].runs.end;
+    // A window mark inside the span ends at its last record's runs, or
+    // past them when the span holds two code blocks and the mark is of
+    // a block between them, whose runs move through. Its distance to
+    // that record's end is read here, before the records move.
+    let past_record: Vec<usize> = lay.window.as_ref().map_or_else(Vec::new, |window| {
+        window
+            .marks
+            .iter()
+            .map(|mark| {
+                if mark.runs <= run_lo || mark.runs >= run_hi {
+                    return 0;
+                }
+                let end = lay.code_lines[mark.code - 1].runs.end;
+                debug_assert!(end <= mark.runs, "a mark before its last record's end");
+                mark.runs.saturating_sub(end)
+            })
+            .collect()
+    });
     let mut rebuilt: Vec<TextRun> = Vec::with_capacity(run_hi - run_lo);
     let mut copied = run_lo;
     let mut scratch = LayoutDoc::default();
@@ -7547,17 +7606,18 @@ pub fn recolor_batch(
     // hold; queries fall back to the linear tail until reindexed.
     lay.index.runs.clear();
     // Window marks follow the moved run ends. A mark inside the rebuilt
-    // span belongs to a code position whose records were just updated;
-    // its end is its last record's.
+    // span keeps its distance to its last record's end, which was just
+    // updated: nothing for a code position, the runs of the blocks
+    // since that record for a block between two code blocks.
     if let Some(window) = lay.window.as_mut() {
-        for mark in window.marks.iter_mut() {
+        for (mark, past) in window.marks.iter_mut().zip(past_record) {
             if mark.runs <= run_lo {
                 continue;
             }
             if mark.runs >= run_hi {
                 mark.runs = mark.runs.wrapping_add_signed(delta);
             } else {
-                mark.runs = lay.code_lines[mark.code - 1].runs.end;
+                mark.runs = lay.code_lines[mark.code - 1].runs.end + past;
             }
         }
     }
@@ -8451,6 +8511,264 @@ mod tests {
             doc, &theme, fonts, &mut media, &cfg, &mut out, &mut pass, None,
         );
         out
+    }
+
+    /// A file of `lines` short lines. In a `.rs` file the count answers
+    /// each line but every `odd`th, which opens with a tab.
+    fn lines_file(name: &str, lines: usize, odd: usize) -> Document {
+        let text: String = (0..lines)
+            .map(|i| {
+                if odd > 0 && i % odd == odd - 1 {
+                    format!("\tcall({i});\n")
+                } else {
+                    format!("let value_{i} = {i};\n")
+                }
+            })
+            .collect();
+        let dir = std::env::temp_dir().join("oryx-count-seed-unit");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+        std::fs::write(&path, &text).unwrap();
+        load::open(&path, None).unwrap().document
+    }
+
+    /// One slice of a pass, `ms` long. An expired slice (`ms` of zero)
+    /// runs the seeding alone.
+    fn slice(
+        doc: &Document,
+        fonts: &mut FontStore,
+        lay: &mut LayoutDoc,
+        pass: &mut LayoutPass,
+        ms: u64,
+    ) -> bool {
+        let (theme, cfg) = (Theme::default_dark(), ViewConfig::default());
+        let mut media = MediaCache::offline(PathBuf::from("."));
+        let deadline = Instant::now() + Duration::from_millis(ms);
+        layout_more(
+            doc,
+            &theme,
+            fonts,
+            &mut media,
+            &cfg,
+            lay,
+            pass,
+            Some(deadline),
+        )
+    }
+
+    /// A pass with a pool of two workers and the window's retention,
+    /// sliced until the count is on.
+    fn counting_pass(
+        doc: &Document,
+        fonts: &mut FontStore,
+    ) -> (
+        LayoutDoc,
+        LayoutPass,
+        std::sync::Arc<crate::layout::pool::ShapePool>,
+    ) {
+        let pool = std::sync::Arc::new(crate::layout::pool::ShapePool::new(2, &fonts.seed()));
+        let (mut lay, mut pass) = layout_begin(doc, &ViewConfig::default(), 800.0);
+        pass.attach_pool(std::sync::Arc::clone(&pool));
+        pass.retain_around(0.0, 600.0);
+        while pass.counting.is_none() {
+            assert!(
+                !slice(doc, fonts, &mut lay, &mut pass, 2),
+                "the pass ended before the count was on"
+            );
+        }
+        (lay, pass, pool)
+    }
+
+    /// A pass with no count seeds a window of jobs ahead of the
+    /// assembler, four per worker, and no more. A job a worker has in
+    /// hand is in neither of the pool's lists, so the seed can be one
+    /// unit further per worker.
+    #[test]
+    fn a_pass_with_no_count_seeds_a_window_of_units() {
+        let doc = lines_file("plain.txt", 3000, 0);
+        let mut fonts = FontStore::new();
+        let pool = std::sync::Arc::new(crate::layout::pool::ShapePool::new(2, &fonts.seed()));
+        let (mut lay, mut pass) = layout_begin(&doc, &ViewConfig::default(), 800.0);
+        pass.attach_pool(std::sync::Arc::clone(&pool));
+        pass.retain_around(0.0, 600.0);
+        slice(&doc, &mut fonts, &mut lay, &mut pass, 0);
+        assert_eq!(pass.counting, None);
+        let window = 4 * pool.width();
+        assert_eq!(pass.seed_position, 0);
+        assert!(
+            (window..=window + pool.width()).contains(&pass.seed_line),
+            "the seed is at unit {}",
+            pass.seed_line
+        );
+    }
+
+    /// A wave of coloring puts the seed back at the assembler. Under the
+    /// count no unit left may need a job, so the seed stops `SEED_AHEAD`
+    /// units ahead and does not walk the rest of the file.
+    #[test]
+    fn a_reseed_under_the_count_stays_near_the_assembler() {
+        let doc = lines_file("counted.rs", 60_000, 0);
+        let mut fonts = FontStore::new();
+        let (mut lay, mut pass, _pool) = counting_pass(&doc, &mut fonts);
+        pass.invalidate_pool();
+        slice(&doc, &mut fonts, &mut lay, &mut pass, 0);
+        let open = pass.open.as_ref().expect("the assembler is in the block");
+        assert_eq!(pass.seed_position, open.position, "the seed left the block");
+        assert!(
+            pass.seed_line <= open.unit + SEED_AHEAD,
+            "the seed is at unit {}, the assembler at {}",
+            pass.seed_line,
+            open.unit
+        );
+    }
+
+    /// The seeding runs before each step. A seed at its bound does not
+    /// read the pool again for each unit the assembler places: it waits
+    /// until the assembler is half the bound nearer.
+    #[test]
+    fn a_seed_at_its_bound_under_the_count_waits() {
+        let doc = lines_file("waits.rs", 60_000, 0);
+        let mut fonts = FontStore::new();
+        let (mut lay, mut pass, _pool) = counting_pass(&doc, &mut fonts);
+        pass.invalidate_pool();
+        slice(&doc, &mut fonts, &mut lay, &mut pass, 0);
+        let (seed, unit) = (pass.seed_line, pass.open.as_ref().unwrap().unit);
+        assert_eq!(seed, unit + SEED_AHEAD);
+        for _ in 0..3 {
+            slice(&doc, &mut fonts, &mut lay, &mut pass, 2);
+        }
+        let now = pass.open.as_ref().unwrap().unit;
+        assert!(
+            now > unit && now < unit + SEED_AHEAD / 2,
+            "{unit} then {now}"
+        );
+        assert_eq!(pass.seed_line, seed);
+    }
+
+    /// Under the count the assembler takes no result for a counted unit,
+    /// so the pool stays full and the seed stops while the assembler
+    /// goes on. The seed starts again at the assembler's place, not
+    /// behind it.
+    #[test]
+    fn the_seed_under_the_count_starts_at_the_assembler() {
+        let doc = lines_file("behind.rs", 60_000, 0);
+        let mut fonts = FontStore::new();
+        let (mut lay, mut pass, _pool) = counting_pass(&doc, &mut fonts);
+        for _ in 0..5 {
+            slice(&doc, &mut fonts, &mut lay, &mut pass, 2);
+        }
+        let unit = pass
+            .open
+            .as_ref()
+            .expect("the assembler is in the block")
+            .unit;
+        assert!(
+            pass.seed_line < unit,
+            "the test needs the seed behind the assembler: {} and {unit}",
+            pass.seed_line
+        );
+        pool_top_up(&doc, &mut lay, &mut pass);
+        assert!(pass.seed_line >= unit, "{} and {unit}", pass.seed_line);
+    }
+
+    /// The pool changes when a unit is shaped, not what the pass places:
+    /// a counted file longer than the seed's bound, with lines the count
+    /// does not answer and the seed put back every few slices, stands
+    /// where the same file laid out with no pool does.
+    #[test]
+    fn a_counted_file_seeded_under_waves_stands_where_the_serial_one_does() {
+        let doc = lines_file("waves.rs", 20_000, 97);
+        let mut fonts = FontStore::new();
+        let (mut serial, mut pass) = layout_begin(&doc, &ViewConfig::default(), 800.0);
+        pass.retain_around(0.0, 600.0);
+        while !slice(&doc, &mut fonts, &mut serial, &mut pass, 50) {}
+        let (mut lay, mut pass, _pool) = counting_pass(&doc, &mut fonts);
+        let mut slices = 0;
+        while !slice(&doc, &mut fonts, &mut lay, &mut pass, 10) {
+            slices += 1;
+            if slices % 4 == 0 {
+                pass.invalidate_pool();
+            }
+        }
+        assert_eq!(lay.height.to_bits(), serial.height.to_bits());
+        assert_eq!(lay.runs.len(), serial.runs.len());
+        assert_eq!(lay.code_lines.len(), serial.code_lines.len());
+        for line in [0, 96, 97, 5000, 16_500, 19_999] {
+            assert_eq!(
+                lay.table.code_line_top(0, line).to_bits(),
+                serial.table.code_line_top(0, line).to_bits(),
+                "line {line}"
+            );
+        }
+    }
+
+    /// A batch that recolors two code blocks rebuilds the runs from the
+    /// first to the second, and what is between them moves through. The
+    /// window's mark of a paragraph between the two still ends at the
+    /// paragraph's last run.
+    #[test]
+    fn a_recolor_of_two_code_blocks_keeps_the_mark_of_a_paragraph_between_them() {
+        let mut doc = markdown::parse(
+            "intro\n\n```rust\nfn a() {}\n```\n\nbetween the two\n\n```rust\nfn b() {}\n```\n\ntail\n",
+        );
+        let code: Vec<usize> = (0..doc.blocks.len())
+            .filter(|&i| matches!(doc.blocks[i].kind, BlockKind::CodeBlock { .. }))
+            .collect();
+        assert_eq!(code.len(), 2);
+        let (theme, cfg) = (Theme::default_dark(), ViewConfig::default());
+        let mut fonts = FontStore::new();
+        let mut media = MediaCache::offline(PathBuf::from("."));
+        let (mut lay, mut pass) = layout_begin(&doc, &cfg, 800.0);
+        pass.retain_around(0.0, 600.0);
+        layout_more(
+            &doc, &theme, &mut fonts, &mut media, &cfg, &mut lay, &mut pass, None,
+        );
+        // The mark of each position, and where the runs of each block
+        // end: the two lists are the same in a layout that holds each
+        // block of the page.
+        let marks = |lay: &LayoutDoc| -> Vec<usize> {
+            let window = lay.window.as_ref().expect("a windowed layout");
+            window.marks.iter().map(|mark| mark.runs).collect()
+        };
+        let blocks = doc.blocks.len();
+        let ends = |lay: &LayoutDoc| -> Vec<usize> {
+            let mut end = 0;
+            (0..blocks)
+                .map(|block| {
+                    if let Some(last) = lay.runs.iter().rposition(|run| run.block == block) {
+                        end = last + 1;
+                    }
+                    end
+                })
+                .collect()
+        };
+        assert_eq!(marks(&lay), ends(&lay));
+        // The same colors: no run end moves.
+        let patches = [(code[0], 0..1), (code[1], 0..1)];
+        recolor_batch(&mut lay, &doc, &theme, &mut fonts, &cfg, &patches, None);
+        assert_eq!(
+            marks(&lay),
+            ends(&lay),
+            "after a recolor with the same colors"
+        );
+        // New colors cut each code line into more runs.
+        let before = lay.runs.len();
+        let source = std::sync::Arc::clone(&doc.source);
+        for &block in &code {
+            let BlockKind::CodeBlock {
+                language,
+                lines,
+                highlights,
+                ..
+            } = &mut doc.blocks[block].kind
+            else {
+                unreachable!()
+            };
+            *highlights = crate::style::highlight::spans(&source, lines, language.as_deref());
+        }
+        recolor_batch(&mut lay, &doc, &theme, &mut fonts, &cfg, &patches, None);
+        assert!(lay.runs.len() > before, "the colors cut the lines");
+        assert_eq!(marks(&lay), ends(&lay), "after a recolor with new colors");
     }
 
     fn long_line_file(name: &str) -> (Document, String) {
