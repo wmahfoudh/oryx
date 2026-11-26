@@ -25,7 +25,7 @@ Where these folders are:
 | Windows | `%APPDATA%\oryx\config` | `%LOCALAPPDATA%\oryx\cache` | `%APPDATA%\oryx` | `%LOCALAPPDATA%\oryx\data\notes` |
 | macOS | `~/Library/Application Support/oryx` | `~/Library/Caches/oryx` | `~/Library/Application Support/oryx` | `~/Library/Application Support/oryx/notes` |
 
-The Windows row is for the MSI and the zip. With the Microsoft Store version, Windows keeps these files in a private folder of the app, and removes them when the app is uninstalled.
+The Windows row is for the MSI and for the zip installed with `install.ps1`. A portable copy keeps these files in the `data` folder next to `oryx.exe` ([INSTALL.md](INSTALL.md#portable-copy)). With the Microsoft Store version, Windows keeps these files in a private folder of the app, and removes them when the app is uninstalled.
 
 Deleting these folders removes what Oryx has kept. The file associations that an installer or `oryx --register` wrote are not in these folders, and they hold no personal data.
 

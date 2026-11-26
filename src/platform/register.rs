@@ -258,6 +258,11 @@ pub fn register() -> std::io::Result<()> {
     }
     #[cfg(target_os = "windows")]
     {
+        // The registry will name this folder: a portable copy says so
+        // first, then registers as asked.
+        if crate::platform::folders::get().marked() {
+            println!("{}", crate::platform::folders::REGISTER_WARNING);
+        }
         register_windows(&std::env::current_exe()?)?;
     }
     #[cfg(target_os = "macos")]

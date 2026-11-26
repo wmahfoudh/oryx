@@ -243,7 +243,7 @@ Oryx comes with 34 themes, 12 of them made for Oryx. A theme is a TOML file that
 
 In the list, each theme has small icons at its right: one opens the theme in the theme editor, and one duplicates it. A custom theme also has a cross that deletes it, and a double click on its name renames it.
 
-The theme editor changes any of the 51 colors with a color picker, and the document updates as you change them. Editing a theme that ships with Oryx creates a copy, so the original stays unchanged. Your themes are saved in `~/.local/share/oryx/themes` on Linux, in `%APPDATA%\oryx\themes` on Windows (with the MSI or the zip) and in `~/Library/Application Support/oryx/themes` on a Mac. Oryx also reads the themes installed by a package, in folders like `/usr/share/oryx/themes`.
+The theme editor changes any of the 51 colors with a color picker, and the document updates as you change them. Editing a theme that ships with Oryx creates a copy, so the original stays unchanged. Your themes are saved in `~/.local/share/oryx/themes` on Linux, in `%APPDATA%\oryx\themes` on Windows (with the MSI or `install.ps1`; `data\themes` in a portable copy) and in `~/Library/Application Support/oryx/themes` on a Mac. Oryx also reads the themes installed by a package, in folders like `/usr/share/oryx/themes`.
 
 <p align="center"><img src="images/features-theme-editor.png" alt="The theme editor in Oryx" width="800"></p>
 

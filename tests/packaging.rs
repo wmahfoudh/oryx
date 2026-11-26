@@ -242,6 +242,43 @@ fn stage_linux_refuses_a_source_folder_missing_a_file() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// The Windows zip is the portable copy: the release recipe makes the
+/// `data` folder before the zip, names the zip portable, and takes the
+/// folder out before the MSI and the Store package. The install script
+/// copies the program, the themes and the examples by name, so an
+/// installed copy never gets the folder.
+#[test]
+fn the_windows_zip_is_the_portable_copy_and_nothing_else_gets_the_data_folder() {
+    let mark = oryx::platform::folders::MARK;
+    let makefile = std::fs::read_to_string(repo().join("Makefile")).unwrap();
+    let line = |text: &str| {
+        makefile
+            .lines()
+            .position(|line| line.trim() == text || line.trim().starts_with(text))
+            .unwrap_or_else(|| panic!("no line {text:?} in the Makefile"))
+    };
+    let made = line(&format!("mkdir release/windows/oryx/{mark}"));
+    let zipped =
+        line("cd release/windows && zip -qr ../oryx-$(VERSION)-windows-x86_64-portable.zip oryx");
+    let removed = line(&format!("rmdir release/windows/oryx/{mark}"));
+    let msi = line("sh packaging/msi.sh");
+    let msix = line("sh packaging/msix.sh");
+    assert!(made < zipped, "the folder is made before the zip");
+    assert!(zipped < removed, "the folder is in the zip");
+    assert!(
+        removed < msi && removed < msix,
+        "the installers are built without it"
+    );
+
+    let script = packaging("install.ps1");
+    let copied: Vec<&str> = script
+        .lines()
+        .filter(|line| line.starts_with("Copy-Item"))
+        .filter_map(|line| line.split('"').nth(1))
+        .collect();
+    assert_eq!(copied, ["oryx.exe", "themes", "examples"]);
+}
+
 /// A stage shaped like `release/windows/oryx` with a stand-in `oryx.exe`
 /// of incompressible bytes, so the MSI's size tells what it embeds.
 fn windows_stage(dir: &Path, exe_len: usize) {

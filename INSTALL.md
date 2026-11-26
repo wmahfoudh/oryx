@@ -9,9 +9,20 @@ There are four ways to install Oryx on Windows:
 - **Microsoft Store**: search for *Oryx Editor*, or open [its page](https://apps.microsoft.com/detail/9NQGHNSJF3VB). The Store keeps it up to date.
 - **winget**: `winget install Steerania.Oryx` in a terminal. winget downloads the MSI installer and runs it. `winget upgrade Steerania.Oryx` updates it. A new version reaches winget some days after its release.
 - **MSI installer**: `oryx-<version>-windows-x86_64.msi`, a classic installer.
-- **Zip**: `oryx-<version>-windows-x86_64.zip`, for an install in your user folder without administrator rights. Unzip it and run `install.ps1` in PowerShell. It copies Oryx to `%LOCALAPPDATA%\Programs\Oryx` and registers the file types. `install.ps1 -Uninstall` removes it.
+- **Zip**: `oryx-<version>-windows-x86_64-portable.zip`, a portable copy. Unzip it where you want and run `oryx.exe`. Nothing is installed ([Portable copy](#portable-copy)). The same zip can install Oryx in your user folder without administrator rights: run `install.ps1` in PowerShell. It copies Oryx to `%LOCALAPPDATA%\Programs\Oryx` and registers the file types. `install.ps1 -Uninstall` removes it.
 
 The Store app is named *Oryx Editor* because the name *Oryx* was already taken there. It shows under that name in the Start menu.
+
+### Portable copy
+
+The zip is a portable copy of Oryx. Unzip it where you want, on a USB stick for example, and run `oryx.exe`.
+
+- Oryx keeps its settings, the place in each book, the unsaved notes, your themes and the downloaded images in the `data` folder next to `oryx.exe`. Oryx writes nothing outside its folder.
+- On another computer the stick can get another drive letter. The last folder and the place in each book are kept, for the files that are on the stick.
+- To update, extract the new zip over the old folder. You can also unzip it elsewhere and move the `data` folder into it.
+- If you delete the `data` folder, Oryx uses the folders of an installed copy ([PRIVACY.md](PRIVACY.md) has them).
+- If the `data` folder is read-only (a write-protected stick, a copy in `C:\Program Files`), Oryx says so at launch and uses the folders of an installed copy.
+- `oryx.exe --register` registers the file types for this folder, after a warning. They stop working if the folder moves or the stick is removed.
 
 ## macOS
 
@@ -47,6 +58,8 @@ chmod +x Oryx-*-x86_64.AppImage
 ```
 
 You can update it in place with AppImageUpdate, AppImageLauncher or Gear Lever.
+
+You can make the AppImage portable. Create a folder next to it with the same name and `.home` at the end, such as `Oryx-<version>-x86_64.AppImage.home`. The AppImage then uses it as your home folder, and Oryx keeps its files there. If you rename the AppImage, rename the folder too.
 
 ### Tarball
 
@@ -98,7 +111,8 @@ On Linux, the command is `oryx`. On Windows and macOS, the installers do not add
 | Install | Program |
 |---|---|
 | Windows, MSI | `C:\Program Files\Oryx\oryx.exe` |
-| Windows, zip | `%LOCALAPPDATA%\Programs\Oryx\oryx.exe` |
+| Windows, zip installed with `install.ps1` | `%LOCALAPPDATA%\Programs\Oryx\oryx.exe` |
+| Windows, portable copy | `oryx.exe` in the folder you unzipped |
 | macOS | `/Applications/Oryx.app/Contents/MacOS/oryx` |
 
 The Store app has no terminal command. On Windows, adding the folder of `oryx.exe` to your `PATH` gives you the `oryx` command. In PowerShell, a path with a space needs `&` in front: `& "C:\Program Files\Oryx\oryx.exe" notes.md`.

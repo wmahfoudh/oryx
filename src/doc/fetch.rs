@@ -29,7 +29,7 @@ pub fn key(url: &str) -> String {
 /// The cache directory for fetched images, None when the platform gives
 /// no home.
 pub fn cache_dir() -> Option<PathBuf> {
-    directories::ProjectDirs::from("", "", "oryx").map(|dirs| dirs.cache_dir().join("images"))
+    crate::platform::folders::get().folders.images.clone()
 }
 
 /// How long a cache entry is served without a refresh.

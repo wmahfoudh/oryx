@@ -8,11 +8,10 @@
 
 use std::path::{Path, PathBuf};
 
-use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
 use crate::export::ExportSettings;
-use crate::platform::save;
+use crate::platform::{folders, save};
 use crate::style::fonts::{BODY_FAMILY, CODE_FAMILY};
 use crate::ui::settings::{SIZE_MAX, SIZE_MIN, UI_SCALE_MAX, UI_SCALE_MIN};
 use crate::ui::sidebar::{MAX_WIDTH, MIN_WIDTH};
@@ -169,12 +168,14 @@ pub fn home_dir() -> Option<PathBuf> {
 
 /// Location of the config file, None when the platform gives no home.
 pub fn path() -> Option<PathBuf> {
-    ProjectDirs::from("", "", "oryx").map(|dirs| dirs.config_dir().join("config.toml"))
+    let dir = folders::get().folders.config.as_ref()?;
+    Some(dir.join("config.toml"))
 }
 
 /// Location of the reading-position file, beside the config.
 pub fn positions_path() -> Option<PathBuf> {
-    ProjectDirs::from("", "", "oryx").map(|dirs| dirs.config_dir().join("positions.toml"))
+    let dir = folders::get().folders.config.as_ref()?;
+    Some(dir.join("positions.toml"))
 }
 
 /// How many books keep a remembered position.
@@ -275,9 +276,23 @@ impl Positions {
     /// Files a book's position and reading direction, most recent last,
     /// the oldest pruned past the cap.
     pub fn remember(&mut self, key: &str, offset: usize, direction: crate::layout::DirectionMode) {
-        self.book.retain(|b| b.key != key);
+        self.remember_from(folders::base(), key, offset, direction);
+    }
+
+    /// `remember` for a copy whose stored paths are relative to `base`.
+    /// A key that is a book's path is filed in its stored form, and the
+    /// same book's key in full, saved by an installed copy, goes.
+    fn remember_from(
+        &mut self,
+        base: Option<&str>,
+        key: &str,
+        offset: usize,
+        direction: crate::layout::DirectionMode,
+    ) {
+        let stored = folders::stored(key, base);
+        self.book.retain(|b| b.key != stored && b.key != key);
         self.book.push(BookPosition {
-            key: key.to_string(),
+            key: stored,
             offset,
             direction,
         });
@@ -288,21 +303,22 @@ impl Positions {
     }
 
     pub fn lookup(&self, key: &str) -> Option<usize> {
-        self.book
-            .iter()
-            .rev()
-            .find(|b| b.key == key)
-            .map(|b| b.offset)
+        self.entry(folders::base(), key).map(|b| b.offset)
     }
 
     /// The remembered reading direction, automatic when the book is new.
     pub fn direction(&self, key: &str) -> crate::layout::DirectionMode {
-        self.book
-            .iter()
-            .rev()
-            .find(|b| b.key == key)
+        self.entry(folders::base(), key)
             .map(|b| b.direction)
             .unwrap_or_default()
+    }
+
+    /// The book's entry: under the stored form of its key, else under
+    /// the key as given, which finds a path saved in full.
+    fn entry(&self, base: Option<&str>, key: &str) -> Option<&BookPosition> {
+        let stored = folders::stored(key, base);
+        let under = |key: &str| self.book.iter().rev().find(|b| b.key == key);
+        under(&stored).or_else(|| under(key))
     }
 }
 
@@ -320,7 +336,7 @@ pub fn load() -> Config {
         None => (Config::default(), toml::Table::new()),
     };
     *SEEN.lock().unwrap_or_else(|e| e.into_inner()) = Some(seen);
-    config
+    config.in_full(folders::base())
 }
 
 /// The settings of `path` with the table a later `save_changes` compares
@@ -355,6 +371,25 @@ fn held(value: f32, fallback: f32, min: f32, max: f32) -> f32 {
 }
 
 impl Config {
+    /// The settings as the file holds them, for a copy whose stored
+    /// paths are relative to `base`: the last folder in its stored form.
+    /// The reference a save compares against is in this form too.
+    fn as_stored(&self, base: Option<&str>) -> Config {
+        Config {
+            last_dir: folders::stored(&self.last_dir, base),
+            ..self.clone()
+        }
+    }
+
+    /// The settings as the window uses them, from the ones a file
+    /// holds: the last folder as a full path.
+    fn in_full(self, base: Option<&str>) -> Config {
+        Config {
+            last_dir: folders::read(&self.last_dir, base),
+            ..self
+        }
+    }
+
     /// Holds every numeric field to the range its settings control
     /// offers, so a hand-edited file cannot hand the engine a zero font
     /// size or a scale of nothing.
@@ -381,9 +416,10 @@ pub fn save(config: &Config) {
     let Some(p) = path() else {
         return;
     };
+    let config = config.as_stored(folders::base());
     let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
     let before = seen.take().unwrap_or_default();
-    *seen = Some(save_changes(&p, config, &before));
+    *seen = Some(save_changes(&p, &config, &before));
 }
 
 /// Writes the settings that moved since `seen` into the file as it is
@@ -1118,5 +1154,145 @@ mod tests {
         let loaded = load_from(&path);
         std::fs::remove_file(&path).unwrap();
         assert!(!loaded.show_hidden);
+    }
+
+    const STICK: &str = r"\\?\E:\Stick\Oryx";
+    const MOVED: &str = r"\\?\G:\Stick\Oryx";
+
+    #[test]
+    fn a_portable_copy_stores_the_last_folder_relative_and_reads_it_from_its_new_folder() {
+        let path = temp_path("portable-last-dir.toml");
+        let _ = std::fs::remove_file(&path);
+        let config = Config {
+            last_dir: r"\\?\E:\Stick\Books\comics".to_string(),
+            ..Config::default()
+        };
+        save_changes(&path, &config.as_stored(Some(STICK)), &toml::Table::new());
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains(r#"last_dir = '..\Books\comics'"#)
+                || text.contains(r#"last_dir = "..\\Books\\comics""#),
+            "{text}"
+        );
+        let (read, seen) = load_with_baseline(&path);
+        assert_eq!(
+            seen.get("last_dir").and_then(|v| v.as_str()),
+            Some(r"..\Books\comics"),
+            "the reference of the next save is in the stored form"
+        );
+        assert_eq!(
+            read.clone().in_full(Some(STICK)).last_dir,
+            r"\\?\E:\Stick\Books\comics"
+        );
+        assert_eq!(
+            read.in_full(Some(MOVED)).last_dir,
+            r"\\?\G:\Stick\Books\comics",
+            "the stick under another letter"
+        );
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_file(path.with_extension("lock")).ok();
+    }
+
+    #[test]
+    fn a_portable_copy_reads_a_last_folder_saved_in_full_and_keeps_one_on_another_drive() {
+        let old = Config {
+            last_dir: r"C:\Users\u\Documents".to_string(),
+            ..Config::default()
+        };
+        assert_eq!(old.clone().in_full(Some(STICK)).last_dir, old.last_dir);
+        assert_eq!(old.as_stored(Some(STICK)).last_dir, old.last_dir);
+        let never = Config::default();
+        assert_eq!(never.as_stored(Some(STICK)).last_dir, "");
+        assert_eq!(never.in_full(Some(STICK)).last_dir, "");
+    }
+
+    #[test]
+    fn an_installed_copy_stores_and_reads_the_last_folder_in_full() {
+        for dir in [r"\\?\E:\Stick\Books", "/home/user/notes", ""] {
+            let config = Config {
+                last_dir: dir.to_string(),
+                ..Config::default()
+            };
+            assert_eq!(config.as_stored(None), config);
+            assert_eq!(config.clone().in_full(None), config);
+        }
+    }
+
+    #[test]
+    fn a_save_that_changes_no_setting_leaves_a_relative_last_folder_in_the_file() {
+        let path = temp_path("portable-unchanged.toml");
+        std::fs::write(&path, "last_dir = '..\\Books'\ntheme = \"nord\"\n").unwrap();
+        let (config, seen) = load_with_baseline(&path);
+        let mut config = config.in_full(Some(STICK));
+        assert_eq!(config.last_dir, r"\\?\E:\Stick\Books");
+        config.line_numbers = true;
+        save_changes(&path, &config.as_stored(Some(STICK)), &seen);
+        let table: toml::Table = std::fs::read_to_string(&path).unwrap().parse().unwrap();
+        assert_eq!(table["last_dir"].as_str(), Some(r"..\Books"));
+        assert_eq!(table["line_numbers"].as_bool(), Some(true));
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_file(path.with_extension("lock")).ok();
+    }
+
+    #[test]
+    fn a_portable_copy_files_a_book_under_its_relative_path() {
+        let book = r"\\?\E:\Stick\Books\a.cbz";
+        let mut positions = Positions::default();
+        positions.remember_from(Some(STICK), book, 40, Default::default());
+        assert_eq!(positions.book.len(), 1);
+        assert_eq!(positions.book[0].key, r"..\Books\a.cbz");
+        assert_eq!(
+            positions.entry(Some(STICK), book).map(|b| b.offset),
+            Some(40)
+        );
+        assert_eq!(
+            positions
+                .entry(Some(MOVED), r"\\?\G:\Stick\Books\a.cbz")
+                .map(|b| b.offset),
+            Some(40),
+            "the stick under another letter"
+        );
+        assert_eq!(
+            positions.entry(Some(STICK), r"\\?\E:\Stick\Books\b.cbz"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_portable_copy_finds_a_key_saved_in_full_and_files_it_again_relative() {
+        let book = r"\\?\E:\Stick\Books\a.cbz";
+        let mut positions = Positions::default();
+        positions.remember_from(None, book, 7, Default::default());
+        assert_eq!(
+            positions.book[0].key, book,
+            "an installed copy files in full"
+        );
+        assert_eq!(
+            positions.entry(Some(STICK), book).map(|b| b.offset),
+            Some(7)
+        );
+        positions.remember_from(Some(STICK), book, 9, Default::default());
+        let keys: Vec<&str> = positions.book.iter().map(|b| b.key.as_str()).collect();
+        assert_eq!(keys, [r"..\Books\a.cbz"], "the key in full is gone");
+        assert_eq!(
+            positions.entry(Some(STICK), book).map(|b| b.offset),
+            Some(9)
+        );
+    }
+
+    #[test]
+    fn a_portable_copy_keeps_a_book_on_another_drive_and_an_identifier_as_they_are() {
+        let mut positions = Positions::default();
+        for key in [
+            r"\\?\C:\Users\u\Books\a.cbz",
+            r"\\server\share\b.cbz",
+            "urn:uuid:6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+            "urn:isbn:9780140449136|mobi",
+        ] {
+            positions.remember_from(Some(STICK), key, 3, Default::default());
+            assert_eq!(positions.book.last().unwrap().key, key);
+            assert_eq!(positions.entry(Some(STICK), key).map(|b| b.offset), Some(3));
+            assert_eq!(positions.entry(None, key).map(|b| b.offset), Some(3));
+        }
     }
 }

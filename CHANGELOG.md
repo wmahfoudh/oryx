@@ -12,6 +12,12 @@
 
 - You can now type Chinese, Japanese and Korean with an input method, in the editor and in the text fields. To use it, turn on `Input method` in the settings (`Ctrl+,`). Before, input methods were not supported. It was tested on Linux and on Windows (not on the Mac, for the moment).
 
+#### Windows
+
+- You can now carry Oryx on a USB stick. The Windows zip is a portable copy: unzip it and run `oryx.exe`. The settings, the place in each book, the notes, the themes and the downloaded images are in the `data` folder next to `oryx.exe`. Before, they were in your user folder on each computer. More details in [INSTALL.md](INSTALL.md#portable-copy).
+- The zip is now named `oryx-<version>-windows-x86_64-portable.zip`. `install.ps1` is still in it, and an installed copy works as before.
+- If you ran the zip without installing it, Oryx now starts with fresh settings. Your old files are in `%APPDATA%\oryx\config` (`config.toml` and `positions.toml`) and in `%APPDATA%\oryx\themes`. Copy them into `data\config` and `data\themes`.
+
 ### Fixes
 
 - A big code file with long lines is now as fast far down as at its top. Before, in a 194 MB playlist whose lines wrap, a page key at the end of the file took 0.4 s, and the editor used more than half a processor core there while you typed nothing.

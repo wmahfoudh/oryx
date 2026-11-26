@@ -44,7 +44,12 @@ release: audit
 	cp -r themes release/windows/oryx/themes
 	cp -r examples release/windows/oryx/examples
 	cp LICENSE packaging/install.ps1 release/windows/oryx/
-	cd release/windows && zip -qr ../oryx-$(VERSION)-windows-x86_64.zip oryx
+# The zip is the portable copy: with the `data` folder next to oryx.exe,
+# Oryx keeps its settings there. The folder is in the zip alone, and is
+# removed before the MSI and the Store package are built.
+	mkdir release/windows/oryx/data
+	cd release/windows && zip -qr ../oryx-$(VERSION)-windows-x86_64-portable.zip oryx
+	rmdir release/windows/oryx/data
 	wrestool -x -t 14 -o release/windows/oryx.ico release/windows/oryx/oryx.exe
 	sh packaging/msi.sh $(VERSION) release/windows/oryx release/oryx-$(VERSION)-windows-x86_64.msi release/windows/oryx.ico
 	sh packaging/msix.sh $(VERSION) release/windows/oryx release/Oryx-$(VERSION).msix

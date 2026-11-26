@@ -35,6 +35,7 @@ use oryx::paint::painter::Painter;
 use oryx::paint::scroll::{self, BandCache};
 use oryx::platform::config::{self, Config, WindowState};
 use oryx::platform::dialog::{self, Answer};
+use oryx::platform::folders;
 use oryx::platform::notes;
 use oryx::platform::save;
 #[cfg(target_os = "linux")]
@@ -458,7 +459,11 @@ pub fn run(
         dot_shown: false,
         open_failed: refused_at_start,
         gutter_measured: None,
-        notice: None,
+        // A portable copy whose `data` folder refuses a file says at
+        // each launch where the settings go.
+        notice: folders::get()
+            .notice()
+            .map(|text| Notice::new(text, Instant::now())),
         notice_canvas: None,
         display_lost: None,
     };
@@ -1327,8 +1332,7 @@ fn window_title(book: Option<&str>, path: Option<&Path>, dirty: bool, editing: b
 /// Where the note folders live on this machine, when the platform
 /// names a home for Oryx at all.
 fn notes_root() -> Option<PathBuf> {
-    let dirs = directories::ProjectDirs::from("", "", "oryx")?;
-    Some(notes::root(dirs.state_dir(), dirs.data_local_dir()))
+    folders::get().folders.notes.clone()
 }
 
 /// The line under the recovery question's title.
@@ -12593,6 +12597,17 @@ mod tests {
             Some(std::path::PathBuf::from(
                 "/Applications/Oryx.app/Contents/Resources/themes"
             ))
+        );
+    }
+
+    /// The pin of Task 442: the notes are under the state folder the
+    /// system names, or the local data folder where it names none.
+    #[test]
+    fn the_notes_root_is_the_folder_the_system_names() {
+        let dirs = directories::ProjectDirs::from("", "", "oryx").expect("a home folder");
+        assert_eq!(
+            super::notes_root(),
+            Some(super::notes::root(dirs.state_dir(), dirs.data_local_dir()))
         );
     }
 

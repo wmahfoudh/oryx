@@ -1,5 +1,6 @@
 pub mod config;
 pub mod dialog;
+pub mod folders;
 pub mod notes;
 pub mod register;
 pub mod resource;

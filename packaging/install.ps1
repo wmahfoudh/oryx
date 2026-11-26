@@ -7,6 +7,8 @@ if ($Uninstall) {
     exit 0
 }
 New-Item -ItemType Directory -Force $dest | Out-Null
+# The "data" folder of the zip is never copied: it makes a copy portable,
+# and an installed Oryx keeps its settings under %APPDATA%.
 Copy-Item (Join-Path $PSScriptRoot "oryx.exe") $dest -Force
 Copy-Item (Join-Path $PSScriptRoot "themes") $dest -Recurse -Force
 Copy-Item (Join-Path $PSScriptRoot "examples") $dest -Recurse -Force
