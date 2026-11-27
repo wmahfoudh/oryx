@@ -22,6 +22,7 @@
 
 - A big code file with long lines is now as fast far down as at its top. Before, in a 194 MB playlist whose lines wrap, a page key at the end of the file took 0.4 s, and the editor used more than half a processor core there while you typed nothing.
 - A big code file is now measured faster when you open it, change the zoom or the width of the window: 6 s for that playlist, 2 s for a 200 MB Rust file. Before, 21 s and 34 s.
+- When you change the height of the window, a big file is no longer measured again. Before, each new height started the measure again, 6 s for a 42 MB text file.
 - A jump in a big code or text file now shows its text at once while Oryx still measures the file: `Ctrl+End` right after the open, a zoom step or a new window width far down the file, page keys past the first screens. Before, the page stayed blank until the measure reached the place: 4 s in that playlist, 20 s in the same file as text.
 - A file of one very long line no longer blocks the window when it opens. A 200 MB file of one line now shows its text after a second, is ready after 3 s and uses 260 MB of memory. `Ctrl+End` right after the open shows the end of the file. Before, the window showed nothing and read no key for more than a minute and a half, and Oryx used 813 MB.
 - In a file of one very long line, the text now stays on screen when you drag the scrollbar or press `Ctrl+End` while Oryx still measures the file. Before, the page was blank until the measure reached the place, about 4 s in a 33 MB text file, and for as long as you held the scrollbar.
@@ -29,6 +30,7 @@
 - The PDF export of a file of one very long line no longer blocks the window. The count of pages written now moves from the start, and `Escape` cancels at once. The export of a 200 MB file of one line also uses about 500 MB of memory, where it used 1.9 GB. Before, the window read no key for two minutes on that file, and `Escape` was read only once the whole line was prepared.
 - A zoom step while a big code file is still being colored no longer blocks the window. Before, it could take more than five minutes on a 200 MB file.
 - A double click, a selection with the mouse and `Ctrl+A` are now faster in a big code or text file. In a 200 MB Rust file, a double click now takes 0.02 s and `Ctrl+A` 0.01 s. Before, 0.47 s and 0.14 s.
+- After a scroll, the other occurrences of the selected word are now highlighted down to the last line of the view. Before, the lower lines could stay plain until you scrolled further.
 - `Ctrl+A` in the editor no longer blocks the window in a file of one very long line. In an 8 MB file of one line it now takes 0.06 s. Before, the window read no key for more than five minutes, and Oryx used 3 GB of memory.
 - A key typed in the editor no longer blocks the window in a file of one very long line. In a 33 MB file of one line, a key, Enter and an undo now take less than 0.1 s. Before, each blocked the window for 20 s.
 - In the editor, `Ctrl+End` and Go to line now show their place at once while Oryx still measures a big code or text file, and a letter you type there shows at once too. Before, the window kept the old view until the measure reached the place, more than 30 s in a 200 MB file of one line.
@@ -40,6 +42,7 @@
 - When a big file changes on disk while Oryx still measures it, Go to line and `Ctrl+End` are still done, in the new text. The same holds for F5. Before, the view stayed at the top or stopped in the middle of the file.
 - When a big file gets shorter on disk above the place you are reading, the view now shows the end of the file. Before, it went to the top.
 - A search typed while Oryx still measures a big file now shows its match. Before, after Go to line, the match was counted and the view went to the line.
+- `F1` pressed while Oryx still measures a big file now opens the help page at its top. Before, after Go to line or `Ctrl+End`, the help page opened at its end.
 - In the editor, F5 now leaves the view where it is. Before, the view jumped to the line of the caret.
 - `Alt+Left` in a file that was deleted from disk now goes back inside its text, which Oryx still has. Before, it asked to save and opened the previous file.
 - In a file of one very long line, leaving the editor far from the place you entered it no longer slows the window while Oryx still measures the file. Before, each frame took at least 0.05 s more in a 200 MB file of one line.

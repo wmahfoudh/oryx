@@ -1419,6 +1419,15 @@ impl View {
         self.steps_held = steps;
     }
 
+    /// A page of the help takes the document's place, at its top.
+    /// What waited is a place of the document set aside: a seat left
+    /// here would land on the help page, at its end for an offset past
+    /// its text.
+    pub(super) fn other_document(&mut self) {
+        self.scroll_y = 0.0;
+        self.drop_waits();
+    }
+
     /// What a reload keeps of the view, read in the text on screen
     /// before the file is opened again.
     pub(super) fn before_reload(&self, source: &str) -> Reload {
@@ -1827,7 +1836,10 @@ impl View {
                         self.landing_settle = Some(place).filter(|place| place.line);
                         self.scroll_to(page, y);
                     }
-                    None if !page.pending() && !page.parse_pending => {
+                    // With no layout nothing says the place has none:
+                    // a go to line that opened a folded section dropped
+                    // it, and the frame is about to lay the page out.
+                    None if page.lay.is_some() && !page.pending() && !page.parse_pending => {
                         self.pending_offset = None;
                     }
                     _ => {}
@@ -2907,6 +2919,90 @@ mod tests {
             let height = self.lay.as_ref().expect("a layout").height;
             (height - DocY::from(self.view_h)).max(0.0)
         }
+    }
+
+    impl Bench {
+        /// F1: `App::toggle_help` then `App::show_help_document`. The
+        /// file is set aside with its layout and its held steps, and a
+        /// page shorter than the file is read in its place.
+        fn help(&mut self) {
+            self.editing = false;
+            self.caret = None;
+            self.view.steps_held = 0;
+            self.lay = None;
+            self.pass = None;
+            self.text = (1..=60)
+                .map(|n| format!("Paragraph {n} of the help page.\n\n"))
+                .collect();
+            self.doc = oryx::doc::markdown::parse(self.text.clone());
+            self.view.other_document();
+        }
+    }
+
+    #[test]
+    fn the_help_page_opens_at_its_top_whatever_waited_in_the_file() {
+        // What the reader asked of the file before F1, while it was
+        // measured three lines a frame.
+        type Ask = fn(&mut Bench);
+        let asks: [(&str, bool, Ask); 5] = [
+            ("a jump in the editor", true, |bench| bench.go_to(300)),
+            ("the end in the editor", true, |bench| {
+                bench.key(Motion::DocEnd);
+            }),
+            ("a jump while reading", false, |bench| bench.go_to(300)),
+            ("the end while reading", false, |bench| bench.go_edge(true)),
+            ("a letter far from the view", true, |bench| {
+                bench.go_to(300);
+                bench.settle(REST);
+                bench.wheel(-40.0);
+                bench.letter();
+            }),
+        ];
+        for (what, editing, ask) in asks {
+            let mut bench = Bench::new(numbered(LINES), editing, 3);
+            bench.frame();
+            ask(&mut bench);
+            bench.frame();
+            bench.help();
+            let mut frames = 0;
+            while frames < REST || bench.lay.is_none() || bench.pass_active() {
+                bench.frame();
+                frames += 1;
+                assert_eq!(bench.view.scroll_y, 0.0, "{what}, frame {frames}");
+                assert!(frames < 1000, "the help page is not laid out");
+            }
+            assert!(!bench.view.waits(), "{what}: a request of the file waits");
+            assert!(!bench.view.caret_snap, "{what}: a view owed to a caret");
+            assert_eq!(bench.view.caret_seat, None, "{what}");
+        }
+    }
+
+    #[test]
+    fn a_line_asked_while_the_layout_is_dropped_waits_for_the_next_one() {
+        // A go to line of a page into a folded section, made inside
+        // `App::resolve_pending`: the section opens, the layout is
+        // dropped and its pass, which has ended, is still there
+        // (`App::restart_layout`). The landing runs at once.
+        let lands = |dropped: bool| {
+            let mut bench = Bench::new(numbered(LINES), false, usize::MAX);
+            bench.settle(1);
+            let (view_h, row_h) = (bench.view_h, bench.row_h());
+            let place = Place::centered(bench.line_start(300), view_h, row_h).by_line(true);
+            if dropped {
+                bench.lay = None;
+            }
+            bench.view.land_at(place);
+            bench.resolve_pending();
+            if dropped {
+                assert_eq!(bench.view.pending_offset, Some(place), "the line waits");
+            }
+            bench.settle(REST);
+            assert!(!bench.view.waits());
+            bench.view.scroll_y
+        };
+        let whole = lands(false);
+        assert!(whole > 1000.0, "the view went down the file, to {whole}");
+        assert_eq!(lands(true), whole);
     }
 
     #[test]

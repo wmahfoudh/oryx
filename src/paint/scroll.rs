@@ -558,6 +558,16 @@ pub fn defer_relayout(last_pass: Duration, slice: Duration) -> bool {
     last_pass > slice
 }
 
+/// Whether a resize that has held still lays the page out again, for
+/// a layout made at `laid_width` and a page that is now `avail` wide.
+/// A layout is made for a width, so a new height alone lays nothing
+/// out; a comic's page states carry the height and drop their own
+/// layout. `avail` is None for a window with no size, which no frame
+/// draws.
+pub fn relayout_after_resize(laid_width: f32, avail: Option<f32>) -> bool {
+    avail.is_some_and(|avail| avail != laid_width)
+}
+
 /// Painted pixels for `[y_top, y_top + height)` at full window width,
 /// covering the viewport plus two viewport heights above and below.
 pub struct BandCache {
@@ -591,10 +601,7 @@ impl BandCache {
     ) -> BandCache {
         let height = viewport_h * 5;
         let doc_height = layout.height;
-        let max_top = (doc_height - height as DocY).max(0.0);
-        let y_top = (scroll_y - (2 * viewport_h) as DocY)
-            .clamp(0.0, max_top)
-            .floor();
+        let y_top = BandCache::top(scroll_y, viewport_h, doc_height);
         let pixels = super::band_numbered(
             layout, doc, theme, fonts, media, extra, numbers, y_top, width, height,
         );
@@ -606,6 +613,16 @@ impl BandCache {
             doc_height,
             partial: !layout.slides(),
         }
+    }
+
+    /// The top of a band painted for a view at `scroll_y`: two views
+    /// above it, and never above the document's top nor less than five
+    /// views above its end.
+    pub fn top(scroll_y: DocY, viewport_h: u32, doc_height: DocY) -> DocY {
+        let max_top = (doc_height - (viewport_h * 5) as DocY).max(0.0);
+        (scroll_y - (2 * viewport_h) as DocY)
+            .clamp(0.0, max_top)
+            .floor()
     }
 
     /// True when the viewport nears a band edge that is not a document edge.
@@ -1344,6 +1361,13 @@ mod tests {
         assert!(!defer_relayout(slice, slice));
         assert!(defer_relayout(Duration::from_millis(17), slice));
         assert!(defer_relayout(Duration::from_secs(5), slice));
+    }
+
+    #[test]
+    fn a_settled_resize_lays_the_page_out_again_for_a_new_width_alone() {
+        assert!(relayout_after_resize(800.0, Some(640.0)));
+        assert!(!relayout_after_resize(800.0, Some(800.0)), "a new height");
+        assert!(!relayout_after_resize(800.0, None), "a window with no size");
     }
 
     fn band(y_top: DocY, height: u32, doc_height: DocY) -> BandCache {

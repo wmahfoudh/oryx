@@ -40,8 +40,8 @@ pub struct Occurrences {
     /// The other matches, in document order: all of them in a page,
     /// those of `searched` in a one-block document.
     pub matches: Vec<Selection>,
-    /// The rectangles of the matches around the view, and the scroll
-    /// they were computed at; the same windowing as the search's.
+    /// The rectangles of the matches around the view (`window`), and
+    /// the scroll they were computed at.
     pub rects: Vec<(f32, DocY, f32, f32)>,
     pub rects_scroll: DocY,
     /// The rectangles no longer fit the layout.
@@ -53,6 +53,22 @@ pub struct Occurrences {
 }
 
 impl Occurrences {
+    /// The heights the rectangles are built between, for a view at
+    /// `scroll` in a document `doc_height` tall. They stand until the
+    /// view is more than a view away (`rects_due`), and a band painted
+    /// meanwhile starts two views above its scroll and is five views
+    /// tall: three views above `scroll` to four below. A band is held
+    /// inside the document (`BandCache::top`), so near the top it
+    /// reaches the fifth view of the document, and near the end it
+    /// starts five views above the end. A pixel more above, for the
+    /// band's top, which is a whole pixel.
+    pub fn window(scroll: DocY, view: f32, doc_height: DocY) -> (DocY, DocY) {
+        let view = DocY::from(view);
+        let lo = (scroll - 3.0 * view).min(doc_height - 5.0 * view) - 1.0;
+        let hi = (scroll + 4.0 * view).max(5.0 * view);
+        (lo, hi)
+    }
+
     /// Whether the rectangles are to be built again, and whether the
     /// places they were built on changed: the layout moved, or it holds
     /// its full band again after rectangles built on the view alone
@@ -535,5 +551,38 @@ mod tests {
         assert_eq!(found.rects_due(1700.0, 600.0, false), (true, false));
         found.stale = true;
         assert_eq!(found.rects_due(1000.0, 600.0, false), (true, true));
+    }
+
+    #[test]
+    fn the_rectangles_cover_a_band_painted_within_a_view_of_their_scroll() {
+        use crate::paint::scroll::BandCache;
+        // The rectangles are built at one scroll and stand until the
+        // view is more than a view away (`rects_due`). A band painted
+        // meanwhile is five views tall, held inside the document.
+        let view = 600_u32;
+        let tall = DocY::from(view);
+        for doc_height in [300.0, 2_000.0, 3_000.0, 4_500.0, 10_000.0, 100_000.0] {
+            let last = (doc_height - tall).max(0.0);
+            let mut built: DocY = 0.0;
+            while built <= last {
+                let (lo, hi) = Occurrences::window(built, view as f32, doc_height);
+                for quarter in -4..=4 {
+                    let painted = (built + DocY::from(quarter) * tall / 4.0).clamp(0.0, last);
+                    let top = BandCache::top(painted, view, doc_height);
+                    let bottom = (top + 5.0 * tall).min(doc_height);
+                    assert!(
+                        lo <= top && bottom <= hi,
+                        "a page of {doc_height}: rectangles built at {built} cover {lo} to {hi}, \
+                         and the band painted at {painted} is {top} to {bottom}"
+                    );
+                }
+                built += 150.0;
+            }
+        }
+        // Far from both ends the bands of a view around the scroll are
+        // seven views together, and the rectangles are built for no
+        // more.
+        let (lo, hi) = Occurrences::window(50_000.0, view as f32, 100_000.0);
+        assert_eq!(hi - lo, 7.0 * tall + 1.0);
     }
 }

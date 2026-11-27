@@ -6233,10 +6233,10 @@ impl App {
         if !due {
             return;
         }
-        let (lo, hi) = (scroll - 2.0 * DocY::from(vh), scroll + 3.0 * DocY::from(vh));
         let (Some(lay), Some(found)) = (self.layout.as_ref(), self.occurrences.as_mut()) else {
             return;
         };
+        let (lo, hi) = Occurrences::window(scroll, vh, lay.height);
         // A one-block document: the matches of the text the layout
         // holds now, the only ones a rectangle can be built for.
         let had_none = found.draws_nothing();
@@ -6268,9 +6268,10 @@ impl App {
         found.stale = false;
         found.partial = partial_window;
         // A band painted before the layout moved holds the old places.
-        // A scroll past the window needs no repaint of its own: the band
-        // covers the same five views the rectangles did. A set that drew
-        // nothing and draws nothing left the band as it is.
+        // A scroll past a view needs no repaint of its own: the
+        // rectangles covered the band painted meanwhile
+        // (`Occurrences::window`). A set that drew nothing and draws
+        // nothing left the band as it is.
         if moved && !(had_none && found.draws_nothing()) {
             self.band = None;
         }
@@ -8418,14 +8419,10 @@ impl App {
         // document set aside is its own: the stash keeps it, and
         // `help_return` gives it back.
         self.cfg.direction = DirectionMode::Auto;
-        self.view.scroll_y = 0.0;
+        self.view.other_document();
         self.band = None;
         self.pending_band_for = None;
-        self.view.kept_view = None;
-        self.view.pending_anchor = None;
-        self.view.pending_offset = None;
         self.pending_recolor.clear();
-        self.view.bottom_hold.clear();
         if let Some(gfx) = self.gfx.as_ref() {
             gfx.window.set_title(title);
         }
@@ -9250,6 +9247,18 @@ impl App {
         }
         self.occurrences_moved();
         true
+    }
+
+    /// The width a frame gives the page: the window's, less the
+    /// sidebar's (`redraw`). None for a window with no size, which no
+    /// frame draws.
+    fn page_width(&self) -> Option<f32> {
+        let size = self.gfx.as_ref()?.window.inner_size();
+        if size.width == 0 || size.height == 0 {
+            return None;
+        }
+        let inset = self.inset() as u32;
+        Some(size.width.saturating_sub(inset).max(1) as f32)
     }
 
     /// Whether a pass exists with blocks still to place.
@@ -10207,9 +10216,11 @@ impl ApplicationHandler for App {
                 wake.by(at);
             } else {
                 self.settle_at = None;
-                self.keep_view();
-                self.layout = None;
-                self.pass = None;
+                if scroll::relayout_after_resize(self.layout_width, self.page_width()) {
+                    self.keep_view();
+                    self.layout = None;
+                    self.pass = None;
+                }
                 self.request_redraw();
             }
         }
