@@ -1658,11 +1658,14 @@ pub struct LayoutPass {
 const COUNT_FROM: usize = 2048;
 
 /// How far ahead of the assembler the seed may run in a block that is
-/// counted. A unit the seed passes costs about 0.1 µs, so a seed put
-/// back by a wave of coloring costs under 2 ms; the assembler places
-/// about 90,000 counted units a slice, which leaves a worker about 3 ms
-/// for a unit the count does not answer.
-const SEED_AHEAD: usize = 16_384;
+/// counted. The seed starts again at half this distance, and the
+/// assembler places about four million counted units a second: a worker
+/// has 8 ms or more for a unit the count does not answer, and the
+/// longest unit, 8 KB, takes it about 6 ms. A quarter of this bound left
+/// the window's thread to shape such lines itself. A short line the
+/// seed passes costs about 0.1 µs, under 7 ms for a seed a wave of
+/// coloring puts back; a piece of a long line costs the read of its 8 KB.
+const SEED_AHEAD: usize = 65_536;
 
 /// Whether a code line's styled ranges all draw in the regular face.
 /// A markdown source asks for bold and italic, which the count's table
@@ -8607,7 +8610,7 @@ mod tests {
     /// units ahead and does not walk the rest of the file.
     #[test]
     fn a_reseed_under_the_count_stays_near_the_assembler() {
-        let doc = lines_file("counted.rs", 60_000, 0);
+        let doc = lines_file("counted.rs", 150_000, 0);
         let mut fonts = FontStore::new();
         let (mut lay, mut pass, _pool) = counting_pass(&doc, &mut fonts);
         pass.invalidate_pool();
@@ -8627,21 +8630,21 @@ mod tests {
     /// until the assembler is half the bound nearer.
     #[test]
     fn a_seed_at_its_bound_under_the_count_waits() {
-        let doc = lines_file("waits.rs", 60_000, 0);
+        let doc = lines_file("waits.rs", 150_000, 0);
         let mut fonts = FontStore::new();
         let (mut lay, mut pass, _pool) = counting_pass(&doc, &mut fonts);
         pass.invalidate_pool();
         slice(&doc, &mut fonts, &mut lay, &mut pass, 0);
         let (seed, unit) = (pass.seed_line, pass.open.as_ref().unwrap().unit);
         assert_eq!(seed, unit + SEED_AHEAD);
-        for _ in 0..3 {
-            slice(&doc, &mut fonts, &mut lay, &mut pass, 2);
+        // Slices of a millisecond until the assembler has moved: a few
+        // units in the debug build, a few thousand in a release one,
+        // under half the bound in both.
+        while pass.open.as_ref().unwrap().unit == unit {
+            slice(&doc, &mut fonts, &mut lay, &mut pass, 1);
         }
         let now = pass.open.as_ref().unwrap().unit;
-        assert!(
-            now > unit && now < unit + SEED_AHEAD / 2,
-            "{unit} then {now}"
-        );
+        assert!(now < unit + SEED_AHEAD / 2, "{unit} then {now}");
         assert_eq!(pass.seed_line, seed);
     }
 
@@ -8651,7 +8654,7 @@ mod tests {
     /// behind it.
     #[test]
     fn the_seed_under_the_count_starts_at_the_assembler() {
-        let doc = lines_file("behind.rs", 60_000, 0);
+        let doc = lines_file("behind.rs", 150_000, 0);
         let mut fonts = FontStore::new();
         let (mut lay, mut pass, _pool) = counting_pass(&doc, &mut fonts);
         for _ in 0..5 {
@@ -8663,11 +8666,12 @@ mod tests {
             .expect("the assembler is in the block")
             .unit;
         assert!(
-            pass.seed_line < unit,
+            pass.seed_position == 0 && pass.seed_line < unit,
             "the test needs the seed behind the assembler: {} and {unit}",
             pass.seed_line
         );
         pool_top_up(&doc, &mut lay, &mut pass);
+        assert_eq!(pass.seed_position, 0, "the seed left the block");
         assert!(pass.seed_line >= unit, "{} and {unit}", pass.seed_line);
     }
 
@@ -8677,7 +8681,7 @@ mod tests {
     /// where the same file laid out with no pool does.
     #[test]
     fn a_counted_file_seeded_under_waves_stands_where_the_serial_one_does() {
-        let doc = lines_file("waves.rs", 20_000, 97);
+        let doc = lines_file("waves.rs", 70_000, 97);
         let mut fonts = FontStore::new();
         let (mut serial, mut pass) = layout_begin(&doc, &ViewConfig::default(), 800.0);
         pass.retain_around(0.0, 600.0);
@@ -8693,7 +8697,7 @@ mod tests {
         assert_eq!(lay.height.to_bits(), serial.height.to_bits());
         assert_eq!(lay.runs.len(), serial.runs.len());
         assert_eq!(lay.code_lines.len(), serial.code_lines.len());
-        for line in [0, 96, 97, 5000, 16_500, 19_999] {
+        for line in [0, 96, 97, 5000, 66_000, 69_999] {
             assert_eq!(
                 lay.table.code_line_top(0, line).to_bits(),
                 serial.table.code_line_top(0, line).to_bits(),
