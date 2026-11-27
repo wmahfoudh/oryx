@@ -6265,6 +6265,7 @@ impl App {
             );
         }
         found.rects_scroll = scroll;
+        found.rects_view = vh;
         found.stale = false;
         found.partial = partial_window;
         // A band painted before the layout moved holds the old places.

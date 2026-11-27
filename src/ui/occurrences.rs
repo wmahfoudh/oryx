@@ -44,6 +44,8 @@ pub struct Occurrences {
     /// the scroll they were computed at.
     pub rects: Vec<(f32, DocY, f32, f32)>,
     pub rects_scroll: DocY,
+    /// The height of the view they were computed for (`window`).
+    pub rects_view: f32,
     /// The rectangles no longer fit the layout.
     pub stale: bool,
     /// The rectangles were built while the layout held the view alone,
@@ -74,13 +76,13 @@ impl Occurrences {
     /// its full band again after rectangles built on the view alone
     /// (`partial_window` says what it holds now). A scroll past a view
     /// from where they were built asks for them again too, on the same
-    /// places.
+    /// places, and so does a view taller than the one they were built
+    /// for: a new height of the window lays nothing out again, and the
+    /// band is five of the new views.
     pub fn rects_due(&self, scroll: DocY, view: f32, partial_window: bool) -> (bool, bool) {
         let relaid = self.stale || (self.partial && !partial_window);
-        (
-            relaid || (scroll - self.rects_scroll).abs() > DocY::from(view),
-            relaid,
-        )
+        let away = (scroll - self.rects_scroll).abs() > DocY::from(view);
+        (relaid || away || view > self.rects_view, relaid)
     }
 
     /// In a one-block document, keeps the matches of the line starts
@@ -230,6 +232,7 @@ pub fn find(doc: &Document, selection: Selection, matched: Match) -> Option<Occu
         matches: Vec::new(),
         rects: Vec::new(),
         rects_scroll: 0.0,
+        rects_view: 0.0,
         partial: false,
         stale: true,
     };
@@ -537,6 +540,7 @@ mod tests {
             matches: Vec::new(),
             rects: Vec::new(),
             rects_scroll: 1000.0,
+            rects_view: 600.0,
             stale: false,
             partial: true,
         };
@@ -551,6 +555,41 @@ mod tests {
         assert_eq!(found.rects_due(1700.0, 600.0, false), (true, false));
         found.stale = true;
         assert_eq!(found.rects_due(1000.0, 600.0, false), (true, true));
+    }
+
+    #[test]
+    fn rectangles_built_for_a_view_are_built_again_for_a_taller_one() {
+        let mut found = Occurrences {
+            word: Selection {
+                start: ModelPos {
+                    block: 0,
+                    span: 0,
+                    byte: 0,
+                },
+                end: ModelPos {
+                    block: 0,
+                    span: 0,
+                    byte: 3,
+                },
+            },
+            matched: Match::Text,
+            text: String::new(),
+            searched: None,
+            matches: Vec::new(),
+            rects: Vec::new(),
+            rects_scroll: 1000.0,
+            rects_view: 300.0,
+            stale: false,
+            partial: false,
+        };
+        // The window made taller, with no new layout: the band is five
+        // of the new views, and the rectangles cover the old ones. The
+        // places are the same.
+        assert_eq!(found.rects_due(1000.0, 600.0, false), (true, false));
+        found.rects_view = 600.0;
+        assert_eq!(found.rects_due(1000.0, 600.0, false), (false, false));
+        // A shorter view is inside what they cover.
+        assert_eq!(found.rects_due(1000.0, 300.0, false), (false, false));
     }
 
     #[test]
