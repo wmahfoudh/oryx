@@ -8,10 +8,11 @@
 //!
 //! With the setting off, nothing here acts.
 
-use winit::keyboard::{Key, NamedKey};
+use winit::keyboard::{Key, NamedKey, PhysicalKey};
 
+use crate::doc::load;
 use crate::input::keymap::KeyOwner;
-use crate::input::route::{self, Field, First};
+use crate::input::route::{self, Field, First, Held, HeldAt};
 
 /// Whether what has the keys takes text from an input method: the
 /// editor with a caret, the search bar, the path field, and a dialog's
@@ -68,6 +69,81 @@ impl At {
 /// did.
 pub fn drops_press(setting: bool, key: &Key) -> bool {
     setting && matches!(key, Key::Named(NamedKey::Process))
+}
+
+/// What a press is at the window's gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Gate {
+    /// The input method's: nothing in Oryx acts on it.
+    Method,
+    /// Not a keystroke: a synthetic press, or a repeat of a key that
+    /// went down under another owner of the keys (`Held::admits`).
+    Stale,
+    Keystroke,
+}
+
+/// The gate of a press: whose it is, with the record of the key
+/// that went down.
+///
+/// A press the input method takes is recorded too. On Windows the
+/// Enter that confirms a composition arrives as `Process`, and when
+/// the key stays down its repeats arrive as Enter, the composition
+/// being over. They go to what had the keys at the press, as the
+/// repeats of any key do: with no record they went on to whatever was
+/// behind a field that the first of them closed.
+pub fn gate(
+    held: &mut Held,
+    setting: bool,
+    key: &Key,
+    code: PhysicalKey,
+    at: HeldAt,
+    repeat: bool,
+    synthetic: bool,
+) -> Gate {
+    let admitted = held.admits(code, at, repeat, synthetic);
+    if drops_press(setting, key) {
+        Gate::Method
+    } else if admitted {
+        Gate::Keystroke
+    } else {
+        Gate::Stale
+    }
+}
+
+/// How a commit is typed in the editor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Typed {
+    /// As a character key: the first half of a pair wraps a selection,
+    /// and letters join the typing before them in the history.
+    Key(String),
+    /// As pasted text, one step of the history: the text holds a line
+    /// break or a tab.
+    Text(String),
+    Nothing,
+}
+
+/// What a commit types in the editor. A line break and a tab are
+/// typed, as a paste types them, and a return is a line break, alone
+/// or before one: a line break is one byte inside the editor
+/// (`load::without_returns`). Another control character is left out,
+/// as a field leaves it out.
+pub fn typed_in_editor(text: &str) -> Typed {
+    let typed: String = load::without_returns(text)
+        .chars()
+        .filter_map(|c| match c {
+            '\r' => Some('\n'),
+            '\n' | '\t' => Some(c),
+            c if c.is_control() => None,
+            c => Some(c),
+        })
+        .collect();
+    if typed.is_empty() {
+        Typed::Nothing
+    } else if typed.contains(['\n', '\t']) {
+        Typed::Text(typed)
+    } else {
+        Typed::Key(typed)
+    }
 }
 
 /// The reader that gets committed text.
@@ -319,7 +395,8 @@ fn on_boundaries(text: &str, (from, to): (usize, usize)) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use winit::keyboard::SmolStr;
+    use crate::edit::Mode;
+    use winit::keyboard::{KeyCode, SmolStr};
 
     const OWNERS: [KeyOwner; 8] = [
         KeyOwner::Question,
@@ -1013,5 +1090,138 @@ mod tests {
         }
         let outcome = composition.event(at(KeyOwner::GoTo, true), Event::Commit("12"));
         assert_eq!(outcome.commit, Some((CommitTo::Field(Field::GoTo), "12")));
+    }
+
+    const ENTER: PhysicalKey = PhysicalKey::Code(KeyCode::Enter);
+    const KEY_A: PhysicalKey = PhysicalKey::Code(KeyCode::KeyA);
+
+    fn held_at(owner: KeyOwner) -> HeldAt {
+        HeldAt {
+            owner,
+            mode: Mode::Edit,
+            help: false,
+        }
+    }
+
+    /// Enter confirms a Japanese composition in the rename field of
+    /// the theme list and stays down. On Windows the press is
+    /// `Process` and the repeats are Enter: the first is the field's
+    /// and closes it, and the list behind it gets none.
+    #[test]
+    fn the_repeats_of_a_key_the_input_method_took_go_to_what_had_the_keys() {
+        let process = Key::Named(NamedKey::Process);
+        let enter = Key::Named(NamedKey::Enter);
+        let field = held_at(KeyOwner::Dialog { field: true });
+        let list = held_at(KeyOwner::Dialog { field: false });
+        let text = held_at(KeyOwner::Code);
+        let mut held = Held::default();
+        assert_eq!(
+            gate(&mut held, true, &process, ENTER, field, false, false),
+            Gate::Method
+        );
+        assert_eq!(
+            gate(&mut held, true, &enter, ENTER, field, true, false),
+            Gate::Keystroke,
+            "the field's own repeat"
+        );
+        assert_eq!(
+            gate(&mut held, true, &enter, ENTER, list, true, false),
+            Gate::Stale,
+            "the field is closed: the list gets no Enter"
+        );
+        assert_eq!(
+            gate(&mut held, true, &enter, ENTER, text, true, false),
+            Gate::Stale,
+            "nor the text behind the list"
+        );
+        held.release(ENTER);
+        assert_eq!(
+            gate(&mut held, true, &enter, ENTER, text, false, false),
+            Gate::Keystroke,
+            "pressed again"
+        );
+    }
+
+    /// The gate against the record alone, over each run of three
+    /// presses of two keys at two places: with the setting off it is
+    /// the record's answer, as it is with the setting on for a run
+    /// with no `Process`, and a `Process` with the setting on is the
+    /// input method's.
+    #[test]
+    fn the_gate_is_the_record_of_the_held_keys_but_for_the_input_methods_press() {
+        let keys = [
+            Key::Named(NamedKey::Process),
+            Key::Named(NamedKey::Enter),
+            Key::Character(SmolStr::new("a")),
+        ];
+        let places = [held_at(KeyOwner::Path), held_at(KeyOwner::Text)];
+        let mut presses = Vec::new();
+        for key in &keys {
+            for code in [ENTER, KEY_A] {
+                for at in places {
+                    for (repeat, synthetic) in [(false, false), (true, false), (false, true)] {
+                        presses.push((key, code, at, repeat, synthetic));
+                    }
+                }
+            }
+        }
+        let process = |key: &Key| matches!(key, Key::Named(NamedKey::Process));
+        let mut runs = 0;
+        for first in &presses {
+            for second in &presses {
+                for third in &presses {
+                    let run = [first, second, third];
+                    let plain = run.iter().all(|press| !process(press.0));
+                    for setting in [false, true] {
+                        let mut held = Held::default();
+                        let mut record = Held::default();
+                        for &&(key, code, at, repeat, synthetic) in &run {
+                            let got = gate(&mut held, setting, key, code, at, repeat, synthetic);
+                            let admitted = record.admits(code, at, repeat, synthetic);
+                            if setting && process(key) {
+                                assert_eq!(got, Gate::Method, "{run:?}");
+                            } else if !setting || plain {
+                                let want = if admitted {
+                                    Gate::Keystroke
+                                } else {
+                                    Gate::Stale
+                                };
+                                assert_eq!(got, want, "setting {setting}: {run:?}");
+                            }
+                        }
+                        runs += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(runs, 36 * 36 * 36 * 2);
+    }
+
+    #[test]
+    fn a_commit_types_its_line_breaks_and_its_tabs_in_the_editor() {
+        let key = |text: &str| Typed::Key(text.to_string());
+        let text = |text: &str| Typed::Text(text.to_string());
+        for (commit, typed) in [
+            ("\u{4f60}\u{597d}", key("\u{4f60}\u{597d}")),
+            ("(", key("(")),
+            (" ", key(" ")),
+            ("a\nb", text("a\nb")),
+            ("a\tb", text("a\tb")),
+            ("\n", text("\n")),
+            ("\t", text("\t")),
+            ("a\n\nb\n", text("a\n\nb\n")),
+            ("a\r\nb", text("a\nb")),
+            ("a\r\r\nb", text("a\nb")),
+            ("a\rb", text("a\nb")),
+            ("a\r", text("a\n")),
+            ("x\u{1b}y", key("xy")),
+            ("a\u{7f}\u{85}b", key("ab")),
+            ("\u{1b}a\nb\u{0}", text("a\nb")),
+            ("\u{1b}", Typed::Nothing),
+            ("", Typed::Nothing),
+            ("a\u{2028}b", key("a\u{2028}b")),
+        ] {
+            assert_eq!(typed_in_editor(commit), typed, "{commit:?}");
+        }
     }
 }

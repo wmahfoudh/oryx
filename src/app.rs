@@ -22,7 +22,7 @@ use oryx::input::{
     self,
     keymap::{self, Command, KeyOwner},
     log as input_log,
-    method::{self, CommitTo},
+    method::{self, CommitTo, Gate, Typed},
     route::{self, After, Field, First},
     touch,
 };
@@ -2679,14 +2679,26 @@ impl App {
     /// with no modifier, so the reader's own guards apply and the text
     /// does there what the key does. The search bar searches again, a
     /// selection in the editor is replaced or wrapped, the go to line
-    /// field refuses what is neither a digit nor a colon.
+    /// field refuses what is neither a digit nor a colon. In the
+    /// editor, a text with a line break or a tab is typed as a paste
+    /// types it, under the key's guard of a caret
+    /// (`method::typed_in_editor`).
     fn type_commit(&mut self, to: CommitTo, text: &str, event_loop: &ActiveEventLoop) {
         self.fling = None;
         let key = Key::Character(SmolStr::new(text));
         match to {
-            CommitTo::Editor => {
-                self.edit_key(&key, false, false, false);
-            }
+            CommitTo::Editor => match method::typed_in_editor(text) {
+                Typed::Key(typed) => {
+                    let typed = Key::Character(SmolStr::new(typed));
+                    self.edit_key(&typed, false, false, false);
+                }
+                Typed::Text(typed) => {
+                    if self.caret.is_some() {
+                        self.type_over(&typed, Kind::Structural);
+                    }
+                }
+                Typed::Nothing => {}
+            },
             CommitTo::Field(Field::Search) => {
                 self.search_key(&key, false, false, false);
             }
@@ -10496,23 +10508,32 @@ impl ApplicationHandler for App {
                     repeat,
                     ..
                 } = event;
-                // With the setting on, a key the system's input method
-                // uses arrives as `Process` on Windows, a shortcut
-                // included: it is the input method's.
-                if method::drops_press(self.config.input_method, &logical_key) {
-                    return;
-                }
-                self.fling = None;
-                // What is not a keystroke stops here: a synthetic
-                // press, and a repeat of a key that was pressed under
-                // another owner of the keys.
                 let owner = self.key_owner();
                 let at = route::HeldAt {
                     owner,
                     mode: self.mode,
                     help: self.help_stash.is_some(),
                 };
-                if !self.held.admits(physical_key, at, repeat, is_synthetic) {
+                let gate = method::gate(
+                    &mut self.held,
+                    self.config.input_method,
+                    &logical_key,
+                    physical_key,
+                    at,
+                    repeat,
+                    is_synthetic,
+                );
+                // With the setting on, a key the system's input method
+                // uses arrives as `Process` on Windows, a shortcut
+                // included: it is the input method's.
+                if gate == Gate::Method {
+                    return;
+                }
+                self.fling = None;
+                // What is not a keystroke stops here: a synthetic
+                // press, and a repeat of a key that was pressed under
+                // another owner of the keys.
+                if gate == Gate::Stale {
                     return;
                 }
                 // On a layout that types another script, a chord is

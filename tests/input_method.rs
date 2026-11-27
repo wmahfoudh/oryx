@@ -1,19 +1,21 @@
 //! The input method off the window: the replays of the logs of the
 //! probe, and the fuzzer of the composition, of the gate of the presses
-//! and of the route of a commit against a plain model.
+//! with the record of the held keys, and of the route of a commit
+//! against a plain model.
 //!
 //! The logs under `tests/fixtures/input-logs/` are what winit handed
 //! to the window in the sessions of November 2026, with fcitx5 and
 //! ibus on Wayland and X11, and with Microsoft Pinyin, the Japanese
 //! and Korean input methods and Weasel on Windows.
 
+use oryx::edit::Mode;
 use oryx::input::keymap::KeyOwner;
 use oryx::input::log::{self, KeyName, Record};
-use oryx::input::method::{self, At, CommitTo, Composition, Event, Outcome, Shown};
-use oryx::input::route::Field;
+use oryx::input::method::{self, At, CommitTo, Composition, Event, Gate, Outcome, Shown, Typed};
+use oryx::input::route::{Field, Held, HeldAt};
 use proptest::prelude::*;
 use proptest::test_runner::TestCaseError;
-use winit::keyboard::{Key, NamedKey, NativeKey, SmolStr};
+use winit::keyboard::{Key, KeyCode, NamedKey, NativeKey, NativeKeyCode, PhysicalKey, SmolStr};
 
 // The replays.
 
@@ -429,6 +431,9 @@ struct Replayed {
     /// The presses of `Process`, and those the gate dropped.
     process: usize,
     dropped: usize,
+    /// The other presses whose answer at the gate is not the answer of
+    /// a record that holds no press of `Process`.
+    moved: usize,
     /// The composing texts that were not empty, and those that showed
     /// at once with the cursor of the log.
     composing: usize,
@@ -439,12 +444,36 @@ struct Replayed {
     left: bool,
 }
 
+/// The place of a key on the keyboard, told from the others. A log
+/// names it by the name of winit's variant, which is not read back:
+/// each name gets a code of its own.
+fn code_of(codes: &mut Vec<String>, name: &str) -> PhysicalKey {
+    let index = codes
+        .iter()
+        .position(|code| code == name)
+        .unwrap_or_else(|| {
+            codes.push(name.to_string());
+            codes.len() - 1
+        });
+    PhysicalKey::Unidentified(NativeKeyCode::Xkb(index as u32))
+}
+
+fn mode_of(editing: bool) -> Mode {
+    if editing {
+        Mode::Edit
+    } else {
+        Mode::Read
+    }
+}
+
 /// Gives the records of a log to the composition, the gate and the
 /// route of a commit, in the wiring the design gives the window: an
-/// event of the input method to the composition, a press to the gate,
-/// the composition cleared at a loss of focus, and settled after each
-/// record at the place the next one finds. A log has no line for a
-/// change of file.
+/// event of the input method to the composition, a press to the gate
+/// with the record of the held keys, a release to the record, the
+/// record and the composition cleared at a loss of focus, and the
+/// composition settled after each record at the place the next one
+/// finds. A log has no line for a change of file, and does not say
+/// whether the help page was open.
 fn replay(name: &str, setting: bool) -> Replayed {
     let records = read(name);
     let places = places(&records);
@@ -453,17 +482,44 @@ fn replay(name: &str, setting: bool) -> Replayed {
         At::new(setting, place.0, place.1, true, true)
     };
     let mut composition = Composition::default();
+    let mut codes = Vec::new();
+    let mut held = Held::default();
+    // The record as it was before Task 450: a press the gate drops
+    // leaves nothing in it.
+    let mut alone = Held::default();
     let mut out = Replayed::default();
     for (index, record) in records.iter().enumerate() {
         let here = at(index);
         let outcome = match record {
             Record::Key(key) => {
                 let logical = key_of(&key.logical);
-                if key.pressed && logical == Key::Named(NamedKey::Process) {
-                    out.process += 1;
-                    out.dropped += usize::from(method::drops_press(setting, &logical));
-                } else if key.pressed {
-                    assert!(!method::drops_press(setting, &logical), "{name}: {key:?}");
+                let code = code_of(&mut codes, &key.code);
+                if key.pressed {
+                    let place = HeldAt {
+                        owner: key.owner,
+                        mode: mode_of(key.editing),
+                        help: false,
+                    };
+                    let (repeat, synthetic) = (key.repeat, key.synthetic);
+                    let gate =
+                        method::gate(&mut held, setting, &logical, code, place, repeat, synthetic);
+                    assert_eq!(
+                        gate == Gate::Method,
+                        method::drops_press(setting, &logical),
+                        "{name}: {key:?}"
+                    );
+                    if logical == Key::Named(NamedKey::Process) {
+                        out.process += 1;
+                    }
+                    if gate == Gate::Method {
+                        out.dropped += 1;
+                    } else {
+                        let admitted = alone.admits(code, place, repeat, synthetic);
+                        out.moved += usize::from((gate == Gate::Keystroke) != admitted);
+                    }
+                } else {
+                    held.release(code);
+                    alone.release(code);
                 }
                 Outcome::default()
             }
@@ -488,11 +544,15 @@ fn replay(name: &str, setting: bool) -> Replayed {
                 outcome
             }
             Record::Commit(text) => composition.event(here, Event::Commit(text)),
-            Record::Focus(false) => Outcome {
-                redraw: composition.clear(),
-                commit: None,
-                composed: false,
-            },
+            Record::Focus(false) => {
+                held.clear();
+                alone.clear();
+                Outcome {
+                    redraw: composition.clear(),
+                    commit: None,
+                    composed: false,
+                }
+            }
             Record::Focus(true) | Record::Mods(_) | Record::Allowed(_) => Outcome::default(),
         };
         if let Some((to, text)) = outcome.commit {
@@ -522,7 +582,9 @@ fn each_log_of_the_folder_has_its_replay() {
 /// With the setting on: the commits of each log in their order, each
 /// given to the reader that has the keys, none dropped; each composing
 /// text shows where it came, with the cursor of the log; no press of
-/// `Process` acts; and no composing text is left at the end.
+/// `Process` acts; the record of those presses changes the answer of
+/// no other press of the thirty sessions; and no composing text is
+/// left at the end.
 #[test]
 fn the_logs_replay_with_the_setting_on() {
     for log in LOGS {
@@ -542,6 +604,7 @@ fn the_logs_replay_with_the_setting_on() {
             replayed.dropped, replayed.process,
             "{name}: a Process acted"
         );
+        assert_eq!(replayed.moved, 0, "{name}: a press of the session");
         assert_eq!(
             replayed.showed, replayed.composing,
             "{name}: a composing text"
@@ -672,9 +735,10 @@ const OWNERS: [KeyOwner; 8] = [
 ];
 
 /// What a composing text or a commit holds: nothing, letters, a
-/// character of three bytes, a joined emoji, a space, a digit, and a
-/// control character.
-const TEXTS: [&str; 10] = [
+/// character of three bytes, a joined emoji, a space, a digit, a
+/// control character, a line break, a return before one with a tab,
+/// and a lone return.
+const TEXTS: [&str; 13] = [
     "",
     "n",
     "ni h",
@@ -685,8 +749,13 @@ const TEXTS: [&str; 10] = [
     "\u{1f468}\u{200d}\u{1f469}",
     "12",
     "a\u{1b}",
+    "a\nb",
+    "\r\r\nb\t",
+    "a\r",
 ];
 
+/// A press. `Process` is Enter taken by the input method: on Windows
+/// it comes with the place of the real key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Pressed {
     Letter(char),
@@ -694,11 +763,23 @@ enum Pressed {
     Enter,
 }
 
+impl Pressed {
+    fn code(self) -> PhysicalKey {
+        PhysicalKey::Code(match self {
+            Pressed::Letter('d') => KeyCode::KeyD,
+            Pressed::Letter(_) => KeyCode::Digit7,
+            Pressed::Process | Pressed::Enter => KeyCode::Enter,
+        })
+    }
+}
+
 /// An event of the window.
 #[derive(Debug, Clone)]
 enum Step {
-    Press(Pressed),
-    Release,
+    /// A press, or a repeat of a key that is down.
+    Press(Pressed, bool),
+    /// The key of that press goes up.
+    Release(Pressed),
     Composing(&'static str, Option<(usize, usize)>),
     Commit(&'static str),
     Enabled,
@@ -715,20 +796,23 @@ enum Step {
     File,
 }
 
+fn pressed() -> impl Strategy<Value = Pressed> {
+    prop_oneof![
+        Just(Pressed::Letter('d')),
+        Just(Pressed::Letter('7')),
+        Just(Pressed::Process),
+        Just(Pressed::Enter),
+    ]
+}
+
 fn step() -> impl Strategy<Value = Step> {
     let text = || prop::sample::select(&TEXTS[..]);
     let cursor = prop::option::of((0usize..14, 0usize..14));
     prop_oneof![
         4 => (text(), cursor).prop_map(|(text, cursor)| Step::Composing(text, cursor)),
         3 => text().prop_map(Step::Commit),
-        2 => prop_oneof![
-            Just(Pressed::Letter('d')),
-            Just(Pressed::Letter('7')),
-            Just(Pressed::Process),
-            Just(Pressed::Enter),
-        ]
-        .prop_map(Step::Press),
-        1 => Just(Step::Release),
+        4 => (pressed(), any::<bool>()).prop_map(|(pressed, repeat)| Step::Press(pressed, repeat)),
+        1 => pressed().prop_map(Step::Release),
         1 => Just(Step::Enabled),
         1 => Just(Step::Disabled),
         2 => prop::sample::select(&OWNERS[..]).prop_map(Step::Owner),
@@ -762,6 +846,15 @@ impl Window {
         )
     }
 
+    /// What the record of a held key keeps of the window.
+    fn held_at(self) -> HeldAt {
+        HeldAt {
+            owner: self.owner,
+            mode: mode_of(self.editing),
+            help: false,
+        }
+    }
+
     /// A step that changes the window's state. True when it changed
     /// what has the keys or the mode.
     fn change(&mut self, step: &Step) -> bool {
@@ -791,16 +884,32 @@ struct World {
 }
 
 impl World {
-    /// Text given to a reader as a character key with no modifier.
-    /// The guards are the key's: the editor types nothing with no
-    /// caret and drops a text that holds a control character whole, a
-    /// field strips the control characters, and the go to line field
-    /// takes digits and colons.
+    /// Text given to a reader, the plain table. The editor types
+    /// nothing with no caret; it types a line break and a tab, a
+    /// return is a line break when no line break follows its run of
+    /// returns and leaves otherwise, and another control character
+    /// leaves. A field strips the control characters, and the go to
+    /// line field takes digits and colons.
     fn type_text(&mut self, window: Window, to: CommitTo, text: &str) {
         match to {
             CommitTo::Editor => {
-                if window.caret && !text.chars().any(char::is_control) {
-                    self.document.push_str(text);
+                let chars: Vec<char> = text.chars().collect();
+                let mut typed = String::new();
+                for (at, &c) in chars.iter().enumerate() {
+                    match c {
+                        '\r' => {
+                            let after = chars[at + 1..].iter().find(|c| **c != '\r');
+                            if after != Some(&'\n') {
+                                typed.push('\n');
+                            }
+                        }
+                        '\n' | '\t' => typed.push(c),
+                        c if c.is_control() => {}
+                        c => typed.push(c),
+                    }
+                }
+                if window.caret && !typed.is_empty() {
+                    self.document.push_str(&typed);
                     self.undo += 1;
                 }
             }
@@ -812,6 +921,24 @@ impl World {
             CommitTo::Field(Field::Search | Field::Path) | CommitTo::Dialog => {
                 self.field.extend(text.chars().filter(|c| !c.is_control()));
             }
+        }
+    }
+
+    /// Committed text as the window types it: in the editor, what
+    /// the rule of the code gives, as a key or as pasted text, one
+    /// step of the history each.
+    fn type_commit(&mut self, window: Window, to: CommitTo, text: &str) {
+        if to != CommitTo::Editor {
+            self.type_text(window, to, text);
+            return;
+        }
+        let typed = match method::typed_in_editor(text) {
+            Typed::Key(typed) | Typed::Text(typed) => typed,
+            Typed::Nothing => return,
+        };
+        if window.caret {
+            self.document.push_str(&typed);
+            self.undo += 1;
         }
     }
 
@@ -849,6 +976,9 @@ impl World {
 struct Model {
     window: Window,
     composing: Option<(String, Option<(usize, usize)>)>,
+    /// The keys that are down, each with what had the keys and the
+    /// mode when it went down.
+    down: Vec<(PhysicalKey, Place)>,
     world: World,
 }
 
@@ -879,12 +1009,27 @@ impl Model {
     fn step(&mut self, step: &Step) {
         let on = self.window.setting;
         match *step {
-            Step::Press(pressed) => {
-                if !(on && pressed == Pressed::Process) {
+            // A press is written down, the input method's too. A
+            // repeat acts where its key went down, and nowhere else
+            // until the key goes up.
+            Step::Press(pressed, repeat) => {
+                let code = pressed.code();
+                let place = (self.window.owner, self.window.editing);
+                let elsewhere = repeat
+                    && self
+                        .down
+                        .iter()
+                        .any(|(key, at)| *key == code && *at != place);
+                if !repeat {
+                    self.down.retain(|(key, _)| *key != code);
+                    self.down.push((code, place));
+                }
+                if !elsewhere && !(on && pressed == Pressed::Process) {
                     self.world.press(self.window, pressed);
                 }
             }
-            Step::Release | Step::Enabled | Step::Focus(true) => {}
+            Step::Release(pressed) => self.down.retain(|(key, _)| *key != pressed.code()),
+            Step::Enabled | Step::Focus(true) => {}
             Step::Composing(text, cursor) if on && !text.is_empty() => {
                 if self.takes_text() {
                     let ends: Vec<usize> = text
@@ -912,7 +1057,11 @@ impl Model {
                     }
                 }
             }
-            Step::Focus(false) | Step::File => self.composing = None,
+            Step::Focus(false) => {
+                self.down.clear();
+                self.composing = None;
+            }
+            Step::File => self.composing = None,
             Step::Owner(_)
             | Step::Mode(_)
             | Step::Caret(_)
@@ -928,14 +1077,16 @@ impl Model {
 }
 
 /// The code under test, in the wiring the design gives the window: an
-/// event of the input method to the composition, a press to the gate,
-/// the composition cleared at a loss of focus and at a change of file,
-/// and settled after each event. The unit tests of the module have
-/// the events that find a text held at another place, which this
-/// wiring never makes.
+/// event of the input method to the composition, a press to the gate
+/// with the record of the held keys, a release to the record, the
+/// record cleared at a loss of focus, the composition cleared there
+/// and at a change of file, and settled after each event. The unit
+/// tests of the module have the events that find a text held at
+/// another place, which this wiring never makes.
 struct Bench {
     window: Window,
     composition: Composition,
+    held: Held,
     world: World,
 }
 
@@ -969,7 +1120,7 @@ impl Bench {
                 prop_assert!(matches!(step, Step::Commit(_)), "only a commit types");
                 prop_assert!(!text.is_empty(), "an empty commit types nothing");
                 self.world.acted.push(format!("commit {text:?}"));
-                self.world.type_text(self.window, to, text);
+                self.world.type_commit(self.window, to, text);
             }
             if !self.window.setting {
                 prop_assert_eq!(outcome, Outcome::default(), "the setting off");
@@ -985,19 +1136,33 @@ impl Bench {
             prop_assert_eq!(self.window.at(), at, "the rule's answer is the window's");
         }
         match *step {
-            Step::Press(pressed) => {
+            Step::Press(pressed, repeat) => {
                 let key = match pressed {
                     Pressed::Letter(letter) => Key::Character(SmolStr::new(letter.to_string())),
                     Pressed::Process => Key::Named(NamedKey::Process),
                     Pressed::Enter => Key::Named(NamedKey::Enter),
                 };
-                if method::drops_press(self.window.setting, &key) {
-                    prop_assert_eq!(pressed, Pressed::Process);
-                } else {
-                    self.world.press(self.window, pressed);
+                let gate = method::gate(
+                    &mut self.held,
+                    self.window.setting,
+                    &key,
+                    pressed.code(),
+                    self.window.held_at(),
+                    repeat,
+                    false,
+                );
+                match gate {
+                    Gate::Method => prop_assert_eq!(pressed, Pressed::Process),
+                    Gate::Stale => prop_assert!(repeat, "a first press is a keystroke"),
+                    Gate::Keystroke => self.world.press(self.window, pressed),
                 }
             }
-            Step::Focus(false) | Step::File => {
+            Step::Release(pressed) => self.held.release(pressed.code()),
+            Step::Focus(false) => {
+                self.held.clear();
+                self.composition.clear();
+            }
+            Step::File => {
                 self.composition.clear();
             }
             _ => {}
@@ -1033,16 +1198,18 @@ impl Bench {
 /// Runs the steps on the code and on the plain model, and compares
 /// them after each: the composing text that shows, the document, the
 /// field, the undo history, the shortcuts and what acted, in its order.
-fn check_session(mut window: Window, steps: &[Step]) -> Result<(), TestCaseError> {
+fn check_session(mut window: Window, steps: &[Step]) -> Result<World, TestCaseError> {
     window.caret = true;
     let mut bench = Bench {
         window,
         composition: Composition::default(),
+        held: Held::default(),
         world: World::default(),
     };
     let mut model = Model {
         window,
         composing: None,
+        down: Vec::new(),
         world: World::default(),
     };
     for (index, step) in steps.iter().enumerate() {
@@ -1056,7 +1223,7 @@ fn check_session(mut window: Window, steps: &[Step]) -> Result<(), TestCaseError
         prop_assert_eq!(&shown, &model.composing, "step {}: {:?}", index, step);
         prop_assert_eq!(&bench.world, &model.world, "step {}: {:?}", index, step);
     }
-    Ok(())
+    Ok(bench.world)
 }
 
 fn window(setting: bool, owner: KeyOwner, editing: bool) -> Window {
@@ -1089,7 +1256,11 @@ fn window(setting: bool, owner: KeyOwner, editing: bool) -> Window {
 ///    closes the composition;
 /// 6. with the setting on, a press of `Process` changes nothing;
 /// 7. `Enabled` and `Disabled` change no text;
-/// 8. no composing text is held where the keys take no text.
+/// 8. no composing text is held where the keys take no text;
+/// 9. a repeat acts where its key went down and nowhere else until
+///    the key goes up, a key the input method took included;
+/// 10. in the editor a commit types its line breaks and its tabs, and
+///     leaves its other control characters out.
 ///
 /// Two properties of the design are the window's own and no line of
 /// the module can break them: `Enabled` and `Disabled` do not change
@@ -1120,7 +1291,7 @@ fn a_session_runs_on_the_bench_of_the_fuzzer() {
     let steps = [
         Step::Composing("n", Some((1, 1))),
         Step::Composing("ni h", Some((0, 4))),
-        Step::Press(Pressed::Process),
+        Step::Press(Pressed::Process, false),
         Step::Composing("", None),
         Step::Commit("\u{4f60}\u{597d}"),
         Step::Disabled,
@@ -1137,7 +1308,7 @@ fn a_session_runs_on_the_bench_of_the_fuzzer() {
         Step::File,
         Step::Owner(KeyOwner::Question),
         Step::Commit("d"),
-        Step::Press(Pressed::Letter('d')),
+        Step::Press(Pressed::Letter('d'), false),
         Step::Owner(KeyOwner::GoTo),
         Step::Commit("12"),
         Step::Commit("a\u{1b}"),
@@ -1150,8 +1321,8 @@ fn a_session_runs_on_the_bench_of_the_fuzzer() {
         Step::Setting(false),
         Step::Composing("n", None),
         Step::Commit("n"),
-        Step::Press(Pressed::Process),
-        Step::Press(Pressed::Letter('d')),
+        Step::Press(Pressed::Process, false),
+        Step::Press(Pressed::Letter('d'), false),
     ];
     check_session(window(true, KeyOwner::Text, true), &steps).unwrap();
     for owner in OWNERS {
@@ -1161,4 +1332,52 @@ fn a_session_runs_on_the_bench_of_the_fuzzer() {
             }
         }
     }
+}
+
+/// Enter confirms a composition in the rename field of the theme list
+/// and stays down, on Windows: the press is `Process`, its repeats are
+/// Enter. The first is the field's and closes it. The list and the
+/// text behind it get none until the key is pressed again. A commit
+/// with a line break is typed in the editor, and loses the break in a
+/// field.
+#[test]
+fn a_held_enter_that_confirmed_a_composition_stays_with_its_field() {
+    let steps = [
+        Step::Composing("ni h", Some((0, 4))),
+        Step::Press(Pressed::Process, false),
+        Step::Composing("", None),
+        Step::Commit("\u{4f60}\u{597d}"),
+        Step::Press(Pressed::Enter, true),
+        Step::Owner(KeyOwner::Dialog { field: false }),
+        Step::Press(Pressed::Enter, true),
+        Step::Owner(KeyOwner::Code),
+        Step::Press(Pressed::Enter, true),
+        Step::Commit("a\nb"),
+        Step::Release(Pressed::Enter),
+        Step::Press(Pressed::Enter, false),
+        Step::Owner(KeyOwner::Search),
+        Step::Commit("a\nb"),
+    ];
+    let world =
+        check_session(window(true, KeyOwner::Dialog { field: true }, true), &steps).unwrap();
+    assert_eq!(
+        world.acted,
+        [
+            "commit \"\u{4f60}\u{597d}\"",
+            "Enter",
+            "commit \"a\\nb\"",
+            "Enter",
+            "commit \"a\\nb\""
+        ]
+    );
+    assert_eq!(world.document, "a\nb");
+    assert_eq!(world.field, "\u{4f60}\u{597d}ab");
+    // With the setting off the press is a keystroke, and so are its
+    // repeats where the key went down.
+    let world = check_session(
+        window(false, KeyOwner::Dialog { field: true }, true),
+        &steps,
+    )
+    .unwrap();
+    assert_eq!(world.acted, ["Process", "Enter", "Enter"]);
 }

@@ -88,7 +88,12 @@ switches.
 10. A Russian layout: the letters are typed, and `Ctrl+S` saves with
     the key at the place of `S`.
 11. A French layout: the key `[` then `e` types ê.
-12. The setting off, then steps 1, 9, 10 and 11 again: typing is as it
+12. Japanese, with a few lines in the editor: `Ctrl+T`, a click on the
+    icon that duplicates a theme, a double click on the name of the
+    copy, a name in hiragana, then `Enter` held about a second: the
+    copy has the new name, the list stays open, the theme in use does
+    not change, and no line is added to the text.
+13. The setting off, then steps 1, 9, 10 and 11 again: typing is as it
     was before the setting.
 
 ## The Mac
