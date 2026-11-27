@@ -47,6 +47,7 @@
 - `Alt+Left` in a file that was deleted from disk now goes back inside its text, which Oryx still has. Before, it asked to save and opened the previous file.
 - In a file of one very long line, leaving the editor far from the place you entered it no longer slows the window while Oryx still measures the file. Before, each frame took at least 0.05 s more in a 200 MB file of one line.
 - The search in a big code or text file no longer blocks the window. In the same playlist, a single common letter in the search bar now answers in under a second, and `Escape` closes the bar at once. Before, the window was blocked for minutes.
+- Replace All in a big code or text file no longer blocks the window. In the same playlist, a word replaced from the top of the file to its bottom now takes under a second. Before, the window was blocked for 48 seconds.
 - In a very big file, the rows far down are now evenly spaced, and the line numbers stay on their lines. Before, past a few million lines of a 200 MB file, the rows were 16 and 32 px apart in turn.
 - A markdown paragraph of a few megabytes no longer takes gigabytes of memory. A paragraph of 2.9 MB now takes about 110 MB. Before, it took 1.7 GB, and at a high zoom more than 6 GB, where the page stopped at its top.
 - A file opened at a line from the command line, as in `oryx notes.md:6`, no longer crashes Oryx when that line is inside a folded section. The section opens and the line is shown.

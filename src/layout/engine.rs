@@ -7630,6 +7630,13 @@ pub fn recolor_batch(
     Some((run_lo, run_hi, delta))
 }
 
+/// The text a key shapes at most to splice its edit into the layout
+/// (`edit_code_lines`). Shaping costs 0.25 to 0.5 µs a byte on the
+/// window's thread, so the bound is about a tenth of a second. Over
+/// it the measure starts again, on the pool: Replace All from the
+/// first line of a 194 MB file to its last held the window for 48 s.
+pub const KEY_SHAPE_BYTES: usize = 256 * 1024;
+
 /// Splices an edit into a placed code block, the keystroke fast path:
 /// the touched lines shape once to learn their heights, the block's
 /// tall exceptions and every height shift arithmetically, and the
@@ -7638,8 +7645,11 @@ pub fn recolor_batch(
 /// re-measures: of a line longer than `LONG_LINE`, the pieces the edit
 /// changed alone. The document must already carry the edit, and `edit`
 /// is the new text's bytes in its source. Answers
-/// false when the layout is not windowed or the block is not placed as
-/// a code entry, the caller's cue to restart the pass instead.
+/// false when the layout is not windowed, when the block is not placed
+/// as a code entry, or when the units to shape hold more than
+/// `KEY_SHAPE_BYTES`: the caller's cue to restart the pass instead. A
+/// false answer can leave the long lines of the table cut again, and
+/// the layout is then to be dropped whole.
 #[allow(clippy::too_many_arguments)]
 pub fn edit_code_lines(
     lay: &mut LayoutDoc,
@@ -7689,6 +7699,23 @@ pub fn edit_code_lines(
     let (head, tail) = (head.min(same), same - head.min(same));
     let old_units = old_units.start + head..old_units.end - tail;
     let new_units = new_units.start + head..new_units.end - tail;
+
+    // What the key would shape, at most: the bytes of the touched
+    // lines, or a full unit each when that is less, a unit being a
+    // line of `LONG_LINE` bytes at most or a piece of a longer one.
+    // A letter in a line of megabytes shapes a piece or two.
+    let first = lines.line_range(new_lines.start);
+    let last = new_lines
+        .end
+        .checked_sub(1)
+        .and_then(|l| lines.line_range(l));
+    let touched_bytes = match (first, last) {
+        (Some(first), Some(last)) if !new_lines.is_empty() => last.end - first.start,
+        _ => 0,
+    };
+    if touched_bytes.min(new_units.len().saturating_mul(LONG_LINE)) > KEY_SHAPE_BYTES {
+        return false;
+    }
 
     // What the touched units measured before the edit: the shared
     // advance plus their tall exceptions.

@@ -4994,6 +4994,130 @@ fn fast_keystroke(
     }
 }
 
+/// A text file with this text, loaded as the app loads it.
+fn text_file(name: &str, text: &str) -> Document {
+    let path = std::env::temp_dir().join(name);
+    std::fs::write(&path, text).unwrap();
+    let doc = load::open(&path, None).unwrap().document;
+    std::fs::remove_file(&path).ok();
+    doc
+}
+
+/// One edit as a key makes it, the model splice then the layout
+/// splice: whether the layout took it.
+fn layout_takes(
+    doc: &mut Document,
+    lay: &mut LayoutDoc,
+    range: std::ops::Range<usize>,
+    text: &str,
+) -> bool {
+    let start_line = doc.source[..range.start].matches('\n').count();
+    let new_touched = start_line..start_line + text.matches('\n').count() + 1;
+    let mut current = doc.source.to_string();
+    current.replace_range(range.clone(), text);
+    let edit = range.start..range.start + text.len();
+    let (old_lines, new_lines) = oryx::edit::splice_document(doc, &current, range, new_touched)
+        .expect("a file document splices");
+    oryx::layout::edit_code_lines(
+        lay,
+        doc,
+        &theme(),
+        &mut fonts(),
+        &cfg(),
+        0,
+        old_lines,
+        new_lines,
+        edit,
+    )
+}
+
+/// A line of 64 bytes with its line break.
+const LINE_64: &str = "the channel of the evening news, in high definition, number 042\n";
+
+/// Replace All reaches the page as the one range that covers its
+/// matches. From the first line of a big file to its last, the key
+/// would shape each line between them on the window's thread: over
+/// the key's budget the layout leaves the edit to a new pass.
+#[test]
+fn an_edit_over_the_keys_budget_is_left_to_a_new_pass() {
+    assert_eq!(LINE_64.len(), 64);
+    let budget = oryx::layout::KEY_SHAPE_BYTES;
+    // Many short lines, a quarter over the budget.
+    let base = LINE_64.repeat(budget / 64 * 5 / 4);
+    let mut doc = text_file("oryx_key_budget_lines.txt", &base);
+    let mut lay = windowed(&doc, 800.0, 0.0, 600.0);
+    let range = 4..base.len() - 10;
+    let text = base[range.clone()].replace("channel", "station");
+    assert!(
+        !layout_takes(&mut doc, &mut lay, range, &text),
+        "the lines from the first match to the last are over the budget"
+    );
+    // One line twice the budget, in pieces: a comma replaced from its
+    // start to its end.
+    let base = format!("{}\n", "ab, ".repeat(budget / 2));
+    let mut doc = text_file("oryx_key_budget_line.txt", &base);
+    let mut lay = windowed(&doc, 800.0, 0.0, 600.0);
+    let range = 2..base.len() - 3;
+    let text = base[range.clone()].replace(',', ";");
+    assert!(
+        !layout_takes(&mut doc, &mut lay, range, &text),
+        "the pieces from the first match to the last are over the budget"
+    );
+}
+
+/// Under the budget an edit of many lines is spliced as before, and
+/// the layout is the one a fresh pass gives. A letter typed in a line
+/// of megabytes shapes its piece alone, whatever the line's size.
+#[test]
+fn an_edit_at_the_keys_budget_is_spliced() {
+    let budget = oryx::layout::KEY_SHAPE_BYTES;
+    let base = LINE_64.repeat(budget / 64 * 3 / 4);
+    let mut doc = text_file("oryx_key_budget_under.txt", &base);
+    let mut lay = windowed(&doc, 800.0, 0.0, 600.0);
+    let range = 4..base.len() - 10;
+    let text = base[range.clone()].replace("channel", "station");
+    assert!(layout_takes(&mut doc, &mut lay, range, &text));
+    let mut media = MediaCache::offline(PathBuf::from("."));
+    window_to(
+        &doc,
+        &theme(),
+        &mut fonts(),
+        &mut media,
+        &cfg(),
+        &mut lay,
+        None,
+        0.0,
+        600.0,
+        true,
+    );
+    lay.index_more();
+    let reference = text_file("oryx_key_budget_under_ref.txt", &doc.source);
+    let fresh = windowed(&reference, 800.0, 0.0, 600.0);
+    assert_same_layout(&lay, &doc, &fresh, &reference);
+
+    let base = format!("{}\n", "ab, ".repeat(budget / 2));
+    let mut doc = text_file("oryx_key_budget_letter.txt", &base);
+    let mut lay = windowed(&doc, 800.0, 0.0, 600.0);
+    let middle = base.len() / 2;
+    assert!(
+        layout_takes(&mut doc, &mut lay, middle..middle, "x"),
+        "a letter in a long line is on the key"
+    );
+}
+
+/// A cut shapes what is left around it, not what it removes: any size
+/// is spliced.
+#[test]
+fn a_large_cut_is_spliced() {
+    let budget = oryx::layout::KEY_SHAPE_BYTES;
+    let lines = budget / 64 * 5 / 4;
+    let base = LINE_64.repeat(lines);
+    let mut doc = text_file("oryx_key_budget_cut.txt", &base);
+    let mut lay = windowed(&doc, 800.0, 0.0, 600.0);
+    assert!(layout_takes(&mut doc, &mut lay, 64..64 * (lines - 1), ""));
+    assert_eq!(doc.source.len(), 128);
+}
+
 fn assert_same_layout(a: &LayoutDoc, doc_a: &Document, b: &LayoutDoc, doc_b: &Document) {
     assert_eq!(a.height, b.height, "document heights match");
     assert_eq!(a.runs.len(), b.runs.len(), "run counts match");
