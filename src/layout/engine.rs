@@ -7632,10 +7632,13 @@ pub fn recolor_batch(
 
 /// The text a key shapes at most to splice its edit into the layout
 /// (`edit_code_lines`). Shaping costs 0.25 to 0.5 µs a byte on the
-/// window's thread, so the bound is about a tenth of a second. Over
-/// it the measure starts again, on the pool: Replace All from the
-/// first line of a 194 MB file to its last held the window for 48 s.
-pub const KEY_SHAPE_BYTES: usize = 256 * 1024;
+/// window's thread, and up to 0.8 with the frame after it in lines of
+/// two or three bytes, so the bound is half a second or a little
+/// more. Over it the measure starts again, on the pool: Replace All
+/// from the first line of a 194 MB file to its last held the window
+/// for 48 s. Under it the key is the cheaper path: a new measure of
+/// that file takes 10 s, whatever the edit's size.
+pub const KEY_SHAPE_BYTES: usize = 1024 * 1024;
 
 /// Splices an edit into a placed code block, the keystroke fast path:
 /// the touched lines shape once to learn their heights, the block's
@@ -7700,21 +7703,18 @@ pub fn edit_code_lines(
     let old_units = old_units.start + head..old_units.end - tail;
     let new_units = new_units.start + head..new_units.end - tail;
 
-    // What the key would shape, at most: the bytes of the touched
-    // lines, or a full unit each when that is less, a unit being a
-    // line of `LONG_LINE` bytes at most or a piece of a longer one.
-    // A letter in a line of megabytes shapes a piece or two.
-    let first = lines.line_range(new_lines.start);
-    let last = new_lines
-        .end
-        .checked_sub(1)
-        .and_then(|l| lines.line_range(l));
-    let touched_bytes = match (first, last) {
-        (Some(first), Some(last)) if !new_lines.is_empty() => last.end - first.start,
-        _ => 0,
-    };
-    if touched_bytes.min(new_units.len().saturating_mul(LONG_LINE)) > KEY_SHAPE_BYTES {
-        return false;
+    // The bytes the key would shape, a unit at a time as the loop
+    // below asks them. The walk stops at the budget.
+    let mut to_shape = 0;
+    for unit in new_units.clone() {
+        let place = lay.table.unit_place(position, unit);
+        to_shape += match place.piece {
+            Some((start, end)) => end - start,
+            None => lines.line_len(place.line),
+        };
+        if to_shape > KEY_SHAPE_BYTES {
+            return false;
+        }
     }
 
     // What the touched units measured before the edit: the shared

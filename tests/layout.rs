@@ -5105,6 +5105,34 @@ fn an_edit_at_the_keys_budget_is_spliced() {
     );
 }
 
+/// A duplicate, an indent or a paste of a few thousand lines stays on
+/// the key, where it takes a quarter of a second: in a big file a new
+/// pass would measure the whole file for it.
+#[test]
+fn an_edit_of_a_few_thousand_lines_is_spliced() {
+    let base = LINE_64.repeat(6000);
+    let mut doc = text_file("oryx_key_budget_few.txt", &base);
+    let mut lay = windowed(&doc, 800.0, 0.0, 600.0);
+    // 5,400 lines, 345 KB.
+    let range = 64 * 300..64 * 5700;
+    let text = base[range.clone()].replace("channel", "station");
+    assert!(layout_takes(&mut doc, &mut lay, range, &text));
+}
+
+/// The budget counts the bytes to shape, not the lines they are in:
+/// 150 short lines pasted into a line over the budget shape those
+/// lines and the two pieces around them.
+#[test]
+fn a_small_edit_in_a_line_over_the_budget_is_spliced() {
+    let budget = oryx::layout::KEY_SHAPE_BYTES;
+    let base = format!("{}\n{}", "ab, ".repeat(budget * 5 / 16), LINE_64.repeat(10));
+    let mut doc = text_file("oryx_key_budget_beside.txt", &base);
+    let mut lay = windowed(&doc, 800.0, 0.0, 600.0);
+    let middle = budget * 5 / 8;
+    let pasted = format!("\n{}", LINE_64.repeat(150));
+    assert!(layout_takes(&mut doc, &mut lay, middle..middle, &pasted));
+}
+
 /// A cut shapes what is left around it, not what it removes: any size
 /// is spliced.
 #[test]
